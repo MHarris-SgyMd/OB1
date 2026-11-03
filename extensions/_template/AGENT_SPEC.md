@@ -261,7 +261,7 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 | MCP server name | `{kebab-case-name}` | `job-hunt` |
 | Table names | `{snake_case}` | `companies`, `job_postings` |
 | Tool names | `{snake_case}` | `add_company`, `search_job_contacts` |
-| Connector name | Title Case | `Job Hunt` |
+| Connector name | Title Case | `Job Hunt Pipeline` |
 
 ---
 

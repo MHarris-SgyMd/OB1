@@ -18,7 +18,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, dropSchema } from "../db/test-support.ts";
+import { createAssert, dropSchema, pollUntil } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginIdents } from "../db/config.mjs";
 import { PLUGINS as REGISTRY } from "../plugins/registry.ts";
@@ -304,6 +304,10 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(titles(next).includes("Ski trip") && !titles(next).includes("Dentist") && titles(next).includes("Piano"), `…a one-off is in the week of its day alone, a span in each week it reaches (${titles(next)})`);
   const capped = await c("search_activities", { limit: 2 });
   assert(((capped.body.activities ?? []) as unknown[]).length === 2 && capped.body.truncated === true && every.body.truncated === false, "…limit applies, and truncated says when more matched");
+  assert(titles(await c("search_activities", { query: "swim\u00a0ada" })) === "Swimming", "…a no-break space splits a query's words");
+  const allNow = ((await c("search_activities", { limit: 200 })).body.activities ?? []) as unknown[];
+  assert((await c("search_activities", { limit: allNow.length })).body.truncated === false && (await c("search_activities", { limit: allNow.length - 1 })).body.truncated === true,
+    "…search_activities: exactly limit matches is not truncated, one fewer is");
   assert(titles(await c("search_activities", { query: "swim ada" })) === "Swimming" && titles(await c("search_activities", { query: "park camp" })) === "Autumn camp" && titles(await c("search_activities", { query: "swim camp" })) === "",
     "…a query's words each matched apart, across the title, the member's name and the location, all of them needed");
   await c("add_activity", { title: "Bake sale 50% off", start_date: "2026-10-01" });
@@ -401,7 +405,8 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(behindDates.find((d) => d.title === "Ada's birthday")?.days_until === 11 && behindDates.find((d) => d.title === "Today's deadline")?.days_until === 1,
     `…given the user's today, it counts from that day (${behindDates.map((d) => `${d.title}@${d.days_until}`).join()})`);
   const farDates = await c("get_upcoming_dates", { today: await fromToday(3) });
-  assert(farDates.status === 400, `…a today more than a day from UTC's is refused at 400 (${farDates.status})`);
+  const pastDates = await c("get_upcoming_dates", { today: await fromToday(-2) });
+  assert(farDates.status === 400 && pastDates.status === 400, `…a today more than a day from UTC's, ahead or behind, is refused at 400 (${farDates.status}, ${pastDates.status})`);
   const wider = await c("get_upcoming_dates", { days_ahead: 90 });
   const widerDates = (wider.body.dates ?? []) as { title: string; family_member: unknown }[];
   assert(widerDates.map((d) => d.title).join() === "Today's deadline,Ada's birthday,Insurance renewal" && widerDates[2]?.family_member === null, `…a wider window takes in the renewal, a family-wide date's member null (${widerDates.map((d) => d.title).join()})`);
@@ -413,6 +418,12 @@ console.log("\n[family-calendar] its members, activities and dates");
   const onBehindUtc = await c("add_important_date", { title: "Behind deadline, no today", date_value: behindDay });
   assert(onBehind.body.important_date?.next_date === behindDay && onBehindUtc.body.important_date?.next_date === null,
     `…an added date's next_date counts from the user's today when given: a one-time date on it is today, not past (${onBehind.body.important_date?.next_date}, ${onBehindUtc.body.important_date?.next_date})`);
+  const behindUpcoming = ((await c("get_upcoming_dates", { days_ahead: 0, today: behindDay })).body.dates ?? []) as { title: string; days_until: number }[];
+  assert(behindUpcoming.find((d) => d.title === "Behind deadline")?.days_until === 0, `…and get_upcoming_dates given that today lists it at zero days (${behindUpcoming.map((d) => `${d.title}@${d.days_until}`).join()})`);
+  const annivToday = await c("add_important_date", { title: "Anniversary added today", date_value: await yearsBefore(0, 3), recurring_yearly: true });
+  const annivPast = await c("add_important_date", { title: "Anniversary ten days gone", date_value: await yearsBefore(-10, 3), recurring_yearly: true });
+  assert(annivToday.body.important_date?.next_date === today && annivPast.body.important_date?.next_date === (await yearsBefore(-10, -1)),
+    `…a yearly date added on its anniversary comes today; one ten days gone comes next year (${annivToday.body.important_date?.next_date}, ${annivPast.body.important_date?.next_date})`);
   const noMemberDate = await c("add_important_date", { title: "x", date_value: today, family_member_id: NO_ROW });
   assert(noMemberDate.status === 404 && noMemberDate.body.code === "NO_SUCH_MEMBER", "a date for a member that is not there: 404 NO_SUCH_MEMBER");
   const zeroDate = await c("add_important_date", { title: "x", date_value: "0000-02-29" });
@@ -431,7 +442,7 @@ console.log("\n[family-calendar] its members, activities and dates");
   await c("add_important_date", { title: "Long reminder", date_value: await fromToday(40), reminder_days_before: 45 });
   const zero = await c("get_upcoming_dates", { days_ahead: 0 });
   const zeroDates = (zero.body.dates ?? []) as { title: string; next_date: string; days_until: number; remind: boolean }[];
-  assert(zeroDates.filter((d) => d.days_until === 0).map((d) => d.title).join() === "Anniversary today,Today's deadline" && zeroDates.every((d) => d.days_until === 0 ? d.next_date === today : d.remind)
+  assert(zeroDates.filter((d) => d.days_until === 0).map((d) => d.title).join() === "Anniversary added today,Anniversary today,Today's deadline" && zeroDates.every((d) => d.days_until === 0 ? d.next_date === today : d.remind)
          && zeroDates.some((d) => d.title === "Long reminder"),
     `days_ahead 0: today's, a yearly date whose anniversary is today among them, and beyond today only those whose reminder has begun (${zeroDates.map((d) => d.title).join()})`);
   const thirty = ((await c("get_upcoming_dates", {})).body.dates ?? []) as { title: string; next_date: string; days_until: number; remind: boolean }[];
@@ -564,6 +575,9 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   }
   assert(farToday.length === 0, `…and a today more than a day from UTC's is refused at 400, on every operation that takes it (${farToday.join("; ") || "all five"})`);
   assert(names(await c("list_maintenance_tasks", { query: "filter\u00a0HVAC" })) === "HVAC filter replacement", "…a no-break space between a query's words splits them as a space does");
+  const allTasks = await c("list_maintenance_tasks", {});
+  const exactly = await c("list_maintenance_tasks", { limit: (allTasks.body.tasks as unknown[]).length });
+  assert(exactly.body.truncated === false && (exactly.body.tasks as unknown[]).length === (allTasks.body.tasks as unknown[]).length, "…list_maintenance_tasks: exactly limit matches is not truncated");
 
   // Logging: a recurring task moves on from the day logged, an older log leaves it where it is, a one-time task is done.
   const ten = await dayFromToday(-10);
@@ -627,6 +641,15 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   const hinge = String((await c("add_maintenance_task", { name: "Gate hinge", frequency_days: 30 })).body.task?.id);
   const loggedBehind = await c("log_maintenance", { task_id: hinge, completed_on: await dayFromToday(-11), today: await dayFromToday(-1) });
   assert(loggedBehind.body.task?.next_due === (await dayFromToday(19)) && loggedBehind.body.task?.days_until === 20, `…and the task a log answers counts days_until from the user's today when given (${loggedBehind.body.task?.days_until})`);
+  // A newer log after an older one: both last_completed and next_due move on to the newer day.
+  const fresh = String((await c("add_maintenance_task", { name: "Hose bib", frequency_days: 30 })).body.task?.id);
+  await c("log_maintenance", { task_id: fresh, completed_on: await dayFromToday(-20) });
+  const newerLog = await c("log_maintenance", { task_id: fresh, completed_on: await dayFromToday(-5) });
+  assert(newerLog.body.task?.last_completed === (await dayFromToday(-5)) && newerLog.body.task?.next_due === (await dayFromToday(25)), `…a newer log moves last_completed and next_due on from its day (${JSON.stringify(newerLog.body.task).slice(0, 160)})`);
+  // UTC's tomorrow is a user's today in UTC+13 and +14: accepted.
+  const tomorrow = await c("log_maintenance", { task_id: fresh, completed_on: await dayFromToday(1) });
+  assert(tomorrow.status === 200, `…a completed_on of UTC's tomorrow, a far-east user's today, is accepted (${tomorrow.status})`);
+  assert((await histNames({ category: "_" })) === "" && (await histNames({ task_name: "_" })) === "", "…history's category and task_name match an _ as itself");
   // A one-time task with a date, logged: done, its date gone.
   const roofDone = await c("log_maintenance", { task_id: String(roof.body.task?.id), completed_on: utcToday });
   assert(roofDone.body.task?.done === true && roofDone.body.task?.next_due === null && roofDone.body.task?.days_until === null, `…a one-time task with a date, logged, is done and its next_due gone (${JSON.stringify(roofDone.body.task).slice(0, 160)})`);
@@ -656,18 +679,42 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   await c("add_maintenance_task", { name: "Paint 50% of the fence", category: "exterior" });
   assert(names(await c("list_maintenance_tasks", { query: "50%" })) === "Paint 50% of the fence" && names(await c("list_maintenance_tasks", { query: "_" })) === "" && names(await c("list_maintenance_tasks", { category: "_" })) === "",
     "a %, or an _ in a query or a category, matches itself, not any text");
-  // Logs at once on one task: each locks the task, so its last_completed is the latest day logged, whatever the order
-  // they commit in. Without the lock two logs read the old maximum together and the later write can lose the latest day.
-  const probe = String((await c("add_maintenance_task", { name: "Lock probe", frequency_days: 7 })).body.task?.id);
-  const lost: string[] = [];
-  for (let round = 0; round < 30; round++) {
-    const days = await Promise.all(Array.from({ length: 12 }, (_, i) => dayFromToday(-(round * 15 + i))));
-    await Promise.all(days.slice().reverse().map((d) => c("log_maintenance", { task_id: probe, completed_on: d })));
-    const [{ last, latest }] = (await sql`SELECT t.last_completed::text AS last, (SELECT max(completed_on)::text FROM plugin_home_maintenance.maintenance_logs WHERE task_id = t.id) AS latest
-                                          FROM plugin_home_maintenance.maintenance_tasks t WHERE t.id = ${probe}`) as { last: string; latest: string }[];
-    if (last !== latest) lost.push(`round ${round}: ${last} vs ${latest}`);
+  // Two logs at once, forced to race: a row lock held around both (FOR NO KEY UPDATE, which the logs' foreign-key
+  // checks pass) stops each at its UPDATE after its statement has taken its snapshot, the newer queued first. Released,
+  // one commits and the other's UPDATE, which waited on it, re-reads the row. Either way the task must keep the newer
+  // day. A move-on read from the logs (a max over them, as pass 1 had it) is read before the wait, and loses the newer
+  // day whenever the newer commits first, which Postgres's wake order gives about one round in three: ten rounds.
+  const raceTask = String((await c("add_maintenance_task", { name: "Race probe", frequency_days: 7 })).body.task?.id);
+  const waiting = async () => Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = 'ob1_plugins_home_maintenance' AND wait_event_type = 'Lock'`) as { n: number }[])[0].n);
+  const raceLost: string[] = [];
+  for (let round = 0; round < 10; round++) {
+    // Each round's days newer than every earlier round's, so a max over all the task's logs is this round's when it
+    // sees both: only the race can lose the newer day.
+    const base = -300 + round * 20;
+    const [newerDay, olderDay] = [await dayFromToday(base + 15), await dayFromToday(base + 10)];
+    const holder = new SQL({ url: URL_, max: 1 });
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => (held = r));
+    const holding = holder.begin(async (tx) => {
+      await tx`SELECT 1 FROM plugin_home_maintenance.maintenance_tasks WHERE id = ${raceTask} FOR NO KEY UPDATE`;
+      held();
+      await released;
+    });
+    await isHeld;
+    const racerNewer = c("log_maintenance", { task_id: raceTask, completed_on: newerDay });
+    const newerWaits = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    const racerOlder = c("log_maintenance", { task_id: raceTask, completed_on: olderDay });
+    const bothWait = await pollUntil(async () => (await waiting()) === 2, 10_000);
+    release();
+    await holding;
+    await holder.close();
+    const [newerDone, olderDone] = await Promise.all([racerNewer, racerOlder]);
+    const [after] = (await sql`SELECT last_completed::text AS last FROM plugin_home_maintenance.maintenance_tasks WHERE id = ${raceTask}`) as { last: string }[];
+    if (!(newerWaits && bothWait && newerDone.status === 200 && olderDone.status === 200 && after.last === newerDay)) raceLost.push(`round ${round}: ${newerWaits}/${bothWait} ${newerDone.status}/${olderDone.status} kept ${after.last}, newer ${newerDay}`);
   }
-  assert(lost.length === 0, `twelve logs at once on one task, thirty times: last_completed is always the latest day logged (${lost.join("; ") || "every round"})`);
+  assert(raceLost.length === 0, `two logs at once, both waiting on a held row and released together, ten rounds: the task keeps the newer day every time (${raceLost.join("; ") || "every round"})`);
 }
 
 // ── plugins/household-knowledge ──────────────────────────────────────────────
@@ -695,6 +742,13 @@ console.log("\n[household-knowledge] its items and vendors");
   assert(tap.status === 200, "an item named with a parenthesis and a quote is stored");
   const surrogate = await c("add_household_item", { name: "x", details: { s: "a\ud800b" } });
   assert(surrogate.status === 400, `details holding a lone surrogate: 400, not the database's 500 (${surrogate.status})`);
+  const deep: string[] = [];
+  for (const details of [{ "a\u0000": 1 }, { l: ["\u0000"] }, { o: { s: "\ud800" } }, { o: { "k\ud800": 1 } }]) {
+    const r = await c("add_household_item", { name: "x", details });
+    if (r.status !== 400) deep.push(`${JSON.stringify(details)}: ${r.status}`);
+  }
+  assert(deep.length === 0, `…as is a NUL or a lone surrogate in a key, in a list, or nested (${deep.join("; ") || "all four"})`);
+
   const asString = await c("add_household_item", { name: "x", details: '{"brand":"Bosch"}' });
   const bigDetails = await c("add_household_item", { name: "x", details: { blob: "y".repeat(10_001) } });
   const nulDetails = await c("add_household_item", { name: "x", details: { model: "A\u0000B" } });
@@ -704,6 +758,7 @@ console.log("\n[household-knowledge] its items and vendors");
   const search = async (input: Body) => names(await c("search_household_items", input));
   assert((await search({ query: "paint" })) === "Living Room Paint" && (await search({ query: "SEA SALT" })) === "Living Room Paint" && (await search({ query: "march" })) === "Living Room Paint",
     "search_household_items by name, by a value in the details in any case, and by the notes");
+  assert((await search({ location: "_" })) === "", "…a location filter matches an _ as itself");
   assert((await search({ category: "appl", location: "kitch" })) === "Dishwasher" && (await search({ location: "kitchen" })) === 'Kitchen (main) 12" tap,Dishwasher',
     "…by category and location, partial and any case, newest first");
   assert((await search({ query: "Kitchen (main" })) === 'Kitchen (main) 12" tap' && (await search({ query: '12" tap' })) === 'Kitchen (main) 12" tap' && (await search({ query: "Sea, Salt" })) === "",
@@ -711,7 +766,11 @@ console.log("\n[household-knowledge] its items and vendors");
   assert((await search({})) === 'Kitchen (main) 12" tap,Dishwasher,Living Room Paint' && (await search({ limit: 1 })) === 'Kitchen (main) 12" tap' && (await search({ query: "nothing-of-the-kind" })) === "",
     "…no filter lists every item newest first, the limit applies, and no match is an empty list");
   assert((await c("search_household_items", { limit: 1 })).body.truncated === true && (await c("search_household_items", {})).body.truncated === false, "…truncated says when more matched than the limit");
-  assert((await search({ query: "living" })) === "Living Room Paint" && (await search({ query: "appliance" })) === "Dishwasher", "…a query reads the location and the category too");
+  assert((await search({ query: "living" })) === "Living Room Paint" && (await search({ query: "appliance" })) === "Dishwasher" && (await search({ query: "kitchen" })).includes("Dishwasher"),
+    "…a query reads the location and the category too (the dishwasher's kitchen is in its location alone)");
+  assert((await search({ query: "brand" })) === "Living Room Paint" && (await search({ query: "march\u00a0paint" })) === "Living Room Paint", "…the details' keys are searched as well as their values, and a no-break space splits words");
+  const allItems = await c("search_household_items", {});
+  assert((await c("search_household_items", { limit: (allItems.body.items as unknown[]).length })).body.truncated === false, "…search_household_items: exactly limit matches is not truncated");
   assert((await search({ query: "salt living" })) === "Living Room Paint" && (await search({ query: "williams march" })) === "Living Room Paint" && (await search({ query: "paint kitchen" })) === "",
     "…a query's words each matched apart, across the name, the details and the notes, all of them needed");
 
@@ -738,9 +797,15 @@ console.log("\n[household-knowledge] its items and vendors");
   assert((await vendors({ query: "555" })) === "Ann the Plumber" && (await vendors({ query: "lights sparks" })) === "Bright Sparks" && (await vendors({ query: "ann@example" })) === "Ann the Plumber"
          && (await c("list_vendors", { limit: 1 })).body.truncated === true,
     "…a query's words each matched apart, the phone and the email among the fields, and truncated when more matched");
-  assert((await vendors({ query: "ann" })) === "Ann the Plumber" && (await vendors({ query: "electrician" })) === "Bright Sparks", "…a query reads the name and the service type too");
+  assert((await vendors({ query: "ann" })) === "Ann the Plumber" && (await vendors({ query: "electrician" })) === "Bright Sparks" && (await vendors({ query: "ann sparks" })) === ""
+         && (await vendors({ query: "ann.example.com" })) === "Ann the Plumber" && (await vendors({ query: "plumber\u00a0ann" })) === "Ann the Plumber"
+         && (await vendors({ service_type: "_" })) === "",
+    "…a query reads the name, the service type and the website, every word needed, a no-break space splitting words; service_type matches an _ as itself");
+  assert((await c("list_vendors", { limit: 2 })).body.truncated === false, "…list_vendors: exactly limit matches is not truncated");
   await c("add_vendor", { name: "Aaron's Roofing", service_type: "roofer" });
   assert((await vendors({})) === "Aaron's Roofing,Ann the Plumber,Bright Sparks", "…listed by name, whatever order they were added in");
+  const nextDay = await c("add_vendor", { name: "Tomorrow's Tiling", last_used: await dayFromToday(1) });
+  assert(nextDay.status === 200, `a last_used of UTC's tomorrow, a far-east user's today, is accepted (${nextDay.status})`);
   const lateUse = await c("add_vendor", { name: "x", last_used: await dayFromToday(30) });
   assert(lateUse.status === 422 && lateUse.body.code === "FUTURE_DATE", `a last_used more than a day past today in UTC: 422 FUTURE_DATE, since no operation changes a vendor (${JSON.stringify(lateUse.body).slice(0, 120)})`);
   const badEmail = await c("add_vendor", { name: "x", email: "sparks@example" });
@@ -771,6 +836,11 @@ console.log("\n[household-knowledge] its items and vendors");
   assert((await search({ query: '24" x' })) === "Kitchen window" && (await search({ query: "C:\\Users" })) === "Kitchen window",
     "the details are searched as their values read, a quote and a backslash as themselves, not as the JSON escapes them");
   assert((await search({ query: "{" })) === "" && (await search({ query: '":"' })) === "", "…and the JSON's own syntax, a brace or a quoted colon, matches nothing");
+  await c("add_household_item", { name: "Boiler", details: { warranty: { until: "2030-06", parts: ["pump"] } } });
+  assert((await search({ query: "2030-06" })) === "Boiler" && (await search({ query: "pump" })) === "Boiler" && (await search({ query: "until" })) === "Boiler",
+    "…a value or a key nested in an object or a list is searched too");
+  const tenK = await c("add_household_item", { name: "Ten thousand", details: { b: "y".repeat(10_000 - 8) } });
+  assert(tenK.status === 200, `details of exactly 10,000 characters as JSON are stored (${tenK.status})`);
   await c("add_household_item", { name: "Paint 50% off" });
   assert((await search({ query: "50%" })) === "Paint 50% off" && (await search({ query: "_" })) === "" && (await search({ category: "_" })) === "", "a %, or an _ in a query or a category, matches itself, not any text");
 }
