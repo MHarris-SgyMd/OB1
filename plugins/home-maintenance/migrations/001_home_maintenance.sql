@@ -76,7 +76,7 @@ CREATE OR REPLACE VIEW task_rows AS
     CROSS JOIN LATERAL (SELECT (now() AT TIME ZONE 'UTC')::date AS today) d;
 
 CREATE OR REPLACE VIEW log_rows AS
-  SELECT l.id, l.task_id, l.completed_on, l.created_at, t.name AS task_name, t.category AS task_category,
+  SELECT l.id, l.task_id, l.completed_on, l.created_at, l.cost, t.name AS task_name, t.category AS task_category,
          jsonb_build_object(
            'id', l.id, 'task_id', l.task_id, 'completed_on', l.completed_on::text, 'performed_by', l.performed_by,
            'cost', l.cost, 'notes', l.notes, 'next_action', l.next_action,

@@ -61,7 +61,7 @@ CREATE OR REPLACE VIEW item_rows AS
     FROM household_items i;
 
 CREATE OR REPLACE VIEW vendor_rows AS
-  SELECT v.id, v.name, v.service_type, v.notes, v.created_at,
+  SELECT v.id, v.name, v.service_type, v.notes, v.phone, v.email, v.website, v.created_at,
          jsonb_build_object(
            'id', v.id, 'name', v.name, 'service_type', v.service_type, 'phone', v.phone, 'email', v.email, 'website', v.website,
            'notes', v.notes, 'rating', v.rating, 'last_used', v.last_used::text,

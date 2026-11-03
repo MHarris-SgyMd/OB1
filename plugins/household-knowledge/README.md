@@ -12,18 +12,20 @@ Two tables of its own, in the schema `plugin_household_knowledge`, made by `migr
 | Operation | MCP tool | REST route | Scope | Input | Output |
 |---|---|---|---|---|---|
 | Add a household item | `household_knowledge_add_household_item` | `POST /v1/plugins/household-knowledge/items` | `write` | `name`; `category`, `location`, `details` (an object), `notes` optional | `{ item }` |
-| Search household items | `household_knowledge_search_household_items` | `GET /v1/plugins/household-knowledge/items` | `read` | `query`, `category`, `location` optional; `limit`, 1 to 200, default 50 | `{ items }` |
+| Search household items | `household_knowledge_search_household_items` | `GET /v1/plugins/household-knowledge/items` | `read` | `query`, `category`, `location` optional; `limit`, 1 to 200, default 50 | `{ items, truncated }` |
 | A household item | `household_knowledge_get_item_details` | `GET /v1/plugins/household-knowledge/items/{item_id}` | `read` | `item_id` | `{ item }` |
 | Add a vendor | `household_knowledge_add_vendor` | `POST /v1/plugins/household-knowledge/vendors` | `write` | `name`; `service_type`, `phone`, `email`, `website` (http or https), `notes`, `rating` (1 to 5), `last_used` optional | `{ vendor }` |
-| The vendors | `household_knowledge_list_vendors` | `GET /v1/plugins/household-knowledge/vendors` | `read` | `service_type`, `query` optional; `limit`, 1 to 500, default 100 | `{ vendors }`, by name |
+| The vendors | `household_knowledge_list_vendors` | `GET /v1/plugins/household-knowledge/vendors` | `read` | `service_type`, `query` optional; `limit`, 1 to 500, default 100 | `{ vendors, truncated }`, by name |
 
 - **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. Text is trimmed and holds no NUL.
 - **`details`** is an object, at most 10,000 characters as JSON. The standalone server took it as a JSON string. A string, a list or a NUL anywhere in it is refused at 400.
-- **Searching items.** `query` matches the name, category, location, notes and every value in `details`, in any case: "sea salt" finds the paint whose `details` say `"color": "Sea Salt"`. `category` and `location` match part of theirs, in any case. A `%`, `_` or backslash matches itself. Every filter given applies, and the newest item comes first.
-- **Vendors** are listed by name. `service_type` matches part of the service type ("plumb" finds the plumbers), and `query` matches the name, service type or notes.
+- **Searching items.** `query` matches word by word: every word must be in the name, category, location, notes or `details` (its keys and its values), in any case and any order. So "sea salt" finds the paint whose `details` say `"color": "Sea Salt"`, and "Bosch dishwasher" finds the dishwasher whose details say Bosch. `category` and `location` match part of theirs, in any case. A `%`, `_` or backslash matches itself. Every filter given applies, and the newest item comes first.
+- **Vendors** are listed by name. `service_type` matches part of the service type ("plumb" finds the plumbers and the plumbing). `query` matches word by word across the name, service type, notes, phone, email and website. No operation changes a vendor, so `last_used` is the day known when it is added, and a day more than a day past today in UTC is refused.
+- **Truncated.** Each list says whether more matched than its `limit`.
 - **Refusals.**
   - An `item_id` that names no item: `404 NO_SUCH_ITEM`, saying where the ids are.
-  - An email that is no address, a website that is not http or https, a rating outside 1 to 5, or any input out of its form or range: `400`, before anything is stored.
+  - A `last_used` more than a day past today in UTC: `422 FUTURE_DATE`.
+  - An email that is no address, or a website that is not http or https, is refused; the message says to keep it in notes instead. A rating outside 1 to 5, or any input out of its form or range: `400`, before anything is stored.
 - **MCP hints.** Every tool is closed-world, a read is read-only, and an add is marked as destroying nothing.
 
 It reaches nothing of the core's: no thought is read or written.
@@ -73,7 +75,8 @@ The standalone server kept its rows in `public.household_items` and `public.hous
    ```
 
    - **`user_id`.** Each row keeps its `user_id`, in the column the plugin keeps and ignores.
-   - **`details` that is not an object.** The standalone server once stored `details` as an escaped JSON string. Any `details` that is not an object (a string, a list) is kept under a `value` key, so nothing is lost and search still finds it. A null becomes `{}`.
+   - **`details` that is not an object.** The standalone server once stored `details` as an escaped JSON string. Any `details` that is not an object (a string, a list) is kept under a `value` key, so nothing is lost and search still finds it. A SQL NULL becomes `{}`; a JSON `null` is kept under `value` too.
+   - **Not checked again.** A vendor's email and website are copied as they were; only an add checks their form.
    - **A refused copy.** The plugin's tables check a name of 1 to 200 characters, as the old ones did not. If a row breaks it, the copy names the check and nothing is copied. Fix that row in `public` and run the block again.
    - **Leftover tables.** Once the plugin's answers look right, the old tables can be dropped by hand.
 

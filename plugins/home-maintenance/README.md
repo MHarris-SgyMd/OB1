@@ -11,32 +11,36 @@ Two tables of its own, in the schema `plugin_home_maintenance`, made by `migrati
 
 | Operation | MCP tool | REST route | Scope | Input | Output |
 |---|---|---|---|---|---|
-| Add a maintenance task | `home_maintenance_add_maintenance_task` | `POST /v1/plugins/home-maintenance/tasks` | `write` | `name`; `category`, `frequency_days` (1 to 3650), `next_due`, `priority` (default medium), `notes` optional | `{ task }` |
-| The maintenance tasks | `home_maintenance_list_maintenance_tasks` | `GET /v1/plugins/home-maintenance/tasks` | `read` | `query`, `category` optional; `include_done` (default false); `limit`, 1 to 500, default 100 | `{ tasks }` |
-| Log maintenance done | `home_maintenance_log_maintenance` | `POST /v1/plugins/home-maintenance/logs` | `write` | `task_id`; `completed_on` (default today), `performed_by`, `cost`, `notes`, `next_action` optional | `{ log, task }` |
-| Upcoming maintenance | `home_maintenance_get_upcoming_maintenance` | `GET /v1/plugins/home-maintenance/upcoming` | `read` | `days_ahead`, 0 to 366, default 30 | `{ today, tasks }` |
-| Search maintenance history | `home_maintenance_search_maintenance_history` | `GET /v1/plugins/home-maintenance/history` | `read` | `task_id`, `task_name`, `category`, `date_from`, `date_to` optional; `limit`, 1 to 200, default 50 | `{ logs }` |
+| Add a maintenance task | `home_maintenance_add_maintenance_task` | `POST /v1/plugins/home-maintenance/tasks` | `write` | `name`; `category`, `frequency_days` (1 to 3650), `next_due`, `priority` (default medium), `notes`, `today` optional | `{ task }` |
+| The maintenance tasks | `home_maintenance_list_maintenance_tasks` | `GET /v1/plugins/home-maintenance/tasks` | `read` | `query`, `category`, `today` optional; `include_done` (default false); `limit`, 1 to 500, default 100 | `{ tasks, truncated }` |
+| Log maintenance done | `home_maintenance_log_maintenance` | `POST /v1/plugins/home-maintenance/logs` | `write` | `task_id`, `completed_on`; `performed_by`, `cost`, `notes`, `next_action` optional | `{ log, task }` |
+| Upcoming maintenance | `home_maintenance_get_upcoming_maintenance` | `GET /v1/plugins/home-maintenance/upcoming` | `read` | `days_ahead`, 0 to 366, default 30; `today` optional | `{ today, tasks }` |
+| Search maintenance history | `home_maintenance_search_maintenance_history` | `GET /v1/plugins/home-maintenance/history` | `read` | `task_id`, `task_name`, `category`, `date_from`, `date_to` optional; `limit`, 1 to 200, default 50 | `{ logs, count, total_cost, truncated }` |
 
-- **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. A cost is a number, kept to two decimal places. Text is trimmed and holds no NUL. "Today" is the date in UTC.
+- **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. A cost is a number, kept to two decimal places. Text is trimmed and holds no NUL.
+- **Today.** The date in UTC is a day off from the user's for part of each day in most time zones. So:
+  - a log's `completed_on` is required: the day the work was done, in the user's own calendar;
+  - each operation that counts `days_until` takes an optional `today`, the user's date, and counts from the date in UTC without it.
 - **A task** answers with:
   - its id;
   - `next_due` and `last_completed`;
   - `days_until` its due date: negative when it is overdue, null with no date;
   - `done`: a one-time task whose work has been logged.
 
-  A recurring task added without `next_due` falls due `frequency_days` from today.
+  A recurring task added without `next_due` falls due `frequency_days` from today. One last done on a known day is added, then logged on that day.
 - **Logging work** moves the task on, in the same transaction:
   - `last_completed` becomes the latest day logged;
   - a recurring task falls due `frequency_days` after that day;
   - a one-time task is done, with no due date.
 
-  A log of older work is kept without moving the task back. The answer is the log and the task as it now is.
+  A log of older work is kept without moving the task back. A `completed_on` more than a day past today in UTC is refused, since no later log could bring the task's dates back. The answer is the log and the task as it now is.
 - **Upcoming** lists the tasks due within `days_ahead` and every overdue one. They come soonest first, and urgent before high before medium before low within a day. A one-time task with no date, or one done, is not listed.
-- **Every task** is in `list_maintenance_tasks`, which gives the ids `log_maintenance` takes. A done task is listed only with `include_done`, after the rest.
-- **History** lists the work logged, latest first, each entry with its task `{ id, name, category }`. The filters all apply together, and both edge days are included.
+- **Every task** is in `list_maintenance_tasks`, which gives the ids `log_maintenance` takes. A done task is listed only with `include_done`, after the rest. Its `query` matches word by word: every word must be in the name, category or notes, in any order. `truncated` says whether more matched than `limit`.
+- **History** lists the work logged, latest first, each entry with its task `{ id, name, category }`. The filters all apply together, and both edge days are included. `count` and `total_cost` are over every log that matched, not just the page, so "what did we spend this year?" needs one call. `truncated` says whether more matched than were listed.
 - **Refusals.**
   - A `task_id` that names no task: `404 NO_SUCH_TASK`, saying where the ids are.
   - A `date_to` before `date_from`: `422 BAD_DATES`.
+  - A `completed_on` more than a day past today in UTC: `422 FUTURE_DATE`.
   - Input out of its form or range: `400`, before anything is stored.
 - **MCP hints.** Every tool is closed-world, a read is read-only, and a write is marked as destroying nothing.
 
@@ -82,11 +86,16 @@ The standalone server kept its rows in `public.maintenance_tasks` and `public.ma
             coalesce(priority, 'medium'), notes, created_at, updated_at FROM public.maintenance_tasks;
    INSERT INTO plugin_home_maintenance.maintenance_logs (id, task_id, user_id, completed_on, performed_by, cost, notes, next_action)
      SELECT id, task_id, user_id, (completed_at AT TIME ZONE 'UTC')::date, performed_by, cost, notes, next_action FROM public.maintenance_logs;
+   UPDATE plugin_home_maintenance.maintenance_tasks t
+      SET last_completed = m.last, next_due = CASE WHEN t.frequency_days IS NULL THEN NULL ELSE m.last + t.frequency_days END
+     FROM (SELECT task_id, max(completed_on) AS last FROM plugin_home_maintenance.maintenance_logs GROUP BY task_id) m
+    WHERE t.id = m.task_id;
    COMMIT;
    ```
 
    - **`user_id`.** Each row keeps its `user_id`, in the column the plugin keeps and ignores.
    - **Dates.** The old tables held timestamps. Each becomes its date in UTC. A log's `created_at` is the time of the copy.
+   - **Each task's dates, recomputed.** The old trigger took `last_completed` from whichever log was written last, so a log of older work written later moved a task back. The `UPDATE` sets each logged task's `last_completed` to its latest log's day and its `next_due` from that, as `log_maintenance` does: a recurring task `frequency_days` on, a one-time task done.
    - **A refused copy.** The plugin's tables check what the old ones did not:
      - a name of 1 to 200 characters;
      - a frequency of 1 to 3650 days;

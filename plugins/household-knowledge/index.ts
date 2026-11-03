@@ -37,12 +37,19 @@ const ADDS = { destructiveHint: false, openWorldHint: false } as const;
 type Answer<T> = { answer: T };
 
 /** A person's search text as an ILIKE pattern: `%`, `_` and the backslash match themselves, so "50%" finds "50%". */
-const likePattern = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+const likePattern = (s: string) => `%${likeText(s)}%`;
+/**
+ * A person's search text with `%`, `_` and the backslash escaped for ILIKE,
+ * for a query matched word by word: the SQL splits it on spaces and asks each
+ * word apart ("Bosch dishwasher" finds the dishwasher whose details say
+ * Bosch), so a phrase an agent types never misses for its word order.
+ */
+const likeText = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 export default definePlugin({
   name: "household-knowledge",
   title: "Household knowledge",
-  description: "Facts about the things in the home (paint colours, appliances and their models, measurements, documents) and the vendors who work on it, so an agent can answer \"what colour is the living room?\" or \"who was our plumber?\".",
+  description: "Facts about the things in the home (paint colors, appliances and their models, measurements, documents) and the vendors who work on it, so an agent can answer \"what color is the living room?\" or \"who was our plumber?\".",
   operations: {
     add_household_item: operation({
       title: "Add a household item",
@@ -72,31 +79,31 @@ export default definePlugin({
     }),
     search_household_items: operation({
       title: "Search household items",
-      description: "The household items whose name, category, location, notes or details hold the query (any case; a short word finds more), in a category, or in a location, each filter optional and those given all applying. Newest first, with their ids.",
+      description: "The household items holding every word of the query in their name, category, location, notes or details (any case, any order; a short word finds more), in a category, or in a location, each filter optional and those given all applying. Newest first, with their ids; truncated says whether more matched than limit.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
       path: "/items",
       input: {
-        query: text(200).min(1).optional().describe("Text anywhere in the item: its name, category, location, notes or details (a brand, a colour)"),
+        query: text(200).min(1).optional().describe("Words anywhere in the item: its name, category, location, notes or details (a brand, a color), each matched apart"),
         category: text(100).min(1).optional().describe("Text in the category, any case"),
         location: text(200).min(1).optional().describe("Text in the location, any case"),
         limit: z.number().int().min(1).max(200).default(50).describe("How many at most, 1 to 200"),
       },
-      output: { items: z.array(Item) },
+      output: { items: z.array(Item), truncated: z.boolean() },
       async handler(ctx, { query, category, location, limit }) {
-        const pattern = query === undefined ? null : likePattern(query);
+        const words = query === undefined ? null : likeText(query);
         const kind = category === undefined ? null : likePattern(category);
         const place = location === undefined ? null : likePattern(location);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Item>>>`
           SELECT answer FROM item_rows
-           WHERE (${pattern}::text IS NULL OR name ILIKE ${pattern}::text OR category ILIKE ${pattern}::text OR location ILIKE ${pattern}::text
-                  OR notes ILIKE ${pattern}::text OR details_text ILIKE ${pattern}::text)
+           WHERE (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', name, category, location, notes, details_text) ILIKE '%' || w || '%')
+                                             FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
              AND (${kind}::text IS NULL OR category ILIKE ${kind}::text)
              AND (${place}::text IS NULL OR location ILIKE ${place}::text)
            ORDER BY created_at DESC, id
-           LIMIT ${limit}`);
-        return ok({ items: rows.map((r) => r.answer) });
+           LIMIT ${limit + 1}`);
+        return ok({ items: rows.slice(0, limit).map((r) => r.answer), truncated: rows.length > limit });
       },
     }),
     get_item_details: operation({
@@ -116,7 +123,7 @@ export default definePlugin({
     }),
     add_vendor: operation({
       title: "Add a vendor",
-      description: "Adds a service provider (a plumber, an electrician, a landscaper) and answers it with its id. list_vendors lists them, so check it first rather than adding one twice.",
+      description: "Adds a service provider (a plumber, an electrician, a landscaper) and answers it with its id. list_vendors lists them, so check it first rather than adding one twice (a short stem, 'plumb', finds 'plumber' and 'plumbing'). No operation changes a vendor, so last_used is the day known when it is added. An email or a website that is not in its form is refused; keep it in notes instead.",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -125,48 +132,55 @@ export default definePlugin({
         name: text(200).min(1).describe("The vendor's name"),
         service_type: text(100).min(1).nullish().describe("What they do: 'plumber', 'electrician', 'landscaper', …"),
         phone: text(50).min(1).nullish().describe("Their phone number, as written"),
-        email: z.email().max(320).nullish().describe("Their email address"),
-        website: z.url({ protocol: /^https?$/ }).max(2000).nullish().describe("Their website, an http or https URL"),
+        email: z.email("an email address, name@example.com; keep anything else in notes").max(320).nullish().describe("Their email address, name@example.com"),
+        website: z.url({ protocol: /^https?$/, error: "a website as a URL starting http:// or https://; keep anything else in notes" }).max(2000).nullish().describe("Their website, a URL starting http:// or https://"),
         notes: text(5000).nullish().describe("Anything else worth keeping"),
         rating: z.number().int().min(1).max(5).nullish().describe("How good they were, 1 to 5"),
-        last_used: Day.nullish().describe("The day they last worked on the house, YYYY-MM-DD"),
+        last_used: Day.nullish().describe("The day they last worked on the house, YYYY-MM-DD: a day that has come, in the user's own calendar"),
       },
       output: { vendor: Vendor },
       async handler(ctx, v) {
-        const [row] = await ctx.db.tx(async (sql) => {
+        const row = await ctx.db.tx(async (sql) => {
+          if (v.last_used) {
+            const [{ future }] = await sql<{ future: boolean }>`SELECT ${v.last_used}::date > (now() AT TIME ZONE 'UTC')::date + 1 AS future`;
+            if (future) return null;
+          }
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO household_vendors (name, service_type, phone, email, website, notes, rating, last_used)
             VALUES (${v.name}, ${v.service_type ?? null}, ${v.phone ?? null}, ${v.email ?? null}, ${v.website ?? null}, ${v.notes ?? null},
                     ${v.rating ?? null}::int, ${v.last_used ?? null}::date)
             RETURNING id`;
-          return sql<Answer<z.input<typeof Vendor>>>`SELECT answer FROM vendor_rows WHERE id = ${id}`;
+          const [full] = await sql<Answer<z.input<typeof Vendor>>>`SELECT answer FROM vendor_rows WHERE id = ${id}`;
+          return full;
         });
+        if (!row) return refuse(422, "FUTURE_DATE", { last_used: v.last_used, message: `last_used ${v.last_used} is more than a day past today in UTC: give a day they have worked on the house` });
         return ok({ vendor: row.answer });
       },
     }),
     list_vendors: operation({
       title: "The vendors",
-      description: "The service providers, by name: those whose service type holds service_type (any case), or whose name, service type or notes hold the query, each filter optional.",
+      description: "The service providers, by name: those whose service type holds service_type (any case; 'plumb' finds the plumbers) and holding every word of the query in their name, service type, notes, phone, email or website, each filter optional and those given both applying. truncated says whether more matched than limit.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
       path: "/vendors",
       input: {
         service_type: text(100).min(1).optional().describe("Text in the service type: 'plumb' finds the plumbers"),
-        query: text(200).min(1).optional().describe("Text in the name, the service type or the notes"),
+        query: text(200).min(1).optional().describe("Words in the name, service type, notes, phone, email or website, each matched apart"),
         limit: z.number().int().min(1).max(500).default(100).describe("How many at most, 1 to 500"),
       },
-      output: { vendors: z.array(Vendor) },
+      output: { vendors: z.array(Vendor), truncated: z.boolean() },
       async handler(ctx, { service_type, query, limit }) {
         const kind = service_type === undefined ? null : likePattern(service_type);
-        const pattern = query === undefined ? null : likePattern(query);
+        const words = query === undefined ? null : likeText(query);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Vendor>>>`
           SELECT answer FROM vendor_rows
            WHERE (${kind}::text IS NULL OR service_type ILIKE ${kind}::text)
-             AND (${pattern}::text IS NULL OR name ILIKE ${pattern}::text OR service_type ILIKE ${pattern}::text OR notes ILIKE ${pattern}::text)
+             AND (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', name, service_type, notes, phone, email, website) ILIKE '%' || w || '%')
+                                             FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
            ORDER BY name, created_at, id
-           LIMIT ${limit}`);
-        return ok({ vendors: rows.map((r) => r.answer) });
+           LIMIT ${limit + 1}`);
+        return ok({ vendors: rows.slice(0, limit).map((r) => r.answer), truncated: rows.length > limit });
       },
     }),
   },

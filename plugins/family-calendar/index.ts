@@ -52,8 +52,12 @@ async function memberExists(sql: PluginSql, id: string): Promise<boolean> {
 const noSuchMember = (family_member_id: string | null) =>
   refuse(404, "NO_SUCH_MEMBER", { family_member_id, message: "no family member has this id: list_family_members gives each member's id, and add_family_member adds one" });
 
-/** A person's search text as an ILIKE pattern: `%`, `_` and the backslash match themselves, so "50%" finds "50%". */
-const likePattern = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+/**
+ * A person's search text with `%`, `_` and the backslash escaped for ILIKE,
+ * for a query matched word by word: the SQL splits it on spaces and asks each
+ * word apart, so "swim Ada" finds Ada's swimming, and "50%" finds "50%".
+ */
+const likeText = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 export default definePlugin({
   name: "family-calendar",
@@ -180,35 +184,35 @@ export default definePlugin({
     }),
     search_activities: operation({
       title: "Search activities",
-      description: "Activities whose title, member's name, location or notes hold the query (any case; a short word finds more, as \"swim\" finds \"Swimming\"), of one type (any case), or one member's: each filter optional, and those given all apply. Latest start date first, then those with none, newest first.",
+      description: "Activities holding every word of the query in their title, member's name, location or notes (any case, any order; a short word finds more, as \"swim\" finds \"Swimming\"), of one type (any case), or one member's: each filter optional, and those given all apply. Latest start date first, then those with none, newest first; truncated says whether more matched than limit.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
       path: "/activities",
       input: {
-        query: text(200).min(1).optional().describe("Text in the title, the member's name, the location or the notes"),
+        query: text(200).min(1).optional().describe("Words in the title, the member's name, the location or the notes, each matched apart"),
         activity_type: text(100).min(1).optional().describe("One type alone, in any case"),
         family_member_id: z.string().uuid().optional().describe("One member's activities alone, by the id list_family_members gives"),
         limit: z.number().int().min(1).max(200).default(50).describe("How many at most, 1 to 200"),
       },
-      output: { activities: z.array(Activity) },
+      output: { activities: z.array(Activity), truncated: z.boolean() },
       async handler(ctx, { query, activity_type, family_member_id, limit }) {
-        const pattern = query === undefined ? null : likePattern(query);
+        const words = query === undefined ? null : likeText(query);
         const type = activity_type ?? null;
         const member = family_member_id ?? null;
         const rows = await ctx.db.tx(async (sql) => {
           if (member && !(await memberExists(sql, member))) return null;
           return sql<Answer<z.input<typeof Activity>>>`
             SELECT answer FROM activity_rows
-             WHERE (${pattern}::text IS NULL OR title ILIKE ${pattern}::text OR member_name ILIKE ${pattern}::text
-                    OR location ILIKE ${pattern}::text OR notes ILIKE ${pattern}::text)
+             WHERE (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', title, member_name, location, notes) ILIKE '%' || w || '%')
+                                               FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
                AND (${type}::text IS NULL OR lower(activity_type) = lower(${type}::text))
                AND (${member}::uuid IS NULL OR family_member_id = ${member}::uuid)
              ORDER BY starts DESC NULLS LAST, created_at DESC, id
-             LIMIT ${limit}`;
+             LIMIT ${limit + 1}`;
         });
         if (!rows) return noSuchMember(member);
-        return ok({ activities: rows.map((r) => r.answer) });
+        return ok({ activities: rows.slice(0, limit).map((r) => r.answer), truncated: rows.length > limit });
       },
     }),
     add_important_date: operation({
@@ -245,23 +249,37 @@ export default definePlugin({
     }),
     get_upcoming_dates: operation({
       title: "Upcoming dates",
-      description: "The important dates coming in the next days_ahead days (30 unless given), today included, and any further off whose reminder_days_before has already begun; soonest first. A yearly one counts on its next anniversary. Each has next_date, days_until it, and remind: whether it is within its reminder_days_before. Today is the date in UTC, given as today.",
+      description: "The important dates coming in the next days_ahead days (30 unless given), today included, and any further off whose reminder_days_before has already begun; soonest first. A yearly one counts on its next anniversary. Each has next_date, days_until it, and remind: whether it is within its reminder_days_before. Today is the user's date when given, else the date in UTC; the answer says which day it counted from.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
       path: "/dates",
-      input: { days_ahead: z.number().int().min(0).max(366).default(30).describe("How many days ahead to look, 0 to 366") },
+      input: {
+        days_ahead: z.number().int().min(0).max(366).default(30).describe("How many days ahead to look, 0 to 366"),
+        today: Day.optional().describe("The user's own date today, YYYY-MM-DD; the date in UTC unless given, which is a day off for part of each day in most time zones"),
+      },
       output: { today: z.string(), dates: z.array(UpcomingDate) },
-      async handler(ctx, { days_ahead }) {
+      async handler(ctx, { days_ahead, today: given }) {
         const { today, rows } = await ctx.db.tx(async (sql) => {
-          // The views' today: the transaction's own clock, in UTC.
-          const [{ today }] = await sql<{ today: string }>`SELECT (now() AT TIME ZONE 'UTC')::date::text AS today`;
+          const [{ today }] = await sql<{ today: string }>`SELECT coalesce(${given ?? null}::date, (now() AT TIME ZONE 'UTC')::date)::text AS today`;
+          // Each date's next coming from this today: the view's next_date
+          // reckons from today in UTC, so it is reckoned again here, by the
+          // view's own rule (migrations/001: a yearly date moved to this year,
+          // and to next if that is past; a one-time date already past, none).
           const rows = await sql<Answer<z.input<typeof UpcomingDate>>>`
-            SELECT answer || jsonb_build_object('next_date', next_date::text, 'days_until', next_date - ${today}::date,
-                                                'remind', next_date - ${today}::date <= reminder_days_before) AS answer
-              FROM important_date_rows
-             WHERE next_date IS NOT NULL AND next_date - ${today}::date <= greatest(${days_ahead}::int, reminder_days_before)
-             ORDER BY next_date, title, id`;
+            SELECT d.answer || jsonb_build_object('next_date', n.next_date::text, 'days_until', n.next_date - ${today}::date,
+                                                  'remind', n.next_date - ${today}::date <= d.reminder_days_before) AS answer
+              FROM important_date_rows d
+              CROSS JOIN LATERAL (SELECT (d.answer->>'date_value')::date AS day, extract(year FROM ${today}::date)::int AS year) t
+              CROSS JOIN LATERAL (
+                SELECT CASE
+                         WHEN NOT d.recurring_yearly THEN CASE WHEN t.day >= ${today}::date THEN t.day END
+                         WHEN (t.day + make_interval(years => t.year - extract(year FROM t.day)::int))::date >= ${today}::date
+                           THEN (t.day + make_interval(years => t.year - extract(year FROM t.day)::int))::date
+                         ELSE (t.day + make_interval(years => t.year - extract(year FROM t.day)::int + 1))::date
+                       END AS next_date) n
+             WHERE n.next_date IS NOT NULL AND n.next_date - ${today}::date <= greatest(${days_ahead}::int, d.reminder_days_before)
+             ORDER BY n.next_date, d.title, d.id`;
           return { today, rows };
         });
         return ok({ today, dates: rows.map((r) => r.answer) });

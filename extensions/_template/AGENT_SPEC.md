@@ -257,11 +257,11 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 
 | Thing | Pattern | Example |
 |-------|---------|---------|
-| Directory | `extensions/{kebab-case-name}/` | `extensions/household-knowledge/` |
-| MCP server name | `{kebab-case-name}` | `household-knowledge` |
-| Table names | `{snake_case}` | `household_items`, `household_vendors` |
-| Tool names | `{snake_case}` | `add_household_item`, `search_items` |
-| Connector name | Title Case | `Household Knowledge` |
+| Directory | `extensions/{kebab-case-name}/` | `extensions/job-hunt/` |
+| MCP server name | `{kebab-case-name}` | `job-hunt` |
+| Table names | `{snake_case}` | `companies`, `job_postings` |
+| Tool names | `{snake_case}` | `add_company`, `search_job_contacts` |
+| Connector name | Title Case | `Job Hunt` |
 
 ---
 
