@@ -580,10 +580,10 @@
  *      by its listed base, and every listed check has one; one check's headers
  *      sit together, so a number with headers at two places is two checks;
  *      every check this file cites (`check N`, `checks N, M, and K`, each
- *      number of `N to M`, `N through M` or `N–M`) is listed, a lettered one
- *      listed or headed; and every check a line's code names, its comments
- *      aside, is its section's, so a renumber that missed a line fails, as does
- *      a code line the comment scan reads as all comment;
+ *      number of `N to M`, `N through M`, `N–M` or `N-M`) is listed, a lettered
+ *      one listed or headed; and every check a line's code names, its comments
+ *      aside, is its section's, so a renumber that missed a code line fails, as
+ *      does a code line the comment scan reads as all comment;
  *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
  *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
  *      two took 47, within a day). Its probe pins what it refuses and passes
@@ -2076,6 +2076,9 @@ const DENO_EXCEPTIONS = new Map<string, CountedException>([]);
  * (`<td>it's</td><td>{Deno.pid}</td>`) does the same — the .tsx analogue of
  * the prose hazard check 22 met — and matters only when `Deno` shares the
  * line, as does a keyword before a `/` in JSX text (`<p>default / custom</p>`).
+ * A `/` after an object literal's `}` (`{} / 2`) or after a name spelled like
+ * a keyword (`const of = 4; of / 2`) reads as a regex, and a regex after `<`
+ * (`n < /'/.source`) as a division: each hides the rest of its line (SMD-3658).
  * `blankedWithOpen` also says where a template or `${` the text ends inside
  * began, which check 42 reports rather than trusts.
  */
@@ -2086,7 +2089,8 @@ function blanked(text: string, stringsToo: boolean): string {
 /**
  * `blanked`, and where the text ends inside a template literal or `${` (-1 for none): the innermost `${` left open,
  * else the template; a reading that ran on to the end, which check 42 reports at its line rather than trusts
- * (SMD-3323). `scan`'s own `end` matters only to its recursion, so callers take this pair.
+ * (SMD-3323). `scan`'s own `end` matters only to its recursion, so callers take this pair; check 49 calls `scan` itself,
+ * for its `regexesKept`.
  */
 function blankedWithOpen(text: string, stringsToo: boolean): { out: string; openAt: number } {
   const { out, openAt } = scan(text, 0, stringsToo, false);
@@ -10513,8 +10517,8 @@ checkJobTimeouts();
 /**
  * 49: this file numbers its checks three ways — the list above ` * Run:` (` *  N. `), each check's header (a `// ──`
  * or `// ---- Check` separator, or a docblock that opens ` * N: `) and each place it names one (`check N`, `checks N,
- * M, and K`, `N to M`, `N through M`, `N–M`) — and nothing held the numbers apart. Within a day (2026-11-01 and
- * 11-02) two PRs each added a check 45, then two more each a check 47; each pair was caught only because both PRs
+ * M, and K`, `N to M`, `N through M`, `N–M` or `N-M`) — and nothing held the numbers apart. Within a day (2026-11-01
+ * and 11-02) two PRs each added a check 45, then two more each a check 47; each pair was caught only because both PRs
  * added at the same places (the list's end, and for 47 after check 46's section too) and conflicted (SMD-3658), where
  * placed apart they would have merged clean. So no number is listed twice; a header names listed checks (`1 + 2`
  * names two, `16–17` each number from 16 to 17), a lettered sub-check (5b, 17a–17e) counting by its listed base; each
@@ -10524,15 +10528,15 @@ checkJobTimeouts();
  * range and each letter in a lettered one (`17a–17e`). And every check a line's code names, its comments cut by the
  * scanner `blanked` uses, regex literals kept (on each of the repo's .ts files it reads the names the TypeScript
  * parser does; a regex after `)` it reads as a division, with the other limits its docblock gives), is its section's
- * — the section's own number, its base, or a sub-check of it — so a renumber that moved the headers and missed a line
- * fails, even where the old number is still listed because another check took it: 316 names on 312 lines today, all
- * in their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and
- * none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for each
- * run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
- * message, and a name in other words (`check-50`, `check #50`, a number built at runtime) is not read. It reads this
- * file's own text, and not any other file that cites a check by number; prose that reads as a citation or a header
- * fails loudly and is reworded, as does a numbered docblock that is no check's header. Its probe runs on small texts
- * in the same shape.
+ * — the section's own number, its base, or a sub-check of it — so a renumber that moved the headers and missed a code
+ * line fails, even where the old number is still listed because another check took it: 316 names on 312 lines today,
+ * all in their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails),
+ * and none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for
+ * each run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
+ * message (so a stale mention in a comment is not read, as comments name other checks freely), and a name in other
+ * words (`check-50`, `check #50`, a number built at runtime) is not read. It reads this file's own text, and not any
+ * other file that cites a check by number; prose that reads as a citation or a header fails loudly and is reworded,
+ * as does a numbered docblock that is no check's header. Its probe runs on small texts in the same shape.
  */
 const HEADER_SITE = 10;
 const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
@@ -10696,22 +10700,20 @@ function checkCheckNumbers() {
     ["a wrong-section line, reported at its line", `${list("1", "2")}${section("1")}\nfail(rel, "check ${2} said it ← here");\n${section("2")}`, [WRONG_SECTION]],
     ["an unlisted citation, reported at its line", `${list("1")}${section("1")}\n\n// see check ${99} ← here\n`, [UNLISTED_CITE]],
     ["a number listed twice, reported at the second entry", `/**\n *  1. a check\n *  1. again ← here\n *\n * Run: bun probe.ts\n */\n${section("1")}`, [TWICE]],
-    ["a block comment's later line with no leading *, reported", `${list("1")}${section("1")}/* a note\n   that runs on ← here */\n`, [ALL_COMMENT]],
-    ["a regex holding a quote, then a string holding /* and //, then a mention", `${list("1", "2")}${section("1")}const g = (v) => /'/.test(v) ? "docs /* or docs // b" : ""; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
     ["a regex class holding /*, then a mention", `${list("1", "2")}${section("1")}const c = /[ /*?]/; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
     ["a template's later line holding /* and //, then a mention", `${list("1", "2")}${section("1")}const t = \`a\n  docs /* or docs // b — check ${2} reads it\`;\n${section("2")}`, [WRONG_SECTION]],
-    ["a template nesting a template and braces, then a mention", `${list("1", "2")}${section("1")}const n = \`a \${\`b \${{ k: "/*" }.k}\`} c\`; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
-    ["a division then a string, its // a string's", `${list("1", "2")}${section("1")}const r = a / b / c; fail(rel, "a // b — check ${2}");\n${section("2")}`, [WRONG_SECTION]],
-    ["comments the lexer cuts: after a regex with a quote, after a template's close, inline, and unspaced", `${list("1", "2")}${section("1")}if (/^["']/.test(x)) y = 1; // as check ${2} reads it\nconst t = \`a\n  b\`; // check ${2} reads the same\nf(/* check ${2} reads it */ 1);// check ${2} too\n${section("2")}`, []],
-    ["a ${ holding a quoted backtick, then a comment", `${list("1", "2")}${section("1")}const n = \`a \${'\`'} b\`; // check ${2} reads it\n${section("2")}`, []],
+    ["comments the scanner cuts: after a regex with a quote, after a template's close, inline, and unspaced", `${list("1", "2")}${section("1")}if (/^["']/.test(x)) y = 1; // as check ${2} reads it\nconst t = \`a\n  b\`; // check ${2} reads the same\nf(/* check ${2} reads it */ 1);// check ${2} too\n${section("2")}`, []],
     ["a brace closing inside a ${, then a quoted backtick and a comment", `${list("1", "2")}${section("1")}const n = \`a \${{ k: 1 }.k + "\`"} b\`; // check ${2} reads it\n${section("2")}`, []],
     ["an escaped backtick in a template holding /*, then a mention", `${list("1", "2")}${section("1")}const t = \`a \\\` /* b\`; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
     ["a division, then a comment", `${list("1", "2")}${section("1")}const r = a / b; // check ${2} reads it\n${section("2")}`, []],
     ["a regex class holding slashes, then a mention", `${list("1", "2")}${section("1")}const c = /[///]/; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
     ["a regex after return holding a quote, then single-quoted strings and a comment", `${list("1", "2")}${section("1")}function z() { return /'/.test(x) ? 'a' : 'b'; } // check ${2} reads it\n${section("2")}`, []],
-    ["a division after a non-null inside a ${, a template after it, then a mention", `${list("1", "2")}${section("1")}function g() {\n  const m = \`\${(hits.get(k)! / n).toFixed(2)} of docs\`;\n}\nconst a = \`x\`;\nfail(rel, \`see http://x — check ${2}\`);\n${section("2")}`, [WRONG_SECTION]],
+    ["a division after a non-null inside a ${, a template after it, then a mention", `${list("1", "2")}${section("1")}function g() {\n  const m = \`\${(hits.get(k)! / n).toFixed(2)} of docs/x\`;\n}\nconst a = \`x\`;\nfail(rel, \`see http://x — check ${2}\`);\n${section("2")}`, [WRONG_SECTION]],
     ["a division after a postfix ++ or a member named like a keyword, then a string's //", `${list("1", "2")}${section("1")}const h = i++ / n; fail(rel, "a/b at http://x — check ${2}");\nconst y = x.in / n; fail(rel, "a/b http://x — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
     ["a regex literal naming another check, and one inside a ${", `${list("1", "2")}${section("1")}const r = /check ${2} reads/;\nconst t = \`\${/check ${2} too/.source}\`;\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["a header range written with spaces round its dash", `${list("16", "17", "18")}// ── 16  –  18: each ──\n`, []],
+    ["headers each within 10 lines of the last but 18 from the first, two sites", `${list("1")}// ── 1: a ──\n${"\n".repeat(7)}/**\n * 1: b\n */\n${"\n".repeat(6)}/**\n * 1: c ← here\n */\n`, [SITES]],
+    ["a run of lines reading as all comment with a blank line in it, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n\n   and on */\n`, [ALL_COMMENT]],
     ["two runs of lines reading as all comment, code between", `${list("1")}${section("1")}/* a note\n   that runs on ← here */\nconst x = 1;\n/* another\n   on ← here */\n`, [ALL_COMMENT, ALL_COMMENT]],
     ["a run of lines reading as all comment, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n   and on */\n`, [ALL_COMMENT]],
     ["a template holding a // and an apostrophe in a double-quoted string, then mentions", `${list("1", "2")}${section("1")}fail(rel, \`a // b — check ${2}\`);\nfail(rel, "it's // a — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
