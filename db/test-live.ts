@@ -10057,13 +10057,14 @@ if (want("10h")) {
       // nothing, lived). Past, the row is held to the run's end, not 4 s, which a slow host could have spent before the
       // two hand-backs' bounds ran out.
       const handBacks: Record<string, { code: number | null; claim: string | undefined; said: boolean; stopLine: string; hard: string; hardClaim: string | undefined; hardMs: number }> = {};
+      /** The stop's hand-back as it lands: its count, the claim then, and the time since the stop. */
+      type Landing = { n: unknown; claim: string | undefined; ms: number };
       for (const [what, holdMs, waitMs] of [["within", BUDGET_MS + 1500, 30_000], ["past", null, BUDGET_MS + 100]] as const) {
         const [handT] = await seedAll([`Hand-back note ${what}: sweep-pass-good work, its claim's row held as the run hands it back.`]);
         const holder = new SQL({ url: URL_!, max: 1 });
         const hc = await holder.reserve();
         let stopOf: PassStop | null = null;
-        /** The stop's hand-back as it lands: its count, the claim then, and the time since the stop. */
-        let hardOf: Promise<{ n: unknown; claim: string | undefined; ms: number }> | null = null;
+        let hardOf: Promise<Landing> | null = null;
         let holding: Promise<void> | null = null;
         const ran = Promise.withResolvers<void>();
         onOwn = (t) => {
@@ -10086,7 +10087,7 @@ if (want("10h")) {
           // hand-back with no bound waited on the row the case held for it, and hung the shard (SMD-3713 review pass 1,
           // mutant).
           ran.resolve();
-          const landed = hardOf === null ? null : await orHung(hardOf as Promise<{ n: unknown; claim: string | undefined; ms: number }>, 20_000);
+          const landed = hardOf === null ? null : await orHung(hardOf as Promise<Landing>, 20_000);
           handBacks[what] = {
             code: r?.code ?? null, claim: (await claimOf(handT))?.status,
             said: /the claims this run holds could not go back to the pool \(canceling statement due to statement timeout\): each returns as its lease runs out/.test(r?.stderr ?? ""),
@@ -10215,8 +10216,8 @@ if (want("10h")) {
       await drop([claimT]);
 
       /**
-       * The claim's row of `id` held from the judge's question on, for `ms`, or until it settles: the answer waits for the
-       * lock, not its hold.
+       * The claim's row of `id` held from the judge's question on, for `ms` milliseconds, or until `ms`, a promise,
+       * settles: the answer waits for the lock, not its hold.
        */
       const holdClaimRow = (text: string, id: string, ms: number | Promise<unknown>) => {
         const holder = new SQL({ url: URL_!, max: 1 });
