@@ -7205,14 +7205,20 @@ if (want("10h")) {
   /** What a run's call answers: its exit code and the lines on each stream. */
   type SweepRun = Awaited<ReturnType<typeof sweep>>;
   /**
-   * The scheduler's budget the cases past it run under, a session's or a role's statement_timeout: short, since each
-   * such case waits it out once or more, and at 1500 ms, with holds of 2.5–4.5 s, they took ~54 s of [10h]'s ~150
+   * The scheduler's budget the cases past it run under, a session's or a role's statement_timeout: short, since most
+   * wait it out once or more, and at 1500 ms, with holds of 2.5–4.5 s, they took ~54 s of [10h]'s ~150 locally
    * (SMD-3713); a statement nothing holds ends far inside it. A hold that must outlast it is BUDGET_MS and a margin in
    * milliseconds, the margins kept as they were, since load delays a step by milliseconds, not by a share of the budget;
    * one that need only outlast the run ends with it.
    */
   const BUDGET_MS = 750;
   const BUDGET_SESSION = { statement_timeout: String(BUDGET_MS) };
+  /**
+   * The budget of a case that stops the run once it sees a statement wait, inside the wait: twice BUDGET_MS, as it was,
+   * since a poll every 250 ms sees the wait, and a slow poll let BUDGET_MS end first (SMD-3713 review pass 1, cold read).
+   */
+  const WATCHED_MS = BUDGET_MS * 2;
+  const WATCHED_SESSION = { statement_timeout: String(WATCHED_MS) };
   /** The summary line's counts, after "N thought(s) in …:" — what the sweep did with each thought it took. */
   const tally = (r: { stdout: string }) => /^ {2}\d+ thought\(s\) in [^:]*: (.*)$/m.exec(r.stdout)?.[1] ?? "";
   type Subject = { id: string; thought: string; key: string; by: string; judge: string; standing: boolean; fp: string | null; current: string; produced_by: string | null; recipe: Record<string, unknown> | null; agent: string | null };
@@ -7555,7 +7561,7 @@ if (want("10h")) {
       await holder.begin(async (h: SQL) => {
         await h`SELECT pg_advisory_xact_lock(hashtextextended(${`ob1:subject:${filed}`}, 0))`;
         const closing = closer.begin(async (tx: SQL) => {
-          await tx.unsafe("SET LOCAL lock_timeout = '3s'");
+          await tx.unsafe("SET LOCAL lock_timeout = '1500ms'");
           await tx`SELECT close_thought_subject(${filed}::uuid, ${filedNow.id}::uuid, ${filedNow.current})`;
           return "not held off";
         }).catch((e: { errno?: unknown; code?: unknown }) => String(e.errno ?? e.code ?? "an error"));
@@ -10027,20 +10033,24 @@ if (want("10h")) {
       // budget is waited for, so the claim goes back (review pass 2, run-it), but no longer than RELEASE_WAIT, said, the
       // claim left to its lease (review pass 3, cold read: an unbounded wait held the scheduler's stop, which awaits it).
       // A second stop ends the call in hand while the case holds the claim's row.
-      // The second stop's own hand-back, the promise its call returns, waits for the row too: back, 1, within its bound,
-      // null past it (review pass 8, mutant: a plain release under the budget lived, the run's end handing back for it).
+      // The second stop's own hand-back, the promise its call returns, waits for the row too: within its bound it lands,
+      // the claim back as it does, past the budget; past its bound, null (review pass 8, mutant: a plain release under the
+      // budget lived, the run's end handing back for it).
       // Within, the row let go 1.5 s past the budget, the stop's hand-back and the run's end's both wait for it: the call's
       // abort ends the run's loop at once, so its end's hand-back starts beside the stop's, and either may wait on the row
-      // first; the one behind finds nothing left, 0. Each lands past the budget, not null. Held to the stop's 1, the case
-      // failed 4 of 30 local runs under load, the unchanged test's among them, the row SMD-3712's flake failed. Past, the
-      // row is held to the run's end, where a 4 s hold raced the two hand-backs' bounds (SMD-3713).
-      const handBacks: Record<string, { code: number | null; claim: string | undefined; said: boolean; stopLine: string; hard: string }> = {};
-      for (const [what, holdMs, waitMs] of [["within", BUDGET_MS + 1500, 30_000], ["past", null, 1600]] as const) {
+      // first; the one behind finds nothing left, 0. Taken to be 1, the stop's count failed 4 of 30 local runs under load,
+      // the unchanged test's among them, the row SMD-3712's flake failed; so either count is taken, the claim read back in
+      // the pool as the stop's hand-back lands, and that no sooner than the budget after the stop, which only a hold past
+      // the budget gives (SMD-3713 review pass 1, mutant: a hold under the budget, or a stop's hand-back handing back
+      // nothing, lived). Past, the row is held to the run's end, where a 4 s hold raced the two hand-backs' bounds.
+      const handBacks: Record<string, { code: number | null; claim: string | undefined; said: boolean; stopLine: string; hard: string; hardClaim: string | undefined; hardMs: number }> = {};
+      for (const [what, holdMs, waitMs] of [["within", BUDGET_MS + 1500, 30_000], ["past", null, BUDGET_MS + 100]] as const) {
         const [handT] = await seedAll([`Hand-back note ${what}: sweep-pass-good work, its claim's row held as the run hands it back.`]);
         const holder = new SQL({ url: URL_!, max: 1 });
         const hc = await holder.reserve();
         let stopOf: PassStop | null = null;
-        let hardOf: Promise<unknown> | null = null;
+        /** The stop's hand-back as it lands: its count, the claim then, and the time since the stop. */
+        let hardOf: Promise<{ n: unknown; claim: string | undefined; ms: number }> | null = null;
         let holding: Promise<void> | null = null;
         const ran = Promise.withResolvers<void>();
         onOwn = (t) => {
@@ -10049,7 +10059,8 @@ if (want("10h")) {
             await hc`BEGIN`;
             await hc`SELECT 1 FROM thought_work_claims WHERE thought_id = ${handT}::uuid AND work_type = ${POOL} FOR UPDATE`;
             (stopOf as PassStop | null)?.();
-            hardOf = (stopOf as PassStop | null)?.() ?? null;
+            const stoppedAt = Date.now();
+            hardOf = (stopOf as PassStop | null)?.()?.then(async (n) => ({ n, claim: (await claimOf(handT))?.status, ms: Date.now() - stoppedAt })) ?? null;
             await (holdMs === null ? ran.promise : Bun.sleep(holdMs));
             await hc`COMMIT`;
           })();
@@ -10058,11 +10069,16 @@ if (want("10h")) {
         RELEASE_WAIT.ms = waitMs;
         try {
           const r = await orHung(sweep({ session: BUDGET_SESSION, onPass: (st) => { stopOf = st; }, signal: backstop() }), 20_000);
+          // Past's row let go as the run ends or its bound does, before the stop's hand-back is awaited, itself bounded: a
+          // hand-back with no bound waited on the row the case held for it, and hung the shard (SMD-3713 review pass 1,
+          // mutant).
+          ran.resolve();
+          const landed = hardOf === null ? null : await orHung(hardOf as Promise<{ n: unknown; claim: string | undefined; ms: number }>, 20_000);
           handBacks[what] = {
             code: r?.code ?? null, claim: (await claimOf(handT))?.status,
             said: /the claims this run holds could not go back to the pool \(canceling statement due to statement timeout\): each returns as its lease runs out/.test(r?.stderr ?? ""),
             stopLine: /stopped after 0 thought\(s\): what it held (is back in the pool|goes back as each lease runs out)/.exec(r?.stderr ?? "")?.[1] ?? "",
-            hard: hardOf === null ? "none" : String(await (hardOf as Promise<unknown>)),
+            hard: hardOf === null ? "none" : landed === null ? "still waiting at 20 s" : String(landed.n), hardClaim: landed?.claim, hardMs: landed?.ms ?? -1,
           };
         } finally {
           ran.resolve();
@@ -10075,6 +10091,7 @@ if (want("10h")) {
         await drop([handT]);
       }
       assert(handBacks.within.code === 130 && handBacks.within.claim === "pending" && !handBacks.within.said && handBacks.within.stopLine === "is back in the pool" && ["1", "0"].includes(handBacks.within.hard)
+          && handBacks.within.hardClaim === "pending" && handBacks.within.hardMs >= BUDGET_MS + 500
           && handBacks.past.code === 130 && handBacks.past.claim === "claimed" && handBacks.past.said && handBacks.past.stopLine === "goes back as each lease runs out" && handBacks.past.hard === "null",
         `the run's hand-back waits out a short budget on a claim's held row, the claim back, but no longer than its own bound, said, the claim left to its lease (${JSON.stringify(handBacks)})`);
 
@@ -10262,7 +10279,11 @@ if (want("10h")) {
       TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 2000, 100, 100);
       const [putT] = await seedAll(["Budget note 7: flaky-judge sweep-pass-good work, its put-back held past the budget."]);
       const putFree = holdClaimRow("Budget note 7", putT, BUDGET_MS + 1000);
-      /** When each question about the thought came: the second the pause's length after the hand-back. */
+      /**
+       * When each question about the thought came: the second the pause's length after the hand-back, which lands as the
+       * row is let go; at least the hold and the pause, 3,750 ms, where the follow's 1 s in the pause's place gives 2,750
+       * (SMD-3713 review pass 1, mutant: a bound of 2,750 let that live).
+       */
       const putCalls: number[] = [];
       const putHold = onOwn;
       onOwn = (t) => {
@@ -10275,7 +10296,7 @@ if (want("10h")) {
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
       const putGap = putCalls.length === 2 ? putCalls[1] - putCalls[0] : -1;
-      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2 && putGap >= BUDGET_MS + 2000
+      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2 && putGap >= BUDGET_MS + 2500
           && new RegExp(`^ {2}${putT}'s put-back, set-back or claim read passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held is back in the pool, and it claims again in 2 s$`, "m").test(putRun.stderr)
           && tally(putRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
         `a put-back past a scheduler's budget costs the run its poll, the thought back with its place under --limit and asked again after the provider's pause (exit ${putRun?.code ?? "still running at 30 s"}, ${ownCalls - putAsked} asked, ${putGap} ms apart): ${putRun?.stdout.trim().slice(-200)} | ${putRun?.stderr.trim().slice(0, 300)}`);
@@ -10316,11 +10337,11 @@ if (want("10h")) {
       let stopGates = 0;
       let budgetStopHeld: Promise<void> | null = null;
       const budgetStop = new AbortController();
-      const stoppedRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, admit: async () => {
+      const stoppedRunning = settled(sweep({ follow: 1, session: WATCHED_SESSION, admit: async () => {
         if (++stopGates !== 2) return;
         await sc`BEGIN`;
         await sc`LOCK TABLE thought_work_claims IN EXCLUSIVE MODE`;
-        budgetStopHeld = Bun.sleep(BUDGET_MS + 1000).then(async () => { await sc`COMMIT`; });
+        budgetStopHeld = Bun.sleep(WATCHED_MS + 1000).then(async () => { await sc`COMMIT`; });
       }, signal: AbortSignal.any([budgetStop.signal, backstop()]) }));
       const claimWaited = await pollUntil(() => waitingOnLock("claim_thoughts("), 20_000);
       budgetStop.abort();
@@ -10367,7 +10388,7 @@ if (want("10h")) {
       let doorWaited = false;
       try {
         await hh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardT}::uuid::text, 0))`;
-        const hardRunning = settled(sweep({ session: BUDGET_SESSION, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
+        const hardRunning = settled(sweep({ session: WATCHED_SESSION, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
         // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
         // slow answer let the stops land before the write, which the case then never met).
         doorWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
@@ -10393,7 +10414,7 @@ if (want("10h")) {
       let onceWaited = false;
       try {
         await oc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${onceT}::uuid::text, 0))`;
-        const onceRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
+        const onceRunning = settled(sweep({ follow: 1, session: WATCHED_SESSION, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
         onceWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
         onceStop.abort();
         onceRun = await orHung(onceRunning, 20_000);
