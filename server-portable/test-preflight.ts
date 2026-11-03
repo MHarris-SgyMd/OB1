@@ -11,13 +11,14 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * OB1_PREFLIGHT_SHARD=first|rest runs one shard of the sections (SHARDS
- * below); unset, every section runs. CI runs the two side by side (SMD-3468):
+ * below); unset, every section runs. CI runs the two at once (SMD-3468):
  * the first beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195), and the rest on a
- * Postgres of its own. What the cluster shares — a role and its settings,
- * pg_locks, pg_stat_activity — is scoped here to the current database, or
- * named for this suite (pf_*, ob1_pf_capture, "pf reader's").
+ * while the data-layer job's other suites run (SMD-3195), and the rest in a
+ * job of its own, on a runner of its own (SMD-3691). What the cluster shares
+ * — a role and its settings, pg_locks, pg_stat_activity — is scoped here to
+ * the current database, or named for this suite (pf_*, ob1_pf_capture, "pf
+ * reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -61,7 +62,11 @@ const { assert } = sections;
  * a fresh one; first takes [5] and [9], whose local endpoints wait out
  * their timeouts, and the rest the others, [5b] and [12] the long ones among
  * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them).
+ * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
+ * in a job of its own and ends well before the first (its job 103 s, against
+ * the data layer's 184 s, one run), so the split no longer evens two legs:
+ * [9], about 16 s of waits, could go to the rest and take that off the first
+ * (SMD-3710).
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
