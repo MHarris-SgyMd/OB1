@@ -125,10 +125,9 @@ For common issues (connection errors, 401s), see [Common Troubleshooting](../../
 
 ## Next Steps
 
-**Extension 4: Meal Planning** — This is where things get interesting. You'll combine what you've learned about scheduling with a shared MCP server. Your spouse will be able to view meal plans and check off grocery items without accessing your full Open Brain.
+**Extension 4: Meal Planning** — Combine what you've learned about scheduling with recipes, a week's meals and the shopping list made from them, ticked off as things are bought.
 
 **Key concepts in Extension 4:**
-- Shared MCP server (separate server with limited, scoped access — the first time a second person gets in)
 - JSONB for complex data (ingredients, instructions)
 - Auto-generating derivative data (shopping lists from meal plans)
 - Cross-extension queries (checking who's home this week from the family calendar)

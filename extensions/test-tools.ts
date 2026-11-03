@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the four MCP servers with a schema of their
+ * test-tools.ts — every tool of the two MCP servers with a schema of their
  * own on the SQL shim — the extension servers — answers against a real
  * Postgres carrying those schemas. (The ob-graph recipe was the eighth until it
- * retired with SMD-2920; family-calendar, home-maintenance and
- * household-knowledge were three more until they became plugins with SMD-2311:
- * server-portable/test-plugin-ports.ts drives them now.)
+ * retired with SMD-2920; family-calendar, home-maintenance, household-knowledge
+ * and meal-planning were four more until they became plugins with SMD-2311,
+ * which server-portable/test-plugin-ports.ts drives now, and meal-planning's
+ * shared server retired with them.)
  *
  * SMD-1798 added the three servers that were still on supabase-js — family-
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
@@ -43,9 +44,8 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Thirty tools on four servers: twenty on the three change 77
- * drove that remain (meal-planning's six, its shared server's four and
- * professional-crm's ten) and ten on job-hunt.
+ * it is driven. Twenty tools on two servers: professional-crm's ten, which
+ * change 77 drove, and job-hunt's ten.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -68,8 +68,8 @@ const { assert, report } = createAssert();
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The four servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
-const SCHEMAS = ["extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
+/** The two servers, by the schema that owns their tables (job-hunt's last tool writes into professional-crm's). */
+const SCHEMAS = ["extensions/professional-crm/schema.sql",
   "extensions/job-hunt/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 /** What the schemas create, dropped before they are applied and at the end. */
@@ -96,9 +96,8 @@ const KEY = "one-write-key-for-every-tool";
 const USER = "11111111-1111-4111-8111-111111111111";
 process.env.SUPABASE_URL = URL_;
 process.env.MCP_ACCESS_KEY = KEY;
-process.env.MCP_HOUSEHOLD_ACCESS_KEY = KEY;
 process.env.DEFAULT_USER_ID = USER;
-for (const name of ["MCP_ACCESS_KEYS", "MCP_HOUSEHOLD_ACCESS_KEYS", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "OB1_PG_POOL"]) delete process.env[name];
+for (const name of ["MCP_ACCESS_KEYS", "SUPABASE_SERVICE_ROLE_KEY", "OB1_PG_POOL"]) delete process.env[name];
 
 /** Each server's handler by file, for the drift guard at the end. */
 const handlers = new Map<string, Handler>();
@@ -158,119 +157,6 @@ const eqJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(
 
 // Everything below runs inside one try so the schemas are dropped however it ends.
 try {
-
-// ── extensions/meal-planning: index.ts, then the shared server on the same rows ──
-
-const WEEK = "2026-09-21";
-let pastaId = "", saladId = "", shoppingListId = "";
-{
-  const F = "extensions/meal-planning/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-
-  // tags is TEXT[], ingredients and instructions JSONB: one insert, two array bindings.
-  const pasta = await c("add_recipe", { name: "Pasta al limone", cuisine: "italian", prep_time_minutes: 10, cook_time_minutes: 20, servings: 4,
-    ingredients: [{ name: "spaghetti", quantity: "400", unit: "g" }, { name: "olive oil", quantity: "2", unit: "tbsp" }], instructions: ["boil", "toss"], tags: ["quick", "vegetarian"], rating: 5 });
-  assert(pasta.status === 200 && !pasta.isError && UUID.test(pasta.body?.id), `add_recipe stores the row (${pasta.isError ? pasta.toolText.slice(0, 80) : pasta.body?.id})`);
-  pastaId = pasta.body?.id ?? "";
-  assert(eqJson(pasta.body?.tags, ["quick", "vegetarian"]), `…tags into text[] as an array (${JSON.stringify(pasta.body?.tags)})`);
-  assert(eqJson(pasta.body?.instructions, ["boil", "toss"]) && pasta.body?.ingredients?.[1]?.name === "olive oil", "…instructions and ingredients into jsonb as JSON arrays — the same insert, bound by column type");
-  const salad = await c("add_recipe", { name: "Green salad", cuisine: "french", ingredients: [{ name: "lettuce", quantity: "1", unit: "head" }, { name: "olive oil", quantity: "1", unit: "tbsp" }], instructions: [], tags: [] });
-  assert(!salad.isError && UUID.test(salad.body?.id) && eqJson(salad.body?.tags, []) && eqJson(salad.body?.instructions, []), `an empty tags array and empty instructions store as empty (${JSON.stringify(salad.body?.tags)})`);
-  saladId = salad.body?.id ?? "";
-  const noTags = await c("add_recipe", { name: "Toast", ingredients: [{ name: "bread", quantity: "2", unit: "slices" }], instructions: ["toast"] });
-  assert(!noTags.isError && eqJson(noTags.body?.tags, []), "tags left out defaults to []");
-
-  const every = await c("search_recipes", {});
-  assert(!every.isError && Array.isArray(every.body) && every.body?.length === 3 && every.body[0]?.name === "Toast", `search_recipes lists all, newest first (${every.isError ? every.toolText.slice(0, 60) : every.body?.length})`);
-  const byName = await c("search_recipes", { query: "pasta" });
-  assert(!byName.isError && byName.body?.length === 1 && byName.body[0]?.name === "Pasta al limone", "…by name, ILIKE");
-  const byCuisine = await c("search_recipes", { cuisine: "french" });
-  assert(!byCuisine.isError && byCuisine.body?.length === 1 && byCuisine.body[0]?.name === "Green salad", "…by cuisine");
-  const byTag = await c("search_recipes", { tag: "quick" });
-  assert(!byTag.isError && byTag.body?.length === 1 && byTag.body[0]?.name === "Pasta al limone", `…by tag — .contains() on a text[] column is array containment (${byTag.isError ? byTag.toolText.slice(0, 60) : byTag.body?.length})`);
-  const byNoTag = await c("search_recipes", { tag: "nope" });
-  assert(!byNoTag.isError && byNoTag.body?.length === 0, "…a tag no recipe has finds none");
-  const byIngredient = await c("search_recipes", { ingredient: "olive oil" });
-  assert(!byIngredient.isError && byIngredient.body?.length === 2, `…by ingredient — .or("ingredients.cs.[…]") is jsonb containment on the array of objects (${byIngredient.isError ? byIngredient.toolText.slice(0, 60) : byIngredient.body?.length})`);
-  const commaIngredient = await c("search_recipes", { ingredient: "olive oil, extra virgin" });
-  assert(!commaIngredient.isError && Array.isArray(commaIngredient.body) && commaIngredient.body.length === 0, `…an ingredient with a comma is a value, not two .or() terms, and finds none (${commaIngredient.isError ? commaIngredient.toolText.slice(0, 80) : commaIngredient.body?.length})`);
-  const byOneIngredient = await c("search_recipes", { ingredient: "lettuce" });
-  assert(!byOneIngredient.isError && byOneIngredient.body?.length === 1 && byOneIngredient.body[0]?.name === "Green salad", "…and one where one recipe has it");
-
-  const updated = await c("update_recipe", { recipe_id: pastaId, tags: ["quick"], rating: 4, notes: "less lemon" });
-  assert(!updated.isError && eqJson(updated.body?.tags, ["quick"]) && updated.body?.rating === 4 && updated.body?.notes === "less lemon", `update_recipe replaces tags and fields (${updated.isError ? updated.toolText.slice(0, 60) : JSON.stringify(updated.body?.tags)})`);
-  // `if (error) throw error`: the SDK renders a thrown Error's message; a thrown plain object was "[object Object]".
-  const badId = await c("update_recipe", { recipe_id: "not-a-uuid", name: "x" });
-  assert(badId.isError && /invalid input syntax for type uuid/.test(badId.toolText), `update_recipe on a malformed id fails with the database's message, not [object Object] (${badId.toolText.slice(0, 70)})`);
-  const noRow = await c("update_recipe", { recipe_id: NO_ROW, name: "x" });
-  assert(noRow.isError && /rows returned/.test(noRow.toolText), `…and on no row, with .single()'s PostgREST message (${noRow.toolText.slice(0, 70)})`);
-
-  const plan = await c("create_meal_plan", { week_start: WEEK, meals: [
-    { day_of_week: "monday", meal_type: "dinner", recipe_id: pastaId, servings: 4 },
-    { day_of_week: "tuesday", meal_type: "lunch", custom_meal: "leftovers" },
-    { day_of_week: "tuesday", meal_type: "dinner", recipe_id: saladId, notes: "light" },
-  ] });
-  assert(!plan.isError && Array.isArray(plan.body) && plan.body?.length === 3 && plan.body?.every((m: any) => UUID.test(m.id)), `create_meal_plan inserts the batch (${plan.isError ? plan.toolText.slice(0, 60) : plan.body?.length})`);
-  const badMeal = await c("create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "brunch" }] });
-  assert(badMeal.isError && /meal_plans_meal_type_check/.test(badMeal.toolText), `a meal type the CHECK refuses fails with the constraint's name (${badMeal.toolText.slice(0, 70)})`);
-
-  // The embedded select: `*, recipes:recipe_id (name, cuisine, prep_time_minutes, cook_time_minutes)` — by the key column, aliased.
-  const week = await c("get_meal_plan", { week_start: WEEK });
-  assert(!week.isError && Array.isArray(week.body) && week.body?.length === 3, `get_meal_plan lists the week (${week.isError ? week.toolText.slice(0, 80) : week.body?.length})`);
-  assert(week.body?.map((m: any) => `${m.day_of_week}/${m.meal_type}`).join() === "monday/dinner,tuesday/dinner,tuesday/lunch", "…ordered by day then meal type");
-  assert(eqJson(week.body?.[0]?.recipes, { name: "Pasta al limone", cuisine: "italian", prep_time_minutes: 10, cook_time_minutes: 20 }),
-    `…each recipe meal carries its recipe as an object of the four named columns, keyed by the alias (${JSON.stringify(week.body?.[0]?.recipes)})`);
-  assert(week.body?.[2]?.recipes === null && week.body?.[2]?.custom_meal === "leftovers", "…and a custom meal's recipe is null");
-  assert(week.body?.[0]?.week_start === WEEK, `…the week_start date column is the bare date PostgREST gives (${week.body?.[0]?.week_start})`);
-  const emptyWeek = await c("get_meal_plan", { week_start: "2020-01-06" });
-  assert(!emptyWeek.isError && eqJson(emptyWeek.body, []), "an unplanned week is an empty list");
-
-  // Aggregation over the embed: two recipes share olive oil in the same unit.
-  const list = await c("generate_shopping_list", { week_start: WEEK });
-  assert(!list.isError && UUID.test(list.body?.id) && Array.isArray(list.body?.items), `generate_shopping_list writes the list (${list.isError ? list.toolText.slice(0, 80) : list.body?.id})`);
-  shoppingListId = list.body?.id ?? "";
-  const items = (list.body?.items ?? []) as { name: string; quantity: string; unit: string; purchased: boolean; recipe_id: string }[];
-  assert(items.map((i) => i.name).sort().join() === "lettuce,olive oil,spaghetti", `…with the two recipes' ingredients, read through the embed (${items.map((i) => i.name).join()})`);
-  assert(items.find((i) => i.name === "olive oil")?.quantity === "2 + 1" && items.find((i) => i.name === "spaghetti")?.recipe_id === pastaId && items.every((i) => i.purchased === false),
-    "…the shared ingredient aggregated, each item naming its recipe, none purchased");
-  const again = await c("generate_shopping_list", { week_start: WEEK });
-  assert(!again.isError && again.body?.id === shoppingListId && typeof again.body?.updated_at === "string", "…and a second run updates the same list");
-}
-
-{
-  const F = "extensions/meal-planning/shared-server.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-
-  const week = await c("view_meal_plan", { user_id: USER, week_start: WEEK });
-  assert(!week.isError && week.body?.length === 3 && eqJson(week.body?.[0]?.recipes, { name: "Pasta al limone", cuisine: "italian", prep_time_minutes: 10, cook_time_minutes: 20, servings: 4 }),
-    `view_meal_plan embeds the recipe with servings too (${week.isError ? week.toolText.slice(0, 80) : JSON.stringify(week.body?.[0]?.recipes)})`);
-  const other = await c("view_meal_plan", { user_id: NO_ROW, week_start: WEEK });
-  assert(!other.isError && eqJson(other.body, []), "…another user's week is empty");
-
-  const recipes = await c("view_recipes", { user_id: USER });
-  assert(!recipes.isError && recipes.body?.length === 3 && Object.keys(recipes.body?.[0] ?? {}).sort().join() === "cook_time_minutes,cuisine,id,name,prep_time_minutes,rating,servings,tags",
-    `view_recipes lists the named columns only (${recipes.isError ? recipes.toolText.slice(0, 60) : Object.keys(recipes.body?.[0] ?? {}).join()})`);
-  const tagged = await c("view_recipes", { user_id: USER, tag: "quick" });
-  assert(!tagged.isError && tagged.body?.length === 1 && tagged.body[0]?.name === "Pasta al limone", "…by tag, array containment");
-  const named = await c("view_recipes", { user_id: USER, query: "sal", cuisine: "french" });
-  assert(!named.isError && named.body?.length === 1 && named.body[0]?.name === "Green salad", "…by name and cuisine");
-
-  const list = await c("view_shopping_list", { user_id: USER, week_start: WEEK });
-  assert(!list.isError && list.body?.id === shoppingListId && list.body?.items?.length === 3, `view_shopping_list finds the week's list (${list.isError ? list.toolText.slice(0, 60) : list.body?.id})`);
-  const noList = await c("view_shopping_list", { user_id: USER, week_start: "2020-01-06" });
-  assert(noList.isError && /rows returned/.test(noList.toolText), `…and a week without one fails with .single()'s message, not [object Object] (${noList.toolText.slice(0, 70)})`);
-
-  const marked = await c("mark_item_purchased", { shopping_list_id: shoppingListId, item_name: "spaghetti", purchased: true });
-  const after = (marked.body?.items ?? []) as { name: string; purchased: boolean }[];
-  assert(!marked.isError && after.find((i) => i.name === "spaghetti")?.purchased === true && after.filter((i) => i.purchased).length === 1,
-    `mark_item_purchased flips the one item (${marked.isError ? marked.toolText.slice(0, 60) : JSON.stringify(after.map((i) => [i.name, i.purchased]))})`);
-  const noSuchList = await c("mark_item_purchased", { shopping_list_id: NO_ROW, item_name: "x", purchased: true });
-  assert(noSuchList.isError && /rows returned/.test(noSuchList.toolText), "…and a missing list fails with the message");
-}
 
 // ── extensions/professional-crm ──────────────────────────────────────────────
 
@@ -451,7 +337,7 @@ console.log("\n[the servers' clients share one pool]");
 
 console.log("\n[every tool each server registers is driven here]");
 {
-  const files = ["extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
+  const files = ["extensions/professional-crm/index.ts",
     "extensions/job-hunt/index.ts"];
   let total = 0;
   for (const file of files) {
@@ -461,7 +347,7 @@ console.log("\n[every tool each server registers is driven here]");
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 30, `thirty tools on the four servers (${total})`);
+  assert(total === 20, `twenty tools on the two servers (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);

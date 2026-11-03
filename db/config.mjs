@@ -2688,9 +2688,9 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
   // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): three of the six, family-calendar's,
-  // home-maintenance's and household-knowledge's plugins since SMD-2311, their
-  // tables in their own schemas under their own roles.
+  // README's Step 1 says (SMD-1810): two of the six, professional-crm's and
+  // job-hunt's; the other four are plugins since SMD-2311, their tables in
+  // their own schemas under their own roles.
   // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
   // granted nothing — Supabase's default privileges carried its service role;
   // the policies are gone, and this group is what a role other than the
@@ -2698,9 +2698,6 @@ export const ROLE_GRANTS = Object.freeze({
   // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
   // both).
   extensions: Object.freeze([
-    Object.freeze({ table: "recipes",               privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
-    Object.freeze({ table: "meal_plans",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
-    Object.freeze({ table: "shopping_lists",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
