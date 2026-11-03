@@ -289,10 +289,11 @@ free_rows() {
 # SMD-3195, SMD-3468), and the rest runs in a job of its own, preflight-rest,
 # on a runner of its own (SMD-3691); here one after the other on one, each
 # shard dropping the schema before its first database section, which their
-# lane's length, inside the database lane's, makes free. The script runs itself again under a second
-# with-postgres.sh with --pair, and that run does only this — so a run needs
-# podman or docker even when DATABASE_URL is given, and without one this lane
-# fails with with-postgres.sh's "No working container runtime found".
+# lane's length, inside the database lane's, makes free. The script runs
+# itself again under a second with-postgres.sh with --pair, and that run does
+# only this — so a run needs podman or docker even when DATABASE_URL is given,
+# and without one this lane fails with with-postgres.sh's "No working container
+# runtime found".
 # pair_rows NOWFILE: at_row's file.
 pair_rows() {
   FAILED=0 NOW_FILE="$1"

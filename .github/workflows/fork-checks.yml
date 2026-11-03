@@ -1148,11 +1148,12 @@ jobs:
       # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
       # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first here, beside
       # test-upgrade, and rest in the job preflight-rest, on a runner of its
-      # own, since this job's CPUs are its limit (SMD-3691: that job's comment
-      # has the measurements). test-upgrade.ts applies migrations INCREMENTALLY, onto a
-      # database that already holds data — the one situation every other suite
-      # avoids by resetting first, and the only one a real deployment is ever
-      # in; most of its time is three waits on the migrator's 10 s lock_timeout.
+      # own, since this job's CPUs are its limit (SMD-3691: that job's
+      # comment has the measurements). test-upgrade.ts applies migrations
+      # INCREMENTALLY, onto a database that already holds data — the one
+      # situation every other suite avoids by resetting first, and the only
+      # one a real deployment is ever in; most of its time is three waits on
+      # the migrator's 10 s lock_timeout.
       # test-preflight.ts is the deploy gate: without it a misconfigured server
       # starts, answers the MCP handshake, passes every HTTP liveness probe, and
       # fails only when a user captures their first thought; its time is its
@@ -1176,7 +1177,7 @@ jobs:
       - name: Start the incremental upgrade and preflight, in the background
         working-directory: db
         run: |
-          # The first shard's database; their containers create test-upgrade's and the rest's.
+          # The first shard's database; pair-postgres's container creates test-upgrade's.
           bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
           limit_s=600
           echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/data-layer.started"
@@ -1504,23 +1505,22 @@ jobs:
 
       # The CPU's model, then one line on the CPUs from the legs' start to the
       # last leg's end, then every sample, folded (SMD-3691). The legs' span
-      # moves with the runner's CPU: on main to 11-02 every CPU-bound section
-      # ran 1.3-1.5 times as long in the slow runs, where waits did not, and
-      # over five runs of OB1 PR 621 the slow ones had an AMD EPYC 7763, the
-      # fast one an Intel Xeon 8573C (preflight-rest's comment has them).
-      # "busy" is user, nice, system and interrupt time over all time;
-      # "runnable" is /proc/loadavg's count, less the sampler. Runnable over
-      # the CPU count most seconds, with busy near 100%, is a saturated
-      # runner, where another leg adds contention, not time off. It reads, so
-      # it never fails the job.
+      # moves with the runner's CPU: on main to 11-02 the legs ran 1.35-1.45
+      # times as long in the slow runs, where waits did not, and main's logs
+      # named no CPU; this says which a run had. "busy" is user, nice, system
+      # and interrupt time over all time; "runnable" is /proc/loadavg's
+      # count, less the sampler. Runnable over the CPU count most seconds,
+      # with busy near 100%, is a runner bound by its CPUs, where another leg
+      # adds contention, not time off (preflight-rest's comment has what this
+      # found). It reads, so it never fails the job.
       - name: The runner's CPU while the legs ran
         if: ${{ !cancelled() }}
         run: |
           model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo)
           echo "CPU: ${model:-no model name in /proc/cpuinfo}, $(nproc) of them"
           [ -s "$RUNNER_TEMP/cpu.log" ] || { echo "no samples: the sampler did not run"; exit 0; }
-          from=0; to=$EPOCHSECONDS
-          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || echo "the legs never started: the whole job's samples"
+          from=0; to=$EPOCHSECONDS; span="from the start of the legs to their end"
+          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || { from=0; span="over the whole job, the legs never having started"; }
           if [ -s "$RUNNER_TEMP/data-layer.legs" ]; then
             to=0
             while IFS= read -r leg; do
@@ -1528,7 +1528,7 @@ jobs:
               if [ "$end" -gt "$to" ]; then to=$end; fi
             done < "$RUNNER_TEMP/data-layer.legs"
           fi
-          awk -v from="$from" -v to="$to" -v cpus="$(nproc)" '
+          awk -v from="$from" -v to="$to" -v cpus="$(nproc)" -v span="$span" '
             NF == 10 {
               busy = $2 + $3 + $4 + $7 + $8; total = busy + $5 + $6 + $9
               if (seen && $1 > from && $1 <= to && total > t0) {
@@ -1541,10 +1541,11 @@ jobs:
             }
             END {
               if (!n) { print "no samples between " from " and " to; exit }
-              printf "%d s from the legs start to their end: busy %.0f%% on average, %d s (%.0f%%) at 95%% or more; steal %.1f%%, iowait %.1f%%; runnable %.1f on average, over %d for %d s\n", n, sb / n, full, 100 * full / n, ss / n, sw / n, sr / n, cpus, over
+              printf "%d s %s: busy %.0f%% on average, %d s (%.0f%%) at 95%% or more; steal %.1f%%, iowait %.1f%%; runnable %.1f on average, over %d for %d s\n", n, span, sb / n, full, 100 * full / n, ss / n, sw / n, sr / n, cpus, over
             }' "$RUNNER_TEMP/cpu.log"
           echo "::group::every sample: epoch, then /proc/stat's user nice system idle iowait irq softirq steal, then the runnable count"
-          cat "$RUNNER_TEMP/cpu.log"
+          # awk ends a torn last line, so the fold still closes.
+          awk 1 "$RUNNER_TEMP/cpu.log"
           echo "::endgroup::"
 
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
@@ -1571,16 +1572,17 @@ jobs:
 
   # test-preflight.ts's rest shard (OB1_PREFLIGHT_SHARD=rest, SMD-3468), on
   # a runner of its own (SMD-3691). It was the data layer's third leg, but
-  # that job is bound by its runner's 4 CPUs: over five runs of OB1 PR 621,
-  # more tasks were runnable than CPUs for 63-68% of its legs' span, and on
-  # an AMD EPYC 7763 the CPUs were 88-98% busy from the legs' start to 160 s
-  # in. Its span tracked its CPU work over four, so a leg there took its
-  # time from the others, and a fourth would have added contention, not
-  # time off. The rest shard is 56 of the data layer's CPU-seconds, timed
-  # alone on a laptop (39.7 s of bun, 16 s of its Postgres), where the first
-  # shard's is 71.5 and test-upgrade's 33; the data layer keeps those two.
-  # One Postgres, with a /dev/shm of 1 GB: the data layer's first step has
-  # why.
+  # that job was bound by its runner's 4 CPUs. Over five runs of OB1 PR 621
+  # with three legs, more tasks were runnable than CPUs for 62-68% of the
+  # legs' span; on an AMD EPYC 7763 (four of the five) the CPUs were 88-90%
+  # busy on average from the legs' start to 160 s in, and the first shard
+  # ended at 182-189 s. So a leg there took its time from the others, and a
+  # fourth would have added contention, not time off. The rest shard is 56
+  # CPU-seconds timed alone on a laptop (39.7 of bun, 16 of its Postgres),
+  # the first shard 71.5 and test-upgrade 33 (most of its span waits); the
+  # data layer keeps those two. With two legs, on an EPYC, the first shard
+  # ended at 169 s, the CPUs 67% busy and never at 95%. One Postgres, with
+  # a /dev/shm of 1 GB: the data layer's Postgres step has why.
   preflight-rest:
     name: The deploy gate's rest shard against real Postgres
     runs-on: ubuntu-24.04
