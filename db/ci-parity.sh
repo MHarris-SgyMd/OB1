@@ -35,6 +35,10 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
+# A run is every shard of each suite, so a shard named in the caller's shell
+# applies to none of its rows, and would only drop from a row's name the shard
+# a live lane is held to (SMD-3688 review pass 4).
+unset OB1_LIVE_SHARD OB1_PREFLIGHT_SHARD
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
 # The lane keeps the last one in LAST_ROW, which at_row writes for wait_lane.
@@ -317,7 +321,7 @@ pair_rows() {
 # test-live runs on their Postgres, never on that one.
 # live_rows SHARD NOWFILE: one shard's row; at_row's file.
 live_rows() {
-  FAILED=0 NOW_FILE="$2"
+  FAILED=0 NOW_FILE="$2" LAST_ROW=''
   BASE_ENV=$(env | LC_ALL=C sort)
   # Each row a line of its own, as check 35 reads them.
   if [ "$1" = rest ]; then
@@ -334,7 +338,7 @@ live_rows() {
   # The lane ran its own shard's row, or it fails: check 35 and the sed below
   # read lines, and a row bash never reaches (dead code, after an exit, in a
   # heredoc) or reaches in another shard's branch would pass them both and run
-  # nothing, or the wrong shard (review pass 3).
+  # nothing, or the wrong shard (SMD-3688 review pass 3).
   case "${LAST_ROW:-}" in
     "OB1_LIVE_SHARD=$1 db/test-live.ts "*) ;;
     *) echo "ci-parity.sh --live $1 ran no OB1_LIVE_SHARD=$1 row (its last: ${LAST_ROW:-none})" >&2; FAILED=1 ;;
@@ -343,12 +347,9 @@ live_rows() {
   return "$FAILED"
 }
 # The live lanes' shards, in the order they are printed: read from the file's
-# test-live rows, so the shards started are the ones check 35 holds to the
-# workflow (review pass 1: a shard left off a list typed here passed check 35
-# and never ran). Check 35 also holds each such row to this sed's one shape,
-# each shard once (review pass 2: an aligned or commented row passed it and
-# was read here as no row), and this line itself to the text it has (review
-# pass 3: a narrower sed dropped a shard with check 35 passing).
+# test-live rows, which check 35 holds to the workflow, to this sed's shape and
+# each shard once, and holds this line to its text as the only assignment of
+# LIVE_SHARDS (SMD-3688).
 LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z][a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
 [ -n "$LIVE_SHARDS" ] || { echo "ci-parity.sh reads no OB1_LIVE_SHARD row in live_rows, so would start no test-live shard" >&2; exit 2; }
 
@@ -387,10 +388,10 @@ stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
   # Each with-postgres.sh removes its container as it exits, ignoring signals
-  # meanwhile, all at once: waited for, so none outlives the script (review
-  # pass 1), within one 30 s deadline, so a stuck removal cannot hold the
-  # prompt (review passes 2 and 3). bash reaps an exited lane itself and keeps
-  # its status, so ps shows it no longer and wait returns at once.
+  # while it does; all are waited for within one 30 s deadline, so none
+  # outlives the script and a stuck removal cannot hold the prompt (SMD-3688).
+  # bash reaps an exited lane itself, so ps no longer shows it and wait
+  # returns at once.
   local deadline=$((SECONDS + 30)) name
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do
     while ps -p "$pid" > /dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done

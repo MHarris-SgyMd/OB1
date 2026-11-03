@@ -10682,8 +10682,8 @@ function checkCiParity() {
   if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
     fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");
   const parityText = readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n");
-  if (parityText.filter((l) => l === LIVE_SHARDS_LINE).length !== 1)
-    fail(PARITY_SCRIPT, `has not exactly one line \`${LIVE_SHARDS_LINE}\`, the sed that reads the rows check 35 holds: another reads other shards than those (check 35, SMD-3688)`);
+  if (parityText.filter((l) => l === LIVE_SHARDS_LINE).length !== 1 || parityText.filter((l) => /\bLIVE_SHARDS=/.test(l.replace(/#.*$/, ""))).length !== 1)
+    fail(PARITY_SCRIPT, `has not exactly one assignment of LIVE_SHARDS, the line \`${LIVE_SHARDS_LINE}\`: another reads, or sets, other shards than the rows check 35 holds (check 35, SMD-3688)`);
   const laneShards = new Set<string>();
   for (const r of parity.runs.filter((p) => p.script === "test-live.ts")) {
     const m = LIVE_SHARD_ROW.exec(parityText[r.line - 1]);
