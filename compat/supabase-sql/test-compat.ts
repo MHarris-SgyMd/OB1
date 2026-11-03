@@ -837,7 +837,7 @@ try {
     ('ongoing', NULL, '2026-09-15', NULL, '{}'),
     ('future', NULL, '2026-10-15', NULL, '{}')`;
   const titles = (r: { data: unknown; error: { message: string } | null }, what: string) => rowsOf(r, what).map((x) => String(x.title)).join();
-  // family-calendar's get_week_schedule: a recurring activity, or one whose dates overlap the week.
+  // The week query family-calendar's get_week_schedule sent until its server became a plugin (SMD-2311): a recurring activity, or one whose dates overlap the week.
   const week = titles(await db.from("acts").select("title").or("and(start_date.lte.2026-09-28,or(end_date.gte.2026-09-21,end_date.is.null)),dow.not.is.null").order("id"), "family-calendar's expression");
   assert(week === "weekly,camp,ongoing", `and(…, or(…)) nested two deep, beside a negated flat term — family-calendar's expression (${week})`);
   // metadata-norm's candidates: two and() groups, each on a JSON path.

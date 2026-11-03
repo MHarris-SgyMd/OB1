@@ -248,6 +248,7 @@ free_rows() {
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
+  nodb evals              eval-priority.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check
@@ -289,16 +290,16 @@ free_rows() {
 }
 
 # The pair lane (SMD-3638): test-upgrade.ts, then test-preflight.ts's two
-# shards, on a Postgres of their own, as CI's data-layer job runs them in the
-# background from its start (SMD-2219, SMD-3195, SMD-3468) — CI side by side,
-# test-upgrade.ts and the first shard on pair-postgres, the rest on
-# preflight-postgres; here one after the other on one, each shard dropping the
-# schema before its first database section, which costs nothing while the
-# lane's length stays inside the longest test-live shard's. The script runs
-# itself again under a with-postgres.sh of its own with --pair, and that run
-# does only this — so a run needs podman or docker even when DATABASE_URL is
-# given, and without one this lane fails with with-postgres.sh's "No working
-# container runtime found".
+# shards, on a Postgres of their own. CI's data-layer job runs the first two
+# side by side on pair-postgres, in the background from its start (SMD-2219,
+# SMD-3195, SMD-3468), and the rest runs in a job of its own, preflight-rest,
+# on a runner of its own (SMD-3691); here one after the other on one, each
+# shard dropping the schema before its first database section, which costs
+# nothing while the lane's length stays inside the longest test-live shard's.
+# The script runs itself again under a with-postgres.sh of its own with
+# --pair, and that run does only this — so a run needs podman or docker even
+# when DATABASE_URL is given, and without one this lane fails with
+# with-postgres.sh's "No working container runtime found".
 # pair_rows NOWFILE: at_row's file.
 pair_rows() {
   FAILED=0 NOW_FILE="$1"
@@ -462,11 +463,13 @@ main() {
   run server-portable    test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
   run server-portable    test-plugins-sql.ts
+  run server-portable    test-plugin-ports.ts
   run server-portable    test-local-provider.ts
   run evals              eval-write-path.ts --gate
   # The check drops the schema and refuses a database holding thoughts unless
   # told; this one is the throwaway with-postgres.sh started, as CI's is.
   OB1_FIXTURE_RESET=1 run evals eval-projection-replay.ts --fixture-check
+  OB1_FIXTURE_RESET=1 run evals eval-priority.ts --seeded
   run server-portable    test-egress.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts

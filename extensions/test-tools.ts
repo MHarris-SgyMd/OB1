@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the seven MCP servers with a schema of their
+ * test-tools.ts — every tool of the six MCP servers with a schema of their
  * own on the SQL shim — the extension servers — answers against a real
  * Postgres carrying those schemas. (The ob-graph recipe was the eighth until it
- * retired with SMD-2920.)
+ * retired with SMD-2920, and family-calendar the seventh until it became a
+ * plugin with SMD-2311: server-portable/test-plugin-ports.ts drives it now.)
  *
  * SMD-1798 added the three servers that were still on supabase-js — family-
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
@@ -41,10 +42,9 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Forty-five tools on seven servers: twenty-nine on the five
+ * it is driven. Thirty-nine tools on six servers: twenty-nine on the five
  * change 77 drove (SMD-1588's "twenty-five" counted the four `index.ts` files;
- * the shared meal-planning server's four are the rest), six on family-calendar
- * and ten on job-hunt.
+ * the shared meal-planning server's four are the rest) and ten on job-hunt.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -67,11 +67,11 @@ const { assert, report } = createAssert();
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The seven servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
+/** The six servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
 const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
-  "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql"];
+  "extensions/job-hunt/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
-/** What the schemas create, dropped before they are applied and at the end. family-calendar's CREATE TABLE has no IF NOT EXISTS (meal-planning's gained it under SMD-1810's boyscout). */
+/** What the schemas create, dropped before they are applied and at the end. */
 async function dropExtensionSchemas() {
   for (const rel of SCHEMAS) {
     const text = schemaText(rel);
@@ -478,53 +478,6 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(staleOne) && staleOne.body?.count === 1, "…limit applies");
 }
 
-// ── extensions/family-calendar (SMD-1798) ────────────────────────────────────
-
-{
-  const F = "extensions/family-calendar/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-  // These tools answer the row or the rows themselves, no envelope.
-  const titles = (r: Called) => (Array.isArray(r.body) ? (r.body as { title: string }[]) : []).map((a) => a.title).sort().join();
-
-  const ada = await c("add_family_member", { name: "Ada", relationship: "child", birth_date: "2018-03-01" });
-  assert(ok(ada) && UUID.test(ada.body?.id) && ada.body?.relationship === "child" && ada.body?.birth_date === "2018-03-01", `add_family_member stores the row and answers it, the birth date a bare date (${failure(ada) || JSON.stringify(ada.body).slice(0, 80)})`);
-  const adaId = String(ada.body?.id);
-  // Five activities around the week of 2026-09-21: one recurring, four dated — one across the week, one ended before it,
-  // one open-ended since before it, one ahead of it.
-  const swim = await c("add_activity", { family_member_id: adaId, title: "Swimming", activity_type: "sports", day_of_week: "monday", start_time: "16:00", end_time: "17:00" });
-  const camp = await c("add_activity", { title: "Autumn camp", activity_type: "school", start_date: "2026-09-20", end_date: "2026-09-27", start_time: "09:00" });
-  const ended = await c("add_activity", { title: "Spring term", activity_type: "school", start_date: "2026-09-01", end_date: "2026-09-10", start_time: "08:00" });
-  const ongoing = await c("add_activity", { title: "Piano", activity_type: "music", start_date: "2026-09-15", start_time: "18:00" });
-  const ahead = await c("add_activity", { title: "Ski trip", activity_type: "sports", start_date: "2026-10-15", start_time: "07:00" });
-  assert([swim, camp, ended, ongoing, ahead].every(ok) && swim.body?.family_member_id === adaId && camp.body?.family_member_id === null, `add_activity ×5: a recurring one for Ada, four dated ones for the whole family (${[swim, camp, ended, ongoing, ahead].map(failure).filter(Boolean).join("; ")})`);
-  const week = await c("get_week_schedule", { week_start: "2026-09-21" });
-  assert(ok(week) && titles(week) === "Autumn camp,Piano,Swimming", `get_week_schedule: the recurring activity and the two whose dates reach the week, not the one that ended before it or the one ahead — the grouped .or() the shim reads since SMD-1798 (${failure(week) || titles(week)})`);
-  assert(week.body?.[0]?.title === "Autumn camp" && week.body?.[2]?.title === "Piano", `…ordered by start time (${(week.body ?? []).map((a: { title: string }) => a.title).join()})`);
-  const swimRow = week.body?.find((a: { title: string }) => a.title === "Swimming");
-  assert(swimRow?.family_members?.name === "Ada" && swimRow?.family_members?.relationship === "child" && Object.keys(swimRow?.family_members ?? {}).sort().join() === "name,relationship" && week.body?.find((a: { title: string }) => a.title === "Piano")?.family_members === null,
-    `…each with its family member embedded through the key column — the two named columns, no more — or null for the whole family (${JSON.stringify(swimRow?.family_members)})`);
-  const forAda = await c("get_week_schedule", { week_start: "2026-09-21", family_member_id: adaId });
-  assert(ok(forAda) && titles(forAda) === "Swimming", `…filtered to one family member (${titles(forAda)})`);
-  const byQuery = await c("search_activities", { query: "camp" });
-  assert(ok(byQuery) && titles(byQuery) === "Autumn camp", `search_activities by title, ILIKE (${failure(byQuery) || titles(byQuery)})`);
-  const byType = await c("search_activities", { activity_type: "sports" });
-  assert(ok(byType) && titles(byType) === "Ski trip,Swimming", `…by type (${titles(byType)})`);
-  const byMember = await c("search_activities", { family_member_id: adaId });
-  assert(ok(byMember) && titles(byMember) === "Swimming" && byMember.body?.[0]?.family_members?.relationship === "child", "…by family member, the member embedded");
-  const every = await c("search_activities", {});
-  const dated = (every.body ?? []).filter((a: { start_date: string | null }) => a.start_date);
-  assert(ok(every) && every.body?.length === 5 && dated[0]?.title === "Ski trip" && dated[3]?.title === "Spring term", `…no filter lists all five, latest start date first (${(every.body ?? []).map((a: { title: string }) => a.title).join()})`);
-  const bday = await c("add_important_date", { family_member_id: adaId, title: "Ada's birthday", date_value: dateDaysFromNow(10), recurring_yearly: true });
-  const renewal = await c("add_important_date", { title: "Insurance renewal", date_value: dateDaysFromNow(60), reminder_days_before: 14 });
-  assert(ok(bday) && ok(renewal) && bday.body?.recurring_yearly === true && bday.body?.reminder_days_before === 7 && renewal.body?.reminder_days_before === 14 && renewal.body?.recurring_yearly === false, `add_important_date ×2, the defaults filled (${failure(bday) || failure(renewal) || JSON.stringify(bday.body).slice(0, 80)})`);
-  const soon = await c("get_upcoming_dates", { days_ahead: 30 });
-  assert(ok(soon) && soon.body?.length === 1 && soon.body?.[0]?.title === "Ada's birthday" && soon.body?.[0]?.family_members?.name === "Ada" && soon.body?.[0]?.date_value === dateDaysFromNow(10), `get_upcoming_dates: the birthday within 30 days, the member embedded, the date bare (${failure(soon) || JSON.stringify(soon.body).slice(0, 100)})`);
-  const wider = await c("get_upcoming_dates", { days_ahead: 90 });
-  assert(ok(wider) && wider.body?.length === 2 && wider.body?.[1]?.title === "Insurance renewal" && wider.body?.[1]?.family_members === null, `…a wider window takes in the renewal, ordered by date, a family-wide date's member null (${(wider.body ?? []).map((d: { title: string }) => d.title).join()})`);
-}
-
 // ── extensions/job-hunt (SMD-1798) ───────────────────────────────────────────
 
 {
@@ -605,7 +558,7 @@ console.log("\n[the servers' clients share one pool]");
 console.log("\n[every tool each server registers is driven here]");
 {
   const files = ["extensions/household-knowledge/index.ts", "extensions/home-maintenance/index.ts", "extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
-    "extensions/family-calendar/index.ts", "extensions/job-hunt/index.ts"];
+    "extensions/job-hunt/index.ts"];
   let total = 0;
   for (const file of files) {
     const handler = handlers.get(file);
@@ -614,7 +567,7 @@ console.log("\n[every tool each server registers is driven here]");
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 45, `forty-five tools on the seven servers (${total})`);
+  assert(total === 39, `thirty-nine tools on the six servers (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);
