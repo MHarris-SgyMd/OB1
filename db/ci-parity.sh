@@ -117,6 +117,32 @@ at_row() {
 # cut_off RC: what a failing row's verdict adds when limit stopped it.
 cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
 
+# keep_output NAME OUT: a failing row's whole output, kept in a file of its own
+# in PARITY_TMP, outside the lanes' directory the exit removes, its path
+# printed under the row's excerpt, so a flake that does not come back can
+# still be read (SMD-3607). The files stay until macOS clears TMPDIR.
+keep_output() {
+  local slug file
+  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-60)
+  file=$(mktemp "$PARITY_TMP/ci-parity-failed.$slug.XXXXXX") && printf '%s\n' "$2" > "$file" && echo "        full output: $file"
+}
+# excerpt OUT: the lines that say what failed, at most three, then how many
+# more. A failed assertion as the suites print it — a ✗ or FAIL beginning the
+# line after its indent, then a space or the line's end (createAssert's
+# "  ✗  label", the db/ suites' own "  ✗ label", the self-checks' "FAIL
+# name") — and not a line that only quotes one: a passing "  ✓  … (✗ …)"
+# row of test-preflight's took the excerpt twice (SMD-3607). Else a crash's
+# error: lines, else the last three lines.
+excerpt() {
+  local lines n
+  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)')
+  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -E 'error:')
+  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$' | tail -3)
+  printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
+  n=$(printf '%s\n' "$lines" | grep -c .)
+  [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
+}
+
 # Each directory CI installs, once, from its lockfile. A lockfile out of step
 # with package.json is reported here, apart from anything that then fails.
 install() {
@@ -125,6 +151,7 @@ install() {
   if [ "$rc" -ne 0 ]; then
     row bad "$dir" "bun install --frozen-lockfile$(cut_off "$rc")"
     printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
+    keep_output "install $dir" "$out"
     FAILED=1
   fi
 }
@@ -155,11 +182,8 @@ suite() {
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
     row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
-    if printf '%s\n' "$out" | grep -qE '✗|error:'; then
-      printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
-    else
-      printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
-    fi
+    excerpt "$out"
+    keep_output "$name" "$out"
     FAILED=1
   else
     row ok "$name" "${res:-exit 0} · $took"
@@ -196,6 +220,7 @@ typecheck() {
     else
       printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     fi
+    keep_output "typecheck $dir" "$out"
     FAILED=1
   fi
 }
