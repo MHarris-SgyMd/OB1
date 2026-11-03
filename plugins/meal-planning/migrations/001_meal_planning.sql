@@ -78,11 +78,16 @@ CREATE TABLE IF NOT EXISTS shopping_list_items (
   quantity    text,
   unit        text,
   purchased   boolean NOT NULL DEFAULT false,
+  -- The quantity it was bought at, while it is marked bought: a list made
+  -- again keeps the mark while the quantity is no more than this, so a meal
+  -- dropped and planned again does not ask to buy what was bought.
+  bought_quantity text,
   -- The recipes it is for.
   recipe_ids  uuid[] NOT NULL DEFAULT '{}',
   -- Its place in the list: the order the week's meals first name it.
   position    integer NOT NULL,
-  created_at  timestamptz NOT NULL DEFAULT now()
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT shopping_list_items_bought_when_purchased CHECK (purchased OR bought_quantity IS NULL)
 );
 
 CREATE INDEX IF NOT EXISTS recipes_by_tags ON recipes USING gin (tags);
@@ -129,5 +134,6 @@ CREATE OR REPLACE VIEW meal_rows AS
 
 CREATE OR REPLACE VIEW shopping_item_rows AS
   SELECT i.id, i.list_id, i.position,
-         jsonb_build_object('id', i.id, 'name', i.name, 'quantity', i.quantity, 'unit', i.unit, 'purchased', i.purchased, 'recipe_ids', to_jsonb(i.recipe_ids)) AS answer
+         jsonb_build_object('id', i.id, 'name', i.name, 'quantity', i.quantity, 'unit', i.unit, 'purchased', i.purchased, 'bought_quantity', i.bought_quantity,
+                            'recipe_ids', to_jsonb(i.recipe_ids)) AS answer
     FROM shopping_list_items i;
