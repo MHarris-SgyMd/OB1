@@ -51,7 +51,7 @@ row() {
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, about twice the slowest honest row here under the lanes' load
-# (test-live's extract shard, ~300 s); OB1_PARITY_ROW_LIMIT sets another.
+# (test-live's sleep shard, ~290 s); OB1_PARITY_ROW_LIMIT sets another.
 # Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in

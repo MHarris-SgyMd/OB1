@@ -116,15 +116,15 @@ if (!URL_) {
  * and [10g], [17] and [41] (~39 s) went to the rest, by main's run at
  * 30bd9637 (sleep 218 s of sections, long 217, extract 303, rest 221). With
  * [38] alone the floor (SMD-3714, ~269 s), [9f] went to the rest, [10g] to
- * long, and [5d] and [41] to extract, so the other three even out under it,
- * by main's runs 41683999107, 41689520872 and 41700508681 (live steps of
- * sleep 276 s, long 271, extract 274 and the rest 274, from 308 for extract
- * before). [5d] waits on the CPU, and the rest keeps the timers' [9f]. The
- * rest's sections wait on the CPU, not on timers, so its time moves most
- * with the runner's speed: its slow runs are its median, its fast ones ~50 s
- * under. A cell's job runs ~18 s past its sections (~25 s
- * for the rest's, with test-search-path.ts), so a section added to a cell
- * adds to the run's length once that cell's job is the run's longest.
+ * long, and [5d] and [41] to extract, so the other three even out under it:
+ * projected from the section medians of main's runs 41683999107, 41689520872
+ * and 41700508681, live steps of long 271 s, extract 274 and the rest 274,
+ * against sleep's 276 measured and extract's 309 before. [5d] waits on the
+ * CPU, so it left the rest, which took [9f]'s timers instead. The rest's
+ * other sections wait on the CPU, so its time moves most with the runner's
+ * speed: its slow runs are its median, its fast ones ~50 s under. A cell's
+ * job runs ~15-25 s past its sections, so a section added to a cell adds to
+ * the run's length once that cell's job is the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -743,7 +743,8 @@ if (want("5d")) {
   await applyMigrations(URL_, { ...opts041, routeEstimateMinPages: 0 });
   assert(/IF v_pages >= 0 AND v_min = 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasClauses()), "041 is installed with its floor at 0 (038's gate, carried through 039), jit = off and both pins on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
-  // [5b]'s 2,000 rows are dead after the DELETE above. Unvacuumed, their 28
+  // In the rest or a whole run, [5b]'s 2,000 rows are dead after the DELETE
+  // above (in extract, where [5d] runs first, there are none). Unvacuumed, their 28
   // pages stay and the load goes in after them; the sample draws them and
   // counts them as seen with no hit (041's LEFT join, on purpose): 49 misses
   // in 5,000 draws at 15,000 rows, about one run in six. The page check after
@@ -4177,8 +4178,8 @@ if (want("9")) {
 // and mid-pass, whose each error is (worker-bootstrap.ts's followClassify,
 // whose every cell test-worker-bootstrap.ts holds; here one case per path it
 // sends a thought down), and what the follower says, stamps and ends with. Its
-// own section, in the extract shard, so the long shard keeps its time (review
-// pass 4).
+// own section, out of [9] so the long shard kept its time (review pass 4);
+// in the rest since SMD-3714, which evened the cells out under sleep.
 
 if (want("9f")) {
   console.log("\n[9f] db/reembed.ts --follow: the provider and the database going away, at the start and mid-pass");
