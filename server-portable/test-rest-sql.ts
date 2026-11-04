@@ -1569,6 +1569,9 @@ console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a cl
       && !onOpen.isError && onOpen.sc.ticketClosed === undefined && !/is closed/.test(onOpen.text),
     `a claim on a Done ticket says board-sync will release it, in the text and as ticketClosed through both doors; one on an open ticket says nothing (${onDone.text.slice(-120)})`);
 
+  const renewedBefore = await mcp("renew_claim", { id: doneId, token: doneToken });
+  assert(!renewedBefore.isError && JSON.stringify(renewedBefore.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }) && /SMD-9500 is closed \(Done\): board-sync releases every claim/.test(renewedBefore.text),
+    `renew_claim on a closed ticket's claim, before board-sync's release, says it will go (${renewedBefore.text.slice(-120)})`);
   await sql`SELECT release_closed_ticket_claims('test-rest-sql', false, ${{ name: "board-sync" }}::jsonb)`;
   const renewed = await mcp("renew_claim", { id: doneId, token: doneToken });
   const renewedRest = await rest("POST", `/v1/claims/${doneId}/renew`, { token: doneToken });
@@ -1576,12 +1579,12 @@ console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a cl
   const released = await mcp("release_claim", { id: doneId, token: doneToken, reason: "merged" });
   const reason = "SMD-9500 closed: Done (completed); test-rest-sql";
   assert(renewed.isError && renewed.sc.code === "CLAIM_RELEASED" && renewed.sc.ticketClosed === true
-      && renewed.text === `Refused: claim ${doneId} was released by board-sync at ${String(renewed.sc.releasedAt)} (${JSON.stringify(reason)}): its ticket is closed, so the work under it is over: delete the token file and any marker beside it. Work still to do there needs the ticket reopened, or a ticket of its own.`
+      && renewed.text === `Refused: claim ${doneId} was released by board-sync at ${String(renewed.sc.releasedAt)} (${JSON.stringify(reason)}): its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.`
       && renewedRest.status === 409 && renewedRest.body.ticketClosed === true
-      && reclaimed.isError && reclaimed.sc.code === "CLAIM_RELEASED" && reclaimed.sc.ticketClosed === true && /its ticket is closed, so the work under it is over/.test(reclaimed.text),
-    `once board-sync's release ends it, a renewal through either door, and claim_work with its token, say the ticket closed and the work is over — not to ask about claiming again (${renewed.text.slice(0, 160)})`);
+      && reclaimed.isError && reclaimed.sc.code === "CLAIM_RELEASED" && reclaimed.sc.ticketClosed === true && /its ticket is closed\. If your work under it merged, the release is done/.test(reclaimed.text),
+    `once board-sync's release ends it, a renewal through either door, and claim_work with its token, say the ticket closed — done if the work merged, else tell the user — not to ask about claiming again (${renewed.text.slice(0, 160)})`);
   assert(!released.isError && released.sc.outcome === "already_released"
-      && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed, so the work under it is over`).test(released.text),
+      && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed\\. If your work under it merged`).test(released.text),
     `the holder's release after it says who ended the claim and why (${released.text.slice(0, 200)})`);
 
   // An operator's release, or the holder's own, met by a later release: who and why, nothing of a closed ticket.
@@ -1590,6 +1593,21 @@ console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a cl
   const twice = await mcp("release_claim", { id: openId, token: onOpen.sc.token });
   assert(!twice.isError && /had already ended at \S+: released by writer \("dropped"\)\.$/.test(twice.text) && !/closed/.test(twice.text),
     `a claim its holder released, released again: by whom and why, nothing of a closed ticket (${twice.text.slice(-80)})`);
+
+  // A key's own row relabelled the board's by a patch: refused too, the row unmoved (review pass 2).
+  const own = await rest("POST", "/v1/thoughts", { content: "[13] a key's own ticket row", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed", linear_updated_at: "2099-01-01T00:00:00.000Z" } }, KEYS.rival);
+  const ownId = String(own.body.id);
+  const relabel = await mcp("update_thought", { id: ownId, metadata_patch: { source: "linear" } }, KEYS.rival);
+  const relabelRest = await rest("PATCH", `/v1/thoughts/${ownId}`, { metadata_patch: { source: " Linear " } }, KEYS.rival);
+  const [ownRow] = await sql`SELECT metadata->>'source' AS source FROM thoughts WHERE id = ${ownId}::uuid`;
+  const [head] = await sql`SELECT count(*)::int AS n FROM ob1_work_claim_closed_head('SMD-9501')`;
+  assert(own.status === 201 && relabel.isError && relabel.sc.code === "REFUSED_SOURCE_RESERVED" && relabel.text === "Refused: `metadata_patch.source: \"linear\"` is the board's own label, which only its importers write. Patch without it."
+      && relabelRest.status === 400 && relabelRest.body.code === "REFUSED_SOURCE_RESERVED" && ownRow?.source !== "linear" && head?.n === 0,
+    `update_thought relabelling a key's own ticket row the board's is refused through both doors, the row unmoved, the ticket not read closed (${relabel.text.slice(0, 80)}; ${relabelRest.status}; ${ownRow?.source}; ${head?.n})`);
+  // A capture-only key's ticket key keeps its refusal: the label's is said after the metadata's.
+  const hooked = await mcp("capture_thought", { content: "[13] a capture key's board row", source: "linear", metadata: { issue: "SMD-9501" } }, KEYS.hook);
+  assert(hooked.isError && hooked.sc.code === "REFUSED_METADATA_SHAPE" && hooked.sc.problem === "ticket_key" && hooked.sc.key === "issue",
+    `a capture-only key sending the board's label with a ticket key is refused for the ticket key, as before (${JSON.stringify(hooked.sc)})`);
 
   // `source: "linear"` is the board's own label, refused through both doors: a key could otherwise write a ticket row
   // board-sync's release would trust.

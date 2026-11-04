@@ -1019,13 +1019,18 @@ ticket the brain records as Done, Canceled or a Duplicate, with the reason
 - `claim_work` on such a ticket still claims, and says the claim will go
   (`ticketClosed`: the status and its type).
 - A renewal of a claim board-sync ended answers `CLAIM_RELEASED` with
-  `ticketClosed: true`: the work is over, not a release to ask about.
+  `ticketClosed: true`: done if the holder's work merged, else the ticket closed
+  under it (tell the user), never a release to ask about claiming again. Only
+  117's own reason, by a releaser neither an operator nor an agent, counts.
+- `renew_claim` on such a ticket, before the release, says the claim will go, as
+  `claim_work` does.
 - A release after it answers `already_released`, naming who ended the claim and why.
 
 No tool reaches the release. A row is trusted as the board's only under
-`source: "linear"`, which `capture_thought` refuses to every key
-(`REFUSED_SOURCE_RESERVED`, 400 over REST). A write key can still patch a board
-row's ticket keys and so end its claims, as it can already mislabel `moved`.
+`source: "linear"`, which `capture_thought` and `update_thought`'s patch refuse
+to every key (`REFUSED_SOURCE_RESERVED`, 400 over REST). A write key can still
+edit the board's own rows, a ticket key or a delete, and so end a ticket's
+claims, as it can already mislabel `moved`.
 
 ## Priority assertions (SMD-3664)
 

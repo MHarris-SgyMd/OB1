@@ -2429,11 +2429,13 @@ whose holder merged and never released stayed on every read naming the ticket
 claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose
 head in `ob1_ticket_head` has a settled status type (`node_settled_types()`:
 completed, canceled, duplicate) and is an importer's row (`metadata.source` is
-`linear`, which the server refuses to every key: capture_thought answers
-`REFUSED_SOURCE_RESERVED`, so a key's own thought with an `issue` and a
-`status_type` releases nothing). A write key can still mark a board row closed
-by patching its ticket keys, as it can already mislabel `moved`; board-sync
-writes the board's status back when the ticket next moves. A claim made after the ticket closed is
+`linear`, which the server refuses to every key: capture_thought and
+update_thought's patch answer `REFUSED_SOURCE_RESERVED`, so a key's own thought
+with an `issue` and a `status_type` releases nothing). A write key can still
+make a ticket read closed by editing the board's own rows (patching one's
+ticket keys, or deleting an open head over an older closed board row), as it
+can already mislabel `moved`; board-sync writes the board's status back when
+the ticket next moves. A claim made after the ticket closed is
 released too, and a ticket that reopens brings none back. Each release is stamped
 from the call's envelope, with the reason `<issue> closed: <status>
 (<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
@@ -2495,9 +2497,10 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups
-capture,worker,…` those alone (SMD-2289). Every group includes **closedclaims**,
-the release of a closed ticket's claims that board-sync alone calls (117): a role
-granted by `--groups` without it cannot call that release, and a plain `--grant` can. `--groups` revokes nothing; `--exact` adds the
+capture,worker,…` those alone (SMD-2289). The full set a plain `--grant` issues
+includes **closedclaims**, the release of a closed ticket's claims that board-sync
+alone calls (117): a role granted by `--groups` without it cannot call that
+release, and one granted by a plain `--grant` can. `--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the

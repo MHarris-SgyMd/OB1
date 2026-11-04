@@ -692,6 +692,11 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   // The key is capture_thought's to set, once (SMD-3314): a patch moving it
   // would let one thought take another's name on every brain.
   if (metadata_patch !== undefined && Object.hasOwn(metadata_patch, "client_key")) return refuse({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "client_key" });
+  // The board's label is its importers' (SMD-3600), by a patch as by a capture: a key's own row relabelled so would be a
+  // ticket row board-sync's release trusts (review pass 2).
+  if (metadata_patch !== undefined && typeof metadata_patch.source === "string" && IMPORTER_SOURCES.has(metadata_patch.source.trim().toLowerCase())) {
+    return refuse({ code: "REFUSED_SOURCE_RESERVED", retryable: false, source: metadata_patch.source.trim().toLowerCase() });
+  }
   // The thought and the pointer, each by id else by client_key (SMD-3314).
   const { id, byClientKey } = await targetNamed(ctx, principal, name);
   if (typeof supersedes === "string") supersedes = (await targetNamed(ctx, principal, supersedes)).id;

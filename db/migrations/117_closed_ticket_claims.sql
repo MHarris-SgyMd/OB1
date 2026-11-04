@@ -20,14 +20,17 @@
 --     lapsed) whose head in ob1_ticket_head (068) has a settled status type
 --     (node_settled_types(), 105: completed, canceled, duplicate) and is a
 --     row an importer wrote — its metadata.source is `linear`, which the
---     server refuses to every key (capture_thought's `source`, review pass
---     1; `source` is a reserved metadata key besides), so a thought a key
---     captures with an `issue` and a `status_type` of its own never releases
---     anyone's claim: when such a row is the head, the ticket is left alone.
---     One route stays: a write key may patch a board row's ticket keys
---     (update_thought's metadata_patch), as it may already mislabel 095's
---     `moved` that way; board-sync writes the board's status back when the
---     ticket next moves.
+--     server refuses to every key: capture_thought's `source` and its
+--     metadata, and update_thought's metadata_patch (review passes 1 and
+--     2). So a thought a key writes with an `issue` and a `status_type` of
+--     its own never releases anyone's claim: when such a row is the head,
+--     the ticket is left alone. A write key may still edit the board's own
+--     rows — patch one's ticket keys (its status, or its `issue` to another
+--     ticket), or delete an open head over an older closed board row — and
+--     so make a ticket read closed, as it may already mislabel 095's `moved`
+--     that way; board-sync writes the board's status back when the ticket
+--     next moves. Only the server refuses the label: a raw SQL writer is
+--     trusted as the database's owner is.
 --   * WHICH CLAIMS: every unreleased claim on such a ticket, the whole
 --     ticket's and every piece's, live or lapsed, whenever it was made — a
 --     claim made on a ticket already closed is released at the next pass too
@@ -126,7 +129,7 @@ AS $$
      AND t.metadata->>'source' = 'linear'
 $$;
 COMMENT ON FUNCTION ob1_work_claim_closed_head(text) IS
-  'The ticket''s status and status type when its head (ob1_ticket_head, 068) has a settled status type (node_settled_types(): completed, canceled, duplicate) and is an importer''s row (metadata.source linear, which no client can set); no row otherwise. Migration 117 / SMD-3600.';
+  'The ticket''s status and status type when its head (ob1_ticket_head, 068) has a settled status type (node_settled_types(): completed, canceled, duplicate) and is an importer''s row (metadata.source linear, which the server refuses to every key); no row otherwise. Migration 117 / SMD-3600.';
 
 -- ---------------------------------------------------------------------------
 -- release_closed_ticket_claims
