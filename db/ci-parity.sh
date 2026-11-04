@@ -52,7 +52,7 @@ row() {
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, about twice the slowest honest row here under the lanes' load
-# (test-live's sleep shard, ~270 s); OB1_PARITY_ROW_LIMIT sets another.
+# (test-live's sleep shard, ~290 s); OB1_PARITY_ROW_LIMIT sets another.
 # Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in
@@ -252,8 +252,8 @@ typecheck() {
 # lane's longest rows, and that lane set a run's length; apart, this lane and
 # that one each end inside the longest test-live shard. The widths stay one
 # after the other: a lane more is more load on every lane's timing rows, and
-# the run would end no sooner. Like the database-free lane, its FAILED is its
-# own. schema_rows NOWFILE: at_row's file.
+# the run would end no sooner. Like the database-free lane's below, its FAILED
+# is its own. schema_rows NOWFILE: at_row's file.
 schema_rows() {
   FAILED=0 NOW_FILE="$1" LAST_ROW=''
   nodb db                 test-schema.ts
@@ -461,7 +461,7 @@ stop_lanes() {
       case "$LANE_NAMES " in
         *" $pid:"*) name=${LANE_NAMES##* $pid:}; name="${name%% *} lane" ;;
       esac
-      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds shows in podman ps or docker ps" >&2
+      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds, if any, shows in podman ps or docker ps" >&2
     else
       wait "$pid" 2>/dev/null
     fi
