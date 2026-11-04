@@ -395,11 +395,13 @@ Prefer `--scope read` wherever a client only needs to search. A read-only key do
 not get a permission error from `capture_thought` — the tool is never registered
 for it, so it does not appear in `tools/list` at all.
 
-The mirror image is `--scope capture`: `capture_thought`, and `set_priority` and
-`clear_priority` on a thought the key captured (SMD-3664) — no search, no update,
-no delete. It is the key for a session-end hook or an import pipeline, a
-credential that sits in a config file on a machine you do not watch; a leak of it
-can add a thought and state how much its own thoughts matter, and cannot read one
+The mirror image is `--scope capture`: `capture_thought`, `set_priority` and
+`clear_priority` on a thought the key captured (SMD-3664), and the open-item
+writers (`open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`) on an item it opened (SMD-3665) — no search, no
+update of a thought, no delete. It is the key for a session-end hook or an import
+pipeline, a credential that sits in a config file on a machine you do not watch;
+a leak of it can add a thought, state how much its own thoughts matter and keep
+its own to-dos, and cannot read one
 ([`recipes/session-capture-hook`](recipes/session-capture-hook/)).
 
 A fourth, `--scope forward`, grants nothing at all: every server refuses it as a
@@ -627,7 +629,7 @@ logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
 (`deploy/README.md` has the count, and the liveness-probe target for a platform
 that can only GET). A client shows every tool in `server-portable/tools.json`
 for a write key, the ones whose scope is `read` for a read key, and
-`capture_thought`, `set_priority` and `clear_priority` for a capture key; smoke.sh's "tool surface matches the
+`capture_thought`, the priority writers and the open-item writers for a capture key; smoke.sh's "tool surface matches the
 manifest" holds a write key's list to that file.
 
 ## Where to run it for real

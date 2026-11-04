@@ -71,7 +71,7 @@ export function loginPage(a: Asking, action: string, { wrong = false, note = "",
 export const SCOPE_MEANS: Record<string, string> = {
   "brain:write": "read, add, change and delete thoughts, and run the workers of the brain — what a write key may do",
   "brain:read": "read thoughts and the records about the brain (its searches, workers and state), and change nothing — what a read key may do",
-  "brain:capture": "add thoughts, and say how much its own matter, and nothing else — what a capture key may do",
+  "brain:capture": "add thoughts, say how much its own matter and keep its own to-dos, and nothing else — what a capture key may do",
 };
 
 /** The consent page, with an Allow form posting to `confirm` and a Deny form posting to `abort`. */

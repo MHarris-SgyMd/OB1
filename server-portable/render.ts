@@ -29,6 +29,8 @@ import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
+import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
+import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
@@ -1998,3 +2000,79 @@ export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, Priority
     ...v.history.map(historyLine),
   ].join("\n"),
   priorityRefusal, AS_JSON);
+
+
+// ── Open items (SMD-3665 PR 2, migration 117) ────────────────────────────────
+// Each reply's value is its JSON (AS_JSON), as the priority replies': an item's text, owner and reasons are data a
+// reader of the value needs. In the text they are words a key gave, quoted on one line.
+
+const quoted = (s: string, max = 200) => JSON.stringify(oneLine(snipText(s, max)));
+/** One item: its status, id, text, owner and due time. */
+const itemLine = (i: OpenItem) =>
+  `${i.status} item ${i.id}: ${quoted(i.text)}${i.owner ? `, owner ${quoted(i.owner, 80)}` : ""}${i.dueAt ? `, due ${i.dueAt}` : ""}${i.plugin ? `, for ${oneLine(snipText(i.plugin.name, 64))}'s row ${quoted(i.plugin.row, 80)}` : ""}`;
+const proposalLine = (p: ItemProposal) =>
+  `proposal ${p.id} to close it ${p.status}${p.label ? ` (${oneLine(snipText(p.label, 40))})` : ""}${p.evidenceThoughtId ? `, shown by thought ${p.evidenceThoughtId}` : ""} by ${oneLine(snipText(p.proposer.name, 80))}`
+  + `${p.reason ? `: ${quoted(p.reason)}` : ""}; ${p.decision === null ? "pending" : p.decision === "moot" ? `moot since ${p.decidedAt}` : `${p.decision} by ${oneLine(snipText(p.decider?.name ?? "", 80))} at ${p.decidedAt}`}`;
+const eventLine = (e: OpenItemEvent) =>
+  `- ${e.at} ${e.event === "opened" ? "opened" : e.event === "updated" ? "changed" : `set ${e.status}`} by ${oneLine(snipText(e.maker.name, 80))}`
+  + `${e.proposalId ? ` (accepting proposal ${e.proposalId})` : ""}${e.reason ? `: ${quoted(e.reason)}` : ""} — then ${quoted(e.text, 120)}${e.owner ? `, owner ${quoted(e.owner, 80)}` : ""}${e.dueAt ? `, due ${e.dueAt}` : ""}`;
+const itemRefusal = (r: Refusal) =>
+  r.code === "ITEM_NOT_FOUND" ? `Refused: the brain holds no open item ${r.item.key}.`
+  : r.code === "ITEM_NOT_YOURS"
+    ? "Refused: a capture-only key may change only an open item it opened, while no other key has changed it (or one its plugin's row stands for, through that plugin), and name as an item's origin or a close's evidence only a thought it captured."
+  : r.code === "REFUSED_ITEM_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
+  : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not open or change an item.`
+  : r.code === "ITEM_UNOWNABLE" ? "Refused: this caller carries no agent id, so an item it opened could never be shown to be its own; through a plugin, open the item for the plugin's row."
+  : r.code === "ITEM_UNATTRIBUTED"
+    ? `Refused: a capture-only key's own items are known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : r.cause === "registry_unknown" ? "this server holds none for this key; ask the operator to check its registry row" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+  : r.code === "ORIGIN_NOT_FOUND" ? `Refused: the brain holds no thought ${r.thought} to read the item from.`
+  : r.code === "EVIDENCE_NOT_FOUND" ? `Refused: the brain holds no thought ${r.thought} to cite as evidence.`
+  : r.code === "ITEM_SETTLED" ? `Refused: open item ${r.item} is ${r.status} already; reopen it (set_item_status) before proposing its close.`
+  : r.code === "PROPOSAL_NOT_FOUND" ? `Refused: the brain holds no proposed close ${r.proposal}.`
+  : r.code === "PROPOSAL_DECIDED" ? `Refused: proposal ${r.proposal} is ${r.decision} already.`
+  : r.code === "PROPOSAL_YOURS" ? `Refused: proposal ${r.proposal} is yours; another key accepts it. Withdraw it by rejecting it, or settle the item yourself.`
+  : r.code === "CONFIRM_NOT_YOURS" ? `Refused: open item ${r.item} was proposed, not stated; a write key confirms it. A capture-only key may dismiss it (dropped).`
+  : unknownRefusal(r);
+
+export const renderOpenItem = (o: Outcome<OpenItemResult, OpenItemCode>): Reply => render(o, (v) =>
+  v.outcome === "opened" && v.item ? `Opened ${itemLine(v.item)}.`
+  : v.item ? `That item is already in this brain — ${itemLine(v.item)} — so nothing was written.${v.note ? ` ${oneLine(snipText(v.note, 200))}` : ""}`
+  : "An item for this is already in this brain, and not yours to be shown; nothing was written.",
+  itemRefusal, AS_JSON);
+
+export const renderUpdateItem = (o: Outcome<UpdateItemResult, UpdateItemCode>): Reply => render(o, (v) =>
+  v.outcome === "updated" ? `Changed it: ${itemLine(v.item)}.` : `It already says this — ${itemLine(v.item)} — so nothing was written.`,
+  itemRefusal, AS_JSON);
+
+export const renderSetItemStatus = (o: Outcome<SetItemStatusResult, SetItemStatusCode>): Reply => render(o, (v) =>
+  v.outcome === "changed"
+    ? `Set it ${v.item.status}: ${itemLine(v.item)}.${v.mooted ? ` ${v.mooted === 1 ? "One close proposed on it is" : `${v.mooted} closes proposed on it are`} moot now.` : ""}`
+    : `It is ${v.item.status} already — ${itemLine(v.item)} — so nothing was written.`,
+  itemRefusal, AS_JSON);
+
+export const renderProposeItemClose = (o: Outcome<ProposeItemCloseResult, ProposeItemCloseCode>): Reply => render(o, (v) =>
+  v.outcome === "proposed"
+    ? `Proposed: ${proposalLine(v.proposal)}, on ${itemLine(v.item)}. Another key accepts or rejects it (decide_item_close).${v.replaced ? ` It withdraws your earlier proposal ${v.replaced.id}.` : ""}`
+    : `Your proposal with that evidence is pending already — ${proposalLine(v.proposal)} — so nothing was written.`,
+  itemRefusal, AS_JSON);
+
+export const renderDecideItemClose = (o: Outcome<DecideItemCloseResult, DecideItemCloseCode>): Reply => render(o, (v) =>
+  v.outcome === "accepted" ? `Accepted ${proposalLine(v.proposal)}. The item is ${v.item.status}: ${itemLine(v.item)}.` : `Rejected ${proposalLine(v.proposal)}. The item stands: ${itemLine(v.item)}.`,
+  itemRefusal, AS_JSON);
+
+export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>): Reply => render(o, (v) =>
+  [
+    `${itemLine(v.item)}; first said ${v.item.notedAt}${v.item.originThoughtId ? ` in thought ${v.item.originThoughtId}` : ""}, opened by ${oneLine(snipText(v.item.openedBy.name, 80))}${v.item.closedAt ? `, settled ${v.item.closedAt}` : ""}.`,
+    `Every change, oldest first (${v.events.length}):`,
+    ...v.events.map(eventLine),
+    ...(v.proposals.length ? [`Closes proposed (${v.proposals.length}):`, ...v.proposals.map((p) => `- ${proposalLine(p)}`)] : []),
+  ].join("\n"),
+  itemRefusal, AS_JSON);
+
+export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Reply => render(o, (v) =>
+  v.items.length === 0 ? "No items match."
+  : [
+      `${v.items.length} item${v.items.length === 1 ? "" : "s"}${v.truncated ? " (the limit cut the list: narrow it)" : ""}:`,
+      ...v.items.map((i) => `- ${itemLine(i)}${i.overdue ? " (overdue)" : ""}${i.pendingProposals ? ` (${i.pendingProposals} close${i.pendingProposals === 1 ? "" : "s"} proposed)` : ""}`),
+    ].join("\n"),
+  itemRefusal, AS_JSON);
