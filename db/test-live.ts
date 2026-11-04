@@ -125,7 +125,9 @@ if (!URL_) {
  * moves most with the runner's speed: its slow runs are its median, its fast
  * run ~50 s under. A cell's job runs ~15-25 s past its live step, so a
  * section added to a cell adds to the run's length once that cell's job is
- * the run's longest.
+ * the run's longest. SMD-3734 cut timers in long (~25 s locally) and the
+ * rest (~10 s), from jobs of 277 s and 297 s on PR 643's run 41790596461,
+ * so long has room under sleep's 282 s and the rest is still the longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -12912,8 +12914,8 @@ if (want("16")) {
     // hold the follower at its start) and so does the first outage probe,
     // 3 s in, once the 503s have stopped; the pauses are cut to 100 ms. The
     // outage's first wait is 3 s here (SMD-3734; the real 5 s before,
-    // SMD-3048): its probes answer, so a 1 s first wait would end the wait the
-    // 1.5 s hold reads the row in, and 3 s holds it and a poll's lag.
+    // SMD-3048): its probes answer, so a 1 s first wait would end before the
+    // 1.5 s hold reads the row, and 3 s fits the hold and a poll's lag.
     {
       const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
       // One thought back in the pool, one with a candidate the judge is asked
@@ -13073,8 +13075,8 @@ if (want("16")) {
   // A consolidate follower outlasts its provider going away (SMD-2599), as
   // extract's does in [10]: in this process, the pauses cut to 100 ms and the
   // outage schedule to 1 s first (SMD-3048), the judge answering 503 while a
-  // newer thought of a pair is judged, then hanging past a 1 s --timeout,
-  // its least (SMD-3734; 2 s before), while another is, each until the
+  // newer thought of a pair is judged, then hanging while another is, past a
+  // 1 s --timeout, its least (SMD-3734; 2 s before), each until the
   // follower's probes have found it down (judgeOutage), however slow the
   // runner.
   {
