@@ -19403,8 +19403,8 @@ async function sleepScaffold(sql: SQL) {
    * calls, a start line, its exit), or a line a faster poll only makes
    * likelier ([38r]'s record put right mid-run), waits 300 ms of each, not
    * the scaffold's second. No line's regex names them, and drained() counts
-   * what isn't pooled yet, so a faster poll ends no period early. [38]'s and
-   * [38r]'s (SMD-3734).
+   * what isn't pooled yet, so a faster poll ends no period early. [38]'s
+   * fifteen (SMD-3733, SMD-3783) and [38r]'s eight (SMD-3734).
    */
   const ONE_SHOT = { captureMs: 300, pollMs: 300 };
   // The passes look for new work every second, not every 15 s (SMD-3048);
@@ -19995,7 +19995,7 @@ if (want("38")) {
     // drained first.
     const limitOrphans = wakeOrphans;
     const acLimitDrain = new AbortController();
-    await bounded(sleepRun({ signal: acLimitDrain.signal }), acLimitDrain);
+    await bounded(sleepRun({ ...ONE_SHOT, signal: acLimitDrain.signal }), acLimitDrain);
     for (const id of limitOrphans) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
       await orphanRow(id, "zz-limit");
@@ -20021,7 +20021,7 @@ if (want("38")) {
     const cutOrphans: string[] = [];
     for (const text of ["An orphan a cut sweep reaches first.", "An orphan a cut sweep leaves."]) cutOrphans.push(await capture(text, "op-sleep", 0, 10));
     const acCutDrain = new AbortController();
-    await bounded(sleepRun({ signal: acCutDrain.signal }), acCutDrain);
+    await bounded(sleepRun({ ...ONE_SHOT, signal: acCutDrain.signal }), acCutDrain);
     for (const id of cutOrphans) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
       await orphanRow(id, "zz-cut");
@@ -20236,7 +20236,7 @@ if (want("38")) {
       // again at the id that sorts last, no capture beside it, under a 2 s rescan; the captures' work drained
       // first by a one-shot run, whose place in the table is its own process's.
       const acDeepDrain = new AbortController();
-      await bounded(sleepRun({ signal: acDeepDrain.signal }), acDeepDrain);
+      await bounded(sleepRun({ ...ONE_SHOT, signal: acDeepDrain.signal }), acDeepDrain);
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
       // A one-shot run walks every window, having no later read: it finds the orphan, and so does its dry run
@@ -20248,7 +20248,7 @@ if (want("38")) {
       const deepDry = lines.some((l) => /a period would begin/.test(l)) && !lines.some((l) => /idle: no work/.test(l))
         && lines.some((l) => /; one past it, which a one-shot run walks to and --follow reaches a window a rescan/.test(l));
       const acDeepOnce = new AbortController();
-      const deepOnceCode = await bounded(sleepRun({ signal: acDeepOnce.signal }), acDeepOnce);
+      const deepOnceCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acDeepOnce.signal }), acDeepOnce);
       assert(deepDry && deepOnceCode === 0 && (await rowsBy("zz-deep")) === 0,
         `a one-shot run, and its dry run, find an orphan past the first window, a capture's work beside it: it is swept (dry run ${deepDry}; exit ${deepOnceCode}; ${await rowsBy("zz-deep")} left)`);
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
@@ -20271,11 +20271,11 @@ if (want("38")) {
     // Drained first, a one-shot run with no work at all exits 0 at once, no
     // period begun.
     const acWholeDrain = new AbortController();
-    const wholeDrained = await bounded(sleepRun({ signal: acWholeDrain.signal }), acWholeDrain);
+    const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
     lines.length = 0;
     const acNone = new AbortController();
     const noneAt = Date.now();
-    const noneCode = await bounded(sleepRun({ signal: acNone.signal }), acNone);
+    const noneCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acNone.signal }), acNone);
     const noneMs = Date.now() - noneAt;
     assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneMs < 10_000,
       `a one-shot run that finds no work exits 0 at once, no period begun (exit ${noneCode} in ${noneMs} ms; ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
@@ -20303,7 +20303,7 @@ if (want("38")) {
     // shard).
     const wholeOrphan = await capture("An orphan only a whole read finds.", "op-sleep", 0, 19);
     const acWholeNote = new AbortController();
-    await bounded(sleepRun({ signal: acWholeNote.signal }), acWholeNote);
+    await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeNote.signal }), acWholeNote);
     await sql`DELETE FROM thought_chunks WHERE thought_id = ${wholeOrphan}::uuid`;
     await orphanRow(wholeOrphan, "zz-baseline");
     // The dry run counts the orphan as work, as the run's whole read does (review pass 1: it said "no work").
@@ -20543,7 +20543,7 @@ if (want("38")) {
     let heldOnceCode = -9;
     try {
       const acHeldOnce = new AbortController();
-      heldOnceCode = await bounded(sleepRun({ statementTimeout: 1, signal: acHeldOnce.signal }), acHeldOnce);
+      heldOnceCode = await bounded(sleepRun({ ...ONE_SHOT, statementTimeout: 1, signal: acHeldOnce.signal }), acHeldOnce);
     } finally {
       await dropSlow();
     }
@@ -20552,7 +20552,7 @@ if (want("38")) {
     // The next run is a restart: no hold carried over, it takes the work the hold left.
     lines.length = 0;
     const acRestart = new AbortController();
-    const restartCode = await bounded(sleepRun({ signal: acRestart.signal }), acRestart);
+    const restartCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acRestart.signal }), acRestart);
     assert(restartCode === 0 && !(await claims(EX)).pending, `…and the next run, a restart, takes the work the hold left (exit ${restartCode}; ${JSON.stringify(await claims(EX))})`);
 
     // A model not served is the configuration's: the scheduler's check of
