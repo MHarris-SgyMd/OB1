@@ -1,4 +1,4 @@
-# The release job (SMD-1860): what a tag publishes.
+# The release workflow (SMD-1860): what a tag publishes.
 #
 # A release is cut on main by scripts/assemble-release.ts — the fragments
 # numbered, CHANGELOG.md and releases.json written, FORK_VERSION bumped and a
@@ -45,8 +45,8 @@
 # write; and a pull request that bumps an action (Dependabot's, every week) runs
 # the new action in the rehearsal before anyone has read it, with a token that
 # can push nothing to GHCR and create no release. Check 23 holds the split: a
-# job that grants a write runs on a push alone, and a called workflow declares
-# no permissions.
+# job that grants a write runs only on a push of a named branch or a tag, and a
+# called workflow has no other trigger and declares no permissions.
 #
 # The release job's token runs every action in release-steps.yml with publish
 # rights, so each `uses:` is a full commit SHA (the tag in a trailing comment),
@@ -58,7 +58,7 @@ on:
   push:
     tags: ["v[0-9]*"]
   pull_request:
-    # What the job builds from, or reads: the two Dockerfiles and what they
+    # What the jobs build from, or read: the two Dockerfiles and what they
     # COPY, the compose files, the manifest, the scripts the job runs or
     # imports, this file and the steps it calls. The server image carries
     # mcp-server/ and rest-client/ since SMD-2287 PR 5a, and dashboard/ since

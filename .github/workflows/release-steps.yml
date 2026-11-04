@@ -7,7 +7,8 @@
 # No `permissions:` here, at the top or on the job: a called workflow's token
 # is its caller's, and a permission declared here could only narrow it. Narrow
 # the release job's, and a tag would fail at its first push to GHCR, which no
-# rehearsal reaches; check 23 refuses one. Nor a trigger but workflow_call.
+# rehearsal reaches; check 23 refuses one. Nor a trigger but workflow_call,
+# whose own runs would want a `permissions:` here (check 23 refuses that too).
 #
 # Every `uses:` is a full commit SHA with its tag in a trailing comment, and the
 # runner image is named (check 23, SMD-2093): the release job runs these
@@ -77,8 +78,9 @@ jobs:
       # SMD-3473: a pull request's rehearsal builds both platforms when it
       # changes:
       # - what can build differently on arm64: the two Dockerfiles (the base
-      #   image, every RUN), this file, and each package.json and bun.lock a
-      #   Dockerfile copies, whose `bun install` runs under QEMU for arm64;
+      #   image, every RUN), this file and release.yml, and each package.json
+      #   and bun.lock a Dockerfile copies, whose `bun install` runs under QEMU
+      #   for arm64;
       # - .dockerignore or dashboard/, which build the same on both (dashboard
       #   builds on the build platform) but are kept from the ticket's list;
       # - releases.json, which only a cut changes, so the tree a tag publishes

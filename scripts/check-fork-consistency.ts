@@ -277,12 +277,13 @@
  *      own line, block scalars skipped; the rules are workflowPinProblems
  *      and dependabotProblems, pure functions their probes run on in-memory
  *      text (SMD-2093); no exceptions. And what the actions run with
- *      (SMD-2111): a workflow with a trigger but workflow_call sets a
- *      top-level `permissions:` granting no write; a job that grants a write
- *      has an `if:` one of whose top-level `&&` terms is
- *      `github.event_name == 'push'`, so no pull request's run holds it; a
- *      workflow called alone declares no `permissions:`, since it runs with
- *      its caller's (workflowPermissionProblems)
+ *      (SMD-2111): a workflow called by workflow_call has no other trigger
+ *      and declares no `permissions:`, since it runs with its caller's; any
+ *      other workflow sets a top-level `permissions:` granting no write; a
+ *      job that grants a write has an `if:` whose top-level `&&` terms
+ *      include `github.event_name == 'push'` and a named branch or tag, so
+ *      no pull request's run or bot's branch push holds it
+ *      (workflowPermissionProblems)
  *  24. no vendored script speaks PostgREST — a `rest/v1` path in any string,
  *      a supabase-py import or `create_client(` (Python and shell), or a
  *      `@supabase/postgrest-js` specifier, comments blanked (the JS scanner;
@@ -6130,20 +6131,32 @@ checkComposeOnly();
  * And what those actions run with (SMD-2111). The release job was one job with
  * `contents: write` and `packages: write` that ran as a rehearsal on any pull
  * request touching release.yml, so a Dependabot bump ran the new action with a
- * token that could push to GHCR before anyone had read the PR. So a workflow
- * with any trigger but workflow_call sets a top-level `permissions:` that grants
- * no write (without one, its jobs take the repository's default token, which an
- * owner can set to write); a job that grants a write (`write-all`, or `write` on
- * any scope) has an `if:` one of whose top-level `&&` terms is
- * `github.event_name == 'push'`, so it runs only on code someone with push
- * rights pushed; and a workflow whose only trigger is workflow_call declares no
- * `permissions:`, top-level or on a job, since its token is its caller's and
- * one declared there can only narrow it: a narrowed release job would fail at
- * a tag's first push, which no rehearsal reaches. The condition is read as
- * text: a `${{ }}` around it and parentheses around it or a term are taken off,
- * quoted strings are skipped, and a top-level `||` refuses it. This holds who
- * gets a write, not what the job does with it. workflowPermissionProblems is
- * pure, and its probes run on in-memory text.
+ * token that could push to GHCR before anyone had read the PR. So:
+ * - a workflow with a workflow_call trigger has no other, and declares no
+ *   `permissions:`, top-level or on a job. Its token is its caller's, and one
+ *   declared there can only narrow it: a narrowed release job would fail at a
+ *   tag's first push, which no rehearsal reaches. A second trigger would want
+ *   a top-level `permissions:` of its own for its own runs (below), which
+ *   would narrow the callers too;
+ * - any other workflow sets a top-level `permissions:` (a map, `read-all` or
+ *   `{}`) that grants no write. Without one, its jobs take the repository's
+ *   default token, which an owner can set to write;
+ * - a job that grants a write (`write-all`, or `write` on any scope) has an
+ *   `if:` whose top-level `&&` terms include `github.event_name == 'push'` and
+ *   a ref no bot's push meets: `github.ref == 'refs/heads/<branch>'` for a
+ *   branch other than `dependabot/…`, `github.ref == 'refs/tags/<tag>'`, or
+ *   `startsWith(github.ref, 'refs/tags/…')`. A push term alone is not enough:
+ *   Dependabot pushes its own branch, and a `permissions:` key raises the
+ *   read-only token GitHub gives that run.
+ * The condition is read as text, in the house form: a `${{ }}` around all of
+ * it and parentheses around it or a term are taken off, quoted strings are
+ * skipped, and a top-level `||`, or a `${{` or `}}` left inside (which makes
+ * the condition a string template GitHub reads as true), refuses it. GitHub
+ * compares strings and names case-blind, so `'PUSH'` or
+ * `'push' == github.event_name` would hold too; check 23 refuses them, and the
+ * house form is lower case, the context on the left. This holds who gets a
+ * write, not what the job does with it. workflowPermissionProblems is pure,
+ * and its probes run on in-memory text.
  */
 const WORKFLOWS_DIR = ".github/workflows";
 const DEPENDABOT = ".github/dependabot.yml";
@@ -6272,16 +6285,14 @@ function dependabotProblems(text: string | null): [string, string][] {
   if (!entries.some(opens)) return [[DEPENDABOT, "has a `github-actions` update over `/` that can open no PR (`open-pull-requests-limit: 0`, or an ignore of `*` at every version) — the pins stay where they are (SMD-2093)"]];
   return [];
 }
-/** `expr` split at each top-level `op` (outside parentheses and '…' strings, where `''` is a quote), or null where its parentheses or quotes do not balance. */
+/** `expr` split at each top-level `op` (outside parentheses and '…' strings), or null where its parentheses or quotes do not balance. */
 function splitTopLevel(expr: string, op: "&&" | "||"): string[] | null {
   const parts: string[] = [];
   let depth = 0, start = 0;
   for (let i = 0; i < expr.length; i++) {
     const c = expr[i];
-    if (c === "'") {
-      for (i++; i < expr.length; i++) if (expr[i] === "'") { if (expr[i + 1] === "'") i++; else break; }
-      if (i >= expr.length) return null;
-    } else if (c === "(") depth++;
+    if (c === "'") { i = expr.indexOf("'", i + 1); if (i < 0) return null; } // `''` in a string reads as two strings, which splits the same
+    else if (c === "(") depth++;
     else if (c === ")") { if (--depth < 0) return null; }
     else if (depth === 0 && expr.startsWith(op, i)) { parts.push(expr.slice(start, i)); start = i + op.length; i++; }
   }
@@ -6289,23 +6300,31 @@ function splitTopLevel(expr: string, op: "&&" | "||"): string[] | null {
   parts.push(expr.slice(start));
   return parts.map((p) => p.trim());
 }
+/** Whether `expr`'s parentheses and quotes balance. */
+const balanced = (expr: string): boolean => splitTopLevel(expr, "&&") !== null;
 /** `expr` with the parentheses that wrap it whole taken off, as often as they do: `(a) && (b)` opens and closes with two pairs, not one, and keeps them. */
 function unwrapParens(expr: string): string {
   let e = expr.trim();
-  while (e.startsWith("(") && e.endsWith(")") && splitTopLevel(e.slice(1, -1), "&&") !== null) e = e.slice(1, -1).trim();
+  while (e.startsWith("(") && e.endsWith(")") && balanced(e.slice(1, -1))) e = e.slice(1, -1).trim();
   return e;
 }
-/** Whether a job's `if:` holds it to a push: one of its top-level `&&` terms is `github.event_name == 'push'`, and it has no top-level `||`. */
-function holdsToPush(cond: unknown): boolean {
+/** A ref term no bot's push can meet: one named branch other than Dependabot's, or a tag. */
+const NAMED_PUSH_REF = /^(?:github\.ref\s*==\s*'refs\/heads\/(?!dependabot\/)[^']+'|github\.ref\s*==\s*'refs\/tags\/[^']+'|startsWith\(\s*github\.ref\s*,\s*'refs\/tags\/[^']*'\s*\))$/;
+/**
+ * Whether a job's `if:` holds it to a push of a named branch or a tag: among its top-level `&&` terms are
+ * `github.event_name == 'push'` and a NAMED_PUSH_REF term, and it has no top-level `||`. A `${{` or `}}` left once a
+ * whole wrap is off makes the condition a string template, which GitHub reads as true, so it holds nothing.
+ */
+function holdsToNamedPush(cond: unknown): boolean {
   if (typeof cond !== "string") return false;
   let e = cond.trim();
   const wrapped = e.match(/^\$\{\{([\s\S]*)\}\}$/);
   if (wrapped) e = wrapped[1];
+  if (/\$\{\{|\}\}/.test(e.replace(/'[^']*'/g, "''"))) return false;
   e = unwrapParens(e);
-  const either = splitTopLevel(e, "||");
-  if (either === null || either.length !== 1) return false;
-  const terms = splitTopLevel(e, "&&");
-  return terms !== null && terms.some((t) => /^github\.event_name\s*==\s*'push'$/.test(unwrapParens(t)));
+  if (splitTopLevel(e, "||")?.length !== 1) return false;
+  const terms = (splitTopLevel(e, "&&") ?? []).map(unwrapParens);
+  return terms.some((t) => /^github\.event_name\s*==\s*'push'$/.test(t)) && terms.some((t) => NAMED_PUSH_REF.test(t));
 }
 /** The write a `permissions:` value grants, as a message names it, or null: `write-all`, or each scope set to `write`. */
 function writeGranted(perms: unknown): string | null {
@@ -6314,31 +6333,34 @@ function writeGranted(perms: unknown): string | null {
   const scopes = Object.entries(perms as Record<string, unknown>).filter(([, v]) => v === "write").map(([k]) => `${k}: write`);
   return scopes.length ? scopes.join(", ") : null;
 }
-/** A workflow's token rules (check 23, SMD-2111): a top-level `permissions:` granting no write unless it is called alone, a write only on a job held to a push, and none declared in a workflow called alone. */
+/** A workflow's token rules (check 23, SMD-2111): a called workflow is called alone and declares no `permissions:`; any other sets a top-level one granting no write; a job grants a write only when held to a named push. */
 function workflowPermissionProblems(file: string, text: string): [string, string][] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch { return []; } // workflowPinProblems reports it
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return [];
   const d = doc as { on?: unknown; permissions?: unknown; jobs?: unknown };
   const triggers = typeof d.on === "string" ? [d.on] : Array.isArray(d.on) ? d.on : d.on && typeof d.on === "object" ? Object.keys(d.on) : [];
-  const calledAlone = triggers.length > 0 && triggers.every((t) => t === "workflow_call");
   const jobs = d.jobs && typeof d.jobs === "object" && !Array.isArray(d.jobs) ? Object.entries(d.jobs as Record<string, unknown>) : [];
   const problems: [string, string][] = [];
-  if (calledAlone) {
-    if ("permissions" in d) problems.push([file, "is called alone (workflow_call) but sets a top-level `permissions:` — its token is its caller's, and a permission declared here can only narrow it: a narrowed release job fails at a tag's first push, which no rehearsal reaches; grant on the calling job (SMD-2111)"]);
-    for (const [key, job] of jobs) if (job && typeof job === "object" && "permissions" in job) problems.push([file, `is called alone (workflow_call) but its job ${key} sets \`permissions:\` — its token is its caller's, and a permission declared here can only narrow it; grant on the calling job (SMD-2111)`]);
+  if (triggers.includes("workflow_call")) {
+    const others = triggers.filter((t) => t !== "workflow_call");
+    if (others.length) problems.push([file, `is called (workflow_call) and also runs on ${others.join(", ")} — a permission declared for those runs would narrow every caller's token too, a release job's among them; keep a called workflow called alone, and give the other runs a caller workflow of their own (SMD-2111)`]);
+    if ("permissions" in d) problems.push([file, "is called (workflow_call) but sets a top-level `permissions:` — its token is its caller's, and a permission declared here can only narrow it: a narrowed caller's job fails where it writes, at a tag's first push for the release, which no rehearsal reaches; grant on the calling job (SMD-2111)"]);
+    for (const [key, job] of jobs) if (job && typeof job === "object" && "permissions" in job) problems.push([file, `is called (workflow_call) but its job ${key} sets \`permissions:\` — its token is its caller's, and a permission declared here can only narrow it; grant on the calling job (SMD-2111)`]);
     return problems;
   }
+  const top = d.permissions;
   if (!("permissions" in d)) problems.push([file, "sets no top-level `permissions:` — its jobs take the repository's default token, which an owner can set to write; set `permissions: contents: read` and grant a write on the job that needs it (SMD-2111)"]);
+  else if (top !== "read-all" && top !== "write-all" && (!top || typeof top !== "object" || Array.isArray(top))) problems.push([file, `sets a top-level \`permissions:\` of ${JSON.stringify(top ?? null)}, which check 23 cannot read as a grant — set \`contents: read\`, \`read-all\` or \`{}\` (SMD-2111)`]);
   else {
-    const all = writeGranted(d.permissions);
-    if (all) problems.push([file, `grants ${all} at the top, to every job and every pull request's run — grant it on the job that needs it, held to a push (SMD-2111)`]);
+    const all = writeGranted(top);
+    if (all) problems.push([file, `grants ${all} at the top, to every job and every pull request's run — grant it on the job that needs it, held to a push of a named branch or a tag (SMD-2111)`]);
   }
   for (const [key, job] of jobs) {
     if (!job || typeof job !== "object") continue;
     const j = job as { permissions?: unknown; if?: unknown };
     const granted = writeGranted(j.permissions);
-    if (granted && !holdsToPush(j.if)) problems.push([file, `job ${key} grants ${granted}, and its \`if:\` (${j.if === undefined ? "none" : JSON.stringify(j.if)}) does not hold it to a push — a pull request's run would hand that token to every action it runs, a bumped one before review; give it an \`if:\` with \`github.event_name == 'push'\` as a top-level \`&&\` term, and split what a pull request runs into a job that only reads (SMD-2111)`]);
+    if (granted && !holdsToNamedPush(j.if)) problems.push([file, `job ${key} grants ${granted}, and its \`if:\` (${j.if === undefined ? "none" : JSON.stringify(j.if)}) does not hold it to a push of a named branch or a tag — a pull request's run, or a bot's push of its own branch, would hand that token to every action the job runs, a bumped one before review; give it an \`if:\` whose top-level \`&&\` terms include \`github.event_name == 'push'\` and \`github.ref == 'refs/heads/main'\` or \`startsWith(github.ref, 'refs/tags/v')\`, and split what a pull request runs into a job that only reads (SMD-2111)`]);
   }
   return problems;
 }
@@ -6348,36 +6370,46 @@ const PERM_READ = "permissions:\n  contents: read\n";
 /** A job granting `perms` (lines at a scope's indent, 6), under `if: <cond>` when one is given (YAML as written: quote one that opens with `!` or `'`). */
 const PERM_JOB = (key: string, perms: string, cond?: string) => `  ${key}:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n${cond === undefined ? "" : `    if: ${cond}\n`}    permissions:\n${perms}    steps:\n      - run: echo hi\n`;
 const PERM_WRITE = "      contents: write\n      packages: write\n";
-const PERM_CALLED = (top: string, job: string) => `name: probe\non:\n  workflow_call:\n    inputs:\n      publish: {type: boolean, required: true}\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n${job}    steps:\n      - run: echo hi\n`;
+/** A workflow called by `on` (workflow_call alone by default), a top-level block, and one job with `job`'s extra lines. */
+const PERM_CALLED = (top: string, job: string, on = "\n  workflow_call:\n    inputs:\n      publish: {type: boolean, required: true}") => `name: probe\non:${on}\n${top}jobs:\n  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n${job}    steps:\n      - run: echo hi\n`;
+const MAIN = "github.ref == 'refs/heads/main'";
 /** Workflows the token rules accept: [why, text]. */
 const PERM_ACCEPTED: [string, string][] = [
   ["release.yml's shape: a reading rehearsal and a writing release held to a tag push", PERM_PROBE(PERM_READ, `${PERM_JOB("rehearsal", "      contents: read\n", "github.event_name != 'push'")}${PERM_JOB("release", PERM_WRITE, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')")}`)],
-  ["fork-checks' publish job: a write held to a push to main, in `${{ }}`", PERM_PROBE(PERM_READ, PERM_JOB("publish", "      contents: write\n", "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}"))],
-  ["a push term in parentheses, beside an `||` inside parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "(github.event_name == 'push') && (a || b)"))],
-  ["a whole condition in parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "(github.event_name == 'push' && a)"))],
-  ["a string holding `||` and a parenthesis beside the push term", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref != 'a || (b''s'"))],
+  ["fork-checks' publish job: a write held to a push to main, in `${{ }}`", PERM_PROBE(PERM_READ, PERM_JOB("publish", "      contents: write\n", `\${{ !cancelled() && github.event_name == 'push' && ${MAIN} }}`))],
+  ["a whole `${{ }}` around the two terms alone", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "${{ github.event_name == 'push' && github.ref == 'refs/tags/v1.0.0' }}"))],
+  ["terms in parentheses, beside an `||` inside parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(github.event_name == 'push') && (${MAIN}) && (a || b)`))],
+  ["a whole condition in parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(github.event_name == 'push' && ${MAIN})`))],
+  ["a string holding `||`, a parenthesis and `}}` beside the terms", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && github.actor != 'a || (b''s }}'`))],
   ["`read-all` at the top", PERM_PROBE("permissions: read-all\n", PERM_JOB("a", "      contents: read\n"))],
   ["`{}` at the top and no job permissions", PERM_PROBE("permissions: {}\n", "  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    steps:\n      - run: echo hi\n")],
   ["a workflow called alone, no permissions anywhere", PERM_CALLED("", "")],
-  ["a workflow called and dispatched, a top-level read", PERM_PROBE(PERM_READ, PERM_JOB("a", "      contents: read\n"), "[workflow_call, workflow_dispatch]")],
 ];
 /** Workflows the token rules refuse with exactly one problem: [why, text, a phrase the problem carries]. */
 const PERM_MUTANTS: [string, string, string][] = [
   ["the release job as it was: a write and no `if:`", PERM_PROBE(PERM_READ, PERM_JOB("release", PERM_WRITE)), "its `if:` (none)"],
-  ["a write held to anything but a push", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name != 'push'")), "does not hold it to a push"],
-  ["a push term beside a top-level `||`", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' || github.event_name == 'pull_request'")), "does not hold it to a push"],
-  ["a push term and-ed, then or-ed: `&&` binds first, so the `||` is top-level", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && a || b")), "does not hold it to a push"],
-  ["a push term inside an `||` group", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "(github.event_name == 'push' || a) && b")), "does not hold it to a push"],
-  ["a negated push term", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `"!(github.event_name == 'push')"`)), "does not hold it to a push"],
-  ["a push test inside a string", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `"'github.event_name == ''push''' && a"`)), "does not hold it to a push"],
-  ["a push test by contains()", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "contains(github.event_name, 'push')")), "does not hold it to a push"],
-  ["an unclosed parenthesis", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && (a")), "does not hold it to a push"],
+  ["a write held to a push alone, which a bot's push of its own branch meets", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push'")), "named branch or a tag"],
+  ["a write held to a named ref alone, which a dispatch from that branch meets", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, MAIN)), "named branch or a tag"],
+  ["a push of any branch", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')")), "named branch or a tag"],
+  ["a push of Dependabot's branch", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref == 'refs/heads/dependabot/github_actions/x'")), "named branch or a tag"],
+  ["a write held to anything but a push", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name != 'push' && ${MAIN}`)), "named branch or a tag"],
+  ["terms beside a top-level `||`", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} || github.event_name == 'pull_request'`)), "named branch or a tag"],
+  ["both terms and-ed, then or-ed: `&&` binds first, so the `|| b` is top-level", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && a || b`)), "named branch or a tag"],
+  ["a push term inside an `||` group", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(github.event_name == 'push' || a) && ${MAIN}`)), "named branch or a tag"],
+  ["a negated push term", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `"!(github.event_name == 'push') && ${MAIN}"`)), "named branch or a tag"],
+  ["a push test inside a string", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `"'github.event_name == ''push''' && ${MAIN}"`)), "named branch or a tag"],
+  ["a push test by contains()", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `contains(github.event_name, 'push') && ${MAIN}`)), "named branch or a tag"],
+  ["an unclosed parenthesis", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && (a`)), "named branch or a tag"],
+  ["a `${{ }}` around one term, which makes the whole a string template", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && \${{ ${MAIN} }}`)), "named branch or a tag"],
+  ["two `${{ }}`s that open and close the condition", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ inputs.x }} && github.event_name == 'push' && ${MAIN} && \${{ true }}`)), "named branch or a tag"],
   ["a job's write-all", PERM_PROBE(PERM_READ, "  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: write-all\n    steps:\n      - run: echo hi\n"), "grants write-all"],
   ["one write scope among reads", PERM_PROBE(PERM_READ, PERM_JOB("a", "      contents: read\n      pull-requests: write\n")), "grants pull-requests: write"],
   ["no top-level permissions", PERM_PROBE("", PERM_JOB("a", "      contents: read\n")), "sets no top-level"],
+  ["a top-level `permissions:` with no value", PERM_PROBE("permissions:\n", PERM_JOB("a", "      contents: read\n")), "cannot read as a grant"],
   ["a write at the top", PERM_PROBE("permissions:\n  contents: write\n", PERM_JOB("a", "      contents: read\n")), "at the top"],
   ["a called workflow's top-level permissions", PERM_CALLED(PERM_READ, ""), "sets a top-level"],
   ["a called workflow's job permissions", PERM_CALLED("", "    permissions:\n      packages: write\n"), "its job a sets"],
+  ["a workflow called and dispatched", PERM_CALLED("", "", " [workflow_call, workflow_dispatch]"), "also runs on workflow_dispatch"],
 ];
 const PIN_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1";
 /** A one-job workflow whose runner and first step a probe replaces; the step text sits at a list item's indent (6), a continuation line at 8. */
@@ -9102,7 +9134,7 @@ function checkRouteTables() {
   }
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
   const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml", "compose.grafana-port.yaml": "deploy/compose.grafana-port.yaml", "compose.grafana-public.yaml": "deploy/compose.grafana-public.yaml" };
-  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release-steps.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
   // …and the commands its notes tell an operator to run: the downloads of those files, the two keys minted with the release's own image (SMD-2287: a release install has no checkout), and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
     const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9", server_image: "ghcr.io/x/ob1-server:9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
@@ -9973,8 +10005,8 @@ checkBunPins();
 // pull request runs, runs it when its `run` calls bun or node on it, read from
 // the step's working-directory, the job's or the workflow's, or a directory a
 // `cd` in the same step names (which of those applies is the shell's to say, so
-// each is taken). release.yml is not read: it runs on a tag, and on a pull
-// request only when its own paths change. A run counts only if the suite's
+// each is taken). release.yml (and release-steps.yml, which it calls) is not
+// read: it runs on a tag, and on a pull request only when its own paths change. A run counts only if the suite's
 // failure fails the job, so nothing counts from a step or job with
 // `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
 // followed by `|| true` or `|| :`, a continued line read as one. A matrix job
@@ -10490,7 +10522,7 @@ const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg
  */
 const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs, and in a recipe's example payload" },
-  "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release.yml alone runs; the rest are repo-consistency's or the cut's" },
+  "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
   "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/assemble-release.ts", "scripts/fork-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; written by fork-index.ts and assemble-release.ts, which no gated job runs" },
