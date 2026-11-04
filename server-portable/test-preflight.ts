@@ -11,13 +11,14 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * OB1_PREFLIGHT_SHARD=first|rest runs one shard of the sections (SHARDS
- * below); unset, every section runs. CI runs the two side by side (SMD-3468):
+ * below); unset, every section runs. CI runs the two at once (SMD-3468):
  * the first beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195), and the rest on a
- * Postgres of its own. What the cluster shares — a role and its settings,
- * pg_locks, pg_stat_activity — is scoped here to the current database, or
- * named for this suite (pf_*, ob1_pf_capture, "pf reader's").
+ * while the data-layer job's other suites run (SMD-3195), and the rest in a
+ * job of its own, on a runner of its own (SMD-3691). What the cluster shares
+ * — a role and its settings, pg_locks, pg_stat_activity — is scoped here to
+ * the current database, or named for this suite (pf_*, ob1_pf_capture, "pf
+ * reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -61,7 +62,11 @@ const { assert } = sections;
  * a fresh one; first takes [5] and [9], whose local endpoints wait out
  * their timeouts, and the rest the others, [5b] and [12] the long ones among
  * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them).
+ * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
+ * in a job of its own and ends well before the first (its job 103 s, against
+ * the data layer's 184 s, one run), so the split no longer evens two legs:
+ * [9], about 16 s of waits, could go to the rest and take that off the first
+ * (SMD-3710).
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -780,6 +785,28 @@ else {
   await tamper.close();
   assert(/worker claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
          "…and dropped, the claim functions are the shipped four, said as such");
+
+  // 116's priority assertions (SMD-3664): the functions the priority operations call, under 116's signatures.
+  {
+    const prio = new SQL({ url: LIVE, max: 1 });
+    const line = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+priority\s{2,}\S/.test(l)) ?? "";
+    try {
+      const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  priority\s+assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group/.test(whole.out),
+             `on a brain at 116 the priority functions and the priority grant: ok (${line(whole.out).trim()})`);
+      await prio.unsafe("ALTER FUNCTION priority_history(text, text) RENAME TO priority_history_away");
+      let missing: Awaited<ReturnType<typeof run>>;
+      try {
+        missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      } finally {
+        await prio.unsafe("ALTER FUNCTION priority_history_away(text, text) RENAME TO priority_history");
+      }
+      assert(missing.code === 1 && /priority\s+migration 116's priority_history\(text,text\) missing under 116's signature/.test(missing.out) && /116_priority_assertions\.sql/.test(missing.out),
+             `a priority function missing: does not start, naming it and 116 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+    } finally {
+      await prio.close();
+    }
+  }
 
   // 115's work claims (SMD-3598), "ticket claims" beside 015's "worker claims": the four functions the claim
   // operations call, and a statement log that would print a renewal's or a release's token (a bind value) whole.
@@ -3227,6 +3254,16 @@ else {
       assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
+      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
+             && /--grant <role> --groups priority/.test(missingBoth.out),
+             "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+      // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
+      await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
+      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON work_claims TO ob1_pf_capture");
+      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\)/.test(noSelect.out),
+             `…and without SELECT on it, the claim calls and every read's claimed label are named (${noSelect.out.split("\n").find((l) => /ticket claims/.test(l))?.trim().slice(0, 200)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.

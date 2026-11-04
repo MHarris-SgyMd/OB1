@@ -18,7 +18,7 @@ A guide to connecting your Open Brain extensions to any AI client. Run the serve
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
-3. Name: the extension name (e.g., `Household Knowledge`, `Home Maintenance`)
+3. Name: the extension name (e.g., `Job Hunt Pipeline`)
 4. Remote MCP server URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Click **Add**
 
@@ -49,7 +49,7 @@ Requires a paid ChatGPT plan (Plus, Pro, Business, Enterprise, or Edu). Works on
 5. Authentication: select **No Authentication** (your access key is embedded in the URL)
 6. Click **Create**
 
-**Using it:** Start a new conversation and make sure the connector is enabled in the tools/apps panel. ChatGPT sometimes needs explicit tool references: "Use the search_household_items tool to find my paint colors."
+**Using it:** Start a new conversation and make sure the connector is enabled in the tools/apps panel. ChatGPT sometimes needs explicit tool references: "Use the search_job_contacts tool to find the TechCorp recruiter."
 
 If ChatGPT says a tool is unavailable and your server's output shows no request arriving, the request never reached your MCP server. Refresh or recreate the ChatGPT app so it pulls the latest tool metadata, start a fresh chat, select the app in Developer Mode, and try a thinking model. On restricted Pro sessions, exact `search`/`fetch` read tools are more likely to appear than write tools.
 
@@ -61,7 +61,7 @@ claude mcp add --transport http extension-name \
   --header "x-access-key: your-access-key"
 ```
 
-Replace `extension-name` with a short name (e.g., `household-knowledge`, `home-maintenance`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
+Replace `extension-name` with a short name (e.g., `job-hunt`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
 
 ## Cursor
 
@@ -137,10 +137,6 @@ After following the steps for your client, your Open Brain extension should appe
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
-- [Meal Planning](../../extensions/meal-planning/) (Extension 4)
-- [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
 
 Every extension that runs a remote MCP server uses this connection pattern.

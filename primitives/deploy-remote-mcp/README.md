@@ -150,10 +150,6 @@ One `bun` process per extension, each answering on its own port with the extensi
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
-- [Meal Planning](../../extensions/meal-planning/) (Extension 4) — two servers, the shared one on its own port and keys ([Shared MCP Server](../shared-mcp/))
-- [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
 
 The recipe and integration servers under `recipes/` and `integrations/` run the same way; each README's run line names its file, port and environment.

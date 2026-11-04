@@ -151,8 +151,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40, 44 and 48 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, and the edge proxy
+      # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -606,7 +606,7 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # extensions (change 64; six, family-calendar a plugin since SMD-2311) and the recipes' and integrations' MCP
+      # extensions (change 64; one of the seven servers, five plugins since SMD-2311 and one retired) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. One MCP stack across the
       # tree's installs — the test fails if server-portable's or mcp-server's
@@ -1064,30 +1064,40 @@ jobs:
       OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     steps:
-      # Three Postgres, started by the job's first step in the background, as
+      # The runner's CPU each second, from here to the job's end: its time
+      # counters and the runnable count, which "The runner's CPU while the
+      # legs ran" reads (SMD-3691). Builtins alone, so the sampler costs one
+      # sleep a second. The runner ends it with the job, as it does the legs.
+      - name: Sample the runner's CPU, in the background
+        run: |
+          (set +e
+           while :; do
+             read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+             read -r _ _ _ running _ < /proc/loadavg
+             echo "$EPOCHSECONDS $user $nice $system $idle $iowait $irq $softirq $steal ${running%/*}"
+             sleep 1
+           done) > "$RUNNER_TEMP/cpu.log" 2>&1 < /dev/null &
+
+      # Two Postgres, started by the job's second step in the background, as
       # db-live's is (its comment has why, SMD-3474), from one pull:
       # - postgres on 5432, the job's own;
       # - pair-postgres on 5433, the upgrade and preflight legs' own, which
-      #   the start step's first two legs reach: its comment has why
-      #   (SMD-3195);
-      # - preflight-postgres on 5434, test-preflight's second shard's
-      #   (SMD-3468).
-      # The last two with a /dev/shm of 1 GB, as db/with-postgres.sh gives
+      #   the start step's legs reach: its comment has why (SMD-3195).
+      # The second with a /dev/shm of 1 GB, as db/with-postgres.sh gives
       # (its comment has why): a parallel HNSW build takes
       # maintenance_work_mem's 64 MB of it, all of Docker's default, and two
       # suites building at once ran out ("could not resize shared memory
       # segment": the first shard beside test-upgrade stopped on it in
       # rehearsals at the default, and never at 1 GB; SMD-3468). One suite
-      # alone builds on preflight-postgres, but its build takes all of the
-      # default too.
+      # alone builds on preflight-rest's Postgres, but its build takes all of
+      # the default too.
       - name: Start Postgres in the background
         run: |
           pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
           (set +e
            pull \
              && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE" \
-             && docker run -d --name pair-postgres -p 5433:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1upgrade "$IMAGE" \
-             && docker run -d --name preflight-postgres -p 5434:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1preflight "$IMAGE"
+             && docker run -d --name pair-postgres -p 5433:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1upgrade "$IMAGE"
            rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
         env:
           IMAGE: pgvector/pgvector:0.8.6-pg16
@@ -1127,7 +1137,7 @@ jobs:
             done
           }
           started
-          ready postgres; ready pair-postgres; ready preflight-postgres
+          ready postgres; ready pair-postgres
 
       # Two suites side by side, each against its own database (SMD-2219), on
       # the second Postgres, pair-postgres, which they have to themselves:
@@ -1136,19 +1146,21 @@ jobs:
       # s after 106 s of suites, on the run's critical path. Then test-preflight
       # was the job's floor, the long leg of a pair whose median was ~219 s of
       # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
-      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first beside
-      # test-upgrade, rest on the third, preflight-postgres, a Postgres
-      # of its own. test-upgrade.ts applies migrations INCREMENTALLY, onto a
-      # database that already holds data — the one situation every other suite
-      # avoids by resetting first, and the only one a real deployment is ever
-      # in; most of its time is three waits on the migrator's 10 s lock_timeout.
+      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first here, beside
+      # test-upgrade, and rest in the job preflight-rest, on a runner of its
+      # own, since this job's CPUs are its limit (SMD-3691: that job's
+      # comment has the measurements). test-upgrade.ts applies migrations
+      # INCREMENTALLY, onto a database that already holds data — the one
+      # situation every other suite avoids by resetting first, and the only
+      # one a real deployment is ever in; most of its time is three waits on
+      # the migrator's 10 s lock_timeout.
       # test-preflight.ts is the deploy gate: without it a misconfigured server
       # starts, answers the MCP handshake, passes every HTTP liveness probe, and
       # fails only when a user captures their first thought; its time is its
       # preflight runs, a subprocess each. A Postgres of their own, not
       # databases beside ob1test: a cluster's databases share its transaction
       # horizon, and an open transaction of theirs hid test-plugins-sql.ts's new
-      # index from the planner (review pass 1, 9 runs in 30). The first two
+      # index from the planner (review pass 1, 9 runs in 30). The two
       # connect as one role to one cluster, so what the cluster shares — a role
       # and its settings, pg_locks, pg_stat_activity — is scoped in each to its
       # own database, or named for the suite; both headers say so, and a fixture
@@ -1161,11 +1173,11 @@ jobs:
       # since this step, so a leg's sections can be timed from its log
       # (SMD-3468). Each has its own time limit (a hang ends as 124, or 137 when
       # TERM is ignored). The last step, "Incremental upgrade and preflight
-      # (started at the job's start)", waits on all three and prints them.
+      # (started at the job's start)", waits on both and prints them.
       - name: Start the incremental upgrade and preflight, in the background
         working-directory: db
         run: |
-          # The first shard's database; their containers create test-upgrade's and the rest's.
+          # The first shard's database; pair-postgres's container creates test-upgrade's.
           bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
           limit_s=600
           echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/data-layer.started"
@@ -1207,11 +1219,9 @@ jobs:
           }
           DATABASE_URL=$UPGRADE_DATABASE_URL leg test-upgrade bun test-upgrade.ts
           (cd ../server-portable && DATABASE_URL=$PREFLIGHT_DATABASE_URL OB1_PREFLIGHT_SHARD=first leg test-preflight-first bun test-preflight.ts)
-          (cd ../server-portable && DATABASE_URL=$PREFLIGHT_REST_DATABASE_URL OB1_PREFLIGHT_SHARD=rest leg test-preflight-rest bun test-preflight.ts)
         env:
           UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1upgrade
           PREFLIGHT_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1preflight
-          PREFLIGHT_REST_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5434/ob1preflight
 
       - name: Store conformance
         working-directory: server-portable
@@ -1420,7 +1430,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the six servers on the SQL shim, called through
+      # Every tool of the one server on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this
@@ -1436,15 +1446,15 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # The three legs the job started after Install (SMD-3195, SMD-3468),
+      # The two legs the job started after Install (SMD-3195, SMD-3468),
       # waited on up to their limit and the kill after it, and printed as
       # SMD-2092's step prints the schema legs: a passing log folded, a failing
-      # one open, and the three summary lines last. It runs when a step before
-      # it failed too, so a failure beside one of the legs' is seen beside it.
-      # A leg that fails here and passes alone (db/with-postgres.sh) is load,
-      # or a leak between legs: replay the start step's legs against
-      # with-postgres.sh, the first two in two databases of one Postgres
-      # (CREATE DATABASE, as the start step does), the rest in another.
+      # one open, and the summary lines last. It runs when a step before it
+      # failed too, so a failure beside one of the legs' is seen beside it. A
+      # leg that fails here and passes alone (db/with-postgres.sh) is load, or
+      # a leak between legs: replay the start step's legs against
+      # with-postgres.sh, in two databases of one Postgres (CREATE DATABASE,
+      # as the start step does).
       - name: Incremental upgrade and preflight (started at the job's start)
         if: ${{ !cancelled() }}
         run: |
@@ -1493,6 +1503,54 @@ jobs:
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
 
+      # The CPU's model, then one line on the CPUs from the legs' start to the
+      # last leg's end, then every sample, folded (SMD-3691). The legs' span
+      # moves with the runner's CPU: on main to 11-02 the legs ran 1.35-1.45
+      # times as long in the slow runs, where waits did not, and main's logs
+      # named no CPU; this says which a run had. "busy" is user, nice, system
+      # and interrupt time over all time; "runnable" is /proc/loadavg's
+      # count, less the sampler. Runnable over the CPU count most seconds,
+      # with busy about 80% or more on average, is a runner bound by its
+      # CPUs, where another leg adds contention, not time off (preflight-rest's
+      # comment has what this found). It reads, so it never fails the job.
+      - name: The runner's CPU while the legs ran
+        if: ${{ !cancelled() }}
+        run: |
+          model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo); cpus=$(nproc)
+          echo "CPU: ${model:-no model name in /proc/cpuinfo}, $cpus of them"
+          [ -s "$RUNNER_TEMP/cpu.log" ] || { echo "no samples: the sampler did not run"; exit 0; }
+          # The window says what it could read: the legs' start, else the
+          # job's; the last leg's end, else this step's start.
+          from=""; to=$EPOCHSECONDS; ended="this step"
+          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || true
+          if [ -s "$RUNNER_TEMP/data-layer.legs" ]; then
+            to=0; ended="the last leg's end"
+            while IFS= read -r leg; do
+              if ! end=$(stat -c %Y "$RUNNER_TEMP/$leg.rc" 2> /dev/null); then end=$EPOCHSECONDS; ended="this step, a leg having written no code"; fi
+              if [ "$end" -gt "$to" ]; then to=$end; fi
+            done < "$RUNNER_TEMP/data-layer.legs"
+          fi
+          if [ -n "$from" ]; then span="from the legs' start to $ended"; else from=0; span="from the job's start to $ended, data-layer.started unread"; fi
+          awk -v from="$from" -v to="$to" -v cpus="$cpus" -v span="$span" '
+            NF == 10 {
+              busy = $2 + $3 + $4 + $7 + $8; total = busy + $5 + $6 + $9
+              if (seen && $1 > from && $1 <= to && total > t0) {
+                d = total - t0; b = 100 * (busy - b0) / d; r = $10 - 1
+                n++; sb += b; ss += 100 * ($9 - s0) / d; sw += 100 * ($6 - w0) / d; sr += r
+                if (b >= 95) full++
+                if (r > cpus) over++
+              }
+              seen = 1; t0 = total; b0 = busy; s0 = $9; w0 = $6
+            }
+            END {
+              if (!n) { print "no samples between " from " and " to; exit }
+              printf "%d s %s: busy %.0f%% on average, %d s (%.0f%%) at 95%% or more; steal %.1f%%, iowait %.1f%%; runnable %.1f on average, over %d for %d s\n", n, span, sb / n, full, 100 * full / n, ss / n, sw / n, sr / n, cpus, over
+            }' "$RUNNER_TEMP/cpu.log"
+          echo "::group::every sample: epoch, then /proc/stat's user nice system idle iowait irq softirq steal, then the runnable count"
+          # awk ends a torn last line, so the fold still closes.
+          awk 1 "$RUNNER_TEMP/cpu.log"
+          echo "::endgroup::"
+
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed
       # step too, so the page shows what ran.
@@ -1510,7 +1568,112 @@ jobs:
         if: always()
         run: |
           for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
-          for c in postgres pair-postgres preflight-postgres; do
+          for c in postgres pair-postgres; do
+            echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
+            docker rm -f "$c" > /dev/null 2>&1 || true
+          done
+
+  # test-preflight.ts's rest shard (OB1_PREFLIGHT_SHARD=rest, SMD-3468), on
+  # a runner of its own (SMD-3691). It was the data layer's third leg, but
+  # that job was bound by its runner's 4 CPUs. Over five runs of OB1 PR 621
+  # with three legs, more tasks were runnable than CPUs for 62-68% of the
+  # legs' span; on an AMD EPYC 7763 (four of the five) the CPUs were 88-90%
+  # busy on average from the legs' start to 160 s in, and the first shard
+  # ended at 182-189 s. So a leg there took its time from the others, and a
+  # fourth would have added contention, not time off. The rest shard is 56
+  # CPU-seconds timed alone on a laptop (39.7 of bun, 16 of its Postgres),
+  # the first shard 71.5 and test-upgrade 33 (most of its span waits); the
+  # data layer keeps those two. With two legs, on an EPYC (one run,
+  # 41566315515), the first shard ended at 169 s, the CPUs 67% busy and
+  # never at 95%. One Postgres, with a /dev/shm of 1 GB: the data layer's
+  # Postgres step has why.
+  preflight-rest:
+    name: The deploy gate's rest shard against real Postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
+
+    steps:
+      # db-live's first step has why (SMD-3474).
+      - name: Start Postgres in the background
+        run: |
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull && docker run -d --name postgres -p 5432:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1preflight "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+        env:
+          IMAGE: pgvector/pgvector:0.8.6-pg16
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
+      # db-live's "Wait for Postgres" has why (SMD-3196, SMD-3474).
+      - name: Wait for Postgres
+        run: |
+          started() {
+            local deadline=$((SECONDS + 180))
+            until [ -s "$RUNNER_TEMP/postgres-start.rc" ]; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "Postgres's pull and start did not end within 180 s:" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+              sleep 0.2
+            done
+            [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            failed=$(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log" || true)
+            if [ "$failed" -gt 0 ]; then echo "::warning::pgvector's pull took $((failed + 1)) tries"; cat "$RUNNER_TEMP/postgres-start.log"; fi
+          }
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          started
+          ready postgres
+
+      # The data layer's start step has what the suite is (SMD-3195); the
+      # sections this shard runs are those test-preflight.ts's SHARDS does
+      # not list.
+      - name: The deploy gate's rest shard
+        working-directory: server-portable
+        run: bun test-preflight.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1preflight
+          OB1_PREFLIGHT_SHARD: rest
+
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-preflight-rest
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # db-live's last step has why (SMD-3474).
+      - name: Postgres's log, and its removal
+        if: always()
+        run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
+          for c in postgres; do
             echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
@@ -5005,15 +5168,18 @@ jobs:
   # needs failed too (the page names the jobs that did not succeed), so it is
   # the second job MAY_SKIP always lets skip; its `!cancelled()` keeps a gated
   # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
-  # A pull request, the merge queue and a
-  # push to another branch publish nothing. contents: write, on this job
-  # alone, is what pushes to the wiki's repository; the token stays out of the
-  # clone's config (an extraheader on each git call) and out of the checkout.
+  # Its needs are exactly the jobs that upload a test-counts-* artifact, each
+  # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
+  # job left out is published only if its upload ends first (SMD-3709).
+  # A pull request, the merge queue and a push to another branch publish
+  # nothing. contents: write, on this job alone, is what pushes to the wiki's
+  # repository; the token stays out of the clone's config (an extraheader on
+  # each git call) and out of the checkout.
   publish-test-counts:
     name: Publish the suites' counts to the wiki
     runs-on: ubuntu-24.04
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: [portable-server, db-schema, replay-gate, db-live, data-layer, compat-shim]
+    needs: [portable-server, db-schema, replay-gate, db-live, data-layer, preflight-rest, compat-shim]
     permissions:
       contents: write
     timeout-minutes: 5
@@ -5141,6 +5307,7 @@ jobs:
       - replay-gate
       - db-live
       - data-layer
+      - preflight-rest
       - deploy-stack
       - deploy-stack-brains
       - deploy-stack-auth
@@ -5154,7 +5321,7 @@ jobs:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: ${{ needs.changes.result == 'success' && needs.changes.outputs.code == 'false' && 'commit-lint publish-test-counts portable-server db-schema replay-gate db-live data-layer deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || 'commit-lint publish-test-counts' }}
+          MAY_SKIP: ${{ needs.changes.result == 'success' && needs.changes.outputs.code == 'false' && 'commit-lint publish-test-counts portable-server db-schema replay-gate db-live data-layer preflight-rest deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || 'commit-lint publish-test-counts' }}
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '

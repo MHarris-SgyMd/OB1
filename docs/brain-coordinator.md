@@ -28,7 +28,7 @@ The decision table marks which rows are that direction, which the maintainer dec
 - **Scheduling.** board-sync's interval, sleep's work period and n8n's schedules are three separate clocks.
 
 **The extensions** sit where SMD-2308 left them, with three gaps:
-- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example and the family calendar use it. SMD-2311 ports the other five extensions; they and three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
+- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example, the family calendar, home maintenance, household knowledge, meal planning and the professional CRM use it. SMD-2311 ports the last extension, job hunt; it and three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
 - **A plugin runs inside the brain's servers**, so it must be curated, and its SQL needs a role boundary that one plugin cannot step out of (SMD-2756).
 - **A plugin has no way out of the brain.** Check 31 refuses `fetch` in plugin code, so anything that reaches an outside service has no home. n8n was chosen as the fork's integration point for exactly that (SMD-1863), but `orchestration-tool.md`'s decision 7 kept it away from the brain's own tools.
 
@@ -57,7 +57,7 @@ The direction joins the two. One runtime runs every task a brain has, whether a 
 
 ### An interactive tool call
 
-Take `crm_add_contact`, professional-crm's tool once it is a plugin with a workflow (SMD-2311):
+Take `add_contact`, professional-crm's operation (a plugin since SMD-2311), once it is a workflow:
 
 1. The client calls the tool on the brain's MCP server. The MCP server forwards it to the REST core as it forwards any plugin operation (`POST /v1/plugins/professional-crm/contacts`), with the client's key or exchanged token (`operator-surface-tiers.md`, "Identity").
 2. The REST core checks the caller, the scope and the input against the manifest, as it does today. The operation's implementation is a workflow, so it opens a run: a row with the caller's principal, the operation, its bounded scope, the class `live` and a deadline.
@@ -198,7 +198,7 @@ What it says about the move:
 - **43 of the six extensions' 45 tools are reads or writes of their own tables, and none calls a model or an outside service.** The two exceptions: `crm_link_thought` reads core `thoughts` directly (`extensions/professional-crm/index.ts:486`), and job-hunt's link tool writes professional-crm's table. For these tools a workflow adds no capability. It is one data operation behind a webhook, so its cost is the latency measured below.
 - **Everything else calls a model and writes core `thoughts`**, through `upsert_thought` and `update_thought` and also by raw updates (smart-ingest, readwise-capture, bio, metadata-norm, schema-aware-routing). Under row 7, each raw write becomes a core operation, and each model call the brain's own, through the egress gate.
 - **Several writes read and then write in separate statements**, not atomically: professional-crm's notes append, `mark_item_purchased`, `generate_shopping_list`, job-hunt's link, agent-memory-api's writeback. Each becomes one data operation in one transaction (see "Data").
-- **Some behaviour lives in triggers** (home-maintenance's next-due date, professional-crm's `last_contacted`). These stay in the plugin's migrations, inside its own schema.
+- **Some behaviour lives in triggers** (home-maintenance's next-due date, professional-crm's `last_contacted`). These stay in the plugin's migrations, inside its own schema. (home-maintenance's became its `log_maintenance` operation's own statements when it was ported, SMD-2311.)
 - **entity-extraction-worker cannot move.** Its schema's `thought_entities` (a BIGINT key to its own `entities`) clashes with core migration 016's (a uuid key to `ob1_entities`), and 016 replaces its queue.
 
 ### What n8n adds to a call (2026-10-28 UTC)

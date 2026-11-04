@@ -468,6 +468,44 @@ head — and board-sync's own row is read again. A list step can read a count as
 (`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
 exists and moved.
 
+### Tickets someone holds (migration 115)
+
+Every read that returns a thought — `search`, `search_thoughts`,
+`search_thoughts_keyword`, `list_thoughts` and `fetch` — says who holds a
+ticket it names (SMD-3599), so an answer to "what should we work on next"
+sees held work before it calls `list_claims`. It is a prompt, not the check:
+a released claim, a branch or PR with no claim, and a claim whose PR merged
+are still AGENTS.md's to find ("Claim your work", step 1).
+
+A result's `claimed` lists the unreleased work claims — live, and lapsed but
+never released, which AGENTS.md reads as work that may be paused — on the
+tickets its metadata files it under (a ticket row's `issue`, a note's
+`ticket`) and the first 50 others its text mentions (the rest counted in
+`claimedNotRead`): each claim's id, ticket, piece, holder, `ownKey` when the
+holder is the caller's own key, label, times and `state`, the first ten
+(`claimedMore` the rest). Over MCP `search_thoughts`, `search_thoughts_keyword`
+and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
+…, until … (claim …, label "…")` — `lapsed at …, never released` for a lapsed
+one — the piece and label quoted on one line as the holder's own words, and
+once per reply that shows one, the same fixed key to reading it: yours when its
+id is in your `.work-claims/` or your task names it (a subagent tells its caller
+rather than renew it), any other live claim holds its work, any other lapsed one
+may be paused unless its PR merged or closed; their structured values keep ids,
+tickets, holders, states and times. `search` and
+`fetch` start the title `[claimed: SMD-3379 (a piece) by codex, since …]`
+after any moved prefix — the first two, never the piece or the label — and
+their JSON, the ChatGPT shape, carries the fields only beside a claimed ticket
+(the tickets not read with them, as `movedNotRead` rides beside a move), label
+included, and `claimed: null` on every result when the read failed. Unlike
+`moved`, a ticket row and a superseded thought are labelled too: who holds a
+ticket is a fact about now. The claims are one read of `work_claims`'
+unreleased rows (115's partial index) per page, made only when a result names
+a ticket; a brain before 115, a server role without the claims grant, or a
+read that fails, gives `claimed: null`, which the text tools say in a line and
+`search`'s and `fetch`'s titles mark `[claims not read]` beside a
+`claimsNote`, and the read goes on.
+Like `moved`, it never moves a rank.
+
 ## Steps
 
 ### 1. Install
@@ -961,7 +999,7 @@ calls does.
 | --- | --- | --- |
 | `WORK_CLAIMED` | 409 | A live claim covers the work. `heldBy` names each claim: id, holder, kind, times and `ownKey` (the caller's own key holds it: another session of it, or this one without its token), never its label. |
 | `CLAIM_NOT_YOURS` | 403 | Not this key with this token. `forced: true` means a force refused: the key is no operator by agent id. `ownKey: true`: the caller's own key holds it under a token this call did not give. |
-| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). |
+| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). `claim_work` with the caller's own ended claim's token, on that claim's work, answers it too, rather than making a new claim (SMD-3654); on other work the token is ignored and a new claim made. |
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
@@ -973,6 +1011,51 @@ lock (115's rule). A role without the `claims` grant group has the claim calls f
 naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks the
 functions, the grant and the log setting. The `worker claims` row, named `work
 claims` before this ticket, is migration 015's: it keeps two workers off one thought.
+
+## Priority assertions (SMD-3664)
+
+A key states how much an item matters, and every statement is kept (migration 116,
+SMD-3663; `docs/priority.md`). An item is a thought (its id), a ticket (its key) or an
+entity (its id), addressed by its kind and key; an open item (`item`) is refused until
+SMD-3665 adds it. Three tools reach it, each over REST and MCP alike:
+
+- **`set_priority`** (`POST /v1/priorities/{kind}/{key}`, capture scope): a level, 0
+  none to 5 critical, and optionally `due_at`, `not_before`, `due_ref` (another item
+  whose due time this one takes), a `reason` and `inferred`. A time is an instant with
+  its offset, or a date, read as the start of that day in UTC. The maker is the key,
+  its tier the key's (operator, a declared priority source, agent, inferred), never an
+  argument's. The caller's new statement on an item replaces its earlier one there; the
+  same statement again is `unchanged`, nothing written. The reply names what it
+  replaced and the item's winner, the lowest tier's newest statement.
+- **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
+  the caller's own statement, never another key's, and names the winner after.
+- **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
+  and its level (null: unknown, not low), and every statement in the order written,
+  each with its maker, tier, reason and how its window closed. `exists: false` is an
+  item since removed, whose statements are kept.
+
+**A capture-only key** reaches the two writers (decision 10): migration 116 lets it
+state a priority on a thought it captured and nobody has taken since, and refuses it
+anything else alike whether the item exists or not. It is never shown the winner
+(`winnerShown: false`, and no word of one), and it has no read tool, so no history.
+The server states the key's scope in the envelope it passes (`write` or `capture`),
+which 116 requires. A plugin's `ctx.call("set_priority", …)` states a priority as its
+caller; a hook's principal is capture-scoped.
+
+**A refusal is an answer**, not an error:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `ITEM_NOT_FOUND` | 404 | The brain holds no such item: `item` names it as 116 keys it (a ticket upper-cased), `which` whether it was the item or the due reference, `openItem` an open item before SMD-3665. `priority_history` answers it for an item nobody stated a priority on. |
+| `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured and nobody took, or a due reference to one. |
+| `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
+| `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. A principal with no agent id by design (a plugin hook's) is answered by 116. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
+| `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
+
+Each writer is one statement, its own READ COMMITTED transaction holding its item's
+lock (116's rule); the history reads the winner and the statements in one statement.
+A role without the `priority` grant group has the priority calls fail, naming the
+table, and nothing else. Preflight's `priority` row checks the functions and the grant.
 
 ## Where a tool's logic lives (SMD-2283)
 
@@ -1260,8 +1343,8 @@ bun run test:e2e          # the whole server over MCP with no Supabase at all, O
 ../db/with-postgres.sh bun test-rest-sql.ts  # the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ../db/with-postgres.sh bun test-preflight.ts  # the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer assertions with no DATABASE_URL, which skips the database sections)
-OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
-OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # every section SHARDS does not list; an assertion outside every section would count in both, which [doc] fails on
+OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest in a job of its own (SMD-3691): the sections SHARDS in test-preflight.ts lists (SMD-3468)
+OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # the other, as the preflight-rest job runs it: every section SHARDS does not list; an assertion outside every section would count in both, which [doc] fails on
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`

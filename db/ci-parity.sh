@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
-# the database-backed suites in CI's order against ONE shared Postgres, but for
-# test-upgrade and test-preflight, which run beside them on a second as CI's do;
-# and beside both, in a lane of their own, the suites and self-checks that need
-# none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
+# the data-layer job's database-backed suites in CI's order against ONE shared
+# Postgres; beside them, all from the start, test-live.ts's four shards, each on
+# a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
+# test-preflight on another as CI's are, and in a lane of their own the suites
+# and self-checks that need none and every directory's typecheck (SMD-1932,
+# SMD-1870, SMD-2903, SMD-3638).
 # Each row says how long it took, and one still running at its time limit, 600 s
 # unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647).
 #
@@ -33,6 +35,10 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
+# A run is every shard of each suite, so a shard named in the caller's shell
+# applies to none of its rows. Left set, it would drop that shard from a row's
+# name, and a live lane is held to its row's name (SMD-3688 review pass 4).
+unset OB1_LIVE_SHARD OB1_PREFLIGHT_SHARD
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
 # The lane keeps the last one in LAST_ROW, which at_row writes for wait_lane.
@@ -44,9 +50,9 @@ row() {
 }
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
-# pair legs, over twice the slowest honest row here under both lanes' load;
-# OB1_PARITY_ROW_LIMIT sets another. Scratch files go in PARITY_TMP, macOS's
-# TMPDIR without its closing slash.
+# pair legs, about twice the slowest honest row here under the lanes' load
+# (test-live's sleep shard, ~270 s); OB1_PARITY_ROW_LIMIT sets another.
+# Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in
   *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;;
@@ -111,6 +117,53 @@ at_row() {
 # cut_off RC: what a failing row's verdict adds when limit stopped it.
 cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
 
+# keep_output NAME OUT: a failing row's whole output, kept in a file of its own
+# in PARITY_TMP, outside the lanes' directory the exit removes, its path
+# printed under the row's excerpt, so a flake that does not come back can
+# still be read (SMD-3607). The files stay until the system clears its
+# temporary directory; clear them by hand as ci-parity-failed.*, never
+# ci-parity-*, which takes a running run's limit markers too and stops every
+# row in hand.
+keep_output() {
+  local slug file
+  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)
+  file=$(mktemp "$PARITY_TMP/ci-parity-failed.$slug.XXXXXX") && printf '%s\n' "$2" > "$file" && echo "        full output: $file"
+}
+# excerpt OUT [no-tally|stopped]: the lines that say what failed, at most
+# three, then how many more. A failed assertion as the suites print it — a ✗
+# or FAIL beginning the line after its indent, then a space or the line's end
+# (createAssert's "  ✗  label", the db/ suites' own "  ✗ label", the
+# self-checks' "FAIL name") — and not a line that only quotes one: a passing
+# "  ✓  … (✗ …)" row of test-preflight's took the excerpt twice (SMD-3607).
+# Not a closing summary either, a bare "FAIL" or the checker's "FAIL — N
+# violation(s):", which name no failure. A line repeated, as a check printed
+# on stdout and again on stderr, counts once. Else a crash's errors, as Bun
+# prints them from the line's start ("error: …", "TypeError: …",
+# "PostgresError: …", "ENOENT: …"), the last three, since Bun prints its own
+# last; else the last three lines that are not blank or Bun's version
+# trailer. no-tally, for a failing suite that printed no assertion tally
+# (a crash, or a script with a tally of its own), adds its last crash line
+# under its failure lines (SMD-3607 review pass 2: a failed row then a throw
+# showed the row alone). stopped, for a row its limit cut off, reads no crash
+# line: an error a suite logged and lived through, as test-jev's "error:
+# connection reset", would pass for the cause; its failure lines show, else
+# its tail, where it stopped.
+excerpt() {
+  local mode="${2:-}" lines crash= n
+  [ "$mode" = stopped ] || crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
+  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$' | awk '!seen[$0]++')
+  if [ -n "$lines" ]; then
+    printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
+    n=$(printf '%s\n' "$lines" | grep -c .)
+    [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
+    [ "$mode" != no-tally ] || [ -z "$crash" ] || printf '%s\n' "$crash" | tail -1 | sed 's/^/        /'
+  elif [ -n "$crash" ]; then
+    printf '%s\n' "$crash" | tail -3 | sed 's/^/        /'
+  else
+    printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$|^Bun v[0-9]' | tail -3 | sed 's/^/        /'
+  fi
+}
+
 # Each directory CI installs, once, from its lockfile. A lockfile out of step
 # with package.json is reported here, apart from anything that then fails.
 install() {
@@ -119,6 +172,7 @@ install() {
   if [ "$rc" -ne 0 ]; then
     row bad "$dir" "bun install --frozen-lockfile$(cut_off "$rc")"
     printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
+    keep_output "install $dir" "$out"
     FAILED=1
   fi
 }
@@ -149,11 +203,8 @@ suite() {
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
     row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
-    if printf '%s\n' "$out" | grep -qE '✗|error:'; then
-      printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
-    else
-      printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
-    fi
+    excerpt "$out" "$([ "$rc" -eq 124 ] && echo stopped || { [ -z "$res" ] && echo no-tally; })"
+    keep_output "$name" "$out"
     FAILED=1
   else
     row ok "$name" "${res:-exit 0} · $took"
@@ -190,6 +241,7 @@ typecheck() {
     else
       printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     fi
+    keep_output "typecheck $dir" "$out"
     FAILED=1
   fi
 }
@@ -198,7 +250,7 @@ typecheck() {
 # typecheck, one after another in a background subshell beside the database
 # suites, its rows printed when the database lane is done. None of these reads
 # the shared Postgres, so the database suites see no other client; what they
-# share is the CPU, and with it the timing rows of both lanes (test-server's
+# share is the CPU, and with it the timing rows of every lane (test-server's
 # probe windows, test-live's polls) run under more load than in series. Its
 # FAILED is its own, so it returns its verdict and main() reads it from wait.
 # free_rows NOWFILE: at_row's file.
@@ -284,15 +336,16 @@ free_rows() {
 }
 
 # The pair lane (SMD-3638): test-upgrade.ts, then test-preflight.ts's two
-# shards, on a Postgres of their own, as CI's data-layer job runs them in the
-# background from its start (SMD-2219, SMD-3195, SMD-3468) — CI side by side,
-# test-upgrade.ts and the first shard on pair-postgres, the rest on
-# preflight-postgres; here one after the other on one, each shard dropping the
-# schema before its first database section, which their lane's length, inside
-# the database lane's, makes free. The script runs itself again under a second
-# with-postgres.sh with --pair, and that run does only this — so a run needs
-# podman or docker even when DATABASE_URL is given, and without one this lane
-# fails with with-postgres.sh's "No working container runtime found".
+# shards, on a Postgres of their own. CI's data-layer job runs the first two
+# side by side on pair-postgres, in the background from its start (SMD-2219,
+# SMD-3195, SMD-3468), and the rest runs in a job of its own, preflight-rest,
+# on a runner of its own (SMD-3691); here one after the other on one, each
+# shard dropping the schema before its first database section, which costs
+# nothing while the lane's length stays inside the longest test-live shard's.
+# The script runs itself again under a with-postgres.sh of its own with
+# --pair, and that run does only this — so a run needs podman or docker even
+# when DATABASE_URL is given, and without one this lane fails with
+# with-postgres.sh's "No working container runtime found".
 # pair_rows NOWFILE: at_row's file.
 pair_rows() {
   FAILED=0 NOW_FILE="$1"
@@ -304,25 +357,73 @@ pair_rows() {
   return "$FAILED"
 }
 
+# The live lanes (SMD-3688): test-live.ts's four shards side by side, each on a
+# Postgres of its own, as CI's db-live matrix runs them (SMD-3048, SMD-3169).
+# The script runs itself again under a with-postgres.sh per shard with --live,
+# and that run does only its shard's row. One Postgres per shard, not one with
+# four databases: roles and backends are the cluster's, and the suite makes
+# roles and counts connections. [2] edits a copy of the migrations, never the
+# tracked tree (SMD-3639), so no shard reads another's edit. Like the pair
+# lane, the live lanes need podman or docker even when DATABASE_URL is given:
+# test-live runs on their Postgres, never on that one.
+# live_rows SHARD NOWFILE: one shard's row; at_row's file.
+live_rows() {
+  FAILED=0 NOW_FILE="$2" LAST_ROW=''
+  BASE_ENV=$(env | LC_ALL=C sort)
+  # Each row a line of its own, as check 35 reads them.
+  if [ "$1" = rest ]; then
+    OB1_LIVE_SHARD=rest run db test-live.ts
+  elif [ "$1" = sleep ]; then
+    OB1_LIVE_SHARD=sleep run db test-live.ts
+  elif [ "$1" = long ]; then
+    OB1_LIVE_SHARD=long run db test-live.ts
+  elif [ "$1" = extract ]; then
+    OB1_LIVE_SHARD=extract run db test-live.ts
+  else
+    echo "ci-parity.sh --live takes rest, sleep, long or extract, not '$1'" >&2; return 2
+  fi
+  # The lane ran its own shard's row, or it fails: check 35 and the sed below
+  # read lines, and a row bash never reaches (dead code, after an exit, in a
+  # heredoc) or reaches in another shard's branch would pass them both and run
+  # nothing, or the wrong shard (SMD-3688 review pass 3).
+  case "${LAST_ROW:-}" in
+    "OB1_LIVE_SHARD=$1 db/test-live.ts "*) ;;
+    *) echo "ci-parity.sh --live $1 ran no OB1_LIVE_SHARD=$1 row (its last: ${LAST_ROW:-none})" >&2; FAILED=1 ;;
+  esac
+  at_row ''
+  return "$FAILED"
+}
+# The live lanes' shards, in the order they are printed: read from the file's
+# test-live rows, which check 35 holds to the workflow, to this sed's shape and
+# each shard once, and holds this line to its text as the only assignment of
+# LIVE_SHARDS (SMD-3688).
+LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z][a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
+[ -n "$LIVE_SHARDS" ] || { echo "ci-parity.sh reads no OB1_LIVE_SHARD row in live_rows, so would start no test-live shard" >&2; exit 2; }
+
 # The lanes beside the database lane: each writes to a file, printed when the
 # database lane is done, one block each, so no lane's rows interleave with
 # another's. A Ctrl-C stops them whole through stop_lanes, since a
 # non-interactive shell's background job ignores SIGINT and their suites would
-# otherwise run on after the script has gone (the pair lane's with-postgres.sh
-# removes its container as it exits). A TERM to this script alone does too,
-# once the database lane's row in hand ends: bash runs a trap only between
-# commands. A closed terminal's hangup reaches them itself (main()). Their
-# files are in one directory, printed as the lanes start so `tail -f` can
-# follow a lane: NAME.out its rows so far, NAME.now the row in hand, since
-# when, and the row before (SMD-3647).
+# otherwise run on after the script has gone (each lane's with-postgres.sh
+# removes its container as it exits, and stop_lanes waits for that). A TERM to
+# this script alone does too, once the database lane's row in hand ends: bash
+# runs a trap only between commands. A closed terminal's hangup reaches them
+# itself (main()). Their files are in one directory, printed as the lanes start
+# so `tail -f` can follow a lane: NAME.out its rows so far, NAME.now the row in
+# hand, since when, and the row before (SMD-3647).
 start_lanes() {
+  local shard
   LANES=$(mktemp -d "$PARITY_TMP/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
-  echo "  … the other two lanes write to $LANES: free.out the database-free lane's rows, pair.out test-upgrade's and test-preflight's"
-  free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
-  FREE_PID=$!
+  echo "  … the other lanes write to $LANES: live-<shard>.out each test-live shard's row, pair.out test-upgrade's and test-preflight's, free.out the database-free lane's rows"
+  for shard in $LIVE_SHARDS; do
+    "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --live "$shard" "$LANES/live-$shard.now" < /dev/null > "$LANES/live-$shard.out" 2>&1 &
+    LIVE_PIDS="$LIVE_PIDS $!" LANE_NAMES="$LANE_NAMES $!:live-$shard"
+  done
   "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
-  PAIR_PID=$!
+  PAIR_PID=$! LANE_NAMES="$LANE_NAMES $!:pair"
+  free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
+  FREE_PID=$! LANE_NAMES="$LANE_NAMES $!:database-free"
 }
 stop_tree() {
   local child
@@ -332,7 +433,25 @@ stop_tree() {
 drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 stop_lanes() {
   local pid
-  for pid in $FREE_PID $PAIR_PID; do stop_tree "$pid"; done
+  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
+  # Each with-postgres.sh removes its container as it exits, ignoring signals
+  # while it does; all are waited for within one 30 s deadline, so none
+  # outlives the script and a stuck removal cannot hold the prompt (SMD-3688).
+  # bash reaps an exited lane itself, so ps no longer shows it and wait
+  # returns at once.
+  local deadline=$((SECONDS + 30)) name
+  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do
+    while ps -p "$pid" > /dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done
+    if ps -p "$pid" > /dev/null 2>&1; then
+      name=lane
+      case "$LANE_NAMES " in
+        *" $pid:"*) name=${LANE_NAMES##* $pid:}; name="${name%% *} lane" ;;
+      esac
+      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds shows in podman ps or docker ps" >&2
+    else
+      wait "$pid" 2>/dev/null
+    fi
+  done
   drop_lanes
 }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
@@ -359,39 +478,33 @@ wait_lane() {
 
 main() {
   FAILED=0
-  FREE_PID='' PAIR_PID='' LANES=''
+  FREE_PID='' PAIR_PID='' LIVE_PIDS='' LANE_NAMES='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
   # A closed terminal's hangup reaches every process of this script's group,
-  # the lanes and the pair lane's with-postgres.sh among them, and limit's trap
-  # ends each row's own group; so main() only exits, since stopping the pair
-  # lane too could cut its with-postgres.sh's container removal short. A HUP
+  # the lanes and their with-postgres.sh runs among them, and limit's trap
+  # ends each row's own group; so main() only exits, since stopping the lanes
+  # too could cut their with-postgres.sh's container removals short. A HUP
   # sent to this script alone exits once the database lane's row in hand ends,
-  # leaving the lanes to run on unreported, each row within its limit.
+  # leaving the lanes to run on unreported, each row within its limit and each
+  # container removed as its lane ends; their rows go with the lanes'
+  # directory, which the exit removes, and a row of theirs that fails keeps its
+  # output in PARITY_TMP all the same, its path printed only to that directory.
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
-  # Against the shared Postgres, in CI's order.
-  # CI runs test-live.ts's four shards side by side, one matrix cell each,
-  # each on a fresh database (SMD-3048, SMD-3169). Here they run in series on
-  # the shared one, each dropping its schema first, which takes the rows and
-  # config keys the one before left; cluster roles and any table dropSchema
-  # does not list stay. A section broken by another's rows shows only in a
-  # full run.
-  OB1_LIVE_SHARD=rest run db test-live.ts
-  # The other two lanes start here, beside the rest of this one. Until
-  # SMD-3639 the rest shard's [2] appended a line to the tracked
-  # db/migrations/002 for a moment, which the database-free lane's checker
-  # (17c hashes the frozen migrations), test-engines and test-schema read, as
-  # do test-upgrade and test-preflight. It edits a copy now, so they could
-  # start first: SMD-3688 takes that up, with the shards side by side.
+  # Every other lane starts now, beside this one (SMD-3688): the four test-live
+  # shards (live_rows), test-upgrade and test-preflight (pair_rows), and the
+  # database-free rows (free_rows). Until SMD-3639 the rest shard's [2] appended
+  # a line to the tracked db/migrations/002 for a moment, which the checker
+  # (17c hashes the frozen migrations), test-engines, test-schema, test-upgrade
+  # and test-preflight read, so they waited for it; it edits a copy now.
   start_lanes
-  OB1_LIVE_SHARD=sleep run db test-live.ts
-  OB1_LIVE_SHARD=long run db test-live.ts
-  OB1_LIVE_SHARD=extract run db test-live.ts
-  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane
-  # (pair_rows).
+
+  # Against the shared Postgres, in CI's order: the data-layer job's suites,
+  # which share CI's one Postgres service too, so state one leaves behind is
+  # caught here (the header's story).
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
@@ -420,16 +533,26 @@ main() {
   run extensions         test-tools.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
+  local shard pid
+  set -- $LIVE_PIDS
+  for shard in $LIVE_SHARDS; do
+    pid=$1; shift
+    wait_lane "$pid" "live-$shard" "test-live.ts's $shard shard, on a Postgres of its own"
+    LIVE_PIDS=${LIVE_PIDS# $pid}
+  done
   wait_lane "$PAIR_PID" pair "test-upgrade and test-preflight, on a Postgres of their own"
   PAIR_PID=''
   wait_lane "$FREE_PID" free "The database-free lane"
   FREE_PID=''
   echo
-  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s)"
+  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s), a failing row's full output in the file named under it"
   return "$FAILED"
 }
 
 if [ "${1:-}" = --pair ]; then
   [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --pair runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
   pair_rows "${2:-}"
+elif [ "${1:-}" = --live ]; then
+  [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --live runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
+  live_rows "${2:-}" "${3:-}"
 elif [ -n "${DATABASE_URL:-}" ]; then main; else exec "$ROOT/db/with-postgres.sh" "$0"; fi

@@ -2591,9 +2591,28 @@ export const ROLE_GRANTS = Object.freeze({
   // release_work_claim (SECURITY INVOKER, PUBLIC's EXECUTE), read through
   // list_work_claims. No DELETE: an ended claim stays as history. The holder's
   // kind is read from ob1_agents, the capture group's SELECT. Soft: a role
-  // without it is refused the claim calls, naming the table, and nothing else.
+  // without it is refused the claim calls, naming the table, and every read's
+  // claimed label (SMD-3599) says its claims could not be read; nothing else.
   claims: Object.freeze([
     Object.freeze({ table: "work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "115" }),
+  ]),
+  // Priority assertions (116, SMD-3663): who said an item matters, how much,
+  // by when. Written only through assert_priority and clear_priority
+  // (SECURITY INVOKER, PUBLIC's EXECUTE), read through priority_of and
+  // priority_history. No DELETE on the assertions: a trigger refuses it and
+  // every UPDATE but closing a window. The projection is replaced and
+  // removed. priority_sources is SELECT alone, so no server role can
+  // declare a source: declare_priority_source is the operator's, as
+  // set_agent_kind. SELECT on ob1_entities too, which only the extraction
+  // group grants otherwise: assert_priority checks an entity exists. (A
+  // thought and a ticket's head are the capture group's.) Soft: a role
+  // without the group is refused the priority calls, naming the table, and
+  // nothing else.
+  priority: Object.freeze([
+    Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
+    Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
+    Object.freeze({ table: "priority_sources",    privileges: Object.freeze(["SELECT"]), since: "116" }),
+    Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -2670,8 +2689,11 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
   // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): five of the six, family-calendar's a
-  // plugin since SMD-2311, its tables in its own schema under its own role.
+  // README's Step 1 says (SMD-1810): two of the six files, job-hunt's and
+  // professional-crm's, whose tables job-hunt's link writes into until it is a
+  // plugin too (SMD-2311 PR 4b). The professional CRM and the other four are
+  // plugins since SMD-2311, their tables in their own schemas under their own
+  // roles.
   // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
   // granted nothing — Supabase's default privileges carried its service role;
   // the policies are gone, and this group is what a role other than the
@@ -2679,13 +2701,6 @@ export const ROLE_GRANTS = Object.freeze({
   // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
   // both).
   extensions: Object.freeze([
-    Object.freeze({ table: "household_items",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "household_vendors",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "maintenance_tasks",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
-    Object.freeze({ table: "maintenance_logs",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
-    Object.freeze({ table: "recipes",               privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
-    Object.freeze({ table: "meal_plans",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
-    Object.freeze({ table: "shopping_lists",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
@@ -2781,7 +2796,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "priority", "community", "extensions", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read

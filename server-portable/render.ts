@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -28,9 +28,10 @@ import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.t
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
-import { TAKEN_OVER, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
+import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
+import { TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
-import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -85,6 +86,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
   // A claim's holder (SMD-3598): a key's name — an OAuth principal's `oauth:<sub>+<client>` too — held to no space, so no sentence.
   if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
+  // A priority item's key (SMD-3664): a uuid, which carries no sentence; a ticket's key is a token already.
+  if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -154,8 +157,17 @@ const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[
  * MCP server rendering its answer.
  */
 const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved ?? []);
+/**
+ * A result's claims as a typed field (SMD-3599): each claim's id, ticket, holder, whether the holder is the caller's
+ * own key, and its times — the piece and label are the holder's words, which ride the text, as WORK_CLAIMED's value
+ * keeps them out. Null when the claims were not read, and from a REST core older than this MCP server.
+ */
+const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
+  Array.isArray(claimed) ? claimed.map((c) => ({ id: c.id, ticket: c.ticket, holder: c.holder, ownKey: c.ownKey, state: c.state, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) : null;
+const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
+  ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 
-/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
+/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust, its moved tickets and its claims; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   preferCurrent: v.preferCurrent,
   // The marker word alone, as a capture's (SMD-2891): the words are in the text.
@@ -168,16 +180,17 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
+    ...claimedFields(h),
   })),
 });
-/** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
+/** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
-  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata) })),
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h) })),
 });
-/** list_thoughts: per thought its id, date, the newer thought that supersedes it, and its trust; the page's sort and the next page's cursor (SMD-2995). */
+/** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
-  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata) })),
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
 });
@@ -513,13 +526,16 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
     const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
     // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
+    // SMD-3599: who holds a ticket it names, after the moved prefix; the holder's label never in a title.
+    const held = claimedWords(r.claimed, r.claimedMore ?? 0, 0, true);
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : r.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
     return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }),
   // …and the whole answer says so beside the results, for a surface that
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
-  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}),
+  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
@@ -556,7 +572,7 @@ function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched
 }
 
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
-  render(o.ok && ingestedNotice(o.value.metadata) ? ok({ ...o.value, title: `[ingested] ${o.value.title}`, text: `${INGESTED_NOTICE}\n\n${o.value.text}` }) : o,
+  render(o.ok ? ok(fetchedMarked(o.value)) : o,
     (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
@@ -611,6 +627,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // label, so the rank above is unchanged.
         const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
         if (moved) parts.push(`⚠ Moved since written: ${moved}`);
+        // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
+        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+        if (held) parts.push(`⚠ Claimed: ${held}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
         const captured = displayDate(t.created_at);
@@ -663,6 +682,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
+    // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
+    if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -675,7 +696,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
           : `The query is only literals and no thought contains them, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`);
     }
 
-    return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
+    return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), safeSearch);
 }
 
@@ -714,6 +735,9 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       if (by) parts.push(by);
       const notice = ingestedNotice(m);
       if (notice) parts.push(notice);
+      // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
+      const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+      if (held) parts.push(`⚠ Claimed: ${held}`);
       const topics = metaList(m.topics, TAG_MAX);
       if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
       parts.push(`\n${fenceText(t.content)}`);
@@ -729,7 +753,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -744,7 +768,9 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // An `ID:` line, the same label the two search tools print — it is what
         // update_thought and delete_thought take. This compact format has no
         // header group, so it trails the content. SMD-1248.
-        const mark = t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : "";
+        // SMD-3599: who holds a ticket it names, after the superseded mark.
+        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
         // e2e suite ([8]) matched on and a client may too.
@@ -767,7 +793,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -1769,15 +1795,92 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
 
 const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
 const holderText = (holder: string, ownKey: boolean) => ownKey ? `your own key (${oneLine(snipText(holder, 80))})` : oneLine(snipText(holder, 80));
-/** What a session of the caller's own key does about a claim its key holds under a token it does not have. */
-const OWN_KEY = "A claim by your own key is another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.";
-const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
-const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
-  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? OWN_KEY : "Leave it to its holder, or claim other work."}`;
+/**
+ * What a session of the caller's own key does about a claim its key holds: this session's own claim on overlapping
+ * work (its id in the worktree's token files — a whole-ticket claim while it claims a piece), another session of
+ * the key, or this one without its token (SMD-3654: the words gave the lost-token way to a session holding both).
+ */
+const ownKey = (mine: string) => `A claim by your own key is this session's own (its id is in your worktree's .work-claims/: ${mine}), another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.`;
+const OWN_KEY = ownKey("work under it, or release it and claim the piece");
+/** On a renewal the caller's claim lapsed and another covers its work: one of this session's own makes the lapsed one spare (review pass 1). */
+const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were renewing and delete its token file");
+/** Another claim's work and holder, its piece quoted (another key's words): the start of heldLine and sinceLine. */
+const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
+const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+/** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
+const CLAIMS_UNREAD_WHY = "The work claims on the tickets named here could not be read (for instance, a brain before migration 115, or a server role without the claims grant): a result";
+const CLAIMS_UNREAD_CHECK = "may still be claimed — check the brain's list_claims before starting work.";
+const CLAIMS_UNREAD = `⚠ ${CLAIMS_UNREAD_WHY} without a \`⚠ Claimed\` line ${CLAIMS_UNREAD_CHECK}`;
+/** The compat pair's note: their claims ride the title, not a line (review pass 3). */
+const CLAIMS_UNREAD_COMPAT = `${CLAIMS_UNREAD_WHY} whose title has no \`[claimed: …]\` ${CLAIMS_UNREAD_CHECK}`;
+/** The compat pair's (search, fetch): a title marker on each result, as `[exact match …]` is, and the words in a top-level note (review pass 2: a failed read was invisible in a title). */
+const CLAIMS_UNREAD_TITLE = "[claims not read] ";
+/** How many claims a title names: the rest counted, the field keeping all (review pass 1: ten made a title of 2 KB). */
+const CLAIMED_IN_TITLE = 2;
+/**
+ * A result's claims in words (SMD-3599), each as heldLine says a claim in the way — a lapsed one never released said
+ * so — with its label quoted and cut, the holder's words, as its piece is. A title's (`title`) say only who holds
+ * what since when, or that it lapsed: the first two, no label, which every ChatGPT surface hands the model as the
+ * result's own words. The text's state facts only; CLAIMED_KEY, once per reply, says how to read them (review pass 4).
+ * The rest past the shown counted; the tickets not read counted, with no claim shown too (review pass 1). Null when
+ * there is nothing to say.
+ */
+function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
+  const all = claimed ?? [];
+  const shown = title ? all.slice(0, CLAIMED_IN_TITLE) : all;
+  const rest = all.length - shown.length + more;
+  const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not checked: list_claims shows them` : "";
+  if (!shown.length) return title || !unread ? null : `none on the tickets read; ${unread}.`;
+  const one = (c: ClaimedOn) => {
+    // A title names no piece: the holder's words, as its label is, and a title reaches the model as the result's own (review pass 2).
+    if (title) return `${c.ticket}${c.piece ? " (a piece)" : ""} by ${holderText(c.holder, c.ownKey)}, ${c.state === "lapsed" ? `lapsed at ${c.expiresAt}` : `since ${c.claimedAt}`}`;
+    const who = heldWho({ id: c.id, issue: c.ticket, piece: c.piece, holder: c.holder, holderKind: null, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey });
+    const when = c.state === "lapsed" ? `lapsed at ${c.expiresAt}, never released` : `until ${c.expiresAt}`;
+    return `${who} since ${c.claimedAt}, ${when} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
+  };
+  const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which ${title ? "the brain's " : ""}list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
+  return title ? words : `${words}.`;
+}
+/**
+ * How to read a `⚠ Claimed` line, once per reply that shows one (review pass 4, the maintainer's call): the same text
+ * every time, its rulings keyed on facts the line states — the claim id, its holder, live or lapsed — so no reading
+ * depends on which claims a page happens to hold. Passes 1 to 3 built per-result sentences from the kinds present, and
+ * each combination left a case unsaid or misread (an own key's lapsed claim, another key's live one, a subagent's
+ * caller's). AGENTS.md's "Claim your work" rules, in words a client without it can follow.
+ */
+const CLAIMED_KEY = "How to read a `⚠ Claimed` line: a claim whose id is in your worktree's .work-claims/, or that your task names, is yours — renew a lapsed one with the token file's lease and read the renewal's reply, unless a .ended.json or .blocked.json sits beside its token file (a subagent tells its caller instead). Any other live claim holds its work, another session's of your own key included, or this one's if it lost its token: leave that work alone and tell the user its label or claim id. Any other lapsed claim, never released, may be work paused elsewhere unless its PR merged or closed (the branch in its label; with none, ask): ask the user before starting that work. A result without the line says nothing either way: check the brain's list_claims and the ticket's branches and PRs before starting work.";
+/** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
+const fetchedMarked = (v: FetchedThought): FetchedThought => {
+  const ingested = ingestedNotice(v.metadata);
+  const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
+  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) };
+};
+const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
 const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
   ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
-  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, claim it again.`;
+  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`;
+/**
+ * A renewal that revived a lapsed claim (SMD-3654): when it lapsed, and what was claimed or renewed on its work
+ * meanwhile — each claim by its work (a piece quoted, as heldLine does: another key's piece is its words, not ours),
+ * holder, times and state, never its label, the first SINCE_MAX and a count of the rest. None: said so. Unread, or
+ * whether it had lapsed unread: said so, with one check to make and what each answer means (review pass 1). The
+ * check's bound when the lease is unread is the claim's own claimedAt: no overlapping claim is made or renewed while
+ * it is live, so one after it came in a lapse (review pass 2: "your previous lease ran out" was a time nothing kept).
+ */
+const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
+  `${heldWho(c)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
+const lapseCheck = (after: string, id: string) =>
+  `list the ticket's claims with list_claims and include_ended: a claim other than this one (claim ${id}) on its work, claimed or renewed after ${after}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+const lapseText = (l: ClaimLapse | undefined, claim: WorkClaim) => {
+  if (!l) return "";
+  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck(`${claim.claimedAt}, when this claim was made`, claim.id)}`;
+  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made or renewed on its work since could not be read: ${lapseCheck(l.at, claim.id)}`;
+  if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made or renewed on its work meanwhile.`;
+  const n = l.claimedSince.length + (l.moreSince ?? 0);
+  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made or renewed on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
+};
 // 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
 // in the wrong one is masked, a cut one too.
 const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{8,}/gi, "[a work-claim token]"), 300))}`;
@@ -1800,17 +1903,19 @@ const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
-    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+  // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
+  : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
-  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "CLAIM_RELEASED" ? endedText(r)
-    : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
+    : r.code === "WORK_CLAIMED" ? `${inTheWay(r, OWN_KEY_RENEWING)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
@@ -1823,3 +1928,56 @@ export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCo
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
+
+// ── Priority assertions (SMD-3664, migration 116) ────────────────────────────
+// Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
+// null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
+
+const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
+const itemText = (i: PriorityItem) => `${i.kind} ${i.key}`;
+const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
+/** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
+const statementText = (a: PriorityAssertion) =>
+  `${levelText(a.level)}${a.dueAt ? `, due ${a.dueAt}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
+  + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
+  + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
+/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
+const historyLine = (a: PriorityAssertion) =>
+  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
+/** The item's winner after a write, to a key shown it: its own statement, another's, or none standing. */
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null) =>
+  !v.winnerShown ? ""
+  : !v.winner ? " No statement on it stands now: its priority is unknown."
+  : v.winner.id === mine ? " Yours is the item's winner."
+  : ` The item's winner is ${statementText(v.winner)}.`;
+const priorityRefusal = (r: Refusal) =>
+  r.code === "ITEM_NOT_FOUND"
+    ? r.openItem ? "Refused: open items (kind item) arrive with SMD-3665; the brain holds none yet."
+      : r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
+  : r.code === "ITEM_NOT_YOURS"
+    ? `Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since${r.dueRef ? ", and take a due time only from another such thought" : ""}.`
+  : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
+  : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not state or clear a priority.`
+  : r.code === "PRIORITY_UNATTRIBUTED"
+    ? `Refused: a capture-only key's own thoughts are known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+  : unknownRefusal(r);
+
+export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
+  v.outcome === "unchanged"
+    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id)}`
+    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id)}`,
+  priorityRefusal, AS_JSON);
+
+export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
+  v.assertion
+    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null)}`
+    : `You have no statement open on that item: nothing to clear.${winnerText(v, null)}`,
+  priorityRefusal, AS_JSON);
+
+export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
+  [
+    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}.` : "no statement stands — its priority is unknown."}`,
+    v.history.length ? `Every statement, oldest first (${v.history.length}):` : "Nobody has stated a priority on it.",
+    ...v.history.map(historyLine),
+  ].join("\n"),
+  priorityRefusal, AS_JSON);

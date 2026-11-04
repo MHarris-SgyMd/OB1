@@ -1870,6 +1870,76 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
   }
 }
 
+console.log("\n[20b] unreleasedClaimsOn reads one page's tickets at once (SMD-3599): their live claims and their lapsed, never-released ones, by ticket; not a released claim, nor another ticket's; at most `limit`");
+{
+  const actor = { name: "smd-3599-store", via: "test" } as never;
+  const made = [];
+  for (const issue of ["SMD-9330", "SMD-9331", "SMD-9332", "SMD-9333"]) made.push(await store.claimWork({ issue, actor }));
+  await store.releaseClaim({ id: String(made[3].claim?.id), token: String(made[3].token), reason: "done", actor });
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    await admin`UPDATE work_claims SET claimed_at = now() - interval '2 minutes', expires_at = now() - interval '1 minute' WHERE id = ${String(made[2].claim?.id)}::uuid`;
+  } finally { await admin.close(); }
+  const got = await store.unreleasedClaimsOn(["SMD-9330", "SMD-9332", "SMD-9333"], 100);
+  const one = await store.unreleasedClaimsOn(["SMD-9330", "SMD-9332"], 1);
+  assert(JSON.stringify(got.map((c) => [c.issue, c.state])) === '[["SMD-9330","live"],["SMD-9332","lapsed"]]' && one.length === 1 && one[0].issue === "SMD-9330",
+    `the tickets named, live and lapsed-unreleased, no released claim and no other ticket's, by ticket, at most the limit (${JSON.stringify([got.map((c) => [c.issue, c.state]), one.map((c) => c.issue)])})`);
+  // Released after, so no later section meets them (whole-branch review).
+  for (const m of made.slice(0, 3)) await store.releaseClaim({ id: String(m.claim?.id), token: String(m.token), reason: "done", actor });
+}
+
+console.log("\n[21] claimLease reads the lease a renewal starts from by its token, and renew_claim's form by the claim's id too: another claim's id with the token is no lease (SMD-3654)");
+{
+  const actor = { name: "smd-3654-store", via: "test" } as never;
+  const a = await store.claimWork({ issue: "SMD-9310", piece: "PR 1", actor });
+  const b = await store.claimWork({ issue: "SMD-9310", piece: "PR 2", actor });
+  const [aId, aToken, bId] = [String(a.claim?.id), String(a.token), String(b.claim?.id)];
+  const byToken = await store.claimLease(aToken);
+  const byBoth = await store.claimLease(aToken, aId);
+  const crossed = await store.claimLease(aToken, bId);
+  const unknown = await store.claimLease("wc_" + "0".repeat(64), aId);
+  assert(a.outcome === "claimed" && b.outcome === "claimed" && byToken?.id === aId && byToken.expiresAt === a.claim?.expiresAt && byToken.releasedAt === null
+      && byBoth?.id === aId && crossed === null && unknown === null,
+    `the lease by token, by token and id; another claim's id, or a token no claim has, reads none (${JSON.stringify([byToken, byBoth, crossed, unknown])})`);
+  // claim_work's form: whether the claim is the caller's own on exactly the work asked, by 115's cleaning and holder test (review pass 4).
+  const here = await store.claimLease(aToken, undefined, { ticket: " smd-9310 ", piece: "pr 1", name: "smd-3654-store" });
+  const otherPiece = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", piece: "PR 2", name: "smd-3654-store" });
+  const wholeTicket = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", name: "smd-3654-store" });
+  const otherKey = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", piece: "PR 1", name: "someone-else" });
+  const otherTicket = await store.claimLease(aToken, undefined, { ticket: "SMD-9399", piece: "PR 1", name: "smd-3654-store" });
+  assert(here?.ownOnThisWork === true && otherPiece?.ownOnThisWork === false && wholeTicket?.ownOnThisWork === false && otherKey?.ownOnThisWork === false && otherTicket?.ownOnThisWork === false && byToken !== null && !("ownOnThisWork" in byToken),
+    `the lease read with the work asked says whether it is the caller's own on exactly that work, as 115 cleans and tests it (${JSON.stringify([here?.ownOnThisWork, otherPiece?.ownOnThisWork, wholeTicket?.ownOnThisWork, otherKey?.ownOnThisWork, otherTicket?.ownOnThisWork])})`);
+  // claimsMadeSince reads the first `limit` and counts them all (review pass 2: every row was fetched for ten).
+  await store.releaseClaim({ id: aId, token: aToken, reason: "split", actor });
+  await store.releaseClaim({ id: bId, token: String(b.token), reason: "split", actor });
+  const whole = await store.claimWork({ issue: "SMD-9310", actor });
+  const first = await store.claimsMadeSince(String(whole.claim?.id), "2000-01-01T00:00:00Z", 1);
+  const all = await store.claimsMadeSince(String(whole.claim?.id), "2000-01-01T00:00:00Z", 10);
+  assert(whole.outcome === "claimed" && first.claims.length === 1 && first.claims[0].id === aId && first.total === 2 && all.claims.length === 2 && all.total === 2,
+    `claimsMadeSince: the first of two overlapping claims at limit 1, the total 2 (${JSON.stringify([first.claims.map((c) => c.id), first.total, all.claims.length, all.total])})`);
+  // The caller's own on this work, by agent id (review pass 5: unpinned): a claim made with an id is its key's under
+  // a new name, and under its name with the registry away (no id: ownWhileAway's case), but not another id's. A piece
+  // spelled with doubled spaces is 115's same piece; one blank once cleaned is no match, 115 refusing it.
+  const U = "11111111-2222-4333-8444-555555555555", V = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    await admin`UPDATE work_claims SET holder_agent_id = ${U}::uuid WHERE id = ${aId}::uuid`;
+    const lease = (w: { piece?: string; name: string; agentId?: string }, token = aToken) => store.claimLease(token, undefined, { ticket: "SMD-9310", ...w }).then((l) => l?.ownOnThisWork);
+    const renamed = await lease({ piece: "PR 1", name: "renamed-key", agentId: U });
+    const away = await lease({ piece: "PR 1", name: "smd-3654-store" });
+    const otherId = await lease({ piece: "PR 1", name: "smd-3654-store", agentId: V });
+    const otherName = await lease({ piece: "PR 1", name: "someone-else" });
+    const doubled = await lease({ piece: "PR  1", name: "smd-3654-store", agentId: U });
+    const wholeToken = String(whole.token);
+    const blank = await lease({ piece: "   ", name: "smd-3654-store" }, wholeToken);
+    const noPiece = await lease({ name: "smd-3654-store" }, wholeToken);
+    assert(renamed === true && away === true && otherId === false && otherName === false && doubled === true && blank === false && noPiece === true,
+      `own on this work by agent id under a new name, by name with no id, not another id's or another name's; "PR  1" is PR 1; a blank piece is no whole ticket (${JSON.stringify([renamed, away, otherId, otherName, doubled, blank, noPiece])})`);
+  } finally {
+    await admin.close();
+  }
+}
+
 await store.close();
 
 report();

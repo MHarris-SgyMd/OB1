@@ -574,9 +574,34 @@
  *      fork-checks.yml holding the required "Fork Checks passed" pending
  *      (SMD-2094). A job that calls a reusable workflow is passed over, since
  *      GitHub takes no limit there. Its probe pins what it refuses and passes
+ *  49. this file's own check numbers hold together: no number listed here
+ *      twice; every check's header (a `// ──` or `// ---- Check` separator, or
+ *      a docblock opening ` * N: `) names a listed check, a lettered sub-check
+ *      by its listed base, and every listed check has one; one check's headers
+ *      sit together, so a number with headers at two places is two checks;
+ *      every check this file cites (`check N`, `checks N, M, and K`, each
+ *      number of `N to M`, `N through M`, `N–M` or `N-M`) is listed, a lettered
+ *      one listed or headed; and every check a line's code names, its comments
+ *      aside, is its section's, so a renumber that missed a code line fails, as
+ *      does a code line the comment scan reads as all comment;
+ *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
+ *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
+ *      two took 47, within a day). Its probe pins what it refuses and passes
+ *  50. fork-checks.yml's publish-test-counts downloads the `test-counts-*`
+ *      artifacts by pattern, each into its own directory, and needs exactly
+ *      the jobs that upload one; each such job uploads one,
+ *      `test-counts-<its key>` (with a matrix, `-` and expressions naming
+ *      the job's index or each axis that varies), sets OB1_TEST_COUNTS in its
+ *      own env and uploads that file or its directory, and a job that sets
+ *      OB1_TEST_COUNTS uploads one, nothing setting or clearing it elsewhere
+ *      or naming it in a run but to read it: a counts job left out reaches
+ *      the wiki's Test-counts page only if its upload ends first, unnamed
+ *      when it does not, a need with no counts is named on every page as
+ *      having none, and a name uploaded twice fails on main alone
+ *      (SMD-3709). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44 and 48 parse YAML with Bun.YAML,
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
  * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
  */
@@ -2063,6 +2088,9 @@ const DENO_EXCEPTIONS = new Map<string, CountedException>([]);
  * (`<td>it's</td><td>{Deno.pid}</td>`) does the same — the .tsx analogue of
  * the prose hazard check 22 met — and matters only when `Deno` shares the
  * line, as does a keyword before a `/` in JSX text (`<p>default / custom</p>`).
+ * A `/` after an object literal's `}` (`{} / 2`) or after a name spelled like
+ * a keyword (`const of = 4; of / 2`) reads as a regex, and a regex after `<`
+ * (`n < /'/.source`) as a division: each hides the rest of its line (SMD-3658).
  * `blankedWithOpen` also says where a template or `${` the text ends inside
  * began, which check 42 reports rather than trusts.
  */
@@ -2073,7 +2101,8 @@ function blanked(text: string, stringsToo: boolean): string {
 /**
  * `blanked`, and where the text ends inside a template literal or `${` (-1 for none): the innermost `${` left open,
  * else the template; a reading that ran on to the end, which check 42 reports at its line rather than trusts
- * (SMD-3323). `scan`'s own `end` matters only to its recursion, so callers take this pair.
+ * (SMD-3323). `scan`'s own `end` matters only to its recursion, so callers take this pair; check 49 calls `scan` itself,
+ * for its `regexesKept`.
  */
 function blankedWithOpen(text: string, stringsToo: boolean): { out: string; openAt: number } {
   const { out, openAt } = scan(text, 0, stringsToo, false);
@@ -2082,9 +2111,10 @@ function blankedWithOpen(text: string, stringsToo: boolean): { out: string; open
 /**
  * The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where;
  * `openAt` is where the text ends inside a template or `${`: the innermost `${` left open, else the template; -1 for
- * none.
+ * none. `regexesKept` keeps a regex literal's body, which check 49 reads for the checks it names
+ * (SMD-3658).
  */
-function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number; openAt: number } {
+function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean, regexesKept = false): { out: string; end: number; openAt: number } {
   let out = "";
   let openAt = -1;
   // The last code character that is not a space, the last identifier (kept across the spaces after it) and whether it
@@ -2133,7 +2163,7 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
       while (i < text.length && text[i] !== "`") {
         if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
         if (text[i] === "$" && text[i + 1] === "{") {
-          const inner = scan(text, i + 2, stringsToo, true);
+          const inner = scan(text, i + 2, stringsToo, true, regexesKept);
           if (openAt < 0) openAt = inner.openAt >= 0 ? inner.openAt : inner.end >= text.length ? i : -1;
           out += "${" + inner.out + (inner.end < text.length ? "}" : "");
           i = inner.end + 1;
@@ -2160,7 +2190,7 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
         else if (text[j] === "/" && !inClass) { closed = true; break; }
       }
       if (closed) {
-        out += "/" + " ".repeat(j - i - 1) + "/"; i = j + 1;
+        out += "/" + (regexesKept ? text.slice(i + 1, j) : " ".repeat(j - i - 1)) + "/"; i = j + 1;
         while (i < text.length && /[a-z]/.test(text[i])) { out += " "; i++; } // the flags
         last = "/"; word = "";
         continue;
@@ -4919,7 +4949,7 @@ const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
  * skip it: publish-test-counts, on a push to main, where nothing is gated.
  */
 const CHANGES_JOB = "changes";
-const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
+const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "preflight-rest", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
 const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code != 'false') }}`;
 /**
  * The changes job as written (review pass 1): a checkout on pull requests
@@ -10496,6 +10526,473 @@ function checkJobTimeouts() {
 }
 checkJobTimeouts();
 
+// ── 49: the checks' numbers are unique, and every check cited exists (SMD-3658) ──
+/**
+ * 49: this file numbers its checks three ways — the list above ` * Run:` (` *  N. `), each check's header (a `// ──`
+ * or `// ---- Check` separator, or a docblock that opens ` * N: `) and each place it names one (`check N`, `checks N,
+ * M, and K`, `N to M`, `N through M`, `N–M` or `N-M`) — and nothing held the numbers apart. Within a day (2026-11-01
+ * and 11-02) two PRs each added a check 45, then two more each a check 47; each pair was caught only because both PRs
+ * added at the same places (the list's end, and for 47 after check 46's section too) and conflicted (SMD-3658), where
+ * placed apart they would have merged clean. So no number is listed twice; a header names listed checks (`1 + 2`
+ * names two, `16–17` each number from 16 to 17), a lettered sub-check (5b, 17a–17e) counting by its listed base; each
+ * listed check has a header; one check's headers sit within HEADER_SITE lines of each other (a separator and the
+ * docblock under it, five apart at the most today, for 16), so headers for one number further apart are two checks;
+ * each number cited is listed, a lettered one by its own header or entry (17c by its docblock), each number in a
+ * range and each letter in a lettered one (`17a–17e`). And every check a line's code names, its comments cut by the
+ * scanner `blanked` uses, regex literals kept (on each of the repo's .ts files it reads the names the TypeScript
+ * parser does; a regex after `)` it reads as a division, with the other limits its docblock gives), is its section's
+ * — the section's own number, its base, or a sub-check of it — so a renumber that moved the headers and missed a code
+ * line fails, even where the old number is still listed because another check took it: some 320 names today, all in
+ * their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and
+ * none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for each
+ * run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
+ * message (so a stale mention in a comment is not read, as comments name other checks freely), and a name in other
+ * words (`check-50`, `check #50`, a number built at runtime) is not read. It reads this file's own text, and not any
+ * other file that cites a check by number; prose that reads as a citation or a header fails loudly and is reworded,
+ * as does a numbered docblock that is no check's header. Its probe runs on small texts in the same shape.
+ */
+const HEADER_SITE = 10;
+const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
+const checkBase = (n: string) => n.replace(/[a-z]$/, "");
+/** A check cited, alone or as a list or range: `check N`, `checks N, M, and K` (or `or K`), `N to M`, `N through M`,
+ * `N–M`, `N – M`, `N-M`. */
+const CHECK_CITATION = /\bchecks? (\d+[a-z]?(?:(?:, and |, or |, | and | or | to | through | – |–|-)\d+[a-z]?)*)\b/gi;
+/** [the section, the check a line in it names, why]: code lines that name a check other than their section's. A why
+ * names no check by `check N`, which would read as a line naming it. */
+const CROSS_SECTION_MESSAGES: [string, string, string][] = [
+  ["13", "14", "deploy/.env.example missing: the message names what each reads from it, 13's _BIND knobs and 14's settings"],
+  ["14", "13", "a required knob's message sends its fix to 13's ENV_EXAMPLE_LIVE"],
+  ["19", "1", "a non-probe entry: a directory with no metadata.json is 1's to report, so 19 waits on it"],
+  ["22b", "22c", "FORK.md's heading missing: both read their history from it, and the message names both"],
+  ["26", "10", "a trust exception and its fixture name the insert 10 counts as well"],
+  ["28", "13", "the release assets' message names the env asset 13 holds"],
+  ["36", "28", "its character and tag refusals in compose.yaml are 28's rule, which its messages name"],
+  ["37", "38", "lgtm's labels, the alert rules' sha among them, are 37's: its report of their file missing is 38's, and its inline copies' failure names both"],
+];
+/** The checks a range or list names: `16–17` and `6 to 8` each number from one end to the other, `17a–17e` each letter
+ * of one number, `1 + 2` each named. */
+function namedChecks(spec: string): string[] {
+  return spec.replace(/\s+/g, " ").split(/ ?[,+] ?(?:(?:and|or) )?| (?:and|or) /).flatMap((untrimmed) => {
+    const part = untrimmed.trim();
+    const letters = part.match(/^(\d+)([a-z]) ?(?:to|through|–|-) ?(\d+)([a-z])$/);
+    if (letters && letters[1] === letters[3] && letters[4] >= letters[2]) {
+      const first = letters[2].charCodeAt(0);
+      return Array.from({ length: letters[4].charCodeAt(0) - first + 1 }, (_, k) => letters[1] + String.fromCharCode(first + k));
+    }
+    const range = part.match(/^(\d+) ?(?:to|through|–|-) ?(\d+)$/);
+    const from = range ? Number(range[1]) : NaN, to = range ? Number(range[2]) : NaN;
+    if (range && to >= from && to - from <= 100) return Array.from({ length: to - from + 1 }, (_, k) => String(from + k));
+    return part.split(/ (?:to|through) | ?[–-] ?/).map((t) => t.trim()).filter((t) => CHECK_NUMBER_WORD.test(t));
+  });
+}
+/** Each line's code: the text through `blanked`'s scanner, its comments cut and its strings, templates and regex
+ * literals kept, so a line is read for what it names as `blanked` reads it, with the limits its docblock gives. */
+const codeOf = (lines: string[]) => scan(lines.join("\n"), 0, false, false, true).out.split("\n");
+/** The checks a line's code names: a message, a const, a probe case. */
+function checksNamed(code: string): string[] {
+  return [...new Set([...code.matchAll(CHECK_CITATION)].flatMap((m) => namedChecks(m[1])))];
+}
+function checkNumberProblems(text: string, crossSection: [string, string, string][] = []): [number, string][] {
+  const lines = text.split("\n");
+  const problems: [number, string][] = [];
+  const listEnd = lines.findIndex((l) => /^ \* Run: /.test(l));
+  const listed = new Map<string, number>();
+  lines.slice(0, Math.max(listEnd, 0)).forEach((l, i) => {
+    const m = l.match(/^ \*\s{1,3}(\d+[a-z]?)\. /);
+    if (!m) return;
+    if (listed.has(m[1])) problems.push([i + 1, `the list holds check ${m[1]} twice, here and at line ${listed.get(m[1])} — two checks took one number; give the newer the next free one (SMD-3658)`]);
+    else listed.set(m[1], i + 1);
+  });
+  if (!listed.size) return [[1, "no numbered list of checks above ` * Run:` to read the numbers from (SMD-3658)"]];
+  const isListed = (n: string) => listed.has(n) || listed.has(checkBase(n));
+  const sites = new Map<string, number[]>();
+  const used = new Set<string>();
+  // A line in 17a's section is 17a's, or names 17, its base; one in 22's names 22 or a sub-check of it, 22b.
+  const owns = (section: string[], n: string) => section.some((x) => x === n || checkBase(x) === n || x === checkBase(n));
+  const code = codeOf(lines);
+  let section: string[] = [], blankedRun = false;
+  lines.forEach((l, i) => {
+    const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*(?:[+–-]|to)\s*\d+[a-z]?)*)\s*[:.]/);
+    const docblock = i > 0 && /^\/\*\*\s*$/.test(lines[i - 1]) ? l.match(/^ \* (\d+[a-z]?(?:\s*[+–-]\s*\d+[a-z]?)*): /) : null;
+    const spec = separator?.[1] ?? docblock?.[1];
+    if (spec) {
+      section = namedChecks(spec);
+      for (const n of section) (sites.get(n) ?? sites.set(n, []).get(n)!).push(i + 1);
+    } else if (/^\/\/ (?:──|----)/.test(l)) section = []; // a separator naming no check ends the section
+    // A line that opens with no comment marker but has no code is reported once for each run of them.
+    const blankedLine = l.trim() !== "" && !/^\s*(?:\/\/|\/\*|\*)/.test(l) && !code[i].trim();
+    if (blankedLine && !blankedRun) problems.push([i + 1, "a line that opens with no comment marker reads as all comment, as may lines after it — a block comment's later line wants a leading ` * `, or the comment scan misread the code above it, which would hide those lines from this check (SMD-3658)"]);
+    if (l.trim()) blankedRun = blankedLine;
+    for (const speaks of checksNamed(code[i])) {
+      if (!section.length) { problems.push([i + 1, `a line names check ${speaks} outside any check's section — move it under its check's header, give its section a check header, or reword it (SMD-3658)`]); continue; }
+      if (owns(section, speaks)) continue;
+      const allowed = crossSection.find(([s, c]) => owns(section, s) && speaks === c);
+      if (allowed) used.add(`${allowed[0]}>${allowed[1]}`);
+      else problems.push([i + 1, `a line in check ${section.join(" + ")}'s section names check ${speaks} — a renumber that moved the headers and missed this line, a line in the wrong section, or prose that reads as a citation and wants rewording; a line that means the other check goes in CROSS_SECTION_MESSAGES, with why, and a fixture builds its number (\`check \${N}\`) (SMD-3658)`]);
+    }
+  });
+  const crossAt = lines.findIndex((l) => /^const CROSS_SECTION_MESSAGES\b/.test(l)) + 1 || 1;
+  for (const [s, c] of crossSection) if (!used.has(`${s}>${c}`)) problems.push([crossAt, `CROSS_SECTION_MESSAGES names a line in check ${s}'s section naming check ${c}, and none does now — take it off (SMD-3658)`]);
+  for (const [n, at] of sites) {
+    if (!isListed(n)) problems.push([at[0], `a header names check ${n}, which the list above \` * Run:\` does not hold — list it, or give it the number its list entry holds (SMD-3658)`]);
+    const elsewhere = at.find((l) => l - at[0] > HEADER_SITE);
+    if (elsewhere !== undefined) problems.push([elsewhere, `check ${n} has a header here and another at line ${at[0]} — two checks took one number, so give the newer the next free one, or a numbered docblock or separator here (\`// ── 1. a step ──\`) is no check's header and wants rewording (SMD-3658)`]);
+  }
+  for (const [n, at] of listed) {
+    if (![...sites.keys()].some((h) => h === n || checkBase(h) === n)) problems.push([at, `the list holds check ${n}, but no header names it — open its section with a \`// ── ${n}: …\` separator or a docblock opening \` * ${n}: …\` (SMD-3658)`]);
+  }
+  // A lettered check is cited by its own header or list entry: 17c is cited as one of 17's parts only if 17c is headed.
+  const isCited = (n: string) => listed.has(n) || (listed.has(checkBase(n)) && (n === checkBase(n) || sites.has(n)));
+  lines.forEach((l, i) => {
+    for (const m of l.matchAll(CHECK_CITATION)) {
+      for (const n of namedChecks(m[1])) if (!isCited(n)) problems.push([i + 1, `cites check ${n}, which neither the list above \` * Run:\` nor a lettered header holds — a renumbered or mistyped check, or prose that reads as one and wants rewording (SMD-3658)`]);
+    }
+  });
+  return problems;
+}
+function checkCheckNumbers() {
+  const list = (...ns: string[]) => `/**\n${ns.map((n) => ` *  ${n}. a check\n`).join("")} *\n * Run: bun probe.ts\n */\n`;
+  const section = (n: string) => `\n// ── ${n}: a check ──\n/**\n * ${n}: what it holds\n */\nfunction f() {}\n`;
+  const message = (n: string) => `fail(x, "it is wrong (check ${n}, SMD-1)");\n`;
+  // A separator, then its docblock `gap` lines below it: 10 lines apart one site, 11 two, which pins HEADER_SITE at 10.
+  const site = (gap: number) => `// ── 1: a check ──\n${"\n".repeat(gap - 2)}/**\n * 1: what it holds\n */\n`;
+  const crossProbe: [string, string, string][] = [["37", "38", "the probe's own"]];
+  // [why, text, what each problem it reports says, the CROSS_SECTION_MESSAGES the case reads]: none for a pass.
+  const TWICE = "the list holds check", SITES = "has a header here and another", UNLISTED_HEADER = "a header names check", NO_HEADER = "but no header names it", UNLISTED_CITE = "a renumbered or mistyped check", WRONG_SECTION = "a renumber that moved the headers and missed this line", OUTSIDE = "outside any check's section", STALE = "and none does now", NO_LIST = "no numbered list of checks", ALL_COMMENT = "reads as all comment";
+  const cases: [string, string, string[], [string, string, string][]?][] = [
+    ["a list, a section for each, and citations of each", `${list("1", "2", "2b")}${section("1")}${section("2")}${section("2b")}// cites check ${1}, checks ${1} and ${2}, and check ${"2b"}\n`, []],
+    ["a docblock alone as a check's header", `${list("3")}/**\n * 3: what it holds\n */\n`, []],
+    ["one separator naming two checks, a range, and a range written with to", `${list("1", "2", "16", "17", "18", "20", "21")}// ── 1 + 2: both ──\n// ── 16–18: each ──\n// ── 20 to 21: each ──\n`, []],
+    ["a docblock range as a header", `${list("1", "2")}/**\n * 1–2: both\n */\n`, []],
+    ["a numbered line further down a docblock, which is no header", `${list("1")}${section("1")}/**\n * a list in prose:\n * 2: its second item\n */\n`, []],
+    ["a lettered sub-check under a listed base, headed and cited", `${list("17")}// ── 17: it ──\n/**\n * 17c: a part\n */\n// cites check ${"17c"}\n`, []],
+    ["a listed check headed by its lettered sub-checks alone", `${list("1")}/**\n * 1a: a part\n */\n`, []],
+    ["a list entry one space in", `/**\n * 1. a check\n *\n * Run: bun probe.ts\n */\n${section("1")}`, []],
+    ["a separator in another shape", `${list("47", "35", "31")}// ---- Check ${47}: it\n// ── ${35}. it\n// ── Check ${31}: it\n`, []],
+    ["a separator whose number opens no header, which ends the section", `${list("1")}${section("1")}// ── ${2} apples ──\n`, []],
+    ["a cited range whose every number is listed", `${list("1", "2", "3")}${section("1")}${section("2")}${section("3")}// see checks ${1} to ${3}\n`, []],
+    ["an entry wrapped onto a line opening with a number, which is no entry", `/**\n *  1. a check whose words wrap\n *      38. onto a line like this\n *\n * Run: bun probe.ts\n */\n${section("1")}`, []],
+    ["an entry-shaped line below the list, which is no entry", `${list("1")}/**\n *  5. a numbered note\n */\n${section("1")}`, []],
+    ["headers 10 lines apart, one site", `${list("1")}${site(10)}`, []],
+    ["each section's lines naming its own check, mid-message too", `${list("1", "2")}${section("1")}${message("1")}fail(SELF, \`check ${1} no longer finds it\`);\n${section("2")}fail(rel, "no file found — check ${2} reads each one");\n`, []],
+    ["a line naming its base in a lettered section, and a sub-check in its base's", `${list("22", "22b")}${section("22")}fail(rel, "see check ${"22b"}");\n${section("22b")}fail(rel, "check ${22} said it");\n`, []],
+    ["other checks named in a comment line and in a comment trailing code", `${list("1", "2")}${section("1")}// as \`check ${2}\` reads it\nconst x = 1; // check ${2} reads it too\n${section("2")}`, []],
+    ["a line for another check a cross-section entry names", `${list("37", "38")}${section("37")}${message("38")}${section("38")}`, [], crossProbe],
+    ["a number listed twice", `${list("1", "1")}${section("1")}`, [TWICE]],
+    ["a lettered number listed twice", `${list("2", "2b", "2b")}${section("2")}${section("2b")}`, [TWICE]],
+    ["no list", `${section("1")}`, [NO_LIST]],
+    ["headers 11 lines apart, two sites", `${list("1")}${site(11)}`, [SITES]],
+    ["a header naming a check the list lacks", `${list("1")}${section("1")}${section("2")}`, [UNLISTED_HEADER]],
+    ["a header range reaching a check the list lacks", `${list("16", "18")}// ── 16–18: each ──\n`, [UNLISTED_HEADER]],
+    ["a listed check with no header", `${list("1", "2")}${section("1")}`, [NO_HEADER]],
+    ["a citation of a check the list lacks", `${list("1")}${section("1")}// see check ${99}\n`, [UNLISTED_CITE]],
+    ["a capitalised citation of a check the list lacks, and a capitalised list", `${list("1")}${section("1")}// Check ${99} reads it; Checks ${1} and ${98} too\n`, [UNLISTED_CITE, UNLISTED_CITE]],
+    ["prose with check inside a word, or a number run into letters, which is no citation", `${list("1")}${section("1")}// a precheck ${99} pass; a check ${"5bs"} label\n`, []],
+    ["a citation of a lettered check no header holds", `${list("22", "22b")}${section("22")}${section("22b")}// see check ${"22d"}\n`, [UNLISTED_CITE]],
+    ["a citation of one listed and one not, with and, or, and an Oxford or", `${list("1", "3")}${section("1")}${section("3")}// checks ${1} and ${98}; checks ${1} or ${97}; checks ${1}, ${3}, or ${96}\n`, [UNLISTED_CITE, UNLISTED_CITE, UNLISTED_CITE]],
+    ["a cited range with a number the list lacks, in each range form", `${list("1", "3")}${section("1")}${section("3")}// checks ${1} to ${3}; checks ${1}-${3}; checks ${1}–${3}; checks ${1} – ${3}; checks ${1} through ${3}\n`, [UNLISTED_CITE, UNLISTED_CITE, UNLISTED_CITE, UNLISTED_CITE, UNLISTED_CITE]],
+    ["a wide cited range, each number of it read", `${list("1", "9")}${section("1")}${section("9")}// see checks ${1} to ${9}\n`, Array(7).fill(UNLISTED_CITE)],
+    ["a list with an Oxford comma naming a check the list lacks", `${list("1", "3")}${section("1")}${section("3")}// see checks ${1}, ${3}, and ${2}\n`, [UNLISTED_CITE]],
+    ["a (check N, SMD-…) message naming another listed check", `${list("1", "2")}${section("1")}${message("2")}${section("2")}`, [WRONG_SECTION]],
+    ["a message naming another listed check mid-message", `${list("1", "2")}${section("1")}fail(rel, 'no file found — check ${2} reads each one');\n${section("2")}`, [WRONG_SECTION]],
+    ["a message naming its own check, then another", `${list("1", "2")}${section("1")}fail(rel, "check ${1} holds it, as check ${2} says");\n${section("2")}`, [WRONG_SECTION]],
+    ["a message naming a sibling sub-check", `${list("22", "22b", "22c")}${section("22")}${section("22b")}fail(rel, "check ${"22c"}'s pattern (its own probe)");\n${section("22c")}`, [WRONG_SECTION]],
+    ["a line after a separator naming no check", `${list("1")}${section("1")}\n// ── shared helpers ──\n${message("1")}`, [OUTSIDE]],
+    ["a line after a ---- separator naming no check", `${list("1")}${section("1")}\n// ---- shared helpers ----\n${message("1")}`, [OUTSIDE]],
+    ["a cross-section entry's check named in another section", `${list("35", "37", "38")}${section("35")}${message("38")}${section("37")}${message("38")}${section("38")}`, [WRONG_SECTION], crossProbe],
+    ["another check named in the cross-section entry's section", `${list("37", "38", "39")}${section("37")}${message("38")}${message("39")}${section("38")}${section("39")}`, [WRONG_SECTION], crossProbe],
+    ["a cross-section entry no line needs", `${list("1")}${section("1")}`, [STALE], crossProbe],
+    ["one entry used and one stale", `${list("37", "38")}${section("37")}${message("38")}${section("38")}`, [STALE], [...crossProbe, ["1", "2", "the probe's stale one"]]],
+    ["a sub-check of a cross-section entry's check, which the entry does not name", `${list("37", "38", "38b")}${section("37")}${message("38")}${message("38b")}${section("38")}${section("38b")}`, [WRONG_SECTION], crossProbe],
+    ["comments naming another check: a trailing one holding quotes, a block line, a docblock line", `${list("1", "2")}${section("1")}const x = 1; // the \`_BIND\` knob "check ${2}" reads\n/* as check ${2} reads it */\n/**\n * as check ${2} reads it\n */\n${section("2")}`, []],
+    ["a // in a string, double- or single-quoted, before a mention of another check", `${list("1", "2")}${section("1")}fail(rel, "a // b — check ${2}");\nfail(rel, 'a // b — check ${2}');\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["an escaped quote, then a // still in the string, before a mention", `${list("1", "2")}${section("1")}fail(rel, "a \\" // b — check ${2}");\n${section("2")}`, [WRONG_SECTION]],
+    ["a regex ending in an escaped slash, its // no comment, before a mention", `${list("1", "2")}${section("1")}if (/^\\/\\//.test(x)) fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a mention after an inline block comment", `${list("1", "2")}${section("1")}/* a note */ fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a template's later line opening with *, naming another check", `${list("1", "2")}${section("1")}const t = \`a\n * check ${2} reads it\`;\n${section("2")}`, [WRONG_SECTION]],
+    ["a list of checks on a code line, its second another's", `${list("1", "2")}${section("1")}fail(rel, "checks ${1} and ${2} read it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a lettered cited range, each letter of it read", `${list("17")}// ── 17: it ──\n/**\n * 17a: a part\n */\n/**\n * 17c: a part\n */\n// see checks ${"17a"}–${"17c"}\n`, [UNLISTED_CITE]],
+    ["a range past the bound, read at its ends", `${list("1")}${section("1")}// see checks ${1} to ${1000}\n`, [UNLISTED_CITE]],
+    ["a wrong-section line, reported at its line", `${list("1", "2")}${section("1")}\nfail(rel, "check ${2} said it ← here");\n${section("2")}`, [WRONG_SECTION]],
+    ["an unlisted citation, reported at its line", `${list("1")}${section("1")}\n\n// see check ${99} ← here\n`, [UNLISTED_CITE]],
+    ["a number listed twice, reported at the second entry", `/**\n *  1. a check\n *  1. again ← here\n *\n * Run: bun probe.ts\n */\n${section("1")}`, [TWICE]],
+    ["a regex class holding /*, then a mention", `${list("1", "2")}${section("1")}const c = /[ /*?]/; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a template's later line holding /* and //, then a mention", `${list("1", "2")}${section("1")}const t = \`a\n  docs /* or docs // b — check ${2} reads it\`;\n${section("2")}`, [WRONG_SECTION]],
+    ["comments the scanner cuts: after a regex with a quote, after a template's close, inline, and unspaced", `${list("1", "2")}${section("1")}if (/^["']/.test(x)) y = 1; // as check ${2} reads it\nconst t = \`a\n  b\`; // check ${2} reads the same\nf(/* check ${2} reads it */ 1);// check ${2} too\n${section("2")}`, []],
+    ["a brace closing inside a ${, then a quoted backtick and a comment", `${list("1", "2")}${section("1")}const n = \`a \${{ k: 1 }.k + "\`"} b\`; // check ${2} reads it\n${section("2")}`, []],
+    ["an escaped backtick in a template holding /*, then a mention", `${list("1", "2")}${section("1")}const t = \`a \\\` /* b\`; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a division, then a comment", `${list("1", "2")}${section("1")}const r = a / b; // check ${2} reads it\n${section("2")}`, []],
+    ["a regex class holding slashes, then a mention", `${list("1", "2")}${section("1")}const c = /[///]/; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a regex after return holding a quote, then single-quoted strings and a comment", `${list("1", "2")}${section("1")}function z() { return /'/.test(x) ? 'a' : 'b'; } // check ${2} reads it\n${section("2")}`, []],
+    ["a division after a non-null inside a ${, a template after it, then a mention", `${list("1", "2")}${section("1")}function g() {\n  const m = \`\${(hits.get(k)! / n).toFixed(2)} of docs/x\`;\n}\nconst a = \`x\`;\nfail(rel, \`see http://x — check ${2}\`);\n${section("2")}`, [WRONG_SECTION]],
+    ["a division after a postfix ++ or a member named like a keyword, then a string's //", `${list("1", "2")}${section("1")}const h = i++ / n; fail(rel, "a/b at http://x — check ${2}");\nconst y = x.in / n; fail(rel, "a/b http://x — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["a regex literal naming another check, and one inside a ${", `${list("1", "2")}${section("1")}const r = /check ${2} reads/;\nconst t = \`\${/check ${2} too/.source}\`;\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["a header range written with spaces round its dash", `${list("16", "17", "18")}// ── 16  –  18: each ──\n`, []],
+    ["headers each within 10 lines of the last but 18 from the first, two sites", `${list("1")}// ── 1: a ──\n${"\n".repeat(7)}/**\n * 1: b\n */\n${"\n".repeat(6)}/**\n * 1: c ← here\n */\n`, [SITES]],
+    ["a run of lines reading as all comment with a blank line in it, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n\n   and on */\n`, [ALL_COMMENT]],
+    ["two runs of lines reading as all comment, code between", `${list("1")}${section("1")}/* a note\n   that runs on ← here */\nconst x = 1;\n/* another\n   on ← here */\n`, [ALL_COMMENT, ALL_COMMENT]],
+    ["a template holding a // and an apostrophe in a double-quoted string, then mentions", `${list("1", "2")}${section("1")}fail(rel, \`a // b — check ${2}\`);\nfail(rel, "it's // a — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+  ];
+  // A case whose text marks lines `← here` reports its problems at those lines, in order.
+  const wrong = cases.map(([why, text, says, cross]) => {
+    const problems = checkNumberProblems(text, cross ?? []);
+    const here = text.split("\n").flatMap((l, k) => (l.includes("← here") ? [k + 1] : []));
+    return { why, says, here, got: problems.map((p) => p[1]), at: problems.map((p) => p[0]) };
+  }).filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)) || (c.here.length > 0 && c.at.join() !== c.here.join()));
+  if (wrong.length) fail(SELF, `check 49 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-3658)`);
+  for (const [line, msg] of checkNumberProblems(readFileSync(join(ROOT, SELF), "utf8"), CROSS_SECTION_MESSAGES)) fail(`${SELF}:${line}`, `${msg.replace(/ \(SMD-3658\)$/, "")} (check 49, SMD-3658)`);
+}
+checkCheckNumbers();
+
+// ── 50: publish-test-counts needs exactly the jobs that upload suite counts (SMD-3709) ──
+/**
+ * 50: publish-test-counts (SMD-3614) downloads every `test-counts-*` artifact and writes the wiki's Test-counts page
+ * once the jobs it needs have ended. A job that uploads counts but is not among its needs races it: its rows reach the
+ * page only if its upload ends before the download, and the page, which names the needed jobs that reported nothing,
+ * does not name it. A need that uploads no counts is named on every page as a job that reported none. And a job
+ * uploads no counts unless it sets OB1_TEST_COUNTS, where report() in db/test-support.ts appends each suite run's
+ * line, and uploads that file or its directory. So in fork-checks.yml:
+ * - publish-test-counts downloads `test-counts-*` by its pattern alone (no `name:`, which download-artifact takes
+ *   instead), each artifact into its own directory (no merge-multiple, which puts them in one, where files of one
+ *   name overwrite each other);
+ * - its needs are exactly the jobs with an actions/upload-artifact step whose `name` starts `test-counts-`;
+ * - such a job has one such step, named `test-counts-<its key>`, or with a matrix `test-counts-<its key>-` and
+ *   expressions naming the job's index or each axis that varies (an include-only matrix's keys that differ between
+ *   its entries), so no two of its jobs upload one name, the second of which fails, and only on a push to main;
+ * - it sets OB1_TEST_COUNTS in its own env and uploads that file or its directory, the paths compared as written;
+ * - a job that sets OB1_TEST_COUNTS uploads counts, and nothing sets or clears it in the workflow's env or a step's,
+ *   nor names it in a run but to read it (`$OB1_TEST_COUNTS`, `${…}`, `env.…`, so a read in another language is
+ *   refused too; `#` lines aside), which this check does not read.
+ * Not read: a name built wholly by an expression, an upload's `if:`, the download's `path:` against the directory the
+ * page is read from, a matrix's include entries beside its axes, a matrix job's counts name equal to another job's,
+ * and a set through JavaScript's `process.env.OB1_TEST_COUNTS`: the page names a needed job that succeeded and sent
+ * no counts, and a second upload of one name fails at upload. Its probe pins what it refuses and passes.
+ */
+const COUNTS_PUBLISHER = "publish-test-counts";
+const COUNTS_ENV = "OB1_TEST_COUNTS";
+const COUNTS_ARTIFACT = "test-counts-";
+const COUNTS_BY_INDEX = "${{ strategy.job-index }}";
+type CountsJob = { needs?: unknown; env?: unknown; steps?: unknown; strategy?: unknown };
+/** A YAML value read as a mapping, or null when it is not one. */
+const mapping = (v: unknown): Record<string, unknown> | null => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
+/** A job's steps that use the action `action` (`actions/upload-artifact`, say), each with its `with:` map. */
+function stepsUsing(job: CountsJob, action: string): Record<string, unknown>[] {
+  return (Array.isArray(job.steps) ? job.steps : []).flatMap((s) => {
+    const step = s as { uses?: unknown; with?: unknown } | null;
+    return typeof step?.uses === "string" && step.uses.startsWith(`${action}@`) ? [mapping(step.with) ?? {}] : [];
+  });
+}
+/**
+ * A written-out matrix's axes that vary: those with more than one value (include and exclude are not axes), or, in a
+ * matrix of include entries alone, each key whose value differs between them. Null for a matrix built by an expression.
+ */
+function matrixAxes(matrix: unknown): string[] | null {
+  const m = mapping(matrix);
+  if (!m) return null;
+  const axes = Object.entries(m).filter(([k, v]) => k !== "include" && k !== "exclude" && !(Array.isArray(v) && v.length < 2)).map(([k]) => k);
+  if (Object.keys(m).some((k) => k !== "include" && k !== "exclude")) return axes;
+  const entries = (Array.isArray(m.include) ? m.include : []).map(mapping).filter((e): e is Record<string, unknown> => e !== null);
+  return [...new Set(entries.flatMap(Object.keys))].filter((k) => new Set(entries.map((e) => JSON.stringify(e[k] ?? null))).size > 1);
+}
+/** The name a matrix job's counts take: its key, then an expression naming each axis that varies, or the job's index. */
+function matrixCountsName(key: string, matrix: unknown): string {
+  const axes = matrixAxes(matrix);
+  return `${COUNTS_ARTIFACT}${key}-${axes?.length ? axes.map((a) => "${{ matrix." + a + " }}").join("-") : COUNTS_BY_INDEX}`;
+}
+/** Whether a matrix job's counts name is its own in each job of the matrix: its key, then expressions naming the job's index or each axis that varies (an expression reads a name in any case). */
+function matrixNameHolds(key: string, matrix: unknown, name: string): boolean {
+  if (!name.startsWith(`${COUNTS_ARTIFACT}${key}-`)) return false;
+  const expressions = [...name.matchAll(/\$\{\{(.*?)\}\}/g)].map((m) => m[1].toLowerCase()).join(" ");
+  if (/(?<![\w.])strategy\.job-index\b/.test(expressions)) return true;
+  const named = new Set([...expressions.matchAll(/(?<![\w.])matrix\.([\w-]+)/g)].map((m) => m[1]));
+  return named.size > 0 && (matrixAxes(matrix) ?? []).every((a) => named.has(a.toLowerCase()));
+}
+/** A run's line, a `#` line aside, that names OB1_TEST_COUNTS but as a read: a set, an unset (`env -u` glued to it too), a `$GITHUB_ENV` line, a read in another language, or a word for it. */
+const NAMES_COUNTS = new RegExp(`(?:(?<![$\\w{.])|(?<=\\s-u))${COUNTS_ENV}\\b`);
+const namesCountsInRun = (run: string) => run.split("\n").some((l) => !l.trim().startsWith("#") && NAMES_COUNTS.test(l));
+function testCountsProblems(text: string): string[] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [`does not parse: ${(e as Error).message} — check 50 cannot read which jobs upload suite counts (SMD-3709)`]; }
+  const jobs = mapping(mapping(doc)?.jobs);
+  if (!jobs) return ["has no `jobs:` map check 50 can read (SMD-3709)"];
+  const all = Object.entries(jobs).filter((e): e is [string, CountsJob] => mapping(e[1]) !== null);
+  const publisher = all.find(([key]) => key === COUNTS_PUBLISHER)?.[1];
+  if (!publisher) return [`has no job ${COUNTS_PUBLISHER}, which gathers the ${COUNTS_ARTIFACT}* artifacts into the wiki's Test-counts page — check 50 holds its needs to the jobs that upload them (SMD-3709)`];
+  const problems: string[] = [];
+  const downloads = stepsUsing(publisher, "actions/download-artifact").filter((w) => w.pattern === `${COUNTS_ARTIFACT}*`);
+  if (!downloads.length) problems.push(`job ${COUNTS_PUBLISHER} has no actions/download-artifact step with pattern ${COUNTS_ARTIFACT}*, so the counts the jobs upload never reach the page — download them by that pattern (check 50, SMD-3709)`);
+  for (const w of downloads) {
+    if (w.name !== undefined) problems.push(`job ${COUNTS_PUBLISHER} downloads the counts naming ${JSON.stringify(w.name)}, and download-artifact then takes that one artifact, its pattern ignored — drop the name (check 50, SMD-3709)`);
+    const merge = w["merge-multiple"];
+    if (merge !== undefined && merge !== false && String(merge).toLowerCase() !== "false") problems.push(`job ${COUNTS_PUBLISHER} downloads the counts with merge-multiple, into one directory where the jobs' files of one name overwrite each other — leave it unset, since .github/ci/test-counts-page.ts reads each artifact's own directory (check 50, SMD-3709)`);
+  }
+  if (mapping(mapping(doc)?.env)?.[COUNTS_ENV] !== undefined) problems.push(`sets ${COUNTS_ENV} in the workflow's env, which this check does not read — move it to each counts job's own env:, beside the upload that takes it (check 50, SMD-3709)`);
+  const needs = typeof publisher.needs === "string" ? [publisher.needs] : Array.isArray(publisher.needs) ? publisher.needs.filter((n): n is string => typeof n === "string") : [];
+  const counted = new Set<string>();
+  for (const [key, job] of all) {
+    const uploads = stepsUsing(job, "actions/upload-artifact").filter((w) => typeof w.name === "string" && w.name.startsWith(COUNTS_ARTIFACT));
+    const counts = mapping(job.env)?.[COUNTS_ENV];
+    const matrix = mapping(job.strategy)?.matrix;
+    const want = matrix ? matrixCountsName(key, matrix) : `${COUNTS_ARTIFACT}${key}`;
+    // A counts job: one that uploads counts or sets OB1_TEST_COUNTS, so it keeps the variable in its own env.
+    const countsJob = uploads.length > 0 || counts !== undefined;
+    const instead = countsJob ? "set it in the job's own env: alone" : "a job that uploads no counts sets it nowhere";
+    for (const s of Array.isArray(job.steps) ? job.steps : []) {
+      const step = mapping(s);
+      if (mapping(step?.env)?.[COUNTS_ENV] !== undefined) problems.push(`job ${key} sets or clears ${COUNTS_ENV} in a step's env, which this check does not read (a suite a test spawns adds a row of its own, or none when its line repeats one, so no step need clear it) — ${instead} (check 50, SMD-3709)`);
+      if (typeof step?.run === "string" && namesCountsInRun(step.run)) problems.push(`job ${key} names ${COUNTS_ENV} in a step's run other than as $${COUNTS_ENV}, \${${COUNTS_ENV}…} or env.${COUNTS_ENV}: a set, an unset, a $GITHUB_ENV line, a read in another language or a word for it, which this check does not read — ${instead}, and write the word otherwise (check 50, SMD-3709)`);
+    }
+    if (countsJob) counted.add(key);
+    if (!uploads.length) {
+      if (counts !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} but uploads no ${COUNTS_ARTIFACT}… artifact, so its suites' counts never reach the page — upload that file or its directory with actions/upload-artifact, named ${want} (a name built wholly by an expression is not read)${needs.includes(key) ? "" : `, and add the job to ${COUNTS_PUBLISHER}' needs`}, or drop the variable from a job that runs no suites (check 50, SMD-3709)`);
+      continue;
+    }
+    const name = uploads[0].name as string;
+    if (!needs.includes(key)) problems.push(`job ${key} uploads ${name} but ${COUNTS_PUBLISHER} does not need it, so its rows reach the page only if its upload ends before the download, and the page does not say they are missing — add it to ${COUNTS_PUBLISHER}' needs (check 50, SMD-3709)`);
+    if (uploads.length > 1) { problems.push(`job ${key} uploads ${uploads.length} ${COUNTS_ARTIFACT}… artifacts, where one holds its counts: ${COUNTS_PUBLISHER} downloads each, .github/ci/test-counts-page.ts fails on a line that is not a count, and two of one name fail at upload — keep the one that uploads its ${COUNTS_ENV} file or directory, and drop any other or name it outside ${COUNTS_ARTIFACT} (check 50, SMD-3709)`); continue; }
+    if (matrix ? !matrixNameHolds(key, matrix, name) : name !== want) problems.push(matrix
+      ? `job ${key} uploads ${name}, which is not its own in each job of its matrix — name it ${want}, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`
+      : `job ${key} uploads ${name}, not ${want} — name each job's counts after its key, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`);
+    if (typeof counts !== "string" || !counts) { problems.push(`job ${key} uploads ${name} but sets no ${COUNTS_ENV} in its own env:, the file report() in db/test-support.ts appends its suites' counts to, which this check reads there alone — set it there, to the file the job uploads or a file directly in the directory it uploads (check 50, SMD-3709)`); continue; }
+    const paths = typeof uploads[0].path === "string" ? uploads[0].path.split("\n").map((p) => p.trim().replace(/\/+$/, "")) : [];
+    if (!paths.includes(counts) && !paths.includes(posix.dirname(counts))) problems.push(`job ${key} uploads ${name} from ${JSON.stringify(uploads[0].path ?? null)}, which, compared as written, is neither its ${COUNTS_ENV}, ${counts}, nor that file's directory, so this check cannot tell the artifact holds its counts — upload ${posix.dirname(counts)}/ (check 50, SMD-3709)`);
+  }
+  // A need that sets OB1_TEST_COUNTS but uploads nothing has its message above, which says to upload.
+  for (const n of needs) if (!counted.has(n)) problems.push(`job ${COUNTS_PUBLISHER} needs ${n}, which uploads no ${COUNTS_ARTIFACT}… artifact, so every page names it as a job that reported no counts — its needs are the jobs that upload them (check 50, SMD-3709)`);
+  return problems;
+}
+function checkTestCountsPublished() {
+  const ENV = "    env:\n      OB1_TEST_COUNTS: /tmp/c/counts.jsonl\n", EMPTY = "    env:\n      OB1_TEST_COUNTS: \"\"\n";
+  const MATRIX = "    strategy:\n      matrix:\n        shard: [x, y]\n", SHARD = "${{ matrix.shard }}";
+  const MATRIX2 = "    strategy:\n      matrix:\n        shard: [x, y]\n        pg: [16, 17]\n        os: [linux]\n";
+  const INCLUDE = (...entries: string[]) => `    strategy:\n      matrix:\n        include:\n${entries.map((e) => `          - ${e}\n`).join("")}`;
+  const UPLOAD = (name: string, path = "/tmp/c/") => `      - uses: actions/upload-artifact@v7\n        with:\n          name: ${name}\n          path: ${path}\n`;
+  // A job that runs suites: `env` and `job` (lines at its keys' indent), `steps` before its upload, the upload's name and path.
+  const counts = (key: string, o: { env?: string; job?: string; steps?: string; name?: string; path?: string } = {}) =>
+    `  ${key}:\n    runs-on: ubuntu-24.04\n${o.env ?? ENV}${o.job ?? ""}    steps:\n      - run: bun test.ts\n${o.steps ?? ""}${UPLOAD(o.name ?? `test-counts-${key}`, o.path)}`;
+  const publish = (needs: string, download = "          pattern: test-counts-*\n") =>
+    `  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: ${needs}\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n${download}`;
+  const plain = (key: string, steps: string, env = "") => `  ${key}:\n    runs-on: ubuntu-24.04\n${env}    steps:\n${steps}`;
+  const run = (text: string) => `      - run: |\n${text.split("\n").map((l) => `          ${l}\n`).join("")}`;
+  const lint = plain("lint", "      - run: x\n");
+  const wf = (...jobs: string[]) => `name: probe\non: push\njobs:\n${jobs.join("")}`;
+  // What each refusal says, naming its job, as a probe case expects it: each runs to its advice where one can go wrong.
+  const notNeeded = (k: string, name = `test-counts-${k}`) => `job ${k} uploads ${name} but publish-test-counts does not need it, so its rows reach the page only if its upload ends before the download, and the page does not say they are missing — add it to publish-test-counts' needs (`;
+  const noEnv = (k: string, name = `test-counts-${k}`) => `job ${k} uploads ${name} but sets no OB1_TEST_COUNTS in its own env:, the file report() in db/test-support.ts appends its suites' counts to, which this check reads there alone — set it there, to the file the job uploads or a file directly in the directory it uploads (`;
+  const noUpload = (k: string, want = `test-counts-${k}`, needed = true) => `job ${k} sets OB1_TEST_COUNTS but uploads no test-counts-… artifact, so its suites' counts never reach the page — upload that file or its directory with actions/upload-artifact, named ${want} (a name built wholly by an expression is not read)${needed ? "" : ", and add the job to publish-test-counts' needs"}, or drop the variable from a job that runs no suites (`;
+  const extra = (n: string) => `job publish-test-counts needs ${n}, which uploads no test-counts-… artifact, so every page names it as a job that reported no counts — its needs are the jobs that upload them (`;
+  const inRun = (k: string, uploads = true) => `job ${k} names OB1_TEST_COUNTS in a step's run other than as $OB1_TEST_COUNTS, \${OB1_TEST_COUNTS…} or env.OB1_TEST_COUNTS: a set, an unset, a $GITHUB_ENV line, a read in another language or a word for it, which this check does not read — ${uploads ? "set it in the job's own env: alone" : "a job that uploads no counts sets it nowhere"}, and write the word otherwise (`;
+  const inStep = (k: string, uploads = true) => `job ${k} sets or clears OB1_TEST_COUNTS in a step's env, which this check does not read (a suite a test spawns adds a row of its own, or none when its line repeats one, so no step need clear it) — ${uploads ? "set it in the job's own env: alone" : "a job that uploads no counts sets it nowhere"} (`;
+  const unread = (k: string, name: string, want: string) => `job ${k} uploads ${name}, which is not its own in each job of its matrix — name it ${want}, since upload-artifact fails a second upload of one name, and only on a push to main (`;
+  const misnamed = (k: string, name: string) => `job ${k} uploads ${name}, not test-counts-${k} — name each job's counts after its key, since upload-artifact fails a second upload of one name, and only on a push to main (`;
+  const DOWNLOAD = "job publish-test-counts has no actions/download-artifact step with pattern test-counts-*, so the counts the jobs upload never reach the page — download them by that pattern (";
+  const MERGED = "job publish-test-counts downloads the counts with merge-multiple, into one directory where the jobs' files of one name overwrite each other — leave it unset, since .github/ci/test-counts-page.ts reads each artifact's own directory (";
+  const WORKFLOW_ENV = "sets OB1_TEST_COUNTS in the workflow's env, which this check does not read — move it to each counts job's own env:, beside the upload that takes it (";
+  const TWICE = (n: number) => `job a uploads ${n} test-counts-… artifacts, where one holds its counts: publish-test-counts downloads each, .github/ci/test-counts-page.ts fails on a line that is not a count, and two of one name fail at upload — keep the one that uploads its OB1_TEST_COUNTS file or directory, and drop any other or name it outside test-counts- (`;
+  // Each a run that sets or clears OB1_TEST_COUNTS, or names it as a word, one to a step.
+  const SETS = ["OB1_TEST_COUNTS= bun x.ts", "if true; then\n  OB1_TEST_COUNTS= bun x.ts\nfi", "DATABASE_URL=x OB1_TEST_COUNTS= bun x.ts", "unset -v OB1_TEST_COUNTS", "env --unset=OB1_TEST_COUNTS bun x.ts",
+    "export -n OB1_TEST_COUNTS", "declare -x OB1_TEST_COUNTS=/tmp/x", "echo \"OB1_TEST_COUNTS=/tmp/d/counts.jsonl\" >> \"${GITHUB_ENV}\"",
+    "{\n  echo 'OB1_TEST_COUNTS<<EOF'\n  echo /tmp/d/counts.jsonl\n  echo EOF\n} >> \"$GITHUB_ENV\"", "python -c \"import os; del os.environ['OB1_TEST_COUNTS']\"", "echo \"OB1_TEST_COUNTS=$OB1_TEST_COUNTS\"",
+    "env -uOB1_TEST_COUNTS bun x.ts", "OB1_TEST_COUNTS= bun x.ts  # rerun without counts"];
+  // [why, text, what each problem it reports says]: none for a pass, one phrase per problem, in order.
+  const cases: [string, string, string[]][] = [
+    ["two counts jobs, both needed", wf(counts("a"), counts("b"), publish("[a, b]")), []],
+    ["needs written as one name", wf(counts("a"), publish("a")), []],
+    ["a matrix job's name, its key and an expression", wf(counts("a", { job: MATRIX, name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["a matrix job named by both axes that vary, in any case", wf(counts("a", { job: MATRIX2, name: "test-counts-a-${{ matrix.Shard }}-${{ matrix.pg }}" }), publish("[a]")), []],
+    ["a matrix job named by its index", wf(counts("a", { job: MATRIX2, name: `test-counts-a-${COUNTS_BY_INDEX}` }), publish("[a]")), []],
+    ["a matrix job named through format()", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ format('{0}', matrix.shard) }}" }), publish("[a]")), []],
+    ["a matrix whose axes are written with -, _ and digits", wf(counts("a", { job: "    strategy:\n      matrix:\n        node-version: [20, 22]\n        pg_major: [16, 17]\n        os2: [a, b]\n", name: "test-counts-a-${{ matrix.node-version }}-${{ matrix.pg_major }}-${{ matrix.os2 }}" }), publish("[a]")), []],
+    ["a matrix whose axis is written in capitals", wf(counts("a", { job: "    strategy:\n      matrix:\n        Shard: [x, y]\n", name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["a matrix whose include and exclude are not axes", wf(counts("a", { job: `${MATRIX2}        include:\n          - shard: z\n          - shard: w\n        exclude:\n          - shard: x\n          - pg: 16\n`, name: "test-counts-a-${{ matrix.shard }}-${{ matrix.pg }}" }), publish("[a]")), []],
+    ["a matrix job's name with text between its key and its expression", wf(counts("a", { job: MATRIX, name: `test-counts-a-x${SHARD}` }), publish("[a]")), []],
+    ["a one-job matrix whose include entries add keys, which are not read as axes", wf(counts("a", { job: "    strategy:\n      matrix:\n        os: [linux]\n        include:\n          - extra: a\n          - extra: b\n", name: "test-counts-a-${{ matrix.os }}" }), publish("[a]")), []],
+    ["an include-only matrix named by the key that differs", wf(counts("a", { job: INCLUDE("{ shard: a, pg: 17 }", "{ shard: b, pg: 17 }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["a matrix built by an expression, its name an axis", wf(counts("a", { job: "    strategy:\n      matrix: ${{ fromJSON(needs.m.outputs.m) }}\n", name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["a strategy with no matrix, its name the plain one", wf(counts("a", { job: "    strategy:\n      fail-fast: false\n" }), publish("[a]")), []],
+    ["the counts file uploaded by its own path", wf(counts("a", { path: "/tmp/c/counts.jsonl" }), publish("[a]")), []],
+    ["the counts directory among other paths, indented as written", wf(counts("a", { path: "|\n            /tmp/logs\n              /tmp/c" }), publish("[a]")), []],
+    ["a job that runs no suites, left out", wf(counts("a"), lint, publish("[a]")), []],
+    ["two counts jobs whose keys extend one another", wf(counts("a"), counts("a-x"), publish("[a, a-x]")), []],
+    ["another artifact from a job that sets no counts", wf(counts("a"), counts("b", { env: "", name: "logs-b" }), publish("[a]")), []],
+    ["an artifact whose name holds the prefix after its start", wf(counts("a"), counts("b", { env: "", name: "old-test-counts-b" }), publish("[a]")), []],
+    ["uploads with no name, or no with:", wf(counts("a"), plain("b", "      - uses: actions/upload-artifact@v7\n        with:\n          path: /tmp/logs\n      - uses: actions/upload-artifact@v7\n"), publish("[a]")), []],
+    ["a job that downloads one job's counts", wf(counts("a"), plain("read", "      - uses: actions/download-artifact@v8\n        with:\n          name: test-counts-a\n"), publish("[a]")), []],
+    ["the merge sub-action, which re-uploads lines the page reads once", wf(counts("a"), plain("merge", "      - uses: actions/upload-artifact/merge@v7\n        with:\n          name: test-counts-all\n          pattern: test-counts-*\n"), publish("[a]")), []],
+    ["a reusable-workflow job, left out", wf(counts("a"), "  reuse:\n    uses: ./.github/workflows/x.yml\n", publish("[a]")), []],
+    ["a job with no body, and a step with none", wf(counts("a"), "  stray:\n", plain("b", "      -\n"), publish("[a]")), []],
+    ["a download that leaves merge-multiple false, in either case", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n          merge-multiple: \"False\"\n")), []],
+    ["runs that read OB1_TEST_COUNTS, say it in a # line, or name its neighbours", wf(counts("a", { steps: run('wc -l "$OB1_TEST_COUNTS" "${OB1_TEST_COUNTS}"; echo "${{ env.OB1_TEST_COUNTS }}"\n  # echo "OB1_TEST_COUNTS=/tmp/x" >> "$GITHUB_ENV"\necho "OB1_TEST_COUNTS_DIR=/tmp/c MY_OB1_TEST_COUNTS=1" >> "$GITHUB_ENV"\necho "COUNTS_DIR=$(dirname "$OB1_TEST_COUNTS")" >> "$GITHUB_ENV"') }), publish("[a]")), []],
+    ["a counts job left out of the needs", wf(counts("a"), counts("b"), publish("[a]")), [notNeeded("b")]],
+    ["a matrix counts job left out of the needs", wf(counts("a", { job: MATRIX, name: `test-counts-a-${SHARD}` }), publish("[]")), [notNeeded("a", `test-counts-a-${SHARD}`)]],
+    ["a counts job with no OB1_TEST_COUNTS", wf(counts("a", { env: "" }), publish("[a]")), [noEnv("a")]],
+    ["a matrix counts job with no OB1_TEST_COUNTS", wf(counts("a", { env: "", job: MATRIX, name: `test-counts-a-${SHARD}` }), publish("[a]")), [noEnv("a", `test-counts-a-${SHARD}`)]],
+    ["a counts job whose OB1_TEST_COUNTS is empty", wf(counts("a", { env: EMPTY }), publish("[a]")), [noEnv("a")]],
+    ["a counts job with neither", wf(counts("a", { env: "" }), publish("[]")), [notNeeded("a"), noEnv("a")]],
+    ["a job with no OB1_TEST_COUNTS, then one left out, each read", wf(counts("a", { env: "" }), counts("b"), publish("[a]")), [noEnv("a"), notNeeded("b")]],
+    ["a needed job's counts named otherwise, told only to rename", wf(counts("a", { name: "counts-a" }), publish("[a]")), [noUpload("a")]],
+    ["a job's counts named otherwise, left out, told to rename and add it", wf(counts("a", { name: "counts-a" }), publish("[]")), [noUpload("a", "test-counts-a", false)]],
+    ["a matrix job's counts named otherwise, told its matrix name", wf(counts("a", { job: MATRIX, name: `counts-a-${SHARD}` }), publish("[a]")), [noUpload("a", `test-counts-a-${SHARD}`)]],
+    ["OB1_TEST_COUNTS set empty, no counts uploaded", wf(counts("a", { env: EMPTY, name: "logs-a" }), publish("[]")), [noUpload("a", "test-counts-a", false)]],
+    ["a need that uploads no counts", wf(counts("a"), lint, publish("[a, lint]")), [extra("lint")]],
+    ["an upload from another directory", wf(counts("a", { path: "/tmp/other/" }), publish("[a]")), ['job a uploads test-counts-a from "/tmp/other/", which, compared as written, is neither its OB1_TEST_COUNTS, /tmp/c/counts.jsonl, nor that file\'s directory, so this check cannot tell the artifact holds its counts — upload /tmp/c/ (check 50']],
+    ["two counts uploads of one name in one job, its paths not read", wf(counts("a", { steps: UPLOAD("test-counts-a", "/tmp/x/") }), publish("[a]")), [TWICE(2)]],
+    ["three counts uploads in one job, counted", wf(counts("a", { steps: UPLOAD("test-counts-a") + UPLOAD("test-counts-y") }), publish("[a]")), [TWICE(3)]],
+    ["a copied job, its counts named for the other", wf(counts("a"), counts("b", { name: "test-counts-a" }), publish("[a, b]")), [misnamed("b", "test-counts-a")]],
+    ["a name that starts with the job's own", wf(counts("a", { name: "test-counts-ab" }), publish("[a]")), [misnamed("a", "test-counts-ab")]],
+    ["a matrix job's one name for every shard", wf(counts("a", { job: MATRIX }), publish("[a]")), [unread("a", "test-counts-a", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name after its key, with no expression", wf(counts("a", { job: MATRIX, name: "test-counts-a-x" }), publish("[a]")), [unread("a", "test-counts-a-x", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name after another key", wf(counts("a", { job: MATRIX, name: `test-counts-b-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-b-${SHARD}`, `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name after a longer key", wf(counts("a", { job: MATRIX, name: `test-counts-ab-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-ab-${SHARD}`, `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name by a shell variable", wf(counts("a", { job: MATRIX, name: "test-counts-a-$shard" }), publish("[a]")), [unread("a", "test-counts-a-$shard", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name by one axis of two that vary", wf(counts("a", { job: MATRIX2, name: `test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-a-${SHARD}`, "test-counts-a-${{ matrix.shard }}-${{ matrix.pg }}")]],
+    ["a matrix job's name by an expression the same in each job, the axes' words after it", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ github.run_id }}-matrix.shard-strategy.job-index" }), publish("[a]")), [unread("a", "test-counts-a-${{ github.run_id }}-matrix.shard-strategy.job-index", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name by the matrix's size, or a matrix value's own name", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ strategy.job-total }}-${{ matrix.job-index }}" }), publish("[a]")), [unread("a", "test-counts-a-${{ strategy.job-total }}-${{ matrix.job-index }}", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name by another context's matrix", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ format('{0}', inputs.matrix.shard) }}" }), publish("[a]")), [unread("a", "test-counts-a-${{ format('{0}', inputs.matrix.shard) }}", `test-counts-a-${SHARD}`)]],
+    ["an include-only matrix named by a key the same in each entry", wf(counts("a", { job: INCLUDE("{ shard: a, pg: 16 }", "{ shard: a, pg: 17 }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-a-${SHARD}`, "test-counts-a-${{ matrix.pg }}")]],
+    ["an include-only matrix of identical entries, told the job's index", wf(counts("a", { job: INCLUDE("{ shard: a }", "{ shard: a }") }), publish("[a]")), [unread("a", "test-counts-a", `test-counts-a-${COUNTS_BY_INDEX}`)]],
+    ["a matrix built by an expression, its name the same in each job", wf(counts("a", { job: "    strategy:\n      matrix: ${{ fromJSON(needs.m.outputs.m) }}\n", name: "test-counts-a-${{ github.run_id }}" }), publish("[a]")), [unread("a", "test-counts-a-${{ github.run_id }}", `test-counts-a-${COUNTS_BY_INDEX}`)]],
+    ["a download of another pattern", wf(counts("a"), publish("[a]", "          pattern: counts-*\n")), [DOWNLOAD]],
+    ["a download of one job's counts", wf(counts("a"), publish("[a]", "          pattern: test-counts-a\n")), [DOWNLOAD]],
+    ["a publisher with no download step", wf(counts("a"), "  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: [a]\n    steps:\n      - run: x\n"), [DOWNLOAD]],
+    ["a second download naming one artifact beside the pattern", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n      - uses: actions/download-artifact@v8\n        with:\n          pattern: test-counts-*\n          name: test-counts-a\n")), ['job publish-test-counts downloads the counts naming "test-counts-a", and download-artifact then takes that one artifact, its pattern ignored — drop the name (']],
+    ["the downloads merged into one directory", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n          merge-multiple: true\n")), [MERGED]],
+    ["the downloads merged, the input a string", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n          merge-multiple: \"True\"\n")), [MERGED]],
+    ["the downloads merged by an expression", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n          merge-multiple: ${{ true }}\n")), [MERGED]],
+    ["OB1_TEST_COUNTS in the workflow's env", wf(counts("a"), publish("[a]")).replace("jobs:\n", "env:\n  OB1_TEST_COUNTS: /tmp/c/counts.jsonl\njobs:\n"), [WORKFLOW_ENV]],
+    ["OB1_TEST_COUNTS cleared in the workflow's env", wf(counts("a"), publish("[a]")).replace("jobs:\n", "env:\n  OB1_TEST_COUNTS: \"\"\njobs:\n"), [WORKFLOW_ENV]],
+    ["OB1_TEST_COUNTS in a step's env", wf(counts("a", { steps: "      - run: bun more.ts\n        env:\n          OB1_TEST_COUNTS: /tmp/d/counts.jsonl\n" }), publish("[a]")), [inStep("a")]],
+    ["OB1_TEST_COUNTS cleared in a step's env, in a job that uploads none", wf(counts("a"), plain("b", "      - run: bun more.ts\n        env:\n          OB1_TEST_COUNTS: \"\"\n"), publish("[a]")), [inStep("b", false)]],
+    ["each way a run sets, clears or names OB1_TEST_COUNTS, one to a step", wf(counts("a", { steps: SETS.map(run).join("") }), publish("[a]")), SETS.map(() => inRun("a"))],
+    ["a run that clears OB1_TEST_COUNTS in a job that sets it and uploads none, told both to keep it in the job's env and to upload", wf(counts("a"), plain("b", run("unset OB1_TEST_COUNTS"), ENV), publish("[a]")), [inRun("b"), noUpload("b", "test-counts-b", false)]],
+    ["a matrix job's name by two expressions written without spaces", wf(counts("a", { job: MATRIX2, name: "test-counts-a-${{matrix.shard}}${{matrix.pg}}" }), publish("[a]")), []],
+    ["a matrix job's name whose axis's word sits between two expressions", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ github.run_id }}-matrix.shard.${{ github.run_attempt }}" }), publish("[a]")), [unread("a", "test-counts-a-${{ github.run_id }}-matrix.shard.${{ github.run_attempt }}", `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name holding its key after another's", wf(counts("a", { job: MATRIX, name: `test-counts-b-test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-b-test-counts-a-${SHARD}`, `test-counts-a-${SHARD}`)]],
+    ["a matrix job's name by another context's strategy or a longer word's matrix", wf(counts("a", { job: MATRIX, name: "test-counts-a-${{ inputs.strategy.job-index }}-${{ needs.m.outputs.submatrix.shard }}" }), publish("[a]")), [unread("a", "test-counts-a-${{ inputs.strategy.job-index }}-${{ needs.m.outputs.submatrix.shard }}", `test-counts-a-${SHARD}`)]],
+    ["an include-only matrix beside an exclude, named by a key the same in each entry", wf(counts("a", { job: `${INCLUDE("{ shard: a, pg: 16 }", "{ shard: a, pg: 17 }")}        exclude:\n          - pg: 18\n`, name: `test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-a-${SHARD}`, "test-counts-a-${{ matrix.pg }}")]],
+    ["an include built by an expression", wf(counts("a", { job: "    strategy:\n      matrix:\n        include: ${{ fromJSON(needs.m.outputs.m) }}\n", name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["an include entry built by an expression, not read, beside a written one", wf(counts("a", { job: INCLUDE("${{ fromJSON(needs.m.outputs.e) }}", "{ shard: a }"), name: "test-counts-a-${{ matrix.pg }}" }), publish("[a]")), []],
+    ["an include-only matrix whose second entry adds a key that differs", wf(counts("a", { job: INCLUDE("{ shard: a }", "{ shard: a, pg: 17 }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-a-${SHARD}`, "test-counts-a-${{ matrix.pg }}")]],
+    ["an include-only matrix whose key is null in one entry and missing in the other", wf(counts("a", { job: INCLUDE("{ shard: a, pg: null }", "{ shard: b }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["an include-only matrix whose entries differ in a mapping's value", wf(counts("a", { job: INCLUDE("{ shard: a, cfg: { v: 1 } }", "{ shard: a, cfg: { v: 2 } }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), [unread("a", `test-counts-a-${SHARD}`, "test-counts-a-${{ matrix.cfg }}")]],
+    ["an include-only matrix whose entries share a mapping", wf(counts("a", { job: INCLUDE("{ shard: a, cfg: { v: 1 } }", "{ shard: b, cfg: { v: 1 } }"), name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["a needed job whose OB1_TEST_COUNTS is empty and uploads none, told only to upload", wf(counts("a", { env: EMPTY, name: "logs-a" }), publish("[a]")), [noUpload("a")]],
+    ["the second of two needed jobs, its counts named otherwise", wf(counts("a"), counts("b", { name: "counts-b" }), publish("[a, b]")), [noUpload("b")]],
+    ["two counts uploads in a job left out of the needs", wf(counts("a", { steps: UPLOAD("test-counts-a", "/tmp/x/") }), publish("[]")), [notNeeded("a"), TWICE(2)]],
+    ["a publish-test-counts job with no body", wf(counts("a"), "  publish-test-counts:\n"), ["has no job publish-test-counts"]],
+    ["no publish-test-counts job", wf(counts("a")), ["has no job publish-test-counts"]],
+    ["a file that does not parse", "jobs: [", ["does not parse"]],
+    ["a file with no jobs", "name: probe\non: push\n", ["has no `jobs:` map"]],
+    ["jobs as a list", "name: probe\non: push\njobs: [a]\n", ["has no `jobs:` map"]],
+    ["jobs as a word", "name: probe\non: push\njobs: a\n", ["has no `jobs:` map"]],
+  ];
+  const wrong = cases.map(([why, text, says]) => ({ why, says, got: testCountsProblems(text) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 50 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-3709)`);
+  for (const msg of testCountsProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
+}
+checkTestCountsPublished();
+
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
 // ci-parity.sh is CI's local equivalent, and nothing held it to the workflow:
@@ -10510,6 +11007,14 @@ checkJobTimeouts();
 // line no step runs as written is stale. What ci-parity.sh cannot run is
 // excused by job or by script with why.
 const PARITY_SCRIPT = "db/ci-parity.sh";
+/**
+ * A test-live row as ci-parity.sh's live lanes read it (SMD-3688): its LIVE_SHARDS is this shape's shards, read
+ * by sed, so a row check 35 reads in another shape (aligned columns, a comment after, quotes) would pass here and
+ * never run.
+ */
+const LIVE_SHARD_ROW = /^ *OB1_LIVE_SHARD=([a-z]+) run db test-live\.ts$/;
+/** ci-parity.sh's line that reads LIVE_SHARD_ROW's shards, held to this text so the two cannot drift apart (SMD-3688 review pass 3). */
+const LIVE_SHARDS_LINE = `LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\\([a-z][a-z]*\\) run db test-live\\.ts$/\\1/p' "$ROOT/db/\${0##*/}" | tr '\\n' ' ')`;
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
@@ -10670,6 +11175,19 @@ function checkCiParity() {
   // Were these missed, the reading is broken, not the two files in step.
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+  // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
+  if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
+    fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");
+  const parityText = readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n");
+  if (parityText.filter((l) => l === LIVE_SHARDS_LINE).length !== 1 || parityText.filter((l) => /\bLIVE_SHARDS=/.test(l.replace(/#.*$/, ""))).length !== 1)
+    fail(PARITY_SCRIPT, `has not exactly one assignment of LIVE_SHARDS, the line \`${LIVE_SHARDS_LINE}\`: another reads, or sets, other shards than the rows check 35 holds (check 35, SMD-3688)`);
+  const laneShards = new Set<string>();
+  for (const r of parity.runs.filter((p) => p.script === "test-live.ts")) {
+    const m = LIVE_SHARD_ROW.exec(parityText[r.line - 1]);
+    if (!m) fail(PARITY_SCRIPT, `line ${r.line} runs test-live.ts in a shape its live lanes do not read, so the shard would never start — write it \`OB1_LIVE_SHARD=<shard> run db test-live.ts\`, single spaces and nothing after (check 35, SMD-3688)`);
+    else if (laneShards.has(m[1])) fail(PARITY_SCRIPT, `line ${r.line} runs test-live's ${m[1]} shard a second time, which would start two lanes on one lane's files — each shard is one row (check 35, SMD-3688)`);
+    else laneShards.add(m[1]);
+  }
 }
 checkCiParity();
 
