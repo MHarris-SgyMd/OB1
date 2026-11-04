@@ -47,10 +47,19 @@ export const TOOLS = [
   { name: "brain_info", scope: "read" },
   { name: "list_claims", scope: "read" },
   { name: "priority_history", scope: "read" },
+  { name: "item_history", scope: "read" },
+  { name: "list_items", scope: "read" },
   { name: "capture_thought", scope: "capture" },
   // A capture-only key states a priority on a thought it captured (decision 10, migration 116), and 116 refuses it any other.
   { name: "set_priority", scope: "capture" },
   { name: "clear_priority", scope: "capture" },
+  // Open items (SMD-3665 PR 2): the writers are the capture group's, as set_priority is — a capture-only key on its
+  // own items, a plugin hook (capture scope) on its rows' — and 117 refuses either anything else.
+  { name: "open_item", scope: "capture" },
+  { name: "update_item", scope: "capture" },
+  { name: "set_item_status", scope: "capture" },
+  { name: "propose_item_close", scope: "capture" },
+  { name: "decide_item_close", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
   { name: "reset_capture_stamp", scope: "write" },

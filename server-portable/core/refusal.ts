@@ -6,6 +6,7 @@
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
 import type { Citation, ClaimProblem, PriorityItem, PriorityProblem } from "../store.ts";
+import type { ItemProblem } from "../open-items.ts";
 import type { StandingFlag } from "../standing.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
@@ -65,10 +66,24 @@ export type Refusal =
   // Priority assertions (116, SMD-3664): set_priority, clear_priority, priority_history. `item` is 116's normalised
   // form of the caller's own input, so neither refusal tells a capture-only key what exists.
   | { code: "ITEM_NOT_FOUND"; retryable: false; which: "item" | "due_ref"; item: PriorityItem } // the brain holds no such item (or due reference, `which`): a thought, ticket, entity or open item (117)
-  | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured or an open item it opened, which nobody else took, or one its plugin's row stands for (or a due reference to one) — answered alike whether it exists or not
+  | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem | null; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured or an open item it opened, which nobody else took, or one its plugin's row stands for (or a due reference to one) — answered alike whether it exists or not
   | { code: "REFUSED_PRIORITY_INPUT"; retryable: false; problem: PriorityProblem; message: string } // an argument 116 refused by its rule (SQLSTATE 22023); message: the database's words
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own thoughts, is not to hand while the registry may answer
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  // Open items (117, SMD-3665 PR 2): the item writers' own refusals. ITEM_NOT_FOUND, ITEM_NOT_YOURS and READ_ONLY_KEY
+  // above answer them too, an open item named `{kind: "item", key: <its id>}` — ITEM_NOT_YOURS's item null for a
+  // proposal a capture-only key may not decide, which names no item it may be told of.
+  | { code: "REFUSED_ITEM_INPUT"; retryable: false; problem: ItemProblem; message: string } // an argument 117 refused by raising (SQLSTATE 22023): `problem` names which; message: the database's words
+  | { code: "ITEM_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own items, is not to hand while the registry may answer
+  | { code: "ITEM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown" } // …the registry cannot answer until an operator acts, or the server holds no id for the key and no word why (claims.ts's registry_unknown)
+  | { code: "ITEM_UNOWNABLE"; retryable: false } // a caller with no agent id at all (a plugin hook's) opening an item for no plugin row: it could never be shown its own
+  | { code: "ORIGIN_NOT_FOUND"; retryable: false; thought: string } // the thought an item was to be read from is not in the brain
+  | { code: "EVIDENCE_NOT_FOUND"; retryable: false; thought: string } // the thought a proposed close cites is not in the brain
+  | { code: "ITEM_SETTLED"; retryable: false; item: string; status: "done" | "dropped" } // a close proposed for an item already done or dropped
+  | { code: "PROPOSAL_NOT_FOUND"; retryable: false; proposal: string } // no such proposed close (told to a write key alone)
+  | { code: "PROPOSAL_DECIDED"; retryable: false; proposal: string; decision: "accepted" | "rejected" | "moot" } // the proposal is decided, or moot, already
+  | { code: "PROPOSAL_YOURS"; retryable: false; proposal: string } // a proposal is accepted by a key other than its proposer
+  | { code: "CONFIRM_NOT_YOURS"; retryable: false; item: string } // a capture-only key may dismiss a proposed item, never confirm it
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
@@ -167,6 +182,17 @@ const FACTS: Facts = {
   REFUSED_PRIORITY_INPUT: (r) => ({ problem: r.problem }),
   READ_ONLY_KEY: none,
   PRIORITY_UNATTRIBUTED: (r) => ({ cause: r.cause }),
+  // The open items' (SMD-3665 PR 2): ids and the words 117 answers in, never another key's text.
+  REFUSED_ITEM_INPUT: (r) => ({ problem: r.problem }),
+  ITEM_UNOWNABLE: none,
+  ITEM_UNATTRIBUTED: (r) => ({ cause: r.cause }),
+  ORIGIN_NOT_FOUND: (r) => ({ thought: r.thought }),
+  EVIDENCE_NOT_FOUND: (r) => ({ thought: r.thought }),
+  ITEM_SETTLED: (r) => ({ item: r.item, status: r.status }),
+  PROPOSAL_NOT_FOUND: (r) => ({ proposal: r.proposal }),
+  PROPOSAL_DECIDED: (r) => ({ proposal: r.proposal, decision: r.decision }),
+  PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
+  CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),

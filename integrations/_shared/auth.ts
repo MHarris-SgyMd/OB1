@@ -17,13 +17,16 @@
  *   do not appear in tools/list at all.
  *
  *   A third scope, `capture` (SMD-1298), is the mirror image: `capture_thought`,
- *   and `set_priority` and `clear_priority` on a thought the key captured (SMD-3664,
- *   migration 116's rule) — no read tool, no update, no delete. It is the key a
+ *   `set_priority` and `clear_priority` on a thought the key captured (SMD-3664,
+ *   migration 116's rule), and the open-item writers on an item it opened
+ *   (SMD-3665, migration 117's) — no read tool, no update of a thought, no
+ *   delete. It is the key a
  *   session-end hook holds: a credential that sits in a config file on every
  *   machine that runs the hook, and whose leak must be worth as little as
- *   possible. A leaked capture key can add a thought and state how much its own
- *   thoughts matter, at its own tier; it cannot read one, alter one, remove one,
- *   or state a priority on another key's. The core servers ask tools.ts's mayCall, which reads a
+ *   possible. A leaked capture key can add a thought, state how much its own
+ *   thoughts matter at its own tier, and keep its own to-dos; it cannot read one,
+ *   alter one, remove one, state a priority on another key's, or confirm or close
+ *   another key's item. The core servers ask tools.ts's mayCall, which reads a
  *   tool's group from the manifest (SMD-1931); canRead, canCapture and
  *   canWrite below state the same three groups for a caller without a tool
  *   name — whether a capture's writer may read (core/writes.ts, and the REST
