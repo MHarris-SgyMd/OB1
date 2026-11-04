@@ -4860,9 +4860,12 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  const unlistedFns = definersWithoutPublic.filter((f) => !listedOids.has(f.oid)).map((f) => f.sig);
-  assert(definersWithoutPublic.length === listedFns.length && unlistedFns.length === 0,
-    `every function the files REVOKEd FROM PUBLIC is in the community group, and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
+  const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
+  const lockedOids = new Set(await fnOids(lockedFns));
+  const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
+  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 1,
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 118's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -17208,6 +17211,140 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late', 'item-ren-renamed', 'item-old', 'item-old-renamed')`);
+}
+
+console.log("\n[106] Migration 118: a closed ticket's claims released — every unreleased claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose head is an importer's row with a settled status type (Done, Canceled, Duplicate), stamped from the envelope with the status and the run; an open ticket's, a ticket without a head and one whose head a key wrote kept; a claim made after the close released at the next call, a reopen bringing none back; the dry run writing nothing; refusals by SQLSTATE; EXECUTE the closedclaims group's, not PUBLIC's; a re-apply a no-op (SMD-3600)");
+{
+  type Claim = { id: string; issue: string; piece: string | null; holder: string; state: string; released_by: string | null; released_by_kind: string | null; release_reason: string | null; ticket_status: string; ticket_status_type: string };
+  type Answer = { outcome: string; released: Claim[] };
+  const file = files.find((f) => /^\d{3}_closed_ticket_claims\.sql$/.test(f)) ?? "no NNN_closed_ticket_claims.sql";
+  const BOARD = { name: "closed-board", via: "sync-linear.ts" }, AGENT = { name: "closed-agent" }, OTHER = { name: "closed-other" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('closed-board', 'ingested'), ('closed-agent', 'agent'), ('closed-other', 'agent')`);
+  const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
+  // A ticket row as board-sync writes one (source linear), or as a key would (the server stamps its own source).
+  const ticket = async (issue: string, status: string, type: string, source = "linear", synced = "2026-11-03T00:00:00.000Z") =>
+    (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`,
+      [`${issue} — [106] ${status} ${source} ${synced}`, JSON.stringify({ source, issue, status, status_type: type, linear_updated_at: synced })])).rows[0].id;
+  const move = (id: string, status: string, type: string) =>
+    db.query(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status', $2::text, 'status_type', $3::text) WHERE id = $1::uuid`, [id, status, type]);
+  const claim = async (issue: string, actor: object, piece: string | null = null, lease = 14400) =>
+    (await db.query<{ r: { outcome: string; claim: { id: string } | null; token: string | null } }>(`SELECT claim_work($1, $2, NULL, $3, NULL, $4::jsonb) AS r`, [issue, piece, lease, JSON.stringify(actor)])).rows[0].r;
+  const release = async (dry = false, run = "sync-linear.ts@2026-11-03T12:00:00.000Z", actor: object | null = BOARD) =>
+    (await db.query<{ r: Answer }>(`SELECT release_closed_ticket_claims($1, $2, $3::jsonb) AS r`, [run, dry, actor === null ? null : JSON.stringify(actor)])).rows[0].r;
+  const open = async (issue: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE issue = $1 AND released_at IS NULL`, [issue])).rows[0].n;
+  const unreleased = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+
+  // SMD-9801 Done: a lapsed whole-ticket claim (a lapsed claim covers nothing), then two pieces under two keys, and one its holder released.
+  const done = await ticket("SMD-9801", "Done", "completed");
+  const whole = await claim("SMD-9801", AGENT, null, 60);
+  await db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid`, [whole.claim!.id]);
+  const pr1 = await claim("SMD-9801", AGENT, "PR 1");
+  const pr2 = await claim("SMD-9801", OTHER, "PR 2");
+  const pr3 = await claim("SMD-9801", OTHER, "PR 3");
+  await db.query(`SELECT release_work_claim($1::uuid, $2, 'merged', false, $3::jsonb)`, [pr3.claim!.id, pr3.token, JSON.stringify(OTHER)]);
+  await ticket("SMD-9802", "Canceled", "canceled");
+  await claim("SMD-9802", AGENT);
+  await ticket("SMD-9803", "Duplicate", "duplicate");
+  await claim("SMD-9803", OTHER);
+  await ticket("SMD-9804", "In Progress", "started");
+  await claim("SMD-9804", AGENT);
+  // A key's own thought saying SMD-9805 is Done is no importer's row: the ticket is left alone, even as its head.
+  await ticket("SMD-9805", "Done", "completed", "mcp");
+  await claim("SMD-9805", AGENT);
+  // SMD-9806 has a board row, Done, but a key's newer-synced row is its head: left alone too.
+  await ticket("SMD-9806", "Done", "completed");
+  await ticket("SMD-9806", "Done", "completed", "mcp", "2027-01-01T00:00:00.000Z");
+  await claim("SMD-9806", AGENT);
+  // SMD-9807 has no row at all.
+  await claim("SMD-9807", AGENT);
+  assert([whole, pr1, pr2, pr3].every((c) => c.outcome === "claimed"), `the fixture's claims are made (${[whole, pr1, pr2, pr3].map((c) => c.outcome).join(", ")})`);
+
+  // The dry run: the same claims, as they stand, nothing written.
+  const before = await unreleased();
+  const dry = await release(true);
+  const said = (r: Answer) => r.released.map((c) => `${c.issue}/${c.piece}/${c.state}/${c.ticket_status}/${c.ticket_status_type}`);
+  assert(dry.outcome === "dry_run" && JSON.stringify(said(dry)) === JSON.stringify(["SMD-9801/null/lapsed/Done/completed", "SMD-9801/PR 1/live/Done/completed", "SMD-9801/PR 2/live/Done/completed", "SMD-9802/null/live/Canceled/canceled", "SMD-9803/null/live/Duplicate/duplicate"])
+         && dry.released.every((c) => c.released_by === null && !("token" in c) && !("token_hash" in c)) && (await unreleased()) === before,
+    `a dry run lists every unreleased claim on the Done, Canceled and Duplicate tickets — the lapsed whole ticket and both pieces — by ticket and piece, with the ticket's status, no token, and writes nothing (${JSON.stringify(said(dry))})`);
+
+  // The release: the same five, each stamped from the envelope with the status and the run.
+  const r = await release();
+  const reasons = r.released.map((c) => c.release_reason);
+  const work = (x: Answer) => JSON.stringify(x.released.map((c) => c.id));
+  assert(r.outcome === "released" && work(r) === work(dry)
+         && r.released.every((c) => c.state === "released" && c.released_by === "closed-board" && c.released_by_kind === "ingested")
+         && JSON.stringify(reasons) === JSON.stringify([
+           "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z",
+           "SMD-9802 closed: Canceled (canceled); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9803 closed: Duplicate (duplicate); sync-linear.ts@2026-11-03T12:00:00.000Z"]),
+    `the release ends the same five claims, each released by the caller's key and kind, the reason naming the ticket, its status, its type and the run (${JSON.stringify(reasons)})`);
+  const kept = await Promise.all(["SMD-9804", "SMD-9805", "SMD-9806", "SMD-9807"].map(open));
+  const pr3Row = (await db.query<{ reason: string; by: string }>(`SELECT release_reason AS reason, released_by AS by FROM work_claims WHERE id = $1::uuid`, [pr3.claim!.id])).rows[0];
+  assert(JSON.stringify(kept) === "[1,1,1,1]" && pr3Row.reason === "merged" && pr3Row.by === "closed-other",
+    `kept: the In Progress ticket's claim, the ticket whose only row a key wrote, the one whose head a key wrote over a Done board row, the one with no row; a claim its holder released keeps its own end (${JSON.stringify(kept)}, ${pr3Row.reason} by ${pr3Row.by})`);
+  const renewed = (await db.query<{ r: { outcome: string; code: string } }>(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [pr1.claim!.id, pr1.token, JSON.stringify(AGENT)])).rows[0].r;
+  const again = await release();
+  assert(renewed.code === "CLAIM_RELEASED" && again.outcome === "released" && again.released.length === 0,
+    `the holder's renewal after it is refused CLAIM_RELEASED; a second call releases nothing (${renewed.code}, ${again.released.length})`);
+
+  // A claim made on a closed ticket is released at the next call; a reopen brings none back, and a claim on the reopened ticket stays.
+  const late = await claim("SMD-9802", OTHER);
+  const lateGone = (await release()).released.map((c) => c.id);
+  await move(done, "In Progress", "started");
+  const reopened = await open("SMD-9801");
+  const onReopened = await claim("SMD-9801", AGENT, "PR 4");
+  const whileOpen = (await release()).released.length;
+  await move(done, "Done", "completed");
+  const closedAgain = (await release()).released.map((c) => c.id);
+  assert(late.outcome === "claimed" && JSON.stringify(lateGone) === JSON.stringify([late.claim!.id]) && reopened === 0 && onReopened.outcome === "claimed" && whileOpen === 0
+         && JSON.stringify(closedAgain) === JSON.stringify([onReopened.claim!.id]),
+    `a claim made on the Canceled ticket is released at the next call; reopened, the Done ticket's claims stay released and a new one is kept until it closes again (${lateGone.length}, ${reopened}, ${whileOpen}, ${closedAgain.length})`);
+
+  // Board-sync's key cannot claim (115: an ingested key).
+  const boardClaims = await raised(`SELECT claim_work('SMD-9804', NULL, NULL, 14400, NULL, $1::jsonb)`, [JSON.stringify(BOARD)]);
+  // Refusals: no run, no holder, above READ COMMITTED.
+  const noRun = await raised(`SELECT release_closed_ticket_claims(' ', false, $1::jsonb)`, [JSON.stringify(BOARD)]);
+  const noHolder = await raised(`SELECT release_closed_ticket_claims('run', false, NULL)`);
+  let iso = { code: "", message: "" };
+  try { await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(`SELECT release_closed_ticket_claims('run', false, $1::jsonb)`, [JSON.stringify(BOARD)]); }); }
+  catch (e) { iso = { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message }; }
+  assert(boardClaims.code === "42501" && /closed-board is an ingested key/.test(boardClaims.message) && noRun.code === "22023" && /needs a run/.test(noRun.message)
+         && noHolder.code === "42501" && /release_closed_ticket_claims needs a holder/.test(noHolder.message)
+         && iso.code === "0A000" && /release_closed_ticket_claims must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(iso.message),
+    `board-sync's ingested key is refused a claim; a blank run 22023, no holder 42501, REPEATABLE READ 0A000, each by name (${boardClaims.code}, ${noRun.code}, ${noHolder.code}, ${iso.code})`);
+
+  // EXECUTE: not PUBLIC's; a role with capture, server and claims is refused naming the function; with closedclaims and capture it releases.
+  const publicExec = async () => (await db.query<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = 'release_closed_ticket_claims(text, boolean, jsonb)'::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS e`)).rows[0].e;
+  const ROLE = "ob1_test_closedclaims";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "claims"] })]) await db.exec(st);
+  await claim("SMD-9803", AGENT);
+  const asRole = async () => {
+    try {
+      let n = -1;
+      await db.transaction(async (tx) => {
+        await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+        n = (await tx.query<{ r: Answer }>(`SELECT release_closed_ticket_claims('run', false, $1::jsonb) AS r`, [JSON.stringify(BOARD)])).rows[0].r.released.length;
+      });
+      return { code: "", message: "", n };
+    } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0], n: -1 }; }
+  };
+  const withoutGroup = await asRole();
+  await db.exec(`REVOKE ALL ON work_claims FROM ${ROLE}`);
+  for (const st of grantStatements(ROLE, { groups: ["closedclaims"] })) await db.exec(st);
+  const withGroup = await asRole();
+  assert(!(await publicExec()) && withoutGroup.code === "42501" && /permission denied for function release_closed_ticket_claims/.test(withoutGroup.message) && withGroup.code === "" && withGroup.n === 1,
+    `EXECUTE is not PUBLIC's: a role granted capture, server and claims is refused naming the function; granted closedclaims and capture (no claims group), it releases the Duplicate ticket's new claim (${withoutGroup.message.slice(0, 80)}, ${withGroup.code || withGroup.n})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // Re-applied: the claims stand, one function, still not PUBLIC's.
+  const claimsBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+  await reapply(file);
+  const claimsAfter = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+  assert(claimsAfter === claimsBefore && (await functionsNamed("release_closed_ticket_claims")) === 1 && !(await publicExec()),
+    `118 applied again changes nothing: ${claimsAfter} unreleased claims stand, one release function, EXECUTE still not PUBLIC's`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
