@@ -507,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -2605,7 +2605,9 @@ export const ROLE_GRANTS = Object.freeze({
   // declare a source: declare_priority_source is the operator's, as
   // set_agent_kind. SELECT on ob1_entities too, which only the extraction
   // group grants otherwise: assert_priority checks an entity exists. (A
-  // thought and a ticket's head are the capture group's.) Soft: a role
+  // thought and a ticket's head are the capture group's.) SELECT on
+  // open_items and open_item_events since 117: assert_priority checks an
+  // open item exists, and whether a capture-only key opened it. Soft: a role
   // without the group is refused the priority calls, naming the table, and
   // nothing else.
   priority: Object.freeze([
@@ -2613,6 +2615,22 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
     Object.freeze({ table: "priority_sources",    privileges: Object.freeze(["SELECT"]), since: "116" }),
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
+    Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
+    Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),
+  ]),
+  // Open items (117, SMD-3665): a to-do, a commitment or a plugin's task, its
+  // status and its history. Written only through open_item, update_item,
+  // set_item_status, propose_item_close and decide_item_close (SECURITY
+  // INVOKER, PUBLIC's EXECUTE), read through open_item_history. No UPDATE or
+  // DELETE on the events: a trigger refuses them. The projection is replaced,
+  // and a rebuild removes a row no event made. A proposal is updated only to
+  // be decided, once. A thought's existence and capturer are the capture
+  // group's. Soft: a role without the group is refused the item calls,
+  // naming the table, and nothing else.
+  items: Object.freeze([
+    Object.freeze({ table: "open_item_events",          privileges: Object.freeze(["SELECT", "INSERT"]), since: "117" }),
+    Object.freeze({ table: "open_items",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "117" }),
+    Object.freeze({ table: "open_item_close_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "117" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -2774,7 +2792,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "priority", "community", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "priority", "items", "community", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read

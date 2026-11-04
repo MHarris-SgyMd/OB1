@@ -62,8 +62,8 @@ export type Refusal =
   | { code: "CLAIM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown"; id: string; forced: boolean } // …and the registry cannot answer this server until an operator acts
   // Priority assertions (116, SMD-3664): set_priority, clear_priority, priority_history. `item` is 116's normalised
   // form of the caller's own input, so neither refusal tells a capture-only key what exists.
-  | { code: "ITEM_NOT_FOUND"; retryable: false; which: "item" | "due_ref"; item: PriorityItem; openItem: boolean } // the brain holds no such item (or due reference, `which`); an open item (kind item) none until SMD-3665
-  | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured and nobody took (or a due reference to one) — answered alike whether it exists or not
+  | { code: "ITEM_NOT_FOUND"; retryable: false; which: "item" | "due_ref"; item: PriorityItem } // the brain holds no such item (or due reference, `which`): a thought, ticket, entity or open item (117)
+  | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured or an open item it opened, which nobody else took, or one its plugin's row stands for (or a due reference to one) — answered alike whether it exists or not
   | { code: "REFUSED_PRIORITY_INPUT"; retryable: false; problem: PriorityProblem; message: string } // an argument 116 refused by its rule (SQLSTATE 22023); message: the database's words
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own thoughts, is not to hand while the registry may answer
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
@@ -159,7 +159,7 @@ const FACTS: Facts = {
   REFUSED_CLAIM_KEY: none,
   CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced }),
   // The item as 116 keys it — a uuid or a ticket key, the caller's own input normalised — and which argument named it.
-  ITEM_NOT_FOUND: (r) => ({ which: r.which, item: r.item, openItem: r.openItem }),
+  ITEM_NOT_FOUND: (r) => ({ which: r.which, item: r.item }),
   ITEM_NOT_YOURS: (r) => ({ item: r.item, dueRef: r.dueRef }),
   REFUSED_PRIORITY_INPUT: (r) => ({ problem: r.problem }),
   READ_ONLY_KEY: none,
