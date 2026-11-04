@@ -271,7 +271,7 @@ Before submitting, verify:
 
 - [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim, `../_shared/auth.ts` and `../_shared/sse.ts`, and the route returns `mcpReply(c, () => transport.handleRequest(c))` — no supabase-js, no `deno.json`
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
-- [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its tables are in `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`
+- [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its grants follow step 4 (the `extensions` group is retired: SMD-2311, SMD-3747)
 - [ ] `schema.sql` does NOT modify the `thoughts` table
 - [ ] `index.ts` follows the exact server structure (imports, auth, Hono app), its tail spreading `...listenOn(process.env.OB1_LISTEN_HOST)` between `port` and `fetch` (extensions/test-auth.ts fails a server without it)
 - [ ] `index.ts` tools return `{ content: [{ type: "text" as const, text }] }` format

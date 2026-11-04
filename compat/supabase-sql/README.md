@@ -343,7 +343,7 @@ development — the test caught it.
   list.
 - **Timestamps are strings.** A `Date` Bun hands back is rendered as its ISO
   string, as PostgREST's JSON has it (FORK.md change 73); a consumer that wants a
-  `Date` does `new Date(row.x)`, as the shim-migrated extensions already do.
+  `Date` does `new Date(row.x)`, as the shim-migrated extensions did.
 - **JSON-path keys are identifier-shaped.** `meta->>café` and `meta->>a$b` are
   refused here; PostgREST accepts both. Nothing in the tree uses such a key.
 

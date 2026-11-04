@@ -163,7 +163,7 @@ CREATE OR REPLACE VIEW application_rows AS
 
 -- An interview, with its application's id and status, its posting's title and its company's name.
 CREATE OR REPLACE VIEW interview_rows AS
-  SELECT i.id, i.application_id, p.company_id, i.status, i.scheduled_at, i.created_at,
+  SELECT i.id, i.application_id, p.company_id, i.status, a.status AS application_status, i.scheduled_at, i.created_at,
          jsonb_build_object(
            'id', i.id, 'application_id', i.application_id,
            'application', jsonb_build_object('id', a.id, 'status', a.status), 'posting', jsonb_build_object('id', p.id, 'title', p.title),

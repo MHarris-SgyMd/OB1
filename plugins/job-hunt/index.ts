@@ -17,8 +17,14 @@ const SIZES = ["startup", "mid-market", "enterprise"] as const;
 const REMOTE = ["remote", "hybrid", "onsite"] as const;
 const SOURCES = ["linkedin", "company-site", "referral", "recruiter", "other"] as const;
 const STATUSES = ["draft", "applied", "screening", "interviewing", "offer", "accepted", "rejected", "withdrawn"] as const;
+/** An application at one of these is ended: it makes room for another to its posting, and its interviews leave the pipeline. */
+const ENDED: readonly string[] = ["rejected", "withdrawn"];
+/** At one of these an application has not been sent, so it is not dated today by default. */
+const UNSENT: readonly string[] = ["draft", "withdrawn"];
 const INTERVIEW_TYPES = ["phone_screen", "technical", "behavioral", "system_design", "hiring_manager", "team", "final"] as const;
 const INTERVIEW_STATUSES = ["scheduled", "completed", "cancelled", "no_show"] as const;
+/** The statuses update_interview sets; completed is log_interview_notes'. */
+const SET_STATUSES = ["scheduled", "cancelled", "no_show"] as const;
 const ROLES = ["recruiter", "hiring_manager", "referral", "interviewer", "other"] as const;
 /** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
 const Day = z.iso.date().refine((d) => !d.startsWith("0000-"), "a date from the year 0001");
@@ -94,7 +100,7 @@ const missing = (code: string, field: string, id: string, thing: string, where: 
 const noSuchCompany = (id: string) => missing("NO_SUCH_COMPANY", "company_id", id, "company", "list_companies gives each company's id, and add_company adds one");
 const noSuchPosting = (id: string) => missing("NO_SUCH_POSTING", "job_posting_id", id, "job posting", "list_job_postings gives each posting's id, and add_job_posting adds one");
 const noSuchApplication = (id: string) => missing("NO_SUCH_APPLICATION", "application_id", id, "application", "list_applications gives each application's id");
-const noSuchInterview = (id: string) => missing("NO_SUCH_INTERVIEW", "interview_id", id, "interview", "get_upcoming_interviews and get_pipeline_overview give the interviews' ids");
+const noSuchInterview = (id: string) => missing("NO_SUCH_INTERVIEW", "interview_id", id, "interview", "list_interviews gives each interview's id");
 const noSuchContact = (id: string) => missing("NO_SUCH_JOB_CONTACT", "job_contact_id", id, "job contact", "search_job_contacts gives each contact's id, and add_job_contact adds one");
 /** A day after the user's today, refused: the day it happened has come. */
 const futureDay = (field: string, day: string, today: string) =>
@@ -103,6 +109,11 @@ const futureDay = (field: string, day: string, today: string) =>
 const futureMoment = (moment: string) =>
   refuse(422, "FUTURE_DATE", { last_contacted: moment, message: "last_contacted is more than a day ahead: it is when you last spoke" });
 const isFutureMoment = (moment: string | null | undefined) => !!moment && Date.parse(moment) > Date.now() + 86_400_000;
+/** A posted day after every time zone's today (UTC's and a day), refused: it is the day it was posted. */
+const futurePosted = (day: string | null | undefined) => {
+  if (!day || Date.parse(`${day}T00:00:00Z`) <= Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`) + 86_400_000) return null;
+  return refuse(422, "FUTURE_DATE", { posted_date: day, message: "posted_date is after today: it is the day it was posted" });
+};
 /** Whether an update gave a field: absent is kept, null clears. */
 const givenIn = <T extends object>(u: T) => (k: keyof T) => u[k] !== undefined;
 const nothingToChange = (field: string, id: string) => refuse(422, "NOTHING_TO_CHANGE", { [field]: id, message: "give at least one field to change" });
@@ -110,11 +121,20 @@ const badSalary = (min: number, max: number) => refuse(422, "BAD_SALARY", { sala
 const badDates = (first: string, firstDay: string, second: string, secondDay: string) =>
   refuse(422, "BAD_DATES", { [first]: firstDay, [second]: secondDay, message: `${second} is before ${first}` });
 
-/** Whether a row with this id is in a table of the plugin's (a fixed name, never a caller's). */
-async function exists(sql: PluginSql, table: "companies" | "applications", id: string): Promise<boolean> {
-  const rows = table === "companies" ? await sql<{ n: number }>`SELECT count(*)::int AS n FROM companies WHERE id = ${id}`
-    : await sql<{ n: number }>`SELECT count(*)::int AS n FROM applications WHERE id = ${id}`;
-  return rows[0].n > 0;
+/** Whether a company with this id is there. */
+async function companyExists(sql: PluginSql, id: string): Promise<boolean> {
+  const [{ n }] = await sql<{ n: number }>`SELECT count(*)::int AS n FROM companies WHERE id = ${id}`;
+  return n > 0;
+}
+/** The refusal of a second open application to a posting whose row the caller has locked, or null. One being reopened is still ended here. */
+async function openApplication(sql: PluginSql, postingId: string) {
+  const [open] = await sql<{ id: string; status: string }>`
+    SELECT id, status FROM applications WHERE job_posting_id = ${postingId} AND status NOT IN ('rejected', 'withdrawn') ORDER BY created_at, id LIMIT 1`;
+  if (!open) return null;
+  return refuse(409, "ALREADY_APPLIED", {
+    job_posting_id: postingId, application_id: open.id, application_status: open.status,
+    message: `this posting has an open application, ${open.id} (${open.status}): update_application moves it on`,
+  });
 }
 const companyOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Company>>>`SELECT answer FROM company_rows WHERE id = ${id}`)[0]?.answer ?? null;
 const postingOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Posting>>>`SELECT answer FROM posting_rows WHERE id = ${id}`)[0]?.answer ?? null;
@@ -124,7 +144,7 @@ const contactOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.inpu
 /** The scheduled interviews from now to `days` days on, the soonest first, at most `limit` and one more. */
 const upcoming = (sql: PluginSql, days: number, limit: number) => sql<Answer<z.input<typeof Interview>>>`
   SELECT answer FROM interview_rows
-   WHERE status = 'scheduled' AND scheduled_at >= now() AND scheduled_at <= now() + make_interval(days => ${days}::int)
+   WHERE status = 'scheduled' AND scheduled_at >= now() AND scheduled_at <= now() + make_interval(days => ${days}::int) AND application_status NOT IN ('rejected', 'withdrawn')
    ORDER BY scheduled_at, id
    LIMIT ${limit + 1}`;
 
@@ -229,7 +249,7 @@ export default definePlugin({
     }),
     add_job_posting: operation({
       title: "Add a job posting",
-      description: "Adds a posting at a company (company_id, from list_companies) and answers it with its id, which submit_application takes. list_job_postings lists them, so check it first rather than adding one twice. Salaries are whole amounts in salary_currency (ISO 4217, USD unless given), the minimum no more than the maximum; the closing date no earlier than the posted one. Refused: a company that is not there (NO_SUCH_COMPANY), a minimum above the maximum (BAD_SALARY), and a closing date before the posted one (BAD_DATES).",
+      description: "Adds a posting at a company (company_id, from list_companies) and answers it with its id, which submit_application takes. list_job_postings lists them, so check it first rather than adding one twice. Salaries are whole amounts in salary_currency (ISO 4217, USD unless given), the minimum no more than the maximum; the closing date no earlier than the posted one. Refused: a company that is not there (NO_SUCH_COMPANY), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), and a posted date after today (FUTURE_DATE).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -250,10 +270,12 @@ export default definePlugin({
       },
       output: { job_posting: Posting },
       async handler(ctx, p) {
+        const postedAhead = futurePosted(p.posted_date);
+        if (postedAhead) return postedAhead;
         if (p.salary_min != null && p.salary_max != null && p.salary_min > p.salary_max) return badSalary(p.salary_min, p.salary_max);
         if (p.posted_date && p.closing_date && p.closing_date < p.posted_date) return badDates("posted_date", p.posted_date, "closing_date", p.closing_date);
         const posting = await ctx.db.tx(async (sql) => {
-          if (!(await exists(sql, "companies", p.company_id))) return null;
+          if (!(await companyExists(sql, p.company_id))) return null;
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO job_postings (company_id, title, url, salary_min, salary_max, salary_currency, requirements, nice_to_haves, notes, source, posted_date, closing_date)
             VALUES (${p.company_id}, ${p.title}, ${p.url ?? null}, ${p.salary_min ?? null}::int, ${p.salary_max ?? null}::int, ${p.salary_currency},
@@ -299,7 +321,7 @@ export default definePlugin({
     }),
     update_job_posting: operation({
       title: "Change a job posting",
-      description: "Changes the fields given of a posting (job_posting_id, from list_job_postings), leaving the rest: a salary range or closing date learnt later, a typo. A field given as null is cleared (the title cannot be); requirements and nice_to_haves, when given, replace the list. The salary range and the dates are checked as they will stand. Refused: a posting that is not there (NO_SUCH_POSTING), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of a posting (job_posting_id, from list_job_postings), leaving the rest: a salary range or closing date learnt later, a typo. A field given as null is cleared (the title cannot be); requirements and nice_to_haves, when given, replace the list. The salary range and the dates are checked as they will stand. Refused: a posting that is not there (NO_SUCH_POSTING), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), a posted date after today (FUTURE_DATE), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -323,6 +345,8 @@ export default definePlugin({
         const given = givenIn(u);
         const fields = ["title", "url", "salary_min", "salary_max", "salary_currency", "requirements", "nice_to_haves", "notes", "source", "posted_date", "closing_date"] as const;
         if (!fields.some(given)) return nothingToChange("job_posting_id", u.job_posting_id);
+        const postedAhead = futurePosted(u.posted_date);
+        if (postedAhead) return postedAhead;
         return ctx.db.tx(async (sql) => {
           // The row locked, so the range and the dates are checked against what they will be.
           const [held] = await sql<{ salary_min: number | null; salary_max: number | null; posted_date: string | null; closing_date: string | null }>`
@@ -379,7 +403,7 @@ export default definePlugin({
       async handler(ctx, j) {
         if (isFutureMoment(j.last_contacted)) return futureMoment(j.last_contacted!);
         const contact = await ctx.db.tx(async (sql) => {
-          if (j.company_id && !(await exists(sql, "companies", j.company_id))) return null;
+          if (j.company_id && !(await companyExists(sql, j.company_id))) return null;
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO job_contacts (company_id, name, title, email, phone, linkedin_url, role_in_process, notes, last_contacted)
             VALUES (${j.company_id ?? null}::uuid, ${j.name}, ${j.title ?? null}, ${j.email ?? null}, ${j.phone ?? null}, ${j.linkedin_url ?? null},
@@ -445,7 +469,7 @@ export default definePlugin({
         if (!fields.some(given)) return nothingToChange("job_contact_id", u.job_contact_id);
         if (isFutureMoment(u.last_contacted)) return futureMoment(u.last_contacted!);
         return ctx.db.tx(async (sql) => {
-          if (u.company_id && !(await exists(sql, "companies", u.company_id))) return noSuchCompany(u.company_id);
+          if (u.company_id && !(await companyExists(sql, u.company_id))) return noSuchCompany(u.company_id);
           const changed = await sql<{ id: string }>`
             UPDATE job_contacts SET
               company_id = CASE WHEN ${given("company_id")} THEN ${u.company_id ?? null}::uuid ELSE company_id END,
@@ -485,6 +509,7 @@ export default definePlugin({
           if (!held) return { missing: true as const };
           if (crm !== null && held.crm === crm) return { contact: (await contactOf(sql, job_contact_id))!, already_linked: true };
           if (crm !== null && held.crm !== null) return { taken: held.crm };
+          if (crm === null && held.crm === null) return { contact: (await contactOf(sql, job_contact_id))!, already_linked: false };
           await sql`UPDATE job_contacts SET professional_crm_contact_id = ${crm}::uuid, updated_at = now() WHERE id = ${job_contact_id}`;
           return { contact: (await contactOf(sql, job_contact_id))!, already_linked: false };
         });
@@ -497,7 +522,7 @@ export default definePlugin({
     }),
     submit_application: operation({
       title: "Record an application",
-      description: "Records an application to a posting (job_posting_id, from list_job_postings) and answers it with its id, which schedule_interview and update_application take. status is applied unless given; applied_date is today (the user's own date) unless given, or none for a draft. A posting holds one open application: one rejected or withdrawn makes room for another, and update_application moves an open one on. Refused: a posting that is not there (NO_SUCH_POSTING), a posting with an open application (ALREADY_APPLIED, naming it), and an applied_date after today (FUTURE_DATE).",
+      description: "Records an application to a posting (job_posting_id, from list_job_postings) and answers it with its id, which schedule_interview and update_application take. status is applied unless given; applied_date is today (the user's own date) unless given, or none for a draft or a withdrawn one. A posting holds one open application, one not rejected or withdrawn: one ended makes room for another, an ended one can always be recorded, and update_application moves an open one on. Refused: a posting that is not there (NO_SUCH_POSTING), an open application to a posting with one already (ALREADY_APPLIED, naming it), and an applied_date after today (FUTURE_DATE).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -505,7 +530,7 @@ export default definePlugin({
       input: {
         job_posting_id: z.string().uuid().describe("The posting's id"),
         status: z.enum(STATUSES).default("applied").describe("draft, applied, screening, interviewing, offer, accepted, rejected or withdrawn"),
-        applied_date: Day.nullish().describe("The day you applied, YYYY-MM-DD; today unless given, none for a draft"),
+        applied_date: Day.nullish().describe("The day you applied, YYYY-MM-DD; today unless given, none for a draft or a withdrawn one"),
         resume_version: text(200).min(1).nullish().describe("Which resume you sent"),
         cover_letter_notes: text(5000).min(1).nullish().describe("What the cover letter said"),
         referral_contact: text(200).min(1).nullish().describe("Who referred you"),
@@ -515,19 +540,15 @@ export default definePlugin({
       output: { application: Application },
       async handler(ctx, a) {
         const day = todayOf(a.today);
-        const applied = a.applied_date !== undefined ? a.applied_date : a.status === "draft" ? null : day;
+        const applied = a.applied_date !== undefined ? a.applied_date : UNSENT.includes(a.status) ? null : day;
         if (applied && applied > day) return futureDay("applied_date", applied, day);
         return ctx.db.tx(async (sql) => {
           // The posting locked, so two applications to it at once decide in turn.
           const [posting] = await sql<{ id: string }>`SELECT id FROM job_postings WHERE id = ${a.job_posting_id} FOR UPDATE`;
           if (!posting) return noSuchPosting(a.job_posting_id);
-          const [open] = await sql<{ id: string; status: string }>`
-            SELECT id, status FROM applications WHERE job_posting_id = ${a.job_posting_id} AND status NOT IN ('rejected', 'withdrawn') ORDER BY created_at, id LIMIT 1`;
-          if (open) {
-            return refuse(409, "ALREADY_APPLIED", {
-              job_posting_id: a.job_posting_id, application_id: open.id, application_status: open.status,
-              message: `this posting has an open application, ${open.id} (${open.status}): update_application moves it on`,
-            });
+          if (!ENDED.includes(a.status)) {
+            const taken = await openApplication(sql, a.job_posting_id);
+            if (taken) return taken;
           }
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO applications (job_posting_id, status, applied_date, resume_version, cover_letter_notes, referral_contact, notes)
@@ -565,7 +586,7 @@ export default definePlugin({
     }),
     update_application: operation({
       title: "Change an application",
-      description: "Changes the fields given of an application (application_id, from list_applications), leaving the rest: its status as it moves on, the day the company answered (response_date), and its other fields. A field given as null is cleared. A draft moved on with no applied_date is dated today, the user's own date. Refused: an application that is not there (NO_SUCH_APPLICATION), a day after today (FUTURE_DATE), a response before the application (BAD_DATES), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of an application (application_id, from list_applications), leaving the rest: its status as it moves on, the day the company answered (response_date), and its other fields. A field given as null is cleared. A draft moved on to a status that sends it (not withdrawn) with no applied_date is dated today, the user's own date, unless the response recorded is earlier. Reopening a rejected or withdrawn application needs its posting to have no other open one. Refused: an application that is not there (NO_SUCH_APPLICATION), a day after today (FUTURE_DATE), a response before the application (BAD_DATES), a reopened one whose posting has another open (ALREADY_APPLIED), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -593,13 +614,22 @@ export default definePlugin({
         }
         return ctx.db.tx(async (sql) => {
           // The row locked, so the dates are checked against what they will be.
-          const [held] = await sql<{ applied_date: string | null; response_date: string | null }>`
-            SELECT applied_date::text AS applied_date, response_date::text AS response_date FROM applications WHERE id = ${u.application_id} FOR UPDATE`;
+          const [held] = await sql<{ status: string; job_posting_id: string; applied_date: string | null; response_date: string | null }>`
+            SELECT status, job_posting_id::text AS job_posting_id, applied_date::text AS applied_date, response_date::text AS response_date
+              FROM applications WHERE id = ${u.application_id} FOR UPDATE`;
           if (!held) return noSuchApplication(u.application_id);
-          const applied = given("applied_date") ? u.applied_date ?? null
-            : held.applied_date === null && u.status !== undefined && u.status !== "draft" ? day : held.applied_date;
+          const status = u.status ?? held.status;
           const response = given("response_date") ? u.response_date ?? null : held.response_date;
+          // A draft sent today is dated today, unless a response recorded before it says otherwise.
+          const sentNow = held.status === "draft" && held.applied_date === null && !UNSENT.includes(status) && (response === null || response >= day);
+          const applied = given("applied_date") ? u.applied_date ?? null : sentNow ? day : held.applied_date;
           if (applied && response && response < applied) return badDates("applied_date", applied, "response_date", response);
+          if (ENDED.includes(held.status) && !ENDED.includes(status)) {
+            // Reopened: the posting locked, as submit_application locks it, so it still holds one open application.
+            await sql`SELECT 1 FROM job_postings WHERE id = ${held.job_posting_id} FOR UPDATE`;
+            const taken = await openApplication(sql, held.job_posting_id);
+            if (taken) return taken;
+          }
           await sql`
             UPDATE applications SET
               status = CASE WHEN ${given("status")} THEN ${u.status ?? null} ELSE status END,
@@ -617,7 +647,7 @@ export default definePlugin({
     }),
     schedule_interview: operation({
       title: "Schedule an interview",
-      description: "Schedules an interview for an application (application_id, from list_applications) and answers it with its id, which update_interview and log_interview_notes take. scheduled_at is ISO 8601 with seconds and its offset; one with no time yet is listed by list_interviews until update_interview sets it. Refused: an application that is not there (NO_SUCH_APPLICATION).",
+      description: "Schedules an interview for an application (application_id, from list_applications) and answers it with its id, which update_interview and log_interview_notes take. scheduled_at is ISO 8601 with seconds and its offset; one with no time yet is listed by list_interviews until update_interview sets it. Refused: an application that is not there (NO_SUCH_APPLICATION), and one rejected or withdrawn (APPLICATION_ENDED).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -633,17 +663,20 @@ export default definePlugin({
       },
       output: { interview: Interview },
       async handler(ctx, i) {
-        const interview = await ctx.db.tx(async (sql) => {
-          if (!(await exists(sql, "applications", i.application_id))) return null;
+        return ctx.db.tx(async (sql) => {
+          const [application] = await sql<{ status: string }>`SELECT status FROM applications WHERE id = ${i.application_id}`;
+          if (!application) return noSuchApplication(i.application_id);
+          if (ENDED.includes(application.status)) {
+            return refuse(422, "APPLICATION_ENDED", { application_id: i.application_id, application_status: application.status,
+              message: `the application is ${application.status}: update_application reopens it first` });
+          }
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO interviews (application_id, interview_type, scheduled_at, duration_minutes, interviewer_name, interviewer_title, notes)
             VALUES (${i.application_id}, ${i.interview_type}, ${i.scheduled_at ?? null}::timestamptz, ${i.duration_minutes ?? null}::int, ${i.interviewer_name ?? null},
                     ${i.interviewer_title ?? null}, nullif(${i.notes ?? null}::text, ''))
             RETURNING id`;
-          return interviewOf(sql, id);
+          return ok({ interview: (await interviewOf(sql, id))! });
         });
-        if (!interview) return noSuchApplication(i.application_id);
-        return ok({ interview });
       },
     }),
     list_interviews: operation({
@@ -673,7 +706,7 @@ export default definePlugin({
     }),
     update_interview: operation({
       title: "Change an interview",
-      description: "Changes the fields given of an interview (interview_id, from list_interviews or get_upcoming_interviews), leaving the rest: a new time (rescheduled), its prep notes, who interviews, or its status (cancelled, no_show). A field given as null is cleared. How it went is log_interview_notes'. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of an interview (interview_id, from list_interviews or get_upcoming_interviews), leaving the rest: a new time (rescheduled: a cancelled or no-show interview given one is scheduled again, unless status says otherwise), its prep notes, who interviews, or its status (scheduled, cancelled, no_show). A field given as null is cleared. How it went, and completing it, is log_interview_notes'. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -686,7 +719,7 @@ export default definePlugin({
         interviewer_name: text(200).min(1).nullish().describe("Who interviews; null clears it"),
         interviewer_title: text(200).min(1).nullish().describe("Their title; null clears it"),
         notes: text(10000).nullish().describe("Prep notes, replacing them; null clears them"),
-        status: z.enum(INTERVIEW_STATUSES).optional().describe("scheduled, completed, cancelled or no_show"),
+        status: z.enum(SET_STATUSES).optional().describe("scheduled, cancelled or no_show; completed is log_interview_notes'"),
       },
       output: { interview: Interview },
       async handler(ctx, u) {
@@ -702,7 +735,9 @@ export default definePlugin({
               interviewer_name = CASE WHEN ${given("interviewer_name")} THEN ${u.interviewer_name ?? null} ELSE interviewer_name END,
               interviewer_title = CASE WHEN ${given("interviewer_title")} THEN ${u.interviewer_title ?? null} ELSE interviewer_title END,
               notes = CASE WHEN ${given("notes")} THEN nullif(${u.notes ?? null}::text, '') ELSE notes END,
-              status = CASE WHEN ${given("status")} THEN ${u.status ?? null} ELSE status END,
+              status = CASE WHEN ${given("status")} THEN ${u.status ?? null}
+                            WHEN ${u.scheduled_at != null} AND status IN ('cancelled', 'no_show') THEN 'scheduled'
+                            ELSE status END,
               updated_at = now()
             WHERE id = ${u.interview_id}
             RETURNING id`;
@@ -714,7 +749,7 @@ export default definePlugin({
     }),
     log_interview_notes: operation({
       title: "Log how an interview went",
-      description: "After an interview (interview_id, from get_pipeline_overview's awaiting_notes, list_interviews or get_upcoming_interviews): its feedback and your rating of it, 1 to 5. Only the fields given change: a field given as null is cleared, and one left out is kept. A scheduled interview whose time has come (or that has none) becomes completed unless status says otherwise; one still ahead stays scheduled, and a cancelled or no-show one stays as it is. Prep notes before it, a new time or a cancellation are update_interview's. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
+      description: "After an interview (interview_id, from get_pipeline_overview's awaiting_notes, list_interviews or get_upcoming_interviews): its feedback and your rating of it, 1 to 5. Only the fields given change: a field given as null is cleared, and one left out is kept. A scheduled interview whose time has come becomes completed unless status says otherwise; one still ahead or with no time stays scheduled, and a cancelled or no-show one stays as it is. Prep notes before it, a new time or a cancellation are update_interview's. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -734,7 +769,7 @@ export default definePlugin({
               feedback = CASE WHEN ${n.feedback !== undefined} THEN nullif(${n.feedback ?? null}::text, '') ELSE feedback END,
               rating = CASE WHEN ${n.rating !== undefined} THEN ${n.rating ?? null}::int ELSE rating END,
               status = CASE WHEN ${n.status !== undefined} THEN ${n.status ?? null}
-                            WHEN status = 'scheduled' AND (scheduled_at IS NULL OR scheduled_at <= now()) THEN 'completed'
+                            WHEN status = 'scheduled' AND scheduled_at <= now() THEN 'completed'
                             ELSE status END,
               updated_at = now()
             WHERE id = ${n.interview_id}
@@ -747,7 +782,7 @@ export default definePlugin({
     }),
     get_pipeline_overview: operation({
       title: "The pipeline at a glance",
-      description: "Where the search stands: how many applications in all, how many at each status (every status, none as 0), the interviews scheduled from now to days_ahead days on (the soonest first), the scheduled interviews already past, still waiting for log_interview_notes, and how many scheduled interviews have no time yet (list_interviews lists them). The lists stop at limit; truncated says whether one was cut, and the counts are of all of them.",
+      description: "Where the search stands: how many applications in all, how many at each status (every status, none as 0), the interviews scheduled from now to days_ahead days on (the soonest first), the scheduled interviews already past, still waiting for log_interview_notes, and how many scheduled interviews have no time yet (list_interviews lists them); the interviews of open applications only, not rejected or withdrawn ones. The lists stop at limit; truncated says whether one was cut, and the counts are of all of them.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
@@ -767,10 +802,11 @@ export default definePlugin({
           const [{ up, unscheduled }] = await sql<{ up: number; unscheduled: number }>`
             SELECT count(*) FILTER (WHERE scheduled_at >= now() AND scheduled_at <= now() + make_interval(days => ${days_ahead}::int))::int AS up,
                    count(*) FILTER (WHERE scheduled_at IS NULL)::int AS unscheduled
-              FROM interviews WHERE status = 'scheduled'`;
+              FROM interview_rows WHERE status = 'scheduled' AND application_status NOT IN ('rejected', 'withdrawn')`;
           const soon = await upcoming(sql, days_ahead, limit);
           const past = await sql<Answer<z.input<typeof Interview>> & { n: number }>`
-            SELECT answer, count(*) OVER ()::int AS n FROM interview_rows WHERE status = 'scheduled' AND scheduled_at < now()
+            SELECT answer, count(*) OVER ()::int AS n FROM interview_rows
+             WHERE status = 'scheduled' AND scheduled_at < now() AND application_status NOT IN ('rejected', 'withdrawn')
              ORDER BY scheduled_at DESC, id LIMIT ${limit + 1}`;
           return { counts, up, unscheduled, soon, past };
         });
@@ -786,7 +822,7 @@ export default definePlugin({
     }),
     get_upcoming_interviews: operation({
       title: "Upcoming interviews",
-      description: "The interviews scheduled from now to days_ahead days on, the soonest first, each with its application, posting and company. truncated says whether more were scheduled than limit.",
+      description: "The interviews scheduled from now to days_ahead days on, the soonest first, each with its application, posting and company; those of a rejected or withdrawn application left out. truncated says whether more were scheduled than limit.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",

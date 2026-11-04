@@ -1787,7 +1787,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
     `update_job_posting changes the fields given: the currency in capitals, the requirements replaced trimmed and each once, null clearing, the rest kept, updated_at moved (${String(JSON.stringify(reposted.body.job_posting)).slice(0, 240)})`);
   const salaryBelow = await c("update_job_posting", { job_posting_id: postIds.robo, salary_min: 200000 });
   const closingBefore = await c("update_job_posting", { job_posting_id: postIds.robo, closing_date: await dayFromToday(-6) });
-  const postedAfter = await c("update_job_posting", { job_posting_id: postIds.robo, posted_date: await dayFromToday(11) });
+  const postedAfter = await c("update_job_posting", { job_posting_id: postIds.closed, posted_date: utcToday });
   const noPostingMcp = await c("update_job_posting", { job_posting_id: NO_ROW, title: "x" }, { door: "mcp" });
   const postNothing = await c("update_job_posting", { job_posting_id: postIds.robo });
   assert(salaryBelow.status === 422 && salaryBelow.body.code === "BAD_SALARY" && closingBefore.status === 422 && closingBefore.body.code === "BAD_DATES"
@@ -2105,6 +2105,73 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
          && byName(upAll.interviews).includes("D10") && byName(upAll.interviews).includes("D7") && !((upAll.interviews ?? []) as { status: string }[]).some((x) => x.status !== "scheduled"),
     `get_pipeline_overview: awaiting notes the latest first, cut at limit, counted whole, truncated when it alone is cut; upcoming counted whole past limit; its seven days leave out one at seven and a half and one at ten, which get_upcoming_interviews' fourteen take; no cancelled one upcoming (${byName(pipeAll.upcoming_interviews)}; ${byName(upAll.interviews)})`);
 
+  // Review pass 2's definitions, each at its edge.
+  // An ended application reopened while its posting has another open: refused, as submit_application refuses.
+  const earlierId = appIds.earlier, reappliedId = String(reapplied.body.application?.id);
+  const reopenBlocked = await c("update_application", { application_id: earlierId, status: "applied" });
+  await c("update_application", { application_id: reappliedId, status: "withdrawn" });
+  const reopened = await c("update_application", { application_id: earlierId, status: "screening" });
+  const endedWhileOpen = await c("submit_application", { job_posting_id: postIds.closed, status: "rejected", applied_date: "2026-01-02" });
+  assert(reopenBlocked.status === 409 && reopenBlocked.body.code === "ALREADY_APPLIED" && reopenBlocked.body.application_id === reappliedId
+         && reopened.status === 200 && reopened.body.application?.status === "screening" && endedWhileOpen.status === 200 && endedWhileOpen.body.application?.status === "rejected",
+    `reopening a withdrawn application while its posting has another open is 409 ALREADY_APPLIED naming it, and taken once that one ends; an ended one is recorded beside an open one (${reopenBlocked.status}, ${reopened.status}, ${endedWhileOpen.status})`);
+  // A reopen and a submit to one posting at once, forced to race: one taken, one refused.
+  await c("update_application", { application_id: earlierId, status: "withdrawn" });
+  const reopenRace = await race(`SELECT 1 FROM plugin_job_hunt.job_postings WHERE id = '${postIds.closed}' FOR NO KEY UPDATE`, () => [
+    c("update_application", { application_id: earlierId, status: "applied" }), c("submit_application", { job_posting_id: postIds.closed }),
+  ]);
+  assert(reopenRace.bothWait && reopenRace.results === "200,409", `…and a reopen racing a submit to the same posting: one taken, one refused (${JSON.stringify(reopenRace)})`);
+  // Dating: only a draft sent is dated, and not past a response recorded earlier.
+  const datePost = async (title: string) => String((await c("add_job_posting", { company_id: vx, title })).body.job_posting?.id);
+  const neverSent = await c("submit_application", { job_posting_id: await datePost("D1"), status: "draft" });
+  const neverSentEnded = await c("update_application", { application_id: String(neverSent.body.application?.id), status: "withdrawn" });
+  const unknownDay = await c("submit_application", { job_posting_id: await datePost("D2"), applied_date: null });
+  const unknownEnded = await c("update_application", { application_id: String(unknownDay.body.application?.id), status: "rejected" });
+  const withdrawnAtSubmit = await c("submit_application", { job_posting_id: await datePost("D3"), status: "withdrawn" });
+  const answered = await c("submit_application", { job_posting_id: await datePost("D4"), status: "draft" });
+  await c("update_application", { application_id: String(answered.body.application?.id), response_date: await dayFromToday(-3) });
+  const answeredSent = await c("update_application", { application_id: String(answered.body.application?.id), status: "applied" });
+  assert(neverSentEnded.body.application?.applied_date === null && unknownEnded.body.application?.applied_date === null && withdrawnAtSubmit.body.application?.applied_date === null
+         && answeredSent.status === 200 && answeredSent.body.application?.applied_date === null,
+    `a draft withdrawn stays undated; an undated application that was no draft stays undated when it ends; one withdrawn at submit is undated; a draft sent after a response recorded earlier stays undated, not BAD_DATES (${answeredSent.status} ${answeredSent.body.application?.applied_date})`);
+  // An ended application's interviews leave the pipeline, and none is scheduled for one.
+  const endApp = String((await c("submit_application", { job_posting_id: await datePost("D5") })).body.application?.id);
+  const endAhead = await c("schedule_interview", { application_id: endApp, interview_type: "final", scheduled_at: hours(30), interviewer_name: "E1" });
+  await c("schedule_interview", { application_id: endApp, interview_type: "final", scheduled_at: hours(-30), interviewer_name: "E2" });
+  await c("schedule_interview", { application_id: endApp, interview_type: "final", interviewer_name: "E3" });
+  const beforeEnd = (await c("get_pipeline_overview", {})).body;
+  await c("update_application", { application_id: endApp, status: "rejected" });
+  const afterEnd = (await c("get_pipeline_overview", {})).body;
+  const endedSchedule = await c("schedule_interview", { application_id: endApp, interview_type: "final" });
+  assert(endAhead.status === 200 && beforeEnd.upcoming_count === afterEnd.upcoming_count + 1 && beforeEnd.awaiting_notes_count === afterEnd.awaiting_notes_count + 1
+         && beforeEnd.unscheduled_count === afterEnd.unscheduled_count + 1 && !byName((await c("get_upcoming_interviews", { days_ahead: 30 })).body.interviews).includes("E1")
+         && endedSchedule.status === 422 && endedSchedule.body.code === "APPLICATION_ENDED" && endedSchedule.body.application_status === "rejected",
+    `a rejected application's interviews leave upcoming, awaiting notes and the undated count; scheduling one for it is 422 APPLICATION_ENDED (${JSON.stringify([beforeEnd.upcoming_count, afterEnd.upcoming_count, beforeEnd.awaiting_notes_count, afterEnd.awaiting_notes_count, beforeEnd.unscheduled_count, afterEnd.unscheduled_count])})`);
+  // update_interview: completed is the log's; a new time brings back a cancelled one, not a completed one.
+  const openApp = String((await c("submit_application", { job_posting_id: await datePost("D6") })).body.application?.id);
+  const iv = String((await c("schedule_interview", { application_id: openApp, interview_type: "final", scheduled_at: hours(-2) })).body.interview?.id);
+  const completedByUpdate = await c("update_interview", { interview_id: iv, status: "completed" });
+  await c("update_interview", { interview_id: iv, status: "cancelled" });
+  const backOn = await c("update_interview", { interview_id: iv, scheduled_at: hours(48) });
+  await c("update_interview", { interview_id: iv, scheduled_at: hours(-1) });
+  await c("log_interview_notes", { interview_id: iv, feedback: "Done" });
+  const doneMoved = await c("update_interview", { interview_id: iv, scheduled_at: hours(-3) });
+  const undatedIv = String((await c("schedule_interview", { application_id: openApp, interview_type: "team" })).body.interview?.id);
+  const undatedLogged = await c("log_interview_notes", { interview_id: undatedIv, feedback: "Prep: read their blog" });
+  assert(completedByUpdate.status === 400 && backOn.body.interview?.status === "scheduled" && doneMoved.body.interview?.status === "completed"
+         && undatedLogged.body.interview?.status === "scheduled" && undatedLogged.body.interview?.feedback === "Prep: read their blog",
+    `update_interview refuses completed (400); a new time schedules a cancelled one again and leaves a completed one completed; a log on one with no time keeps it scheduled (${completedByUpdate.status}, ${backOn.body.interview?.status}, ${doneMoved.body.interview?.status}, ${undatedLogged.body.interview?.status})`);
+  // A posted day ahead of every time zone's today, and a null unlink on an unlinked contact.
+  const postedAhead = await c("add_job_posting", { company_id: vx, title: "x", posted_date: await dayFromToday(2) });
+  const postedAheadUpd = await c("update_job_posting", { job_posting_id: kilnId, posted_date: await dayFromToday(2) });
+  const postedTomorrow = await c("update_job_posting", { job_posting_id: String(glaze.body.job_posting?.id), posted_date: await dayFromToday(1) });
+  const hanaId = String(hana.body.job_contact?.id);
+  const hanaBefore = (((await c("search_job_contacts", { query: "hana" })).body.contacts ?? []) as { updated_at: string }[])[0].updated_at;
+  const nullAgain = await c("link_contact_to_professional_crm", { job_contact_id: hanaId, professional_crm_contact_id: null });
+  assert(postedAhead.status === 422 && postedAhead.body.code === "FUTURE_DATE" && postedAheadUpd.status === 422 && postedAheadUpd.body.code === "FUTURE_DATE"
+         && postedTomorrow.status === 200 && nullAgain.status === 200 && nullAgain.body.already_linked === false && nullAgain.body.job_contact?.updated_at === hanaBefore,
+    `a posted day two days ahead is FUTURE_DATE on add and change, one a day ahead (some zone's today) taken; null on an unlinked contact writes nothing (${postedAhead.status}, ${postedAheadUpd.status}, ${postedTomorrow.status})`);
+
   const missed = await outOfBounds(c, [
     ["a company name of 201 characters", "add_company", { name: "x".repeat(201) }], ["an empty company name", "add_company", { name: " " }], ["a NUL in a name", "add_company", { name: "x\u0000" }],
     ["a size of huge", "add_company", { name: "x", size: "huge" }], ["a remote policy of sometimes", "add_company", { name: "x", remote_policy: "sometimes" }],
@@ -2182,7 +2249,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   ]);
   assert(named404[0].body.company_id === NO_ROW && named404[1].body.job_posting_id === NO_ROW && /^no job posting has this id: list_job_postings/.test(String(named404[1].body.message))
          && named404[2].body.job_contact_id === NO_ROW,
-    "each NO_SUCH refusal names the id it was given, and says where the ids are");
+    "NO_SUCH_COMPANY, NO_SUCH_POSTING and NO_SUCH_JOB_CONTACT each name the id given, and NO_SUCH_POSTING says where the ids are");
   assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all twenty-nine"})`);
 }
 

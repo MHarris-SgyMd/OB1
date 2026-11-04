@@ -7374,7 +7374,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
     .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
   // None of the learning path's six: their tables are their plugins' since SMD-2311, and the extensions group is retired.
   assert(extensionSchemas.length === 0 && extensionSchemas.every((f) => contribFiles.includes(f)) && contribFiles.every((f) => existsSync(join(CONTRIB_DIR, f))),
-    `every extensions/*/schema.sql is in CONTRIB_SCHEMA_FILES and every listed file exists (${extensionSchemas.length} extension schemas; ${contribFiles.length} files listed)`);
+    `no extensions/*/schema.sql is left (the six are plugins), and every file CONTRIB_SCHEMA_FILES lists exists (${extensionSchemas.length} extension schemas; ${contribFiles.length} files listed)`);
   // The rule, from inside the suite, over the whole of both trees as check 12
   // walks them — not the listed files alone, since the two directories also
   // hold SQL no brain applies as a schema, and a Supabase-ism there is as
@@ -7433,7 +7433,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   assert(newTables.length === 13 && listedTables.size === 13 && newTables.every((t) => listedTables.has(t)),
     `the files created exactly the 13 tables the recipes group lists (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
   assert(newTables.every((t) => !grantedTables(["community"]).includes(t)) && !(ROLE_GRANT_GROUPS as readonly string[]).includes("extensions") && Object.hasOwn(RETIRED_GRANT_GROUPS, "extensions"),
-    "…none of them a community table under another name, and the extensions group retired since SMD-2311, its name refused by --groups");
+    "…none of them a community table under another name, and the extensions group out of ROLE_GRANT_GROUPS and in RETIRED_GRANT_GROUPS since SMD-2311 (test-preflight asserts --groups refusing it)");
   const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
   assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
     `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);

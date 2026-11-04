@@ -116,7 +116,7 @@ PORT=8787 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' bun --no-install r
 \```
 ```
 
-**GRANT step** — Every extension that creates tables MUST say how a role other than the tables' owner is granted them, because nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). The extensions in this tree list their tables in `ROLE_GRANTS.extensions` (`db/config.mjs`) and the file in `CONTRIB_SCHEMA_FILES` (`db/test-support.ts`), so `bun db/migrate.ts --grant <role>` issues them with the core tables (SMD-1810); a contribution that cannot do that gives the lines by hand:
+**GRANT step** — Every contribution that creates tables MUST say how a role other than the tables' owner is granted them, because nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). The recipes in this tree list their tables in `ROLE_GRANTS.recipes` (`db/config.mjs`) and the file in `CONTRIB_SCHEMA_FILES` (`db/test-support.ts`), so `bun db/migrate.ts --grant <role>` issues them with the core tables (SMD-1810); an extension is a plugin, its tables made under its own role (SMD-2311), and the `extensions` group is retired. A contribution that cannot do that gives the lines by hand:
 
 ```sql
 grant select, insert, update, delete on table public.your_table to your_role;

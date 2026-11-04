@@ -115,7 +115,7 @@ const TABLES = [
   // `thoughts`. They follow `thoughts` although several reference it: the
   // CASCADE above has already cut those constraints by the time they drop.
   ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
-  // The extension and recipe schemas' tables (SMD-1810): test-live [18] applies
+  // The recipe schemas' tables (SMD-1810; the extensions' are their plugins' since SMD-2311): test-live [18] applies
   // CONTRIB_SCHEMA_FILES after the community files, for the same reason and
   // with the same drop. No sequence among them (every id is a uuid or text);
   // their functions stay, as the community schemas' do.
@@ -1426,8 +1426,8 @@ export function communitySchemaFiles(): string[] {
 /** The repository root, which CONTRIB_SCHEMA_FILES are relative to. */
 export const CONTRIB_DIR = join(HERE, "..");
 /**
- * The extension and recipe SQL files that create tables or views — the ones
- * `--grant`'s `extensions` and `recipes` groups cover — in the order test-schema
+ * The recipe SQL files that create tables or views — the ones `--grant`'s
+ * `recipes` group covers (the extensions' went with SMD-2311) — in the order test-schema
  * [50] and test-live [18] apply them, after the community files (SMD-1810).
  * Listed, not walked: recipes/ also holds a psql query layer (`\set`
  * variables), a pg_cron line, two helper functions, a column added to

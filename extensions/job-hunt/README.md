@@ -139,7 +139,7 @@ A recruiter you're talking to during the job search is also a professional conta
 
 **How it works technically:**
 
-No plugin calls another or reads another's tables, so the link is two steps your agent takes, each through the brain's own tools: the CRM adds the contact, and the job hunt records its id in `professional_crm_contact_id`. That id is not a database foreign key — the two plugins' tables live in separate schemas, and you might turn on one without the other — so the job hunt cannot check the CRM has that contact. Linking again to the same id changes nothing; a job contact already linked to another is refused until you unlink it. `job_hunt_search_job_contacts` with `only_unlinked` lists who is not in your CRM yet.
+No plugin calls another or reads another's tables, so the link is two steps your agent takes, each through the brain's own tools: the CRM finds the contact, or adds it if it is not there, and the job hunt records its id in `professional_crm_contact_id`. That id is not a database foreign key — the two plugins' tables live in separate schemas, and you might turn on one without the other — so the job hunt cannot check the CRM has that contact. Linking again to the same id changes nothing; a job contact already linked to another is refused until you unlink it. `job_hunt_search_job_contacts` with `only_unlinked` lists who is not in your CRM yet.
 
 ### Integration with Extensions 1-4
 
