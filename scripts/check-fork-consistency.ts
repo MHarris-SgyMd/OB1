@@ -5040,7 +5040,7 @@ const MAY_REPORT_CASES: [name: string, answer: "carries" | "could render as" | n
   ["Schema against real Postgres (${{ matrix.shard }})", null],
   ["${{ inputs.label }} tests", null],
   ["Fork Checks (${{ matrix.os }})", null],
-  ["Release (images, stack from them, notes)", null],
+  ["Images, stack from them, notes", null],
   ["Fork Checks passe${{ x }}d!", null],
   ["Fork ${{ x }} Checks ${{ y }} passed ${{ z }}", null],
   ["Fork Checks pa${{ x }}ks passed", null],
@@ -6115,7 +6115,7 @@ checkComposeOnly();
  * commit only a fork of the action holds, is zizmor's to find (run once for
  * SMD-2093, not in CI); actionlint cannot check a SHA-pinned action's inputs,
  * so a Dependabot major is read against the new action.yml by hand; and an
- * image an action starts by an input (release.yml's binfmt and BuildKit
+ * image an action starts by an input (release-steps.yml's binfmt and BuildKit
  * images) or a job's `container:`/`services:` image is not a `uses:` and is
  * not read. Nor are a local action's own steps (.github/actions/, none
  * today). The rules are workflowPinProblems and dependabotProblems, pure
@@ -8962,7 +8962,7 @@ function checkRouteTables() {
   }
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
   const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml", "compose.grafana-port.yaml": "deploy/compose.grafana-port.yaml", "compose.grafana-public.yaml": "deploy/compose.grafana-public.yaml" };
-  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release-steps.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
   // …and the commands its notes tell an operator to run: the downloads of those files, the two keys minted with the release's own image (SMD-2287: a release install has no checkout), and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
     const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9", server_image: "ghcr.io/x/ob1-server:9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
@@ -9833,9 +9833,10 @@ checkBunPins();
 // pull request runs, runs it when its `run` calls bun or node on it, read from
 // the step's working-directory, the job's or the workflow's, or a directory a
 // `cd` in the same step names (which of those applies is the shell's to say, so
-// each is taken). release.yml is not read: it runs on a tag, and on a pull
-// request only when its own paths change. A run counts only if the suite's
-// failure fails the job, so nothing counts from a step or job with
+// each is taken). release.yml and release-steps.yml, which it calls, are not
+// read: they run on a tag, and on a pull request only when release.yml's paths
+// change. A run counts only if the suite's failure fails the job, so nothing
+// counts from a step or job with
 // `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
 // followed by `|| true` or `|| :`, a continued line read as one. A matrix job
 // is read once a cell, GitHub's way (matrixCells), its `${{ matrix.* }}` in env
@@ -10350,7 +10351,7 @@ const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg
  */
 const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs, and in a recipe's example payload" },
-  "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release.yml alone runs; the rest are repo-consistency's or the cut's" },
+  "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
   "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/assemble-release.ts", "scripts/fork-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; written by fork-index.ts and assemble-release.ts, which no gated job runs" },

@@ -850,10 +850,9 @@ or that can open no PR. It holds a pin's shape, not its truth: a comment naming
 another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
 CI. Two images the release job's actions start by default, QEMU's binfmt and
 the BuildKit builder that pushes to GHCR, are pinned by digest through their
-inputs in `release.yml`, and nothing moves those but a hand edit; nor does
-anything move the database jobs' pgvector image. The rehearsal still runs with
-the release's write token on a PR that touches what it builds from, a
-Dependabot one included (SMD-2111).
+inputs in `release-steps.yml`, and nothing moves those but a hand edit; nor
+does anything move the database jobs' pgvector image. The rehearsal runs as a
+job of its own whose token only reads (SMD-2111).
 
 **"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
 step runs the suite at the default width and at 768 in the background, each to
