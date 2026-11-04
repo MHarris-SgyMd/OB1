@@ -8,8 +8,8 @@
  * plugin's reads and is refused its writes, and a capture key sees none of
  * it. Each plugin's section then drives its operations as
  * extensions/test-tools.ts drove the standalone servers' tools (until the
- * last became a plugin, SMD-2311): each filter
- * on its own, each refusal, what a write stored and what a read chose.
+ * last became a plugin, SMD-2311): each filter on its own, each refusal, what
+ * a write stored and what a read chose.
  *
  * The drift guard: every tool a write key's tools/list shows for a ported
  * plugin is driven here, and nothing else, so an operation added to one fails
@@ -2230,7 +2230,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const total = Number((await c("get_pipeline_overview", {})).body.total_applications);
   const listedDefault = ((await c("list_applications", {})).body.applications as unknown[]).length;
   assert(refusedEdges.length === 0 && total > 5 && listedDefault === Math.min(total, 50),
-    `each kind of bound's own edge is taken, on one field each, and list_applications without a limit lists min(${total}, 50) (${refusedEdges.join("; ") || "all taken"}; ${listedDefault})`);
+    `each kind of bound's own edge is taken, and list_applications without a limit lists min(${total}, 50) (${refusedEdges.join("; ") || "all taken"}; ${listedDefault})`);
   const tableTakes: string[] = [];
   for (const q of [
     "INSERT INTO plugin_job_hunt.companies (name, glassdoor_rating) VALUES (repeat('n', 200), 1.0), ('t', 5.0)",
@@ -2299,7 +2299,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
     `a semicolon, a tab and a no-break space each split words; a backslash matches itself and only itself; a long query is matched whole; a posting's URL and source, a contact's LinkedIn URL and a company's size and remote policy are not searched; a URL kept as given (${linkedIn})`);
   // Each update: every field changed at once, then one alone leaving the rest.
   const strip = (row: unknown) => { const { updated_at: _u, ...rest } = row as Record<string, unknown>; return rest; };
-  const keeps = (before: unknown, after: unknown, changed: Record<string, unknown>) => canon({ ...strip(before), ...changed }) === canon(strip(after));
+  const keeps = (was: unknown, now: unknown, changed: Record<string, unknown>) => canon({ ...strip(was), ...changed }) === canon(strip(now));
   const g0 = gamma.body.company;
   const gAll = { name: "Gamma Two", industry: "Mining", website: "https://gamma.example", size: "startup", location: "Perth", remote_policy: "remote", notes: "Ore", glassdoor_rating: 3.1 };
   const g1 = (await c("update_company", { company_id: String(g0?.id), ...gAll })).body.company;
@@ -2361,6 +2361,12 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
          && JSON.stringify(undatedOrder) === JSON.stringify([undated2, undated1]) && (await people({ only_unlinked: false, limit: 200 })) === (await people({ limit: 200 })),
     `a name in two cases lists the older first; two undated interviews list the newer first; only_unlinked false lists everyone (${JSON.stringify(undatedOrder)})`);
 
+  const named404 = await Promise.all([
+    c("add_job_posting", { company_id: NO_ROW, title: "x" }), c("submit_application", { job_posting_id: NO_ROW }), c("update_job_contact", { job_contact_id: NO_ROW, notes: "x" }),
+  ]);
+  assert(named404.every((r) => r.status === 404) && named404[0].body.company_id === NO_ROW && named404[1].body.job_posting_id === NO_ROW && /^no job posting has this id: list_job_postings/.test(String(named404[1].body.message))
+         && named404[2].body.job_contact_id === NO_ROW,
+    "NO_SUCH_COMPANY, NO_SUCH_POSTING and NO_SUCH_JOB_CONTACT each name the id given, and NO_SUCH_POSTING says where the ids are");
   const missed = await outOfBounds(c, [
     ["a company name of 201 characters", "add_company", { name: "x".repeat(201) }], ["an empty company name", "add_company", { name: " " }], ["a NUL in a name", "add_company", { name: "x\u0000" }],
     ["a size of huge", "add_company", { name: "x", size: "huge" }], ["a remote policy of sometimes", "add_company", { name: "x", remote_policy: "sometimes" }],
@@ -2433,12 +2439,6 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
     [`INSERT INTO plugin_job_hunt.applications (job_posting_id) VALUES ('${NO_ROW}')`, /foreign key/],
     [`INSERT INTO plugin_job_hunt.job_postings (company_id, title, salary_currency) VALUES ('${ids.acme}', 't', 'US')`, /salary_currency_check/],
   ]);
-  const named404 = await Promise.all([
-    c("add_job_posting", { company_id: NO_ROW, title: "x" }), c("submit_application", { job_posting_id: NO_ROW }), c("update_job_contact", { job_contact_id: NO_ROW, notes: "x" }),
-  ]);
-  assert(named404.every((r) => r.status === 404) && named404[0].body.company_id === NO_ROW && named404[1].body.job_posting_id === NO_ROW && /^no job posting has this id: list_job_postings/.test(String(named404[1].body.message))
-         && named404[2].body.job_contact_id === NO_ROW,
-    "NO_SUCH_COMPANY, NO_SUCH_POSTING and NO_SUCH_JOB_CONTACT each name the id given, and NO_SUCH_POSTING says where the ids are");
   assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all twenty-nine"})`);
 }
 

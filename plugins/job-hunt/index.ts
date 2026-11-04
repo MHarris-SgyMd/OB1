@@ -5,10 +5,10 @@
 // tools kept as ten operations under the same names, and nine more: a list of
 // companies, postings, applications and interviews, so an agent can find the
 // ids the others take, and a change of each of the five kinds of row, so a
-// typo is not for good and an application or an interview can move on. Its link to the professional CRM records the CRM contact's id,
-// which the client gets from professional_crm_add_contact first: no plugin
-// calls another, and this one reaches nothing outside its own schema
-// (decided 2026-11-02).
+// typo is not for good and an application or an interview can move on. Its
+// link to the professional CRM records the CRM contact's id, which the client
+// gets from professional_crm_add_contact first: no plugin calls another, and
+// this one reaches nothing outside its own schema (decided 2026-11-02).
 
 import { definePlugin, ok, operation, refuse, z } from "../../server-portable/plugin-sdk.ts";
 import type { PluginSql } from "../../server-portable/plugin-sdk.ts";
@@ -17,7 +17,10 @@ const SIZES = ["startup", "mid-market", "enterprise"] as const;
 const REMOTE = ["remote", "hybrid", "onsite"] as const;
 const SOURCES = ["linkedin", "company-site", "referral", "recruiter", "other"] as const;
 const STATUSES = ["draft", "applied", "screening", "interviewing", "offer", "accepted", "rejected", "withdrawn"] as const;
-/** An application at one of these is ended: it makes room for another to its posting, and its interviews leave the pipeline. */
+/**
+ * An application at one of these is ended: it makes room for another to its posting, and its interviews leave the
+ * pipeline. The queries spell it out as ('rejected', 'withdrawn'): openApplication, upcoming and the pipeline's two.
+ */
 const ENDED: readonly string[] = ["rejected", "withdrawn"];
 /** At one of these an application has not been sent, so it is not dated today by default. */
 const UNSENT: readonly string[] = ["draft", "withdrawn"];
@@ -40,15 +43,18 @@ const webUrl = (what: string) => z.url({ protocol: /^https?$/, error: `${what} a
  * day of the date in UTC either way, as every time zone's date is (UTC-12 to
  * UTC+14): a date further off is a typo.
  */
+/** The date in UTC now, YYYY-MM-DD. */
+const utcToday = () => new Date().toISOString().slice(0, 10);
 const TodayInput = z.iso.date()
-  .refine((d) => Math.abs(Date.parse(`${d}T00:00:00Z`) - Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)) <= 86_400_000,
+  .refine((d) => Math.abs(Date.parse(`${d}T00:00:00Z`) - Date.parse(`${utcToday()}T00:00:00Z`)) <= 86_400_000,
     "the user's own date today, within a day of the date in UTC")
   .optional()
   .describe("The user's own date today, YYYY-MM-DD; the date in UTC unless given, which is a day off for part of each day in most time zones");
 /** The user's today, as TodayInput gives it, or the date in UTC. */
-const todayOf = (today: string | undefined) => today ?? new Date().toISOString().slice(0, 10);
+const todayOf = (today: string | undefined) => today ?? utcToday();
 
 const Ref = z.object({ id: z.string(), name: z.string() });
+const PostingRef = z.object({ id: z.string(), title: z.string() });
 /** A posting's requirements or nice-to-haves, each a short text. */
 const Items = z.array(text(500).min(1)).max(50);
 const Currency = z.string().trim().regex(/^[A-Za-z]{3}$/, "a currency's three letters: USD, EUR, GBP").transform((s) => s.toUpperCase());
@@ -63,12 +69,12 @@ const Posting = z.object({
   updated_at: z.string(),
 });
 const Application = z.object({
-  id: z.string(), job_posting_id: z.string(), posting: z.object({ id: z.string(), title: z.string() }), company: Ref, status: z.enum(STATUSES),
+  id: z.string(), job_posting_id: z.string(), posting: PostingRef, company: Ref, status: z.enum(STATUSES),
   applied_date: z.string().nullable(), response_date: z.string().nullable(), resume_version: z.string().nullable(), cover_letter_notes: z.string().nullable(),
   referral_contact: z.string().nullable(), notes: z.string().nullable(), created_at: z.string(), updated_at: z.string(),
 });
 const Interview = z.object({
-  id: z.string(), application_id: z.string(), application: z.object({ id: z.string(), status: z.enum(STATUSES) }), posting: z.object({ id: z.string(), title: z.string() }),
+  id: z.string(), application_id: z.string(), application: z.object({ id: z.string(), status: z.enum(STATUSES) }), posting: PostingRef,
   company: Ref, interview_type: z.enum(INTERVIEW_TYPES), scheduled_at: z.string().nullable(), duration_minutes: z.number().int().nullable(),
   interviewer_name: z.string().nullable(), interviewer_title: z.string().nullable(), status: z.enum(INTERVIEW_STATUSES), notes: z.string().nullable(),
   feedback: z.string().nullable(), rating: z.number().int().nullable(), created_at: z.string(), updated_at: z.string(),
@@ -111,7 +117,7 @@ const futureMoment = (moment: string) =>
 const isFutureMoment = (moment: string | null | undefined) => !!moment && Date.parse(moment) > Date.now() + 86_400_000;
 /** A posted day after every time zone's today (UTC's and a day), refused: it is the day it was posted. */
 const futurePosted = (day: string | null | undefined) => {
-  if (!day || Date.parse(`${day}T00:00:00Z`) <= Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`) + 86_400_000) return null;
+  if (!day || Date.parse(`${day}T00:00:00Z`) <= Date.parse(`${utcToday()}T00:00:00Z`) + 86_400_000) return null;
   return refuse(422, "FUTURE_DATE", { posted_date: day, message: "posted_date is after every time zone's today: it is the day it was posted" });
 };
 /** Whether an update gave a field: absent is kept, null clears. */
@@ -142,10 +148,9 @@ async function interviewApplicationStatus(sql: PluginSql, interviewId: string): 
     SELECT a.status AS application_status FROM interviews i JOIN applications a ON a.id = i.application_id WHERE i.id = ${interviewId} FOR SHARE OF a`;
   return held?.application_status ?? null;
 }
-/** The refusal of scheduling again an interview whose application has ended. */
-const interviewEnded = (interviewId: string, applicationStatus: string) =>
-  refuse(422, "APPLICATION_ENDED", { interview_id: interviewId, application_status: applicationStatus,
-    message: `the interview's application is ${applicationStatus}: update_application reopens it first` });
+/** The refusal of an interview for an application that has ended, or of scheduling one of its interviews again. */
+const applicationEnded = (field: "application_id" | "interview_id", id: string, applicationStatus: string, what: string) =>
+  refuse(422, "APPLICATION_ENDED", { [field]: id, application_status: applicationStatus, message: `${what} is ${applicationStatus}: update_application reopens it first` });
 const companyOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Company>>>`SELECT answer FROM company_rows WHERE id = ${id}`)[0]?.answer ?? null;
 const postingOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Posting>>>`SELECT answer FROM posting_rows WHERE id = ${id}`)[0]?.answer ?? null;
 const applicationOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Application>>>`SELECT answer FROM application_rows WHERE id = ${id}`)[0]?.answer ?? null;
@@ -236,7 +241,8 @@ export default definePlugin({
       output: { company: Company },
       async handler(ctx, u) {
         const given = givenIn(u);
-        if (!(["name", "industry", "website", "size", "location", "remote_policy", "notes", "glassdoor_rating"] as const).some(given)) return nothingToChange("company_id", u.company_id);
+        const fields = ["name", "industry", "website", "size", "location", "remote_policy", "notes", "glassdoor_rating"] as const;
+        if (!fields.some(given)) return nothingToChange("company_id", u.company_id);
         const company = await ctx.db.tx(async (sql) => {
           const changed = await sql<{ id: string }>`
             UPDATE companies SET
@@ -510,9 +516,9 @@ export default definePlugin({
         professional_crm_contact_id: z.string().uuid().nullable().describe("The CRM contact's id, from professional_crm_add_contact; null unlinks"),
       },
       output: { job_contact: JobContact, already_linked: z.boolean() },
-      async handler(ctx, { job_contact_id, professional_crm_contact_id: given }) {
+      async handler(ctx, { job_contact_id, professional_crm_contact_id }) {
         // Postgres answers a uuid in lower case; one given in capitals is the same id.
-        const crm = given === null ? null : given.toLowerCase();
+        const crm = professional_crm_contact_id?.toLowerCase() ?? null;
         const done = await ctx.db.tx(async (sql) => {
           // The contact's row locked, so two links at once decide in turn.
           const [held] = await sql<{ crm: string | null }>`SELECT professional_crm_contact_id::text AS crm FROM job_contacts WHERE id = ${job_contact_id} FOR UPDATE`;
@@ -677,10 +683,7 @@ export default definePlugin({
           // Shared with update_application's lock: an application ended at the same moment ends first, or waits for this.
           const [application] = await sql<{ status: string }>`SELECT status FROM applications WHERE id = ${i.application_id} FOR SHARE`;
           if (!application) return noSuchApplication(i.application_id);
-          if (ENDED.includes(application.status)) {
-            return refuse(422, "APPLICATION_ENDED", { application_id: i.application_id, application_status: application.status,
-              message: `the application is ${application.status}: update_application reopens it first` });
-          }
+          if (ENDED.includes(application.status)) return applicationEnded("application_id", i.application_id, application.status, "the application");
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO interviews (application_id, interview_type, scheduled_at, duration_minutes, interviewer_name, interviewer_title, notes)
             VALUES (${i.application_id}, ${i.interview_type}, ${i.scheduled_at ?? null}::timestamptz, ${i.duration_minutes ?? null}::int, ${i.interviewer_name ?? null},
@@ -741,7 +744,7 @@ export default definePlugin({
           const applicationStatus = await interviewApplicationStatus(sql, u.interview_id);
           if (applicationStatus === null) return noSuchInterview(u.interview_id);
           const ended = ENDED.includes(applicationStatus);
-          if (ended && u.status === "scheduled") return interviewEnded(u.interview_id, applicationStatus);
+          if (ended && u.status === "scheduled") return applicationEnded("interview_id", u.interview_id, applicationStatus, "the interview's application");
           await sql`
             UPDATE interviews SET
               interview_type = CASE WHEN ${given("interview_type")} THEN ${u.interview_type ?? null} ELSE interview_type END,
@@ -774,16 +777,17 @@ export default definePlugin({
       },
       output: { interview: Interview },
       async handler(ctx, n) {
-        if (n.feedback === undefined && n.rating === undefined && n.status === undefined) return nothingToChange("interview_id", n.interview_id);
+        const given = givenIn(n);
+        if (!(["feedback", "rating", "status"] as const).some(given)) return nothingToChange("interview_id", n.interview_id);
         return ctx.db.tx(async (sql) => {
           const applicationStatus = await interviewApplicationStatus(sql, n.interview_id);
           if (applicationStatus === null) return noSuchInterview(n.interview_id);
-          if (n.status === "scheduled" && ENDED.includes(applicationStatus)) return interviewEnded(n.interview_id, applicationStatus);
+          if (n.status === "scheduled" && ENDED.includes(applicationStatus)) return applicationEnded("interview_id", n.interview_id, applicationStatus, "the interview's application");
           await sql`
             UPDATE interviews SET
-              feedback = CASE WHEN ${n.feedback !== undefined} THEN nullif(${n.feedback ?? null}::text, '') ELSE feedback END,
-              rating = CASE WHEN ${n.rating !== undefined} THEN ${n.rating ?? null}::int ELSE rating END,
-              status = CASE WHEN ${n.status !== undefined} THEN ${n.status ?? null}
+              feedback = CASE WHEN ${given("feedback")} THEN nullif(${n.feedback ?? null}::text, '') ELSE feedback END,
+              rating = CASE WHEN ${given("rating")} THEN ${n.rating ?? null}::int ELSE rating END,
+              status = CASE WHEN ${given("status")} THEN ${n.status ?? null}
                             WHEN status = 'scheduled' AND scheduled_at <= now() THEN 'completed'
                             ELSE status END,
               updated_at = now()

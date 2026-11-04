@@ -3,8 +3,7 @@
  * test-auth.ts — every vendored server authenticates through the core server's
  * auth path: the extension servers did (SMD-1252, FORK.md change 64) until
  * SMD-2311 made the six plugins and retired meal-planning's shared server, and
- * the
- * recipes and integrations that compared a key the same way (SMD-1455,
+ * the recipes and integrations that compared a key the same way (SMD-1455,
  * change 67) — an HTTP API, four workers and a webhook receiver now that no
  * vendored MCP server is left.
  *
@@ -863,7 +862,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
   env(s, KEYS);
   const at = (route: string, key: string | null, via: Via, also: Partial<Record<Via, string>>, accept = true) => {
     const [method, path] = route.split(" ");
-    return request(s, key, via, also, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, accept });
+    return request(s, key, via, also, { method, path: fill(path), body: method === "GET" ? undefined : {}, accept });
   };
   assert(passed(await at(s.readProbe!, READ_KEY, "query", { bearer: "eyJ.a.gateway-jwt" })),
     `${s.file}: a gateway's bearer token beside a right ?key= does not shadow it`);

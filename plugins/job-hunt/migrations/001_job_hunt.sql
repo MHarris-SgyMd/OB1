@@ -161,7 +161,7 @@ CREATE OR REPLACE VIEW application_rows AS
          ) AS answer
     FROM applications a JOIN job_postings p ON p.id = a.job_posting_id JOIN companies c ON c.id = p.company_id;
 
--- An interview, with its application's id and status, its posting's title and its company's name.
+-- An interview, with its application's id and status, its posting's id and title and its company's id and name.
 CREATE OR REPLACE VIEW interview_rows AS
   SELECT i.id, i.application_id, p.company_id, i.status, a.status AS application_status, i.scheduled_at, i.created_at,
          jsonb_build_object(
