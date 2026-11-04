@@ -2716,28 +2716,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
-  // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): two of the six files, job-hunt's and
-  // professional-crm's, whose tables job-hunt's link writes into until it is a
-  // plugin too (SMD-2311 PR 4b). The professional CRM and the other four are
-  // plugins since SMD-2311, their tables in their own schemas under their own
-  // roles.
-  // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
-  // granted nothing — Supabase's default privileges carried its service role;
-  // the policies are gone, and this group is what a role other than the
-  // tables' owner needs. Every id is a uuid, so no sequence rows; no function
-  // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
-  // both).
-  extensions: Object.freeze([
-    Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "companies",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "job_postings",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "applications",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "interviews",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "job_contacts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-  ]),
   // The recipe SQL files a brain applies as a schema — six files creating
   // tables or views, applied by hand as each README says (SMD-1810; the list
   // is test-support's CONTRIB_SCHEMA_FILES). Upstream granted most of these
@@ -2824,14 +2802,17 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "community", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read
  * of query_log (SMD-2678), retired in 2.0.0 with the search's wake (SMD-3315).
+ * `extensions` granted the tables of the learning path's extension schemas,
+ * retired in 2.0.0 when the six became plugins (SMD-2311).
  */
 export const RETIRED_GRANT_GROUPS = Object.freeze({
   sleep: "retired in 2.0.0: a search no longer wakes the sleep scheduler, which reads no query_log (SMD-3315)",
+  extensions: "retired in 2.0.0: the six extensions are plugins, each with its tables in its own schema under its own role, which --grant never touches (SMD-2311)",
 });
 
 /**

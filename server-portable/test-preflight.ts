@@ -794,6 +794,9 @@ else {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       assert(/✓  priority\s+assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group/.test(whole.out),
              `on a brain at 116 the priority functions and the priority grant: ok (${line(whole.out).trim()})`);
+      // 117's open items (SMD-3665 PR 2): their functions and the items grant, ok on a whole brain.
+      assert(/✓  open items\s+open_item, update_item, set_item_status, propose_item_close, decide_item_close, open_item_history and their helpers present; the server's role holds the items group/.test(whole.out),
+             `on a brain at 117 the open-item functions and the items grant: ok (${whole.out.split("\n").find((l) => /open items/.test(l))?.trim()})`);
       await prio.unsafe("ALTER FUNCTION priority_history(text, text) RENAME TO priority_history_away");
       let missing: Awaited<ReturnType<typeof run>>;
       try {
@@ -3264,6 +3267,10 @@ else {
       assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
              "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+      // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
+      assert(/!  open items\s+the server's role holds no open_item_events INSERT, open_items INSERT, open_items UPDATE, open_items DELETE, open_item_close_proposals INSERT, open_item_close_proposals UPDATE: the open-item writers \(open_item, update_item, set_item_status, propose_item_close and decide_item_close\) fail naming the table, and nothing else does/.test(missingBoth.out)
+             && /--grant <role> --groups items/.test(missingBoth.out),
+             "…and the items group it lacks is a warning naming each write, the open-item writers alone failing for it");
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
@@ -3528,6 +3535,10 @@ else {
       assert(sleepGrant.code === 2 && /"sleep" was retired in 2\.0\.0: a search no longer wakes the sleep scheduler, which reads no query_log \(SMD-3315\) — drop it from --groups\. Nothing was granted\./.test(sleepGrant.out)
                && !/not a group/.test(sleepGrant.out) && !/^GRANT /m.test(sleepGrant.out),
              `…and --groups naming the retired sleep group is refused by name, nothing granted (exit ${sleepGrant.code}: ${sleepGrant.out.trim().split("\n").slice(-1)[0]})`);
+      const extGrant = await migrate(["--grant", "ob1_pf_capture", "--groups", "capture,extensions", "--url", LIVE]);
+      assert(extGrant.code === 2 && /"extensions" was retired in 2\.0\.0: the six extensions are plugins, each with its tables in its own schema under its own role, which --grant never touches \(SMD-2311\) — drop it from --groups\. Nothing was granted\./.test(extGrant.out)
+               && !/not a group/.test(extGrant.out) && !/^GRANT /m.test(extGrant.out),
+             `…and so is the retired extensions group (exit ${extGrant.code}: ${extGrant.out.trim().split("\n").slice(-1)[0]})`);
       // A subject pool named beside extraction (113): the ok names both, and the
       // capture below runs 113's trigger as the role too.
       await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");

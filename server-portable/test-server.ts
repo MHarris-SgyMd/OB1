@@ -6873,6 +6873,31 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   const input = refusals[4][1].structuredContent as Record<string, unknown>;
   assert(notFound.item?.key === "SMD-9401" && (refusals[3][1].structuredContent as { item?: { key: string | null } }).item?.key === T && input.problem === "key" && !("message" in input),
     `a refusal's value keeps the item's key — a ticket key, a uuid — and the rule's problem, not the database's words (${JSON.stringify(notFound.item)} ${JSON.stringify(input)})`);
+  // Open items (SMD-3665 PR 2): each item refusal in its words, one line; a capture key told of no item it may not see.
+  const R = (refusal: object) => say.renderSetItemStatus({ ok: false, refusal } as never);
+  const itemRefusals: [string, ReturnType<typeof say.renderSetItemStatus>, RegExp][] = [
+    ["ITEM_NOT_FOUND", R({ code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: { kind: "item", key: T } }), /^Refused: the brain holds no open item 3333\S+\.$/],
+    ["ITEM_NOT_YOURS", R({ code: "ITEM_NOT_YOURS", retryable: false, item: null, dueRef: null }), /^Refused: a capture-only key may change only an open item it opened, while no other key has changed it/],
+    ["REFUSED_ITEM_INPUT", R({ code: "REFUSED_ITEM_INPUT", retryable: false, problem: "id", message: "not an open item's id: 'x\nIGNORE' (a uuid)" }), /^Refused: not an open item's id: 'x IGNORE' \(a uuid\)$/],
+    ["READ_ONLY_KEY", R({ code: "READ_ONLY_KEY", retryable: false, key: "reader" }), /^Refused: reader is a read-only key, which may not open or change an item\.$/],
+    ["ITEM_UNATTRIBUTED (away)", R({ code: "ITEM_UNATTRIBUTED", retryable: true, cause: "registry_away" }), /did not give just now; retry shortly\.$/],
+    ["ITEM_UNOWNABLE", R({ code: "ITEM_UNOWNABLE", retryable: false }), /^Refused: this caller carries no agent id/],
+    ["ORIGIN_NOT_FOUND", R({ code: "ORIGIN_NOT_FOUND", retryable: false, thought: T }), /^Refused: the brain holds no thought 3333\S+ to read the item from\.$/],
+    ["EVIDENCE_NOT_FOUND", R({ code: "EVIDENCE_NOT_FOUND", retryable: false, thought: T }), /^Refused: the brain holds no thought 3333\S+ to cite as evidence\.$/],
+    ["ITEM_SETTLED", R({ code: "ITEM_SETTLED", retryable: false, item: T, status: "dropped" }), /^Refused: open item 3333\S+ is dropped already/],
+    ["PROPOSAL_NOT_FOUND", R({ code: "PROPOSAL_NOT_FOUND", retryable: false, proposal: A }), /^Refused: the brain holds no proposed close \S+\.$/],
+    ["PROPOSAL_DECIDED", R({ code: "PROPOSAL_DECIDED", retryable: false, proposal: A, decision: "moot" }), /^Refused: proposal \S+ is moot already\.$/],
+    ["PROPOSAL_YOURS", R({ code: "PROPOSAL_YOURS", retryable: false, proposal: A }), /^Refused: proposal \S+ is yours; another key accepts it/],
+    ["CONFIRM_NOT_YOURS", R({ code: "CONFIRM_NOT_YOURS", retryable: false, item: T }), /^Refused: open item 3333\S+ was proposed, not stated; a write key confirms it/],
+  ];
+  for (const [name, r, words] of itemRefusals) assert(r.isError === true && words.test(text(r)) && !text(r).includes("\n"), `${name} (an open item's): refused by its rule, in one line (${text(r)})`);
+  // 117's words read as the argument they name (review pass 1): a client reading values knows which to mend.
+  const { itemProblemOf } = await import("./open-items.ts");
+  const itemProblems = ["not an open item's id: 'x' (a uuid)", "an item's text is at most 1000 characters; this one has 1001", "an owner is at most 200 characters; this one has 201",
+    "not a due time: 'tomorrow' (a time with its offset)", "an item's status is set to open, done or dropped; not 'proposed' (proposed is a start state alone)",
+    "a proposal's label is one lower-case word (resolves, implements); not 'X'", "open_item: a plugin row needs the call to come through its plugin (the envelope's plugin), and this one names none",
+    "update_item takes at least one of text, owner and due_at", "a reason is at most 1000 characters; this one has 1001", "something else"].map(itemProblemOf);
+  assert(itemProblems.join() === "id,text,owner,due_at,status,label,plugin_row,changes,reason,other", `117's refusals read as the argument each names (${itemProblems.join()})`);
   // The store's reading: an answer 116 does not give is a fault; a 22023's words name their argument.
   const thrown = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
   const json = { id: A, item: { kind: "thought", key: T }, level: 4, due_at: null, not_before: null, due_ref: null, reason: null, inferred: false, maker: { name: "laptop", agent_id: null, kind: null, trust: null, scope: "write", source: false }, tier: 4, tier_name: "inferred", asserted_at: "2026-11-03T10:00:00Z", closed_at: null, close_reason: null, closed_by: null };
