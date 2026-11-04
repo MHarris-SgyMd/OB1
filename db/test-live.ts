@@ -125,7 +125,9 @@ if (!URL_) {
  * moves most with the runner's speed: its slow runs are its median, its fast
  * run ~50 s under. A cell's job runs ~15-25 s past its live step, so a
  * section added to a cell adds to the run's length once that cell's job is
- * the run's longest.
+ * the run's longest. SMD-3734 cut timers in long (~25 s locally) and the
+ * rest (~10 s), from jobs of 277 s and 297 s on PR 643's run 41790596461,
+ * so long has room under sleep's 282 s and the rest is still the longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -170,13 +172,13 @@ function want(id: string): boolean {
 }
 
 /**
- * Cut the pauses before a follower's provider outage to 100 ms in this
- * process (SMD-2599): the worker reads the exported array as it runs.
- * Returns the restore, for the case's finally.
+ * Cut the pauses before a follower's provider outage to `ms`, 100 by
+ * default, in this process (SMD-2599): the worker reads the exported array
+ * as it runs. Returns the restore, for the case's finally.
  */
-function shortenPauses(): () => void {
+function shortenPauses(ms = 100): () => void {
   const saved = [...TRANSIENT_PAUSES_MS];
-  TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
+  TRANSIENT_PAUSES_MS.splice(0, saved.length, ms, ms, ms);
   return () => { TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved); };
 }
 
@@ -3680,33 +3682,34 @@ if (want("9")) {
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
   // The heartbeat end to end (migration 031): a batch whose work outlasts the
-  // lease, under workers that beat. Every embedding takes 600 ms, fifteen per
-  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near nine seconds,
+  // lease, under workers that beat. Every embedding takes 400 ms, fifteen per
+  // claim, a 4 s lease with a 1 s heartbeat: a batch runs near six seconds,
   // and until 031 its lease expired mid-way — the rows went to another
   // worker on their second attempt, the first's releases returned false, and
-  // three such batches marked rows failed. Six seconds, not three, because a
+  // three such batches marked rows failed. Four seconds, not three, because a
   // runner that pauses the process for two seconds must not read as a lapse —
-  // a beat is missed only when the process is, and the lease covers five.
+  // a beat is missed only when the process is, and the lease covers three.
   // Three workers over the 42 thoughts claim 15, 15 and 12 at once, one round
   // (SMD-2135; two workers of sixteen, SMD-1023's third review pass, took two
   // rounds, some sixteen seconds). The fifteens outlast the lease — eight rows
   // would fit inside it, and the run would pass with renewal a no-op — and the
-  // twelve finishes at about 7.4 s and claims again, reaping any lease past its
-  // 6 s deadline, so a beat that renewed nothing hands it the others' last
+  // twelve finishes at about 5 s and claims again, reaping any lease past its
+  // 4 s deadline, so a beat that renewed nothing hands it the others' last
   // rows on their second attempt. Fifteen is the batch with margin both ways
   // for 42 thoughts: 14 ends all three together, 16 leaves ten rows that end
-  // at 6.1 s. A fresh backfill key, so the pool is every thought; the recorded
-  // model is the configured one here.
-  slowMs = 600;
+  // at 4.1 s. Two-thirds of 600 ms rows and a 6 s lease, every margin held in
+  // rows (SMD-3734). A fresh backfill key, so the pool is every thought; the
+  // recorded model is the configured one here.
+  slowMs = 400;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
-  const slow = await reembed("--job", SLOW_KEY, "--workers", "3", "--batch", "15", "--ttl", "6", "--heartbeat", "1");
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "3", "--batch", "15", "--ttl", "4", "--heartbeat", "1");
   slowMs = 0;
-  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /15 per claim, 6 s leases renewed every 1 s/.test(slow.out),
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /15 per claim, 4 s leases renewed every 1 s/.test(slow.out),
     `three workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/attempt 2/.test(slow.out) && !/no longer this worker's at release/.test(slow.out) && !/no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
-  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — three workers, one a second, over some nine seconds (${slowBeats})`);
+  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — three workers, one a second, over some six seconds (${slowBeats})`);
   const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
@@ -6858,7 +6861,9 @@ if (want("10g")) {
   await stuckRun;
   slowMs = 0;
   assert(stuckMs < 2500, `a count stuck for 3 s does not hold the hard stop's release past its bound (${stuckMs} ms)`);
-  await Bun.sleep(3500);
+  // The stuck count ends before its function goes. The run's end waits for it (SMD-3734 found none left there), so this
+  // poll, which replaced a 3.5 s sleep, returns at its first read; it guards a run that stops waiting.
+  await pollUntil(async () => (await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND state = 'active' AND query LIKE '%note_extraction_stop%'`)[0].c === 0, 5000);
   await sql.unsafe(`DROP FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean)`);
   await sql`ALTER FUNCTION note_extraction_stop_real(uuid, text, text, text, text, boolean) RENAME TO note_extraction_stop`;
   const [orbitRow] = await sql`SELECT stops, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${orbit}::uuid AND work_type = ${KEY}`;
@@ -12907,9 +12912,10 @@ if (want("16")) {
     // pool, its heartbeat a running follower's while it probes. The 503s
     // answer judge calls only, so the start's probe answers (down mode would
     // hold the follower at its start) and so does the first outage probe,
-    // 5 s in, once the 503s have stopped; the pauses are cut to 100 ms. The
-    // outage schedule stays the real one here (SMD-3048): its probes answer,
-    // so a 1 s first wait ends the wait the 1.5 s hold reads the row in.
+    // 3 s in, once the 503s have stopped; the pauses are cut to 100 ms. The
+    // outage's first wait is 3 s here (SMD-3734; the real 5 s before,
+    // SMD-3048): its probes answer, so a 1 s first wait would end before the
+    // 1.5 s hold reads the row, and 3 s fits the hold and a poll's lag.
     {
       const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
       // One thought back in the pool, one with a candidate the judge is asked
@@ -12921,6 +12927,7 @@ if (want("16")) {
       await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at)
                 SELECT p, ${KEY}, 'succeeded', now() FROM unnest(ARRAY(SELECT consolidation_pool(${KEY}))) p WHERE p <> ${one}::uuid`;
       const restorePauses = shortenPauses();
+      const restoreOutage = shortenOutage(3000);
       judgeUnavailable = 1_000;
       const ac2 = new AbortController();
       const down = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, signal: ac2.signal, writer: { out: () => {}, err: () => {} } }).catch(() => 2);
@@ -12937,6 +12944,7 @@ if (want("16")) {
       for (let i = 0; i < 80 && backBeat.outcome !== "ok"; i++) { await Bun.sleep(250); backBeat = await beatOf(); }
       ac2.abort();
       await down;
+      restoreOutage();
       assert(downBeat.outcome === "failed" && heldBeat.outcome === "failed" && heldBeat.running === true && heldClaim === "pending" && backBeat.outcome === "ok",
         `a consolidation follower whose judge stays down stamps failed, stays a running follower while it waits with the thought back in the pool, and stamps ok once a pass after it is back has work (${JSON.stringify([downBeat.outcome, heldBeat.outcome, heldBeat.running, heldClaim, backBeat.outcome])})`);
       // A following pass that throws ends the run as the worker's end, failed.
@@ -13067,9 +13075,10 @@ if (want("16")) {
   // A consolidate follower outlasts its provider going away (SMD-2599), as
   // extract's does in [10]: in this process, the pauses cut to 100 ms and the
   // outage schedule to 1 s first (SMD-3048), the judge answering 503 while a
-  // newer thought of a pair is judged, then hanging past a 2 s --timeout while
-  // another is, each until the follower's probes have found it down
-  // (judgeOutage), however slow the runner.
+  // newer thought of a pair is judged, then hanging while another is, past a
+  // 1 s --timeout, its least (SMD-3734; 2 s before), each until the
+  // follower's probes have found it down (judgeOutage), however slow the
+  // runner.
   {
     const restorePauses = shortenPauses();
     const restoreOutage = shortenOutage();
@@ -13078,7 +13087,7 @@ if (want("16")) {
     let settled = false;
     let followCode = -1;
     const startJudgeProbes = judgeProbes;
-    const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+    const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
     const claimOf = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
     try {
@@ -13102,14 +13111,20 @@ if (want("16")) {
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
       // Two probes hang, as [10]'s: the one after the timeout, and the outage's first.
+      // Judged within 14 s of the seeds, ~8 s locally (SMD-3734 review pass 1,
+      // mutant): with the probe after the timeout waiting ten times --timeout, the
+      // thought is judged at ~17 s at 1 s, inside the 25 s budget main had; at
+      // main's 2 s it took ~29 s, which 25 s caught.
       judgeDown = "hang";
       judgeOutage.arm(2);
       await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
       const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
-      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
+      const hungAt = Date.now();
+      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 14_000);
+      const hungMs = Date.now() - hungAt;
       const hungRow = await claimOf(hungNewer);
-      assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 2 s, and a one-token call got no answer either\)/.test(l)),
-             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, not failed (${hungRow?.status}: ${hungRow?.last_error?.slice(0, 80)})`);
+      assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 1 s, and a one-token call got no answer either\)/.test(l)),
+             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, within 14 s of the seeds, not failed (${hungRow?.status} after ${hungMs} ms: ${hungRow?.last_error?.slice(0, 80)})`);
     } finally {
       judgeDown = "503";
       judgeOutage.clear();
@@ -13821,11 +13836,14 @@ if (want("16")) {
   // …and one edited while a closure began and ended in its worker's pause
   // after a 503: the retry's first pair asks the gate from before the pause,
   // reads the thought again and sends its old text no more (review pass 2).
-  // An edit, not a delete: a deleted thought has no candidates to judge.
+  // An edit, not a delete: a deleted thought has no candidates to judge. The
+  // pause cut to 1 s from the shipped 5 (SMD-3734): the edit lands within one
+  // poll of the line, and an edit after the pause sends the old text, failing.
   const retryNewer = await seed("[16g] The gatehouse opens at two now.", 30, 0, ["gatehouse"]);
   const retryGateC = liveGate();
   const retryLinesC: string[] = [];
   judgeUnavailable = 1;
+  const restoreRetryPauses = shortenPauses(1000);
   const retryRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: retryGateC.admit, writer: { out: (l) => retryLinesC.push(l), err: (l) => retryLinesC.push(l) } });
   const retryPausingC = await pollUntil(async () => retryLinesC.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
   const retrySeenFrom = seen.length;
@@ -13833,6 +13851,7 @@ if (want("16")) {
   await sql`UPDATE thoughts SET content = '[16g] The gatehouse opens at three now.' WHERE id = ${retryNewer}::uuid`;
   retryGateC.open();
   const retryCodeC = await retryRunC;
+  restoreRetryPauses();
   judgeUnavailable = 0;
   const retrySeen = seen.slice(retrySeenFrom).map((p) => (p.b.includes("at two now") ? "old" : p.b.includes("at three now") ? "new" : "other"));
   assert(retryPausingC && !retrySeen.includes("old") && retrySeen.includes("new") && retryCodeC <= 1,
@@ -19378,6 +19397,16 @@ async function sleepScaffold(sql: SQL) {
     return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: unknown; paused?: { since: string }; holds?: { pass: string; why: string; until: string | null }[] } : null;
   };
   const lines: string[] = [];
+  /**
+   * A one-shot run's capture and poll (SMD-3733): a run without --follow
+   * whose case asserts end states (rows swept, settings seen, the order of
+   * calls, a start line, its exit), or a line a faster poll only makes
+   * likelier ([38r]'s record put right mid-run), waits 300 ms of each, not
+   * the scaffold's second. No line's regex names them, and drained() counts
+   * what isn't pooled yet, so a faster poll ends no period early. [38]'s and
+   * [38r]'s (SMD-3734).
+   */
+  const ONE_SHOT = { captureMs: 300, pollMs: 300 };
   // The passes look for new work every second, not every 15 s (SMD-3048);
   // the CLI case below keeps the shipped 15.
   const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
@@ -19431,14 +19460,14 @@ async function sleepScaffold(sql: SQL) {
     if (ended) await capture(`${note}, number ${nextNotes++}.`, "op-sleep", 0, 40 + (nextNotes % 8));
     return ended;
   };
-  return { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around, nextPeriod, done };
+  return { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, auditRows, beat, lines, ONE_SHOT, sleepRun, bounded, intercept, around, nextPeriod, done };
 }
 
 if (want("38")) {
   console.log("\n[38] db/sleep.ts: the sleep scheduler — a work period once a pass has work and no live write for the capture, extraction alone until its pool drains, then consolidation beside it, until its pools drain (SMD-3379 PR 1c-4b); a live write pauses it, the passes waiting until no live write for the capture (SMD-3379 PR 1c-3b); a search and a sync write do not (SMD-3315); the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, CO, modelCalls, sw, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, CO, modelCalls, sw, env, capture, claims, auditRows, beat, lines, ONE_SHOT, sleepRun, bounded, intercept, around, nextPeriod, done } = await sleepScaffold(sql);
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
   // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
   // to see the row re-stamped through a wait, and the schedule still doubling
@@ -19457,14 +19486,6 @@ if (want("38")) {
   const scaled = (ms: number) => Math.round(ms * SCALE);
   /** A scaled capture as the scheduler prints it, for a line's regex: 6000 ms reads "3.6". */
   const capS = (ms: number) => String(scaled(ms) / 1000).replace(".", "\\.");
-  /**
-   * A one-shot run's capture and poll (SMD-3733): a run without --follow
-   * whose case asserts its end state alone (rows swept, settings seen, the
-   * order of calls, a start line, its exit) waits 300 ms of each, not the
-   * section's second. No line's regex names them, and drained() counts what
-   * isn't pooled yet, so a faster poll ends no period early.
-   */
-  const ONE_SHOT = { captureMs: 300, pollMs: 300 };
   try {
     // The live reads at the database's full precision (SMD-3245, SMD-3379 PR
     // 1c-4a): a live write at an instant with microseconds is outside a read
@@ -21390,7 +21411,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a period re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a live write pauses it, a call past the bound aborted; its provider gone, its key refused or a throw sets it down for the period, a statement timed out holds it until a restart, extraction running on; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot run that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, ONE_SHOT, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -21410,10 +21431,15 @@ if (want("38r")) {
       const run = sleepRun({ follow: true, minStampEveryS: 1, ...o, signal: ac.signal });
       return { stop: () => { ac.abort(); return bounded(run, ac); }, settle: () => bounded(run, ac) };
     };
+    /**
+     * A one-shot run at ONE_SHOT's capture and poll (SMD-3734): its cases
+     * assert end states, and the one whose record is put right mid-run gets
+     * more polls in its 1.5 s extraction, not fewer.
+     */
     const oneSleep = async () => {
       lines.length = 0;
       const ac = new AbortController();
-      return await bounded(sleepRun({ signal: ac.signal }), ac);
+      return await bounded(sleepRun({ ...ONE_SHOT, signal: ac.signal }), ac);
     };
     // Its backlog — two thoughts at another model and one with no vector —
     // re-embedded before extraction's first call; the vectorless one's
@@ -21509,8 +21535,10 @@ if (want("38r")) {
       await sleepRun({ capture: 300, dryRun: true });
       dryAside = lines.some((l) => /re-embed set aside: the brain records other-embed, this stack is configured for stub-embed/.test(l));
       const asideNote = await capture("A note extracted while re-embed is set aside.", "sync-sleep", 0, 21);
-      // A 3 s capture: the old note re-embed takes up is captured between the period's end and the next's start.
-      const aside = follow({ capture: 3 });
+      // The scaffold's 1 s capture (SMD-3734; 3 s before, the quiet's gap for the old note, which the capture no
+      // longer gates: the period's end and the next idle poll's whole read take it up either way, since PR 1c-4b).
+      // The previous case's delete is a live write, so the first period waits it out.
+      const aside = follow();
       try {
         extracted = await pollUntil(async () => (await exStatus(asideNote)) === "succeeded", 15_000);
         const asideBeat = await sleepBeat();
@@ -21555,7 +21583,7 @@ if (want("38r")) {
     await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
     const awakeOld = await reCapture("An old note re-embedded once the record is put right while awake.", 26);
     let startCleared = false, awakeReembedded = false, awakeCode = -9;
-    const awakeRun = follow({ capture: 3 });
+    const awakeRun = follow();
     try {
       await pollUntil(async () => lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)), 15_000);
       await pollUntil(async () => lines.some((l) => /— the period ends/.test(l)), 20_000);
@@ -21571,11 +21599,14 @@ if (want("38r")) {
       `a record put right while idle is read at the next poll: the set-aside cleared, and the next period, begun on re-embed's backlog alone, re-embeds (said ${startCleared}; re-embedded ${awakeReembedded}; exit ${awakeCode})`);
 
     // The record moving under a running re-embed: the follower exits 2, and the scheduler sets the pass aside and
-    // goes on, where it read a refusal and ended. A slow scheduler poll, so the follower's own poll meets the switch first.
+    // goes on, where it read a refusal and ended. A slow scheduler poll, so the follower meets the switch first, at its
+    // read before the next batch once the call in hand ends (~1.5 s), against a 6 s poll the period's start waits out
+    // too (SMD-3734; 15 s before). A scheduler poll that came first would find the pool claimed, not drained; one that
+    // met the follower's exit as the pool drained reads its 2 as the switch all the same (endReembed).
     const mids = [await reCapture("A mid-switch old note, one.", 23), await reCapture("A mid-switch old note, two.", 24)];
     const afterSwitch = await capture("A note extracted after the switch.", "sync-sleep", 0, 25);
     sw.embedSlowMs = 1500;
-    const switching = follow({ poll: 15 });
+    const switching = follow({ poll: 6 });
     let asideMid = false, extractedAfter = false, switchCode = -9, midOutcome: string | null | undefined;
     try {
       await pollUntil(async () => (await reClaimed()) > 0, 15_000);
@@ -23356,7 +23387,8 @@ if (want("41")) {
     const took = performance.now() - t0;
     assert(hung === 1 && took < 2000 && (await rowsOf("ZQ-64", "ZQ-65")).length === 0,
       `a Linear that does not answer is given up on at the step's bound, records nothing, and fails the step (exit ${hung}, ${took.toFixed(0)} ms)`);
-    await Bun.sleep(3000);  // the abandoned request lands at the stub: the comment is on the board with no row
+    // The abandoned request lands at the stub: the comment is on the board with no row (polled for, not 3 s: SMD-3734).
+    await pollUntil(async () => (comments.get("ZQ-65") ?? []).length > 0, 5000);
     const fine = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
     assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
       `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
