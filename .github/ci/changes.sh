@@ -31,6 +31,10 @@
 # whole file does, so no anchor, alias or flow style crosses a block.
 set -uo pipefail
 WORKFLOW=.github/workflows/fork-checks.yml
+# The jobs an edit of which runs every job: the changes job, whose answer the
+# gates read, and the job that runs the checker, whose check 51 is what makes
+# an unchanged block a safe skip (review pass 2). Check 51 holds this list.
+RUN_ALL_JOBS="changes repo-consistency"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
 # kind of file runs every job until it is shown here not to matter: Markdown
@@ -106,7 +110,7 @@ cut_blocks() {
       if (line ~ /^\t/) fail("a tab at the start of line " NR)
       if (line ~ /^[ ]*$/ || line ~ /^[ ]*#/) { held++; heldn[held] = NR; heldt[held] = line; next }
       if (line ~ /^[^ ]/) {
-        if (line ~ /^jobs:[ ]*(#.*)?$/) {
+        if (line ~ /^jobs:([ ]+(#.*)?)?$/) {
           if (seenjobs) fail("a second jobs: at line " NR)
           seenjobs = 1; injobs = 1; region = ".top"; flush(region); put(region, NR, line); next
         }
@@ -114,7 +118,7 @@ cut_blocks() {
         injobs = 0; region = ".top"; flush(region); put(region, NR, line); next
       }
       if (injobs && line ~ /^  [^ ]/) {
-        if (line !~ /^  [A-Za-z_][A-Za-z0-9_-]*:[ ]*(#.*)?$/) fail("line " NR " is two spaces in under jobs: and not a job key alone")
+        if (line !~ /^  [A-Za-z_][A-Za-z0-9_-]*:([ ]+(#.*)?)?$/) fail("line " NR " is two spaces in under jobs: and not a job key alone")
         id = line; sub(/^  /, "", id); sub(/:.*/, "", id)
         if (id in seen) fail("job " id " is named twice, again at line " NR)
         seen[id] = 1; region = id; flush(region); put(region, NR, line); next
@@ -133,8 +137,8 @@ cut_blocks() {
 # by_job: in a checkout whose HEAD^1..HEAD edits WORKFLOW alone of the paths
 # off the list, prints "true<TAB>skip<TAB>why": skip names the gated jobs (a
 # block holding its own gate on skip) whose block is unchanged, or is empty
-# when an edit above jobs: or to the changes job, or an unreadable file, runs
-# every job.
+# when an edit outside the jobs or of a RUN_ALL_JOBS job, or an unreadable
+# file, runs every job.
 by_job() {
   local d f id changed='' skip='' rc=0
   d=$(mktemp -d) || { printf 'true\t\tno scratch directory to read %s by job\n' "$WORKFLOW"; return; }
@@ -153,9 +157,11 @@ by_job() {
     done
     changed=${changed# }
     case " $changed " in
-      *' .top '*) printf 'true\t\t%s is edited outside its jobs, or above the first\n' "$WORKFLOW"; rc=1 ;;
-      *' changes '*) printf 'true\t\t%s edits the changes job\n' "$WORKFLOW"; rc=1 ;;
+      *' .top '*) printf 'true\t\t%s is edited outside its jobs\n' "$WORKFLOW"; rc=1 ;;
     esac
+    for id in $RUN_ALL_JOBS; do
+      if [ "$rc" = 0 ]; then case " $changed " in *" $id "*) printf 'true\t\t%s edits job %s, which every job relies on\n' "$WORKFLOW" "$id"; rc=1 ;; esac; fi
+    done
   fi
   if [ "$rc" = 0 ]; then
     for f in "$d"/head/*; do
@@ -271,6 +277,7 @@ self_check() {
 name: f
 on: push
 jobs:
+  # changes' heading
   changes:
     runs-on: x
   g:
@@ -287,11 +294,17 @@ jobs:
   r:
     steps:
       - run: echo r
+  repo-consistency:
+    steps:
+      - run: bun scripts/check-fork-consistency.ts
 EOF
   local WF=.github/workflows/fork-checks.yml
   # sub FROM TO: an edit of the workflow in the scratch repository, as BSD and GNU sed both take it.
   # shellcheck disable=SC2329 # called from the cases' OPS, which run() evals
   sub() { sed -i.bak "s/$1/$2/" "$WF" && rm -f "$WF.bak"; }
+  # add_gated: a copy of h's block, as gated job n, at the workflow's end.
+  # shellcheck disable=SC2329 # as sub
+  add_gated() { awk '/^  h:/ { p = 1 } /^  r:/ { p = 0 } p' "$WF" | sed "s/^  h:/  n:/; s/' h '/' n '/; s/echo h/echo n/" > "$WF.n" && cat "$WF.n" >> "$WF" && rm -f "$WF.n"; }
   if ! command -v git > /dev/null; then echo "changes.sh: the run's cases need git, and there is none here" >&2; fails=$((fails + 1)); else
     run false pull_request main 'echo x >> docs/a.md'
     run false pull_request main 'echo x > docs/new.md; echo x > README.md'
@@ -316,9 +329,13 @@ EOF
     BASE_OPS=$wfb SKIP=h run true pull_request main 'sub "echo g" "echo g2"; echo x >> docs/a.md'
     # shellcheck disable=SC2016 # as above: $WF expands when run() evals the case
     BASE_OPS=$wfb SKIP='g h' run true pull_request main 'printf "  n:\n    steps:\n      - run: echo n\n" >> "$WF"'
+    # A gated job added runs on the pull request that adds it (review pass 2: the head's side of the compare).
+    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'add_gated'
+    BASE_OPS=$wfb run true pull_request main 'sub "bun scripts" "bun  scripts"'
     BASE_OPS=$wfb SKIP=g run true pull_request main "sub \"h's heading\" \"h's heading, reworded\""
     BASE_OPS=$wfb run true pull_request main 'sub "name: f" "name: f2"'
     BASE_OPS=$wfb run true pull_request main 'sub "runs-on: x" "runs-on: y"'
+    BASE_OPS=$wfb run true pull_request main "sub \"changes' heading\" \"changes' heading, reworded\""
     BASE_OPS=$wfb run true pull_request main 'sub "echo g" "echo g2"; echo x >> server-portable/api.ts'
     BASE_OPS=$wfb run true pull_request main 'sub "  r:" "  - r:"'
     BASE_OPS=$wfb run true pull_request feature 'sub "echo g" "echo g2"'
@@ -330,6 +347,12 @@ EOF
     got=$(sed -n 's/^code=//p' "$out")
     if [ "$got" != true ]; then echo "changes.sh: a HEAD with no second parent wrote code=$got, not true" >&2; fails=$((fails + 1)); fi
   fi
+  # What the cut refuses: a comment with no space before its #, which YAML reads as part of the key.
+  local bad
+  for bad in 'jobs:#x\n  a:\n' 'jobs:\n  a:#x\n' 'jobs:\n  "a":\n' 'jobs:\n  a: {}\n'; do
+    printf '%b' "$bad" > "$dir/cut.yml"
+    if cut_blocks "$dir/cut.yml" > /dev/null 2>&1; then echo "changes.sh: the cut read $bad, which it must refuse" >&2; fails=$((fails + 1)); fi
+  done
   rm -rf "$dir"
   if [ "$fails" -gt 0 ]; then echo "changes.sh: $fails case(s) wrong" >&2; return 1; fi
   echo "changes.sh: every case holds"

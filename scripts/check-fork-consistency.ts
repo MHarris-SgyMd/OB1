@@ -11108,6 +11108,43 @@ function checkJobBlocksCut() {
   for (const msg of jobBlockProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
 }
 checkJobBlocksCut();
+/**
+ * The jobs whose edit runs every job, as CHANGES_SCRIPT lists them in RUN_ALL_JOBS (review pass 2): the changes job,
+ * whose answer the gates read, and each job that runs this checker, since its check 51 is what makes an unchanged block
+ * a safe skip. A job renamed, or the checker moved, would otherwise drop out of the list with nothing failing.
+ */
+const RUN_ALL_LINE = /^RUN_ALL_JOBS="([^"]*)"$/m;
+const CHECKER_RUN = "bun scripts/check-fork-consistency.ts";
+function runAllProblems(script: string, doc: JobsDoc): string[] {
+  const m = RUN_ALL_LINE.exec(script);
+  if (!m) return [`has no RUN_ALL_JOBS="…" line, the jobs whose edit runs every job (check 51, SMD-2435)`];
+  const listed = m[1].split(" ").filter(Boolean);
+  const jobs = doc?.jobs ?? {};
+  const runners = Object.keys(jobs).filter((k) => Array.isArray(jobs[k]?.steps) && (jobs[k]!.steps as { run?: unknown }[]).some((st) => typeof st?.run === "string" && st.run.trim() === CHECKER_RUN));
+  const want = [CHANGES_JOB, ...runners];
+  if (!runners.length) return [`names no job that runs ${CHECKER_RUN}, so nothing runs check 51 on a pull request whose gated jobs skip (check 51, SMD-2435)`];
+  if (JSON.stringify([...listed].sort()) !== JSON.stringify([...want].sort())) return [`RUN_ALL_JOBS is ${listed.join(" ") || "empty"}, not ${want.join(" ")} — the changes job and the job that runs ${CHECKER_RUN}, whose edit must run every job (check 51, SMD-2435)`];
+  return [];
+}
+function checkRunAllJobs() {
+  const LINE = `RUN_ALL_JOBS="${CHANGES_JOB} repo-consistency"\n`;
+  const doc = (checkerJob: string): JobsDoc => ({ jobs: { [CHANGES_JOB]: { steps: [] }, [checkerJob]: { steps: [{ run: CHECKER_RUN }] }, g: { steps: [{ run: "x" }] } } });
+  // [why, script, workflow, what its one problem says, or "" for none]
+  const cases: [string, string, JobsDoc, string][] = [
+    ["the list as the workflow has it", LINE, doc("repo-consistency"), ""],
+    ["the list in another order", `RUN_ALL_JOBS="repo-consistency ${CHANGES_JOB}"\n`, doc("repo-consistency"), ""],
+    ["the checker's job left out", `RUN_ALL_JOBS="${CHANGES_JOB}"\n`, doc("repo-consistency"), "RUN_ALL_JOBS is"],
+    ["the checker moved to another job", LINE, doc("lint"), "RUN_ALL_JOBS is"],
+    ["no list", "x=1\n", doc("repo-consistency"), "has no RUN_ALL_JOBS"],
+    ["no job running the checker", LINE, { jobs: { [CHANGES_JOB]: { steps: [] } } }, "names no job that runs"],
+  ];
+  const wrong = cases.map(([why, script, wf, says]) => ({ why, says, got: runAllProblems(script, wf) }))
+    .filter((c) => (c.says === "" ? c.got.length !== 0 : c.got.length !== 1 || !c.got[0].includes(c.says)));
+  if (wrong.length) fail(SELF, `check 51's RUN_ALL_JOBS rule no longer reads its probe as written: ${JSON.stringify(wrong)} (SMD-2435)`);
+  const wf = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc;
+  for (const msg of runAllProblems(readFileSync(join(ROOT, CHANGES_SCRIPT), "utf8"), wf)) fail(CHANGES_SCRIPT, msg);
+}
+checkRunAllJobs();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
