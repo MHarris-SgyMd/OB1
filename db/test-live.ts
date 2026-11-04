@@ -13109,14 +13109,15 @@ if (want("16")) {
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
       // Two probes hang, as [10]'s: the one after the timeout, and the outage's first.
-      // Judged within 14 s, ~8 s locally: a probe waiting ten times --timeout takes
-      // ~18 s, which the 25 s budget held at main's 2 s timeout, not at 1 s (SMD-3734
-      // review pass 1, mutant).
+      // Judged within 14 s of the seeds, ~8 s locally (SMD-3734 review pass 1,
+      // mutant): with the probe after the timeout waiting ten times --timeout, the
+      // thought is judged at ~17 s at 1 s, inside the 25 s budget main had; at
+      // main's 2 s it took ~29 s, which 25 s caught.
       judgeDown = "hang";
       judgeOutage.arm(2);
-      const hungAt = Date.now();
       await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
       const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
+      const hungAt = Date.now();
       const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 14_000);
       const hungMs = Date.now() - hungAt;
       const hungRow = await claimOf(hungNewer);
@@ -19287,10 +19288,11 @@ async function sleepScaffold(sql: SQL) {
   const lines: string[] = [];
   /**
    * A one-shot run's capture and poll (SMD-3733): a run without --follow
-   * whose case asserts its end state alone (rows swept, settings seen, the
-   * order of calls, a start line, its exit) waits 300 ms of each, not the
-   * scaffold's second. No line's regex names them, and drained() counts what
-   * isn't pooled yet, so a faster poll ends no period early. [38]'s and
+   * whose case asserts end states (rows swept, settings seen, the order of
+   * calls, a start line, its exit), or a line a faster poll only makes
+   * likelier ([38r]'s record put right mid-run), waits 300 ms of each, not
+   * the scaffold's second. No line's regex names them, and drained() counts
+   * what isn't pooled yet, so a faster poll ends no period early. [38]'s and
    * [38r]'s (SMD-3734).
    */
   const ONE_SHOT = { captureMs: 300, pollMs: 300 };
