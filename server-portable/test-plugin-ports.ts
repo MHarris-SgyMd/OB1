@@ -2230,7 +2230,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const total = Number((await c("get_pipeline_overview", {})).body.total_applications);
   const listedDefault = ((await c("list_applications", {})).body.applications as unknown[]).length;
   assert(refusedEdges.length === 0 && total > 5 && listedDefault === Math.min(total, 50),
-    `each bound's own edge is taken, and list_applications without a limit lists all ${total} (${refusedEdges.join("; ") || "all taken"}; ${listedDefault})`);
+    `each kind of bound's own edge is taken, on one field each, and list_applications without a limit lists min(${total}, 50) (${refusedEdges.join("; ") || "all taken"}; ${listedDefault})`);
   const tableTakes: string[] = [];
   for (const q of [
     "INSERT INTO plugin_job_hunt.companies (name, glassdoor_rating) VALUES (repeat('n', 200), 1.0), ('t', 5.0)",
@@ -2281,10 +2281,10 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const gbp = await c("add_job_posting", { company_id: vx, title: "In Pounds", salary_currency: "gbp" });
   const atOfferNow = await c("submit_application", { job_posting_id: await datePost("Straight To Offer"), status: "offer" });
   const unscheduledBefore = Number((await c("get_pipeline_overview", {})).body.unscheduled_count);
-  await c("schedule_interview", { application_id: edgeApp, interview_type: "final", scheduled_at: hours(400 * 24) });
+  const farAhead = await c("schedule_interview", { application_id: edgeApp, interview_type: "final", scheduled_at: hours(400 * 24) });
   const unscheduledAfter = Number((await c("get_pipeline_overview", {})).body.unscheduled_count);
-  assert(gbp.body.job_posting?.salary_currency === "GBP" && atOfferNow.body.application?.applied_date === utcToday && unscheduledAfter === unscheduledBefore,
-    `a currency kept as given (GBP); an application recorded at offer dated today; an interview 400 days ahead is not one with no time (${gbp.body.job_posting?.salary_currency}, ${atOfferNow.body.application?.applied_date}, ${unscheduledBefore}/${unscheduledAfter})`);
+  assert(gbp.body.job_posting?.salary_currency === "GBP" && atOfferNow.body.application?.applied_date === utcToday && farAhead.status === 200 && unscheduledAfter === unscheduledBefore,
+    `a currency other than USD or EUR kept, upper-cased (gbp as GBP); an application recorded at offer dated today; an interview 400 days ahead, taken, is not one with no time (${gbp.body.job_posting?.salary_currency}, ${atOfferNow.body.application?.applied_date}, ${unscheduledBefore}/${unscheduledAfter})`);
   // Search: each separator splits; a backslash matches itself; fields outside the described set are not searched.
   const nbsp = String.fromCharCode(160), backslash = String.fromCharCode(92);
   const urlProbe = await c("add_job_posting", { company_id: vx, title: "Url Probe", url: "https://zzqurl.example/x" });
