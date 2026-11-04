@@ -164,8 +164,8 @@ export function recordId(source: string, key: string): string {
  *     The `## FORK` body is the change as written; the ticket(s) come from the
  *     front matter, and the change number is not assigned until release (null).
  *
- * FORK.md itself is now an index and design record, not the changes, so it is no
- * longer read here (SMD-1806 / SMD-1917).
+ * FORK.md itself is the fork era's record, not the changes, so it is not read
+ * here (SMD-1806 / SMD-1917; SMD-3765).
  */
 export function forkDocFromFile(slug: string, text: string): Doc {
   const parsed = parseFragment(text);

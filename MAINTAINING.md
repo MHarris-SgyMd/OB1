@@ -2,7 +2,7 @@
 
 Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1):
 it began as a fork of that tree at `9543c29` (2026-08-30), and has been a
-project in its own right since (SMD-3765). It takes nothing further from upstream
+project in its own right since 2026-11-04 (SMD-3765). It takes nothing further from upstream
 and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork era: the pin,
 changes 1–17, the detach and how rebases ran.
 
@@ -262,11 +262,12 @@ house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's f
 bullets) — `scripts/commitlint.config.ts`, which shares its tag parser with
 `scripts/mechanism-yield.ts` through `scripts/commit-grammar.ts`, so the check
 and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
-checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
-sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
+checksum) with `shellcheck` over `fork-checks.yml`'s `run:` steps; the workflow
+now sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
 locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
-*required* on `main` with the other eight jobs since SMD-1856 (ten in all; twelve until SMD-1800 retired the two Deno jobs).
+*required* on `main` (SMD-1856), through "Fork Checks passed" since SMD-3168
+(below).
 
 **The runner image and every action are pinned (SMD-2093).** Every job runs on
 `ubuntu-24.04`, not `ubuntu-latest`, which GitHub moves to Ubuntu 26 from
@@ -342,7 +343,7 @@ What the record does say, by a keyword classifier whose samples were read
 (approximate by design: a defect in a checker that parses comments reads as
 record drift):
 
-- About a third of findings are record drift — this file, comments, READMEs.
+- About a third of findings are record drift — FORK.md, comments, READMEs.
   A little under a third are code defects. A fifth are test teeth: a vacuous
   assertion, a wrong fixture, a gate with no margin. The rest are confirmations
   of no defect and tickets filed.
@@ -447,15 +448,16 @@ keyed a stub off exact input text. A suite should pin what it does not test.
 Deliberate. Recorded so nobody assumes they were missed.
 
 - **The access key still rides in the URL** — but it is now scoped, named and
-  hashed (fix 14). `?key=` is kept because Claude Desktop connectors are URL-only,
+  hashed (fix 14, FORK.md's table). `?key=` is kept because Claude Desktop connectors are URL-only,
   so a key in a URL still reaches access logs and browser history. What changed is
   what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
   not even registered for it. Upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
   [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) were
   the upstream answer; Daemonic Brain has its own OAuth path now. The `auth`
-  profile runs an authorization server (SMD-2285), and on a stack configured with a stable
-  public origin the MCP server advertises it at that origin (SMD-2382).
+  profile runs an authorization server (SMD-2285), and on a stack configured
+  with a stable public origin the MCP server advertises it at that origin
+  (SMD-2382).
   `mcp-server/`, which serves `/mcp` since SMD-2287 PR 5b, trades the token it
   issues at the hop (SMD-2286), and keys
   keep working beside it (a claude.ai connector at that origin is asked to sign
@@ -526,15 +528,17 @@ Two constraints that are not engineering problems.
 
 **Data.** A brain is one shared `thoughts` table with no per-user isolation,
 reached with keys (scoped and hashed, fix 14, which can ride in a URL) or the
-`auth` profile's tokens, and every captured thought goes to the configured model
-provider for metadata extraction: local Ollama by default, a hosted provider when
-one is configured ([`SETUP.md`](SETUP.md)). That is fine for personal notes. It is
-not an architecture to put regulated or patient-adjacent data into.
+`auth` profile's tokens. Every captured thought's text goes to the model
+endpoints for embedding and metadata extraction: local Ollama by default, and a
+hosted endpoint only for what the egress gate lets through, which by default is
+nothing until an `OB1_EGRESS_ALLOW` term names it ([`SETUP.md`](SETUP.md), "What
+may leave the box"). That is fine for personal notes. It is not an architecture
+to put regulated or patient-adjacent data into.
 
 **Licence.** Daemonic Brain is a derivative of Open Brain under its licence,
 FSL-1.1-MIT, © Nate B. Jones ([`LICENSE.md`](LICENSE.md)). "Your internal use and
 access" is an explicitly Permitted Purpose, so running it privately for internal
 tooling is squarely allowed. A **Competing Use** — making it available to others
 in a commercial product with the same or substantially similar functionality —
-is not. Each version converts to MIT two years after upstream publishes it. Fine
-as internal tooling; get a legal read before any of it ships in a product.
+is not. Each Open Brain version converts to MIT two years after it is published.
+Fine as internal tooling; get a legal read before any of it ships in a product.

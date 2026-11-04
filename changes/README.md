@@ -135,14 +135,15 @@ the split.
 
 `scripts/check-fork-consistency.ts` check 15: file names (numbered or fragment),
 contiguous numbers, the `# N.` heading matching the name, the line cap and its
-ratchet, MAINTAINING.md under its byte ceiling, neither it nor FORK.md carrying
-a numbered section at any heading level, the index between this file's markers
-equal to what `scripts/fork-index.ts` renders from this directory's numbered
-files (a fragment changes nothing there), and every "FORK.md change
-N" / "FORK change N" / `changes/NNN` / "NNN change M" citation in a file git
-tracks or would track — and every "change N" in the record itself — naming a
-number with a file (or a row of the 1–17 table). Check 16 holds the fragment
-shape; check 17 the changelog, the release pairing and the frozen migrations.
+ratchet, MAINTAINING.md and FORK.md each under the byte ceiling and carrying
+neither a numbered section at any heading level nor the index's markers, the
+index between this file's markers equal to what `scripts/fork-index.ts` renders
+from this directory's numbered files (a fragment changes nothing there), and
+every "FORK.md change N" / "FORK change N" / `changes/NNN` / "NNN change M"
+citation in a file git tracks or would track — and every "change N" in the
+record itself — naming a number with a file (or a row of the 1–17 table). Check
+16 holds the fragment shape; check 17 the changelog, the release pairing and the
+frozen migrations.
 
 ## Index
 

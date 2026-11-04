@@ -101,28 +101,29 @@
  *      not a forward, which is how three knobs passed the text rule this
  *      replaces — and the decision is one pure function its probes run on
  *      in-memory documents (SMD-1843)
- *  15. MAINTAINING.md is the front door and changes/ holds the record: every numbered
- *      change from 18 on is one file changes/NNN-<slug>.md whose first line is
- *      `# N. <title>` with the name's number, the numbers contiguous with no
- *      duplicate (two branches taking one number fail on the tree that holds
- *      both); a file is at most CHANGE_CAP_LINES lines, the files over it at
- *      the split listed in OVERSIZE_AT_SPLIT with a ceiling they may only
- *      shrink under (held stale two ways); MAINTAINING.md is under
- *      FRONT_CEILING_BYTES, neither it nor FORK.md carries a `### N.` section
- *      (at any heading level), and changes/README.md's index block equals what
+ *  15. MAINTAINING.md is the maintainer's front door and changes/ holds the
+ *      record: every numbered change from 18 on is one file
+ *      changes/NNN-<slug>.md whose first line is `# N. <title>` with the name's
+ *      number, the numbers contiguous with no duplicate (two branches taking
+ *      one number fail on the tree that holds both); a file is at most
+ *      CHANGE_CAP_LINES lines, the files over it at the split listed in
+ *      OVERSIZE_AT_SPLIT with a ceiling they may only shrink under (held stale
+ *      two ways); MAINTAINING.md and FORK.md are each under FRONT_CEILING_BYTES
+ *      and carry neither a `### N.` section (at any heading level) nor the
+ *      index's markers, and changes/README.md's index block equals what
  *      scripts/fork-index.ts renders from the directory (SMD-3765 moved it
- *      there from FORK.md); and every "FORK.md change
- *      N" / "FORK change N" / "changes/NNN" / "NNN change M" citation in a file
- *      git tracks or would track (untracked, not ignored), and every bare
- *      "change N" in the record itself, names a number that has a file or a
- *      row of the 1–17 table — lists and wrapped lines included, a thousands
- *      group, a decimal, a date or a number before a unit word excluded, and a
- *      slugged path (or a relative link inside the record) naming the file as
- *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
- *      cap here, and is not in the index: the block renders from the numbered
- *      files alone, so a PR that adds a fragment leaves the index untouched
- *      and the block moves when a numbered file does — at a release cut or a
- *      retitle (SMD-1917, SMD-2084)
+ *      there from FORK.md); and every "FORK.md change N" / "FORK change N" /
+ *      "changes/NNN" / "NNN change M" citation in a file git tracks or would
+ *      track (untracked, not ignored), and every bare "change N" in the record
+ *      itself (changes/, FORK.md and MAINTAINING.md), names a number that has a
+ *      file or a row of the 1–17 table — lists and wrapped lines included, a
+ *      thousands group, a decimal, a date or a number before a unit word
+ *      excluded, and a slugged path (or a relative link inside the record)
+ *      naming the file as it is. A changes/smd-NNNN.md fragment (16) is held to
+ *      the name and the cap here, and is not in the index: the block renders
+ *      from the numbered files alone, so a PR that adds a fragment leaves the
+ *      index untouched and the block moves when a numbered file does — at a
+ *      release cut or a retitle (SMD-1917, SMD-2084)
  *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
  *      that ships a migration fails), an SMD-#### ticket list; exactly one
@@ -3768,7 +3769,7 @@ function checkFixtureRedaction() {
 }
 checkFixtureRedaction();
 
-// ── 15: MAINTAINING.md is the front door; changes/ holds the record (SMD-1917) ──
+// ── 15: MAINTAINING.md is the maintainer's front door; changes/ holds the record ──
 //
 // FORK.md reached 1.23 MB and 17,700 lines — larger than any context window, so
 // every reader took a slice by grep — and its `### N.` sections were numbered by
@@ -3778,12 +3779,12 @@ checkFixtureRedaction();
 // numbers, the line cap, the front door's size, the generated index, and every
 // citation of a change number in the tree. FORK.md stayed the front door, its
 // index included, until SMD-3765 made it the fork era's record: the present-tense
-// sections moved to MAINTAINING.md, which the ceiling now holds, and the index to
-// changes/README.md, beside the files it lists.
+// sections moved to MAINTAINING.md, which the ceiling holds with FORK.md, and the
+// index to changes/README.md, beside the files it lists (SMD-1917, SMD-3765).
 
-/** MAINTAINING.md's byte ceiling — the front door's prose, not the record (~16k tokens; FORK.md's 50 KB at the split, measured outside its index). */
+/** The byte ceiling of MAINTAINING.md, the maintainer's front door, and of FORK.md, the fork era's record — prose, not the change record (~16k tokens; FORK.md's 50 KB at the split, measured outside its index). */
 const FRONT_CEILING_BYTES = 64 * 1024;
-/** The maintainer's front door, and the fork era's record. Both carry prose alone: a numbered change is a file. */
+/** The maintainer's front door, and the fork era's record. Both carry prose alone: a numbered change is a file, and the index is changes/README.md's. */
 const FRONT_DOOR = "MAINTAINING.md";
 const FORK_RECORD = "FORK.md";
 /** A change file's line cap. The shape is in changes/README.md. */
@@ -3955,9 +3956,12 @@ function forkLayoutProblems({ entries, indexText, frontText = "", forkText = "",
   for (const [where, text] of [[FRONT_DOOR, frontText], [FORK_RECORD, forkText]] as const) {
     const sec = /^(#{1,6}) (\d+)\. /m.exec(text.replace(/^```[\s\S]*?^```/gm, "")); // a `# 1. fetch` comment in a fenced snippet is not a section
     if (sec) at(where, "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and ${INDEX_FILE} lists it`);
+    // A second index here would go stale unseen, its links relative to changes/ (a merge
+    // of a branch whose fork-index.ts still wrote FORK.md could keep one).
+    if (text.includes(INDEX_START) || text.includes(INDEX_END)) at(where, "index-elsewhere", `carries the changes index's markers — the index is ${INDEX_FILE}'s alone; delete the block here`);
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > frontCeiling) at(where, "front-oversize", `is ${bytes} bytes; it stays under ${frontCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
   }
-  const bytes = Buffer.byteLength(frontText, "utf8");
-  if (bytes > frontCeiling) at(FRONT_DOOR, "front-oversize", `is ${bytes} bytes; the front door stays under ${frontCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
   let span: { s: number; e: number } | null = null;
   try { span = indexSpan(indexText); } catch (e) { at(INDEX_FILE, "index-missing", `${(e as Error).message} — the generated index lives between them`); }
   if (span && indexText.slice(span.s, span.e) !== "\n" + renderIndex(numbered)) at(INDEX_FILE, "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
@@ -3992,6 +3996,10 @@ const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   ["MAINTAINING.md at its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: "x".repeat(150), ceilings: {}, frontCeiling: 150 }; }, []],
   ["a numbered section left in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: "\n### 19. Left behind\n", ceilings: {} }; }, ["section-in-fork"]],
   ["a numbered section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: "\n### 19. Left behind\n", ceilings: {} }; }, ["section-in-fork"]],
+  ["FORK.md over the ceiling", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: "x".repeat(151), ceilings: {}, frontCeiling: 150 }; }, ["front-oversize"]],
+  ["a second index left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: INDEX_FOR(en), ceilings: {} }; }, ["index-elsewhere"]],
+  ["an index start marker alone in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: `intro\n${INDEX_START}\n`, ceilings: {} }; }, ["index-elsewhere"]],
+  ["an index end marker alone in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: `tail\n${INDEX_END}\n`, ceilings: {} }; }, ["index-elsewhere"]],
   ["a fenced `# 1.` comment in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: "```bash\n# 1. fetch\n```\n", ceilings: {} }; }, []],
   ["no index markers", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: "# changes/\nno markers\n", ceilings: {} }; }, ["index-missing"]],
   ["a duplicated end marker", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en, INDEX_END + "\n"), ceilings: {} }; }, ["index-missing"]],
@@ -4067,6 +4075,13 @@ function changesOnDisk() {
   return changesCache;
 }
 
+/**
+ * A file whose bare "change N" is a citation, read as one: changes/, FORK.md, and
+ * MAINTAINING.md, which holds prose that was FORK.md's (SMD-3765). Anywhere
+ * else only an explicit form ("FORK.md change N", a changes/ path) counts.
+ */
+const isRecordFile = (rel: string) => rel === FORK_RECORD || rel === FRONT_DOOR || rel.startsWith(`${CHANGES_DIR}/`);
+
 function checkForkLayout() {
   for (const [text, record, want] of CITATION_PROBES) {
     const got = citedChangesIn(text, { record }).map((c) => c.n);
@@ -4088,11 +4103,14 @@ function checkForkLayout() {
   // alone, where a `# 1.` comment is not a heading).
   for (const rel of citationFiles()) {
     const text = readFileSync(join(ROOT, rel), "utf8");
-    const record = rel === "FORK.md" || rel.startsWith(`${CHANGES_DIR}/`);
+    const record = isRecordFile(rel);
     const found = citedChangesIn(text, { record });
     if (found.length === 0) continue;
     const lineAt = lineIndexer(text);
     for (const c of found) citations.push({ where: `${rel}:${lineAt(c.index)}`, n: c.n, ...(c.name ? { name: c.name } : {}) });
+  }
+  for (const [rel, want] of [[FORK_RECORD, true], [FRONT_DOOR, true], [`${CHANGES_DIR}/018-x.md`, true], ["README.md", false], ["SETUP.md", false]] as const) {
+    if (isRecordFile(rel) !== want) fail(SELF, `check 15 reads ${rel} ${want ? "as prose" : "as the record"}, where its bare "change N" citations are ${want ? "" : "not "}the record's (its own probe)`);
   }
   for (const p of forkLayoutProblems({ entries, indexText, frontText, forkText, citations })) fail(p.where, `${p.msg} (SMD-1917)`);
 }
@@ -5804,8 +5822,6 @@ const RETIRED_FILES = ["server-portable/wrangler.toml", "server-portable/wrangle
  * on, moved to MAINTAINING.md, which is read whole like any doc.
  */
 const isWholeHistory = (rel: string) => rel.startsWith("changes/") || rel === "CHANGELOG.md" || rel === "FORK.md";
-/** A file's text as 22b and 22c read it: the whole file, or nothing for the history. */
-const liveText = (rel: string, text: string) => (isWholeHistory(rel) ? "" : text);
 function checkRetiredTarget() {
   for (const [probe, wrangler, selected] of RETIRED_TARGET_PROBES) {
     if (WRANGLER_WORD.test(probe) !== wrangler) fail(SELF, `check 22b's wrangler pattern ${wrangler ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
@@ -5820,8 +5836,9 @@ function checkRetiredTarget() {
   for (const want of ["SETUP.md", "MAINTAINING.md"]) {
     if (!files.includes(want)) fail(SELF, `check 22b's listing does not reach ${want} — the listing is broken, not the tree clean`);
   }
+  if (files.includes("FORK.md")) fail(SELF, "check 22b's listing reaches FORK.md, the fork era's record, which it reads as history (SMD-3765)");
   for (const rel of files) {
-    const text = liveText(rel, readFileSync(join(ROOT, rel), "utf8"));
+    const text = readFileSync(join(ROOT, rel), "utf8");
     const code = CODE_FILE.test(rel);
     text.split("\n").forEach((line, i) => {
       if (WRANGLER_WORD.test(line)) fail(`${rel}:${i + 1}`, "names wrangler — the Cloudflare Workers target was retired (SMD-3152); the brain deploys as the compose stack");
@@ -6067,8 +6084,9 @@ function checkComposeOnly() {
   for (const want of ["SETUP.md", "docs/01-getting-started.md", "primitives/deploy-remote-mcp/README.md", "MAINTAINING.md"]) {
     if (!files.includes(want)) fail(SELF, `check 22c's listing does not reach ${want} — the listing is broken, not the tree clean`);
   }
+  if (files.includes("FORK.md")) fail(SELF, "check 22c's listing reaches FORK.md, the fork era's record, which it reads as history (SMD-3765)");
   for (const rel of files) {
-    const text = liveText(rel, readFileSync(join(ROOT, rel), "utf8"));
+    const text = readFileSync(join(ROOT, rel), "utf8");
     for (const [n, line] of joinedLines(text)) {
       if (outsideCompose(line)) fail(`${rel}:${n}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
     }

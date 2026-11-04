@@ -24,7 +24,7 @@ of it still lands. **Start at [`SETUP.md`](SETUP.md).**
 | Upstream baseline | `9543c29a3e44a210ce278392b9fac11248997461` |
 | Upstream date | 2026-08-30 |
 | Git tag | `upstream-pin-9543c29` |
-| Patch branch | `siggymd/fork-baseline`, until the fork shipped from `main` (SMD-2249) |
+| Patch branch | `siggymd/fork-baseline`, until the fork shipped from `main` |
 
 Upstream publishes **no releases and no tags** — there is no stable version to
 track, and the setup guide has users `curl` `main` straight into production. The
@@ -32,7 +32,7 @@ tag above is our substitute for a release: it is the exact upstream tree our
 patches apply to.
 
 The fork deployed from that branch, never from upstream `main`. Daemonic Brain
-deploys a release: [`MAINTAINING.md`, "Deploying"](MAINTAINING.md#deploying).
+deploys as the compose stack: [`MAINTAINING.md`, "Deploying"](MAINTAINING.md#deploying).
 
 ### Versioning
 
@@ -437,8 +437,8 @@ Moved to [`MAINTAINING.md`, "The recurring defect: a value defined twice"](MAINT
 
 Moved to [`MAINTAINING.md`, "Known issues we did NOT fix"](MAINTAINING.md#known-issues-we-did-not-fix)
 (SMD-3765). Three items stayed here, as they were written: two concern
-upstream's workflows, which the fork deleted, and the Workers target retired
-with SMD-3152.
+upstream's workflows, which the fork deleted, and one the Workers target, which
+SMD-3152 retired.
 
 - **The upstream PR gate can be bypassed with a title.** A PR titled `[docs] …`
   (or touching no contribution directory) exits before the credential scan runs.
