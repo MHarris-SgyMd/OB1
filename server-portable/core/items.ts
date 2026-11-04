@@ -73,8 +73,9 @@ function unattributed(principal: Principal) {
 
 /**
  * A refusal 117 answered as a value, by its code, named by what the caller passed: the item's id, the thought, the
- * proposal. `named` is the item (or, for open_item, the origin thought) ITEM_NOT_YOURS speaks of; null for a proposal
- * a capture-only key may not decide, which names no item it may be told of.
+ * proposal. `named` is what ITEM_NOT_YOURS speaks of: the item, the origin thought (open_item) or the evidence thought
+ * (propose_item_close, when 117's words say so); null for a proposal a capture-only key may not decide, which names no
+ * item it may be told of.
  */
 function refusedBy(a: ItemAnswer, principal: Principal, named: { kind: "item" | "thought"; key: string } | null, ids: { item?: string; thought?: string; proposal?: string }) {
   switch (a.code) {

@@ -42,9 +42,10 @@ const CLEANED_AWAY = new RegExp(`[${String.fromCharCode(0xad, 0x200b, 0x2060, 0x
 const blankWhenCleaned = (s: string) => s.replace(/[\p{Cc}]/gu, " ").replace(CLEANED_AWAY, "").trim().length === 0;
 const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character").refine((s) => !blankWhenCleaned(s), "may not be blank");
 const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL character");
-// A thought's id as Postgres reads a uuid — any 8-4-4-4-12 of hex digits, not RFC 9562's version and variant alone
-// (review pass 1: an imported thought's id was refused before the brain was asked).
-const THOUGHT_ID = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a uuid");
+// A thought's or a proposed close's id as Postgres reads a uuid — any 8-4-4-4-12 of hex digits, not RFC 9562's
+// version and variant alone (review pass 1: an imported thought's id was refused before the brain was asked), never
+// braced or unhyphenated (review pass 4), trimmed.
+const UUID_ARG = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a uuid");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
@@ -631,7 +632,7 @@ export const SPECS = {
       text: z.string().min(1).max(4000).refine(NO_NUL, "may not hold a NUL character").describe("What is to be done, at most 1000 characters"),
       owner: ITEM_OWNER.optional().describe("Who is to do it, at most 200 characters: free text, not a key"),
       due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
-      origin_thought: THOUGHT_ID.optional().describe("The id of the thought the item was read from"),
+      origin_thought: UUID_ARG.optional().describe("The id of the thought the item was read from"),
       plugin_row: ITEM_OWNER.optional().describe("Through a plugin's ctx.call alone: the plugin's row the item stands for. Refused from any other caller"),
       proposed: z.boolean().optional().describe("True for an item inferred, not stated (the extractor's): it reads as not yet open until a write key confirms it"),
     },
@@ -667,7 +668,7 @@ export const SPECS = {
     inputSchema: {
       id: ITEM_ID.describe("The open item's id"),
       status: z.enum(["done", "dropped"]).optional().default("done").describe("What the item would close to. Default done"),
-      evidence_thought: THOUGHT_ID.optional().describe("The id of the thought that shows it"),
+      evidence_thought: UUID_ARG.optional().describe("The id of the thought that shows it"),
       label: z.string().max(40).refine(NO_NUL, "may not hold a NUL character").optional().describe("One lower-case word naming how the evidence settles it: resolves, implements"),
       reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
     },
@@ -679,7 +680,7 @@ export const SPECS = {
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       // A uuid as 117's item ids are, hyphenated: Postgres's own cast would take braces and none (review pass 4).
-      id: THOUGHT_ID.describe("The proposed close's id"),
+      id: UUID_ARG.describe("The proposed close's id"),
       accept: z.boolean().describe("True to accept (close the item), false to reject"),
       reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
     },
@@ -701,7 +702,7 @@ export const SPECS = {
     inputSchema: {
       status: z.enum(["open", "proposed", "done", "dropped", "unsettled", "settled", "all"]).optional().describe("Which items: open, proposed, done, dropped, unsettled, settled or all. Default open, or unsettled with overdue"),
       overdue: z.boolean().optional().describe("Only items due before now that are open or proposed"),
-      origin_thought: THOUGHT_ID.optional().describe("Only items read from this thought"),
+      origin_thought: UUID_ARG.optional().describe("Only items read from this thought"),
       plugin: z.string().min(1).max(64).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only items standing for this plugin's rows"),
       limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many. Default 100"),
     },
