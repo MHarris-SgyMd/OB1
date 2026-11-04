@@ -14272,11 +14272,11 @@ if (want("18")) {
       const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
       assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
              `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
-      // The one function a migration holds from PUBLIC, 117's release, is the closedclaims group's (SMD-3600).
+      // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
       assert(!/ON SEQUENCE|agent_memories/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables and 117's release (${fnGrants.join(", ") || "no function"})`);
+             `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
@@ -15862,7 +15862,7 @@ if (want("23b")) {
 // connection with a transaction held open.
 
 if (want("23c")) {
-  console.log("\n[23c] Migration 117 on a real Postgres, through board-sync's own writer: a pass over open tickets releases nothing; a pass moving one to Done and one to Canceled is followed by the step ending every claim on them — a lapsed whole-ticket claim and two pieces — with the status and the run; the release waits on the ticket's lock, then ends a claim made while it waited; a ticket reopened under the lock keeps its claims (SMD-3600)");
+  console.log("\n[23c] Migration 118 on a real Postgres, through board-sync's own writer: a pass over open tickets releases nothing; a pass moving one to Done and one to Canceled is followed by the step ending every claim on them — a lapsed whole-ticket claim and two pieces — with the status and the run; the release waits on the ticket's lock, then ends a claim made while it waited; a ticket reopened under the lock keeps its claims (SMD-3600)");
   const { store, writer, sync } = syncHarness(13);
   // Its own clients for the race and the watch; the harness writes through the suite's, which [24] closes, so this runs before it.
   const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });

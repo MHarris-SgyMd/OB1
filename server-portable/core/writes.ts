@@ -46,7 +46,7 @@ const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
 /**
  * Origin labels capture_thought's `source` and update_thought's `metadata_patch` refuse (SMD-3600): the board's, which board-sync and ingest-records
  * write through the store directly, never through this door. A ticket row under it is one board-sync's release
- * of a closed ticket's claims trusts (migration 117), so a key that could write one could end other keys' claims.
+ * of a closed ticket's claims trusts (migration 118), so a key that could write one could end other keys' claims.
  */
 const IMPORTER_SOURCES: ReadonlySet<string> = new Set<string>(["linear"]);
 export const RESERVED_META: ReadonlySet<string> = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed", "client_key"]);

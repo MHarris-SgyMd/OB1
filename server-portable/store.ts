@@ -1173,7 +1173,7 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
 }
 
 /**
- * A ticket the brain records as closed (migration 117, SMD-3600): its head is an
+ * A ticket the brain records as closed (migration 118, SMD-3600): its head is an
  * importer's row with a settled status type, so board-sync releases every claim
  * on it at its next pass. The status as the board names it, and its type.
  */
@@ -2065,7 +2065,7 @@ export interface ThoughtStore {
    * have paused). By ticket, piece and claim time; at most `limit`. Never a token or its hash.
    */
   unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]>;
-  /** Whether the brain records this ticket (keyed as 115 keys it) as closed — 117's ob1_work_claim_closed_head; null when open, unknown, or on a brain before 117 (SMD-3600). */
+  /** Whether the brain records this ticket (keyed as 115 keys it) as closed — 118's ob1_work_claim_closed_head; null when open, unknown, or on a brain before 118 (SMD-3600). */
   closedTicket(issue: string): Promise<ClosedTicket | null>;
   /**
    * The lease of the claim a token proves, read before a renewal (SMD-3654): its

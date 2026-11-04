@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 117: a closed ticket's claims are released — board-sync ends
+-- Migration 118: a closed ticket's claims are released — board-sync ends
 --                every unreleased claim on a ticket the brain records as
 --                Done, Canceled or a Duplicate (SMD-3600)
 -- =============================================================================
@@ -78,8 +78,8 @@
 --
 -- SAFETY
 --   Additive: two functions (the call and one helper), one REVOKE; nothing
---   existing changed. MINOR under FORK.md's version rules. test-schema [105],
---   test-upgrade [20bi].
+--   existing changed. MINOR under FORK.md's version rules. test-schema [106],
+--   test-upgrade [20bj].
 --
 -- Prerequisites
 --   058 (node_settled_types; `duplicate` in it since 105), 068
@@ -95,20 +95,20 @@ DO $qc$
 BEGIN
   IF to_regclass('public.ob1_ticket_head') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 117 needs 068 (ob1_ticket_head); this schema lacks it',
+      MESSAGE = 'migration 118 needs 068 (ob1_ticket_head); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('node_settled_types()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 117 needs 058 (node_settled_types); this schema lacks it',
+      MESSAGE = 'migration 118 needs 058 (node_settled_types); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_work_claim_lock(text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 117 needs 115 (ob1_work_claim_lock); this schema lacks it',
+      MESSAGE = 'migration 118 needs 115 (ob1_work_claim_lock); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -130,7 +130,7 @@ AS $$
      AND t.metadata->>'source' = 'linear'
 $$;
 COMMENT ON FUNCTION ob1_work_claim_closed_head(text) IS
-  'The ticket''s status and status type when its head (ob1_ticket_head, 068) has a settled status type (node_settled_types(): completed, canceled, duplicate) and is an importer''s row (metadata.source linear, which the server refuses to every key); no row otherwise. Migration 117 / SMD-3600.';
+  'The ticket''s status and status type when its head (ob1_ticket_head, 068) has a settled status type (node_settled_types(): completed, canceled, duplicate) and is an importer''s row (metadata.source linear, which the server refuses to every key); no row otherwise. Migration 118 / SMD-3600.';
 
 -- ---------------------------------------------------------------------------
 -- release_closed_ticket_claims
@@ -204,6 +204,6 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION release_closed_ticket_claims(text, boolean, jsonb) IS
-  'Board-sync''s release: ends every unreleased claim (live or lapsed, the whole ticket''s and every piece''s) on a ticket whose head is an importer''s row (metadata.source linear) with a settled status type (completed, canceled, duplicate), stamped with the caller''s envelope and the reason "<issue> closed: <status> (<status_type>); <p_run>". p_dry_run reads the same claims and writes nothing. Returns jsonb {outcome: released | dry_run, released: [claim with ticket_status and ticket_status_type]}. Takes each ticket''s lock in key order; READ COMMITTED only; one call per transaction. EXECUTE is the closedclaims group''s, not PUBLIC''s. Migration 117 / SMD-3600.';
+  'Board-sync''s release: ends every unreleased claim (live or lapsed, the whole ticket''s and every piece''s) on a ticket whose head is an importer''s row (metadata.source linear) with a settled status type (completed, canceled, duplicate), stamped with the caller''s envelope and the reason "<issue> closed: <status> (<status_type>); <p_run>". p_dry_run reads the same claims and writes nothing. Returns jsonb {outcome: released | dry_run, released: [claim with ticket_status and ticket_status_type]}. Takes each ticket''s lock in key order; READ COMMITTED only; one call per transaction. EXECUTE is the closedclaims group''s, not PUBLIC''s. Migration 118 / SMD-3600.';
 
 REVOKE EXECUTE ON FUNCTION release_closed_ticket_claims(text, boolean, jsonb) FROM PUBLIC;

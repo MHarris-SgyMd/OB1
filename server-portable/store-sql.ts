@@ -1001,8 +1001,8 @@ export class SqlStore implements ThoughtStore {
   }
 
   async closedTicket(issue: string): Promise<ClosedTicket | null> {
-    // SMD-3600: 117's own test of a closed ticket, the one board-sync's release reads, so a claim's reply and the
-    // release agree. Its EXECUTE is PUBLIC's (the release's alone is held). A brain before 117 has none: open, as far as it says.
+    // SMD-3600: 118's own test of a closed ticket, the one board-sync's release reads, so a claim's reply and the
+    // release agree. Its EXECUTE is PUBLIC's (the release's alone is held). A brain before 118 has none: open, as far as it says.
     try {
       const [r] = await this.sql`SELECT status, status_type FROM ob1_work_claim_closed_head(${issue}::text)` as { status: unknown; status_type: unknown }[];
       return r && typeof r.status_type === "string" ? { status: typeof r.status === "string" ? r.status : null, statusType: r.status_type } : null;

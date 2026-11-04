@@ -1012,7 +1012,7 @@ naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks t
 functions, the grant and the log setting. The `worker claims` row, named `work
 claims` before this ticket, is migration 015's: it keeps two workers off one thought.
 
-**A closed ticket keeps no claim** (migration 117, SMD-3600). After each pass,
+**A closed ticket keeps no claim** (migration 118, SMD-3600). After each pass,
 board-sync (`db/sync-linear.ts`) releases every unreleased claim, live or lapsed, on a
 ticket the brain records as Done, Canceled or a Duplicate, with the reason
 `<ticket> closed: <status> (<type>); <run>`.
@@ -1021,7 +1021,7 @@ ticket the brain records as Done, Canceled or a Duplicate, with the reason
 - A renewal of a claim board-sync ended answers `CLAIM_RELEASED` with
   `ticketClosed: true`: done if the holder's work merged, else the ticket closed
   under it (tell the user), never a release to ask about claiming again. Only
-  117's own reason, by a releaser neither an operator nor an agent, counts.
+  118's own reason, by a releaser neither an operator nor an agent, counts.
 - `renew_claim` on such a ticket, before the release, says the claim will go, as
   `claim_work` does.
 - A release after it answers `already_released`, naming who ended the claim and why.

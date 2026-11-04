@@ -4859,12 +4859,12 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  // Every group's: since 117 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
   const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
   const lockedOids = new Set(await fnOids(lockedFns));
   const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
   assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 1,
-    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 117's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 118's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -16785,7 +16785,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late', 'prio-late2', 'prio-fresh')`);
 }
 
-console.log("\n[105] Migration 117: a closed ticket's claims released — every unreleased claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose head is an importer's row with a settled status type (Done, Canceled, Duplicate), stamped from the envelope with the status and the run; an open ticket's, a ticket without a head and one whose head a key wrote kept; a claim made after the close released at the next call, a reopen bringing none back; the dry run writing nothing; refusals by SQLSTATE; EXECUTE the closedclaims group's, not PUBLIC's; a re-apply a no-op (SMD-3600)");
+console.log("\n[106] Migration 118: a closed ticket's claims released — every unreleased claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose head is an importer's row with a settled status type (Done, Canceled, Duplicate), stamped from the envelope with the status and the run; an open ticket's, a ticket without a head and one whose head a key wrote kept; a claim made after the close released at the next call, a reopen bringing none back; the dry run writing nothing; refusals by SQLSTATE; EXECUTE the closedclaims group's, not PUBLIC's; a re-apply a no-op (SMD-3600)");
 {
   type Claim = { id: string; issue: string; piece: string | null; holder: string; state: string; released_by: string | null; released_by_kind: string | null; release_reason: string | null; ticket_status: string; ticket_status_type: string };
   type Answer = { outcome: string; released: Claim[] };
@@ -16796,7 +16796,7 @@ console.log("\n[105] Migration 117: a closed ticket's claims released — every 
   // A ticket row as board-sync writes one (source linear), or as a key would (the server stamps its own source).
   const ticket = async (issue: string, status: string, type: string, source = "linear", synced = "2026-11-03T00:00:00.000Z") =>
     (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`,
-      [`${issue} — [105] ${status} ${source} ${synced}`, JSON.stringify({ source, issue, status, status_type: type, linear_updated_at: synced })])).rows[0].id;
+      [`${issue} — [106] ${status} ${source} ${synced}`, JSON.stringify({ source, issue, status, status_type: type, linear_updated_at: synced })])).rows[0].id;
   const move = (id: string, status: string, type: string) =>
     db.query(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status', $2::text, 'status_type', $3::text) WHERE id = $1::uuid`, [id, status, type]);
   const claim = async (issue: string, actor: object, piece: string | null = null, lease = 14400) =>
@@ -16913,7 +16913,7 @@ console.log("\n[105] Migration 117: a closed ticket's claims released — every 
   await reapply(file);
   const claimsAfter = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
   assert(claimsAfter === claimsBefore && (await functionsNamed("release_closed_ticket_claims")) === 1 && !(await publicExec()),
-    `117 applied again changes nothing: ${claimsAfter} unreleased claims stand, one release function, EXECUTE still not PUBLIC's`);
+    `118 applied again changes nothing: ${claimsAfter} unreleased claims stand, one release function, EXECUTE still not PUBLIC's`);
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);

@@ -1124,7 +1124,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
 }
 
 // ---------------------------------------------------------------------------
-// A closed ticket's claims (SMD-3600, migration 117). After each pass, one
+// A closed ticket's claims (SMD-3600, migration 118). After each pass, one
 // call ends every unreleased claim, live or lapsed, on a ticket whose head the
 // brain records as settled (Done, Canceled or a Duplicate) — so an agent that
 // merged and never released no longer leaves its claim on every read naming
@@ -1141,13 +1141,13 @@ const RELEASE_FN = "release_closed_ticket_claims(text, boolean, jsonb)";
 
 /**
  * The step, when this brain and role can take it — asked once at start, as
- * 053 is: the function (117), EXECUTE on it and SELECT and UPDATE on
+ * 053 is: the function (118), EXECUTE on it and SELECT and UPDATE on
  * work_claims (the closedclaims group). Otherwise why not, said once by the
  * caller; the claims stay until their holders release them.
  */
 export async function closedClaimsStep(sql: SQL, actor: Actor): Promise<{ step: ClosedClaimsStep } | { off: string }> {
   const [r] = await sql`SELECT to_regprocedure(${RELEASE_FN}) IS NOT NULL AS ok`;
-  if (!(r as { ok: boolean }).ok) return { off: "migration 117 is not applied on this brain (cd db && bun migrate.ts --url …)" };
+  if (!(r as { ok: boolean }).ok) return { off: "migration 118 is not applied on this brain (cd db && bun migrate.ts --url …)" };
   const [g] = await sql`SELECT has_function_privilege(${RELEASE_FN}, 'EXECUTE') AND has_table_privilege('work_claims', 'SELECT') AND has_table_privilege('work_claims', 'UPDATE') AS ok`;
   if (!(g as { ok: boolean }).ok) return { off: "this role lacks the closedclaims grant group (cd db && bun migrate.ts --url … --grant <role> --groups closedclaims)" };
   return {
@@ -1177,7 +1177,7 @@ export async function releaseClosedClaims(step: ClosedClaimsStep | null, o: { ru
 export function formatClosedClaims(released: ClosedClaim[], dryRun: boolean): string | null {
   if (!released.length) return null;
   const was = (c: ClosedClaim) => (c.released_at === null ? c.state : Date.parse(c.expires_at) <= Date.parse(c.released_at) ? "lapsed" : "live");
-  // The board's status name is its words: one line, bounded, its type when blank, as 117 writes it into the reason (review pass 1).
+  // The board's status name is its words: one line, bounded, its type when blank, as 118 writes it into the reason (review pass 1).
   const status = (c: ClosedClaim) => (c.ticket_status ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 60) || c.ticket_status_type || "";
   const named = released.slice(0, 10).map((c) => `${c.issue}${c.piece === null ? "" : ` ${JSON.stringify(c.piece)}`} by ${c.holder} (${was(c)}${status(c) ? `, ${status(c)}` : ""})`);
   return `  claims on closed tickets: ${dryRun ? "would release" : "released"} ${released.length} — ${named.join(", ")}${released.length > 10 ? ", …" : ""}`;
@@ -1732,15 +1732,15 @@ function selfCheck(): Promise<number> {
     try { await initiativeProjects(empty, "Open Brain"); } catch (e) { refusedEmpty = /no projects/.test((e as Error).message); }
     ok(refusedEmpty, "an initiative with no projects is refused by name, not an empty census");
 
-    // A closed ticket's claims (SMD-3600): the step against a fake connection — off before 117 and without the
+    // A closed ticket's claims (SMD-3600): the step against a fake connection — off before 118 and without the
     // group, each said by name; on, one call carrying the run, the dry run and the writer's envelope.
     {
       const fakeSql = (answers: Record<string, unknown>[][], seen: unknown[][]) =>
         (async (_s: TemplateStringsArray, ...values: unknown[]) => { seen.push(values); return answers.shift() ?? []; }) as unknown as SQL;
-      const before117 = await closedClaimsStep(fakeSql([[{ ok: false }]], []), { name: ACTOR_NAME });
+      const before118 = await closedClaimsStep(fakeSql([[{ ok: false }]], []), { name: ACTOR_NAME });
       const ungranted = await closedClaimsStep(fakeSql([[{ ok: true }], [{ ok: false }]], []), { name: ACTOR_NAME });
-      ok("off" in before117 && /^migration 117 is not applied/.test(before117.off) && "off" in ungranted && /lacks the closedclaims grant group .*--groups closedclaims/.test(ungranted.off),
-        `the step is off before 117 and for a role without the closedclaims group, each said by name (${"off" in before117 ? before117.off.slice(0, 40) : "on"}; ${"off" in ungranted ? ungranted.off.slice(0, 50) : "on"})`);
+      ok("off" in before118 && /^migration 118 is not applied/.test(before118.off) && "off" in ungranted && /lacks the closedclaims grant group .*--groups closedclaims/.test(ungranted.off),
+        `the step is off before 118 and for a role without the closedclaims group, each said by name (${"off" in before118 ? before118.off.slice(0, 40) : "on"}; ${"off" in ungranted ? ungranted.off.slice(0, 50) : "on"})`);
       const seen: unknown[][] = [];
       const claimRow = { id: "c1", issue: "SMD-1", piece: "PR 1", holder: "codex", state: "released", expires_at: "2026-11-03T01:00:00Z", released_at: "2026-11-03T02:00:00Z", ticket_status: "Done" };
       const on = await closedClaimsStep(fakeSql([[{ ok: true }], [{ ok: true }], [{ r: { outcome: "released", released: [claimRow] } }]], seen), { name: ACTOR_NAME, via: SELF, session: "s" });

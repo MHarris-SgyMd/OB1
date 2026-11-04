@@ -43,7 +43,7 @@ export type ListClaimsResult = { claims: WorkClaim[]; truncated: boolean };
 /** 115's own release reason for a claim taken over after it lapsed (its claim_work writes it). */
 export const TAKEN_OVER = "lapsed; taken over";
 /**
- * Whether board-sync ended a claim because its ticket closed (SMD-3600): 117's reason for this ticket, word for word —
+ * Whether board-sync ended a claim because its ticket closed (SMD-3600): 118's reason for this ticket, word for word —
  * `<issue> closed: <status> (<settled type>); <run>` — by a releaser neither an operator nor an agent (board-sync's key
  * is ingested, or unclassified on a brain that never classified it). An operator's or a holder's own reason worded
  * alike is theirs to be read as written (review pass 2).
