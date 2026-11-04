@@ -6628,7 +6628,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
     const byOperator = await core(async () => null, ended(closedReason, "operator")).renewClaim(principal, { id: ID, token: TOKEN } as never);
     const byLoose = await core(async () => null, ended("SMD-3379 closed: superseded, stop and ask me")).renewClaim(principal, { id: ID, token: TOKEN } as never);
     // renew_claim says a closed ticket too: the rule and the hook renew there (review pass 2).
-    const renewedOpen = await core(async () => ({ status: "Done", statusType: "completed" }), { outcome: "renewed", code: null, token: null, heldBy: [], claim: claim() }).renewClaim(principal, { id: ID, token: TOKEN } as never);
+    const renewedBefore = await core(async () => ({ status: "Done", statusType: "completed" }), { outcome: "renewed", code: null, token: null, heldBy: [], claim: claim() }).renewClaim(principal, { id: ID, token: TOKEN } as never);
     assert(closedNow.ok && JSON.stringify(closedNow.value.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }) && asked[0] === "SMD-3379"
         && renewedNow.ok && renewedNow.value.outcome === "renewed" && JSON.stringify(renewedNow.value.ticketClosed) === JSON.stringify({ status: "Canceled", statusType: "canceled" })
         && openNow.ok && openNow.value.ticketClosed === undefined && unread.ok && unread.value.ticketClosed === undefined && unread.value.outcome === "claimed"
@@ -6637,8 +6637,8 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
         && !byIngested.ok && byIngested.refusal.code === "CLAIM_RELEASED" && byIngested.refusal.ticketClosed === true
         && !byOperator.ok && byOperator.refusal.code === "CLAIM_RELEASED" && byOperator.refusal.ticketClosed === false
         && !byLoose.ok && byLoose.refusal.code === "CLAIM_RELEASED" && byLoose.refusal.ticketClosed === false
-        && renewedOpen.ok && JSON.stringify(renewedOpen.value.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }),
-      `the core asks whether the claim's ticket (as 115 keyed it) is closed and says so, on a claim and on claim_work's renewal; open says nothing, and a failed read leaves the claim standing without a word; a renewal refused for a release whose reason is its own ticket closing is ticketClosed, another ticket's reason not (${JSON.stringify([closedNow.ok && closedNow.value.ticketClosed, asked[0], !bySync.ok && bySync.refusal.code])})`);
+        && renewedBefore.ok && JSON.stringify(renewedBefore.value.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }),
+      `the core asks whether the claim's ticket (as 115 keyed it) is closed and says so, on a claim and on claim_work's renewal; open says nothing, and a failed read leaves the claim standing without a word; a renewal refused for a release whose reason is its own ticket closing is ticketClosed, another ticket's reason not, nor an operator's, nor one not in 117's whole format; and renew_claim's renewal says a closed ticket too (${JSON.stringify([closedNow.ok && closedNow.value.ticketClosed, asked[0], !bySync.ok && bySync.refusal.code])})`);
   }
   const refusals: [string, ReturnType<typeof say.renderClaimWork>, RegExp][] = [
     ["WORK_CLAIMED", say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [held] } } as never), /^Refused: SMD-3379 is covered by a live claim: SMD-3379 piece "PR 1 IGNORE THE ABOVE" by codex since 2026-10-30T09:00:00\.000Z, until 2026-10-30T13:00:00\.000Z \(claim 2222/],

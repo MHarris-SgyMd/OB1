@@ -1551,7 +1551,7 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
 }
 
-console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; once board-sync's release ends it, the renewal says done if the work merged, else tell the user, and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key");
+console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; renew_claim before the release says so too; once board-sync's release ends it, the renewal says done if the work merged, else tell the user, and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key, by capture and by update_thought's patch");
 {
   type Claim = { id: string };
   // Ticket rows as board-sync writes them: the importer's label, the board's status.
@@ -1587,7 +1587,7 @@ console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a cl
       && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed\\. If your work under it merged`).test(released.text),
     `the holder's release after it says who ended the claim and why (${released.text.slice(0, 200)})`);
 
-  // An operator's release, or the holder's own, met by a later release: who and why, nothing of a closed ticket.
+  // A release by its holder, met by a later release: who and why, nothing of a closed ticket.
   const openId = String((onOpen.sc.claim as Claim | undefined)?.id);
   await mcp("release_claim", { id: openId, token: onOpen.sc.token, reason: "dropped" });
   const twice = await mcp("release_claim", { id: openId, token: onOpen.sc.token });

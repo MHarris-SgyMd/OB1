@@ -48,9 +48,11 @@ export const TAKEN_OVER = "lapsed; taken over";
  * is ingested, or unclassified on a brain that never classified it). An operator's or a holder's own reason worded
  * alike is theirs to be read as written (review pass 2).
  */
-export const closedBySync = (issue: string | null | undefined, reason: string | null | undefined, kind: string | null | undefined): boolean =>
-  !!issue && !!reason && kind !== "operator" && kind !== "agent"
-  && reason.startsWith(`${issue} closed: `) && /^.+ \((?:completed|canceled|duplicate)\); .+$/.test(reason.slice(issue.length + 9));
+export const closedBySync = (issue: string | null | undefined, reason: string | null | undefined, kind: string | null | undefined): boolean => {
+  if (!issue || !reason || kind === "operator" || kind === "agent") return false;
+  const head = `${issue} closed: `;
+  return reason.startsWith(head) && /^.+ \((?:completed|canceled|duplicate)\); .+$/.test(reason.slice(head.length));
+};
 /** 115's clamp on list_work_claims' limit. */
 const LIST_MAX = 1000;
 

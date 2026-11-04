@@ -35,7 +35,7 @@ export type Refusal =
   // capture_thought's `client_key` (SMD-3314, migration 112).
   | { code: "REFUSED_CLIENT_KEY_SHAPE"; retryable: false; value: string } // not a UUID
   | { code: "REFUSED_CLIENT_KEY_SCOPE"; retryable: false }                // a capture-only key sent one: its dedup reply would say whether an id exists
-  // capture_thought's `source` (SMD-3600): a label the board's importers write directly, which a ticket row's closing release reads (migration 117).
+  // capture_thought's `source` and update_thought's metadata_patch (SMD-3600): a label the board's importers write directly, which a ticket row's closing release reads (migration 117).
   | { code: "REFUSED_SOURCE_RESERVED"; retryable: false; source: string }
   // capture_thought's pointers (SMD-1298, SMD-1978).
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record, or whether it stands, could not be read

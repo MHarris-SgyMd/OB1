@@ -1126,7 +1126,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
 // ---------------------------------------------------------------------------
 // A closed ticket's claims (SMD-3600, migration 117). After each pass, one
 // call ends every unreleased claim, live or lapsed, on a ticket whose head the
-// brain records as settled (Done, Canceled, Duplicate) — so an agent that
+// brain records as settled (Done, Canceled or a Duplicate) — so an agent that
 // merged and never released no longer leaves its claim on every read naming
 // the ticket (SMD-3599's `claimed`). The database decides which tickets, from
 // the rows this tool writes (an importer's head, never a key's); this pass's

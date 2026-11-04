@@ -421,7 +421,8 @@ console.log("\n[8] capture_thought stamps the classifier's genre on the row (SMD
   // Its pre-signal reads the metadata, not the wire, so it runs under deny; an
   // arxiv_id is a research-paper by rule (the tier, unset here, is never
   // reached). source:linear's project-issue is the board importers' alone
-  // since SMD-3600, which write through the store, not this door. A mutant that drops the payload fold (genre undefined) or
+  // since SMD-3600, which write through the store, not this door.
+  // A mutant that drops the payload fold (genre undefined) or
   // hardcodes it (the tier-unset fallback is `other`, not research-paper) fails
   // here — the CLASSIFIER's value, not a constant, must reach the row.
   const lin = await call(GATED_KEY, "capture_thought", { content: "claims-paper: a gated note naming an arxiv id", metadata: { arxiv_id: "2401.00001" } });

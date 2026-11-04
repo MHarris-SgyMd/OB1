@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim, ClosedTicket } from "./store.ts";
+import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -1861,7 +1861,7 @@ const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) 
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** What to do once board-sync has ended a claim because its ticket closed (SMD-3600). */
 const CLOSED_DONE = "its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.";
-/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why; released because its ticket closed — done. */
+/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why; released because its ticket closed — done if the work merged, else tell the user. */
 const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.ticketClosed
   ? `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}: ${CLOSED_DONE}`
   : r.takenOver
@@ -1928,7 +1928,7 @@ export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): 
     : r.code === "WORK_CLAIMED" ? `${inTheWay(r, OWN_KEY_RENEWING)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
-/** Who ended a claim already ended, and why (review pass 1): taken over; released because its ticket closed — done; or released, by whom and for what. */
+/** Who ended a claim already ended, and why (review pass 1): taken over; released because its ticket closed — done if the work merged, else tell the user; or released, by whom and for what. */
 const endedBy = (c: WorkClaim) => {
   const by = c.releasedBy ? ` by ${oneLine(snipText(c.releasedBy, 80))}` : "";
   if (c.releaseReason === TAKEN_OVER) return `: it lapsed and was taken over${by}.`;

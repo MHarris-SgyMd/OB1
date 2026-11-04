@@ -44,11 +44,11 @@ import type { Reviewer } from "../proposal-review.ts";
 // it can edit any thought through update_thought anyway.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
 /**
- * Origin labels capture_thought's `source` refuses (SMD-3600): the board's, which board-sync and ingest-records
+ * Origin labels capture_thought's `source` and update_thought's `metadata_patch` refuse (SMD-3600): the board's, which board-sync and ingest-records
  * write through the store directly, never through this door. A ticket row under it is one board-sync's release
  * of a closed ticket's claims trusts (migration 117), so a key that could write one could end other keys' claims.
  */
-export const IMPORTER_SOURCES: ReadonlySet<string> = new Set<string>(["linear"]);
+const IMPORTER_SOURCES: ReadonlySet<string> = new Set<string>(["linear"]);
 export const RESERVED_META: ReadonlySet<string> = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed", "client_key"]);
 const TICKET_META = new Set<string>(TICKET_META_KEYS);
 
@@ -694,9 +694,8 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   if (metadata_patch !== undefined && Object.hasOwn(metadata_patch, "client_key")) return refuse({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "client_key" });
   // The board's label is its importers' (SMD-3600), by a patch as by a capture: a key's own row relabelled so would be a
   // ticket row board-sync's release trusts (review pass 2).
-  if (metadata_patch !== undefined && typeof metadata_patch.source === "string" && IMPORTER_SOURCES.has(metadata_patch.source.trim().toLowerCase())) {
-    return refuse({ code: "REFUSED_SOURCE_RESERVED", retryable: false, source: metadata_patch.source.trim().toLowerCase() });
-  }
+  const patchSource = metadata_patch !== undefined && typeof metadata_patch.source === "string" ? metadata_patch.source.trim().toLowerCase() : undefined;
+  if (patchSource !== undefined && IMPORTER_SOURCES.has(patchSource)) return refuse({ code: "REFUSED_SOURCE_RESERVED", retryable: false, source: patchSource });
   // The thought and the pointer, each by id else by client_key (SMD-3314).
   const { id, byClientKey } = await targetNamed(ctx, principal, name);
   if (typeof supersedes === "string") supersedes = (await targetNamed(ctx, principal, supersedes)).id;

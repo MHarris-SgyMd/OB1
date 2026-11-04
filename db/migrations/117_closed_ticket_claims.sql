@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Migration 117: a closed ticket's claims are released — board-sync ends
 --                every unreleased claim on a ticket the brain records as
---                Done, Canceled or Duplicate (SMD-3600)
+--                Done, Canceled or a Duplicate (SMD-3600)
 -- =============================================================================
 --
 -- WHY

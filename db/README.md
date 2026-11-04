@@ -2441,8 +2441,8 @@ released too, and a ticket that reopens brings none back. Each release is stampe
 from the call's envelope, with the reason `<issue> closed: <status>
 (<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
 It takes each ticket's lock in key order under READ COMMITTED (0A000 above it),
-as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run`
-included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
+as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run` and
+`--only` included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
 function so held, and granted by the **closedclaims** group (EXECUTE on the
 function, SELECT and UPDATE on `work_claims`); the server never calls it. A
 plain `migrate.ts --grant <role>` issues every group, this one included: grant a
@@ -2501,7 +2501,8 @@ issues every group at once, or with `--groups
 capture,worker,…` those alone (SMD-2289). The full set a plain `--grant` issues
 includes **closedclaims**, the release of a closed ticket's claims that board-sync
 alone calls (117): a role granted by `--groups` without it cannot call that
-release, and one granted by a plain `--grant` can. `--groups` revokes nothing; `--exact` adds the
+release, and one granted by a plain `--grant` can.
+`--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
@@ -6107,7 +6108,7 @@ which would call this tool's `syncIssue` with the one identifier it was told.
 **A closed ticket's claims (SMD-3600).** After each pass, `--dry-run` and `--only`
 included and `--audit` not, one call to migration 117's
 `release_closed_ticket_claims` ends every unreleased claim (live or lapsed) on a
-ticket whose head is this tool's row with a Done, Canceled or Duplicate status type,
+ticket whose head is this tool's row and says Done, Canceled or a Duplicate,
 and the pass prints `claims on closed tickets: released N — …`, ten named. A dry
 run's `would release` reads the brain as it stands, so a ticket the pass would
 close is not in it. A failed call fails the pass, as a failed findings post does. Asked once at start: a

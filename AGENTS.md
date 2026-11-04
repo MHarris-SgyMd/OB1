@@ -57,7 +57,7 @@ If `open-brain` has no `claim_work` tool, say why:
      - So is an unmerged worktree, branch or open PR for the ticket, with a claim or without one.
      - A lapsed claim whose PR merged or closed is free, even if its branch is still there.
      - Once the user says such work is dead, they release the claim with the operator key and a reason. Or you claim exactly its ticket and piece, which takes the lapsed claim over.
-   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done, Canceled or a Duplicate, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does. Once the ticket is Done, Canceled or a Duplicate, board-sync releases it at its next pass (SMD-3600).
+   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done, Canceled or a Duplicate, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does. On a closed ticket, board-sync releases it at its next pass (SMD-3600).
 2. **Before you create the branch,** call `claim_work` with:
    - `ticket`;
    - `piece` for one PR of several, spelled as the ticket's plan names it (`PR 1b-2`) or as `list_claims` already shows it;

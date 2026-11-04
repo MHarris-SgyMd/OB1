@@ -15862,7 +15862,7 @@ if (want("23b")) {
 // connection with a transaction held open.
 
 if (want("23c")) {
-  console.log("\n[23c] Migration 117 on a real Postgres, through board-sync's own writer: a pass over open tickets releases nothing; a pass moving one to Done and one to Canceled is followed by the step ending every claim on them — a lapsed whole-ticket claim and two pieces — with the status and the run; the release waits on the ticket's lock, then ends a claim made while it waited (SMD-3600)");
+  console.log("\n[23c] Migration 117 on a real Postgres, through board-sync's own writer: a pass over open tickets releases nothing; a pass moving one to Done and one to Canceled is followed by the step ending every claim on them — a lapsed whole-ticket claim and two pieces — with the status and the run; the release waits on the ticket's lock, then ends a claim made while it waited; a ticket reopened under the lock keeps its claims (SMD-3600)");
   const { store, writer, sync } = syncHarness(13);
   // Its own clients for the race and the watch; the harness writes through the suite's, which [24] closes, so this runs before it.
   const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });
