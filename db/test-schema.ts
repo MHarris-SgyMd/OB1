@@ -635,7 +635,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
 
   // The setting that makes the in-scan filter correct lives on the function.
   // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
-  // the defined-twice class FORK.md keeps finding — fails here, not in search.
+  // the defined-twice class MAINTAINING.md names — fails here, not in search.
   const cfg = await db.query<{ cfg: string | null }>(
     `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
      WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`

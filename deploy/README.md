@@ -157,7 +157,7 @@ The stack above builds the server image (as `api`) and `migrate` from the checko
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the workflow
 `.github/workflows/release.yml` (SMD-1860; its steps are in `release-steps.yml`)
 runs on the tag a cut is named by —
-`v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
+`v<X.Y.Z>`; [`MAINTAINING.md`](../MAINTAINING.md) "Versioning" has the scheme and the cut —
 publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
@@ -3993,4 +3993,5 @@ so the profile builds from a checkout.
 
 - `../db/` — the schema and its migration runner
 - `../server-portable/` — the server, and `preflight.ts`
-- `../FORK.md` — what this fork changes and why
+- `../MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `../FORK.md` — the fork era: where Daemonic Brain came from
