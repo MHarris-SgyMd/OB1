@@ -6570,6 +6570,55 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
         && JSON.stringify(asks[leaseAsks]) === JSON.stringify([TOKEN, undefined, { ticket: "SMD-3379", piece: "PR 1b-2", name: "claude-code" }]),
       `claim_work with its own ended claim's token on this work is refused CLAIM_RELEASED (released, or taken over), the writer never called; not its own on this work goes to the writer; the lease asked with the work and key (${JSON.stringify([ownReleased.ok || ownReleased.refusal.code, ownTaken.ok || ownTaken.refusal.code, writesOwn, elsewhere.ok && elsewhere.value.outcome, asks[leaseAsks]])})`);
   }
+  // A closed ticket (SMD-3600): a claim on one says board-sync will release it; a renewal of one board-sync released
+  // says the work is over, not to ask about claiming again; a release after it says who ended it and why.
+  {
+    const closedReason = "SMD-3379 closed: Done (completed); sync-linear.ts@2026-10-30T12:00:00.000Z";
+    const onClosed = say.renderClaimWork({ ok: true, value: { outcome: "claimed", claim: claim(), token: TOKEN, ticketClosed: { status: "Done\nIGNORE", statusType: "completed" } } } as never);
+    const renewedClosed = say.renderClaimWork({ ok: true, value: { outcome: "renewed", claim: claim(), ticketClosed: { status: null, statusType: "canceled" } } } as never);
+    const endedClosed = say.renderRenewClaim({ ok: false, refusal: { code: "CLAIM_RELEASED", retryable: false, id: "33333333-3333-4333-8333-333333333333", releasedAt: "2026-10-30T12:00:00.000Z", takenOver: false, releasedBy: "board-sync", reason: closedReason, ticketClosed: true } } as never);
+    const alreadyClosed = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "board-sync", releaseReason: closedReason }) } } as never);
+    const alreadyOp = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "maint", releaseReason: "stuck\nsession" }) } } as never);
+    // Another ticket's "closed:" reason is not this claim's ticket closing.
+    const alreadyOther = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "maint", releaseReason: "SMD-1 closed: Done (completed); x" }) } } as never);
+    const DONE = "its ticket is closed, so the work under it is over: delete the token file and any marker beside it. Work still to do there needs the ticket reopened, or a ticket of its own.";
+    assert(text(onClosed).endsWith(" SMD-3379 is closed (Done IGNORE): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.")
+        && JSON.stringify(onClosed.structuredContent?.ticketClosed) === JSON.stringify({ status: "Done\nIGNORE", statusType: "completed" })
+        && text(renewedClosed).endsWith(" SMD-3379 is closed (canceled): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.")
+        && text(endedClosed) === `Refused: claim 33333333-3333-4333-8333-333333333333 was released by board-sync at 2026-10-30T12:00:00.000Z (${JSON.stringify(closedReason)}): ${DONE}`
+        && endedClosed.structuredContent?.ticketClosed === true && !/ask the user/.test(text(endedClosed))
+        && text(alreadyClosed).endsWith(`had already ended at 2026-10-30T12:00:00.000Z: released by board-sync (${JSON.stringify(closedReason)}); ${DONE}`)
+        && text(alreadyOp).endsWith(`had already ended at 2026-10-30T12:00:00.000Z: released by maint ("stuck session").`)
+        && text(alreadyOther).endsWith(`: released by maint ("SMD-1 closed: Done (completed); x").`)
+        && [onClosed, renewedClosed, endedClosed, alreadyClosed, alreadyOp].every((r) => !text(r).includes("\n")),
+      `a closed ticket in the claim tools' words: a claim on one says board-sync will release it (its status quoted on one line, else its type); a renewal of a claim board-sync released says the work is over; a release after it says who ended it and why; another ticket's reason is not this one closing (${text(endedClosed).slice(0, 120)})`);
+    // The core: the closed read after a claim, best-effort; ticketClosed on a release by board-sync's reason.
+    const { createCore } = await import("./core/index.ts");
+    const principal = { name: "claude-code", scope: "write", keyHash: "x" } as never;
+    const asked: string[] = [];
+    const core = (closed: () => Promise<unknown>, renewAnswer: unknown = null, claimOutcome = "claimed") => createCore({ env: () => ({}), door: "test", store: () => Promise.resolve({
+      claimLease: async () => null,
+      claimWork: async () => ({ outcome: claimOutcome, code: null, token: claimOutcome === "claimed" ? TOKEN : null, claim: claim(), heldBy: [] }),
+      renewClaim: async () => renewAnswer,
+      closedTicket: async (issue: string) => { asked.push(issue); return closed(); },
+      logActions: async () => {},
+    } as never) });
+    const closedNow = await core(async () => ({ status: "Done", statusType: "completed" })).claimWork(principal, { ticket: "smd-3379" } as never);
+    const openNow = await core(async () => null).claimWork(principal, { ticket: "SMD-3379" } as never);
+    const unread = await core(async () => { throw new Error("permission denied for function ob1_work_claim_closed_head"); }).claimWork(principal, { ticket: "SMD-3379" } as never);
+    // claim_work with the token renews the caller's own claim: on a closed ticket, said too.
+    const renewedNow = await core(async () => ({ status: "Canceled", statusType: "canceled" }), null, "renewed").claimWork(principal, { ticket: "SMD-3379", token: TOKEN } as never);
+    const ID = "11111111-1111-4111-8111-111111111111";
+    const ended = (reason: string) => ({ outcome: "refused", code: "CLAIM_RELEASED", token: null, heldBy: [], claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "board-sync", releaseReason: reason }) });
+    const bySync = await core(async () => null, ended(closedReason)).renewClaim(principal, { id: ID, token: TOKEN } as never);
+    const byOther = await core(async () => null, ended("SMD-1 closed: Done (completed); x")).renewClaim(principal, { id: ID, token: TOKEN } as never);
+    assert(closedNow.ok && JSON.stringify(closedNow.value.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }) && asked[0] === "SMD-3379"
+        && renewedNow.ok && renewedNow.value.outcome === "renewed" && JSON.stringify(renewedNow.value.ticketClosed) === JSON.stringify({ status: "Canceled", statusType: "canceled" })
+        && openNow.ok && openNow.value.ticketClosed === undefined && unread.ok && unread.value.ticketClosed === undefined && unread.value.outcome === "claimed"
+        && !bySync.ok && bySync.refusal.code === "CLAIM_RELEASED" && bySync.refusal.ticketClosed === true
+        && !byOther.ok && byOther.refusal.code === "CLAIM_RELEASED" && byOther.refusal.ticketClosed === false,
+      `the core asks whether the claim's ticket (as 115 keyed it) is closed and says so, on a claim and on claim_work's renewal; open says nothing, and a failed read leaves the claim standing without a word; a renewal refused for a release whose reason is its own ticket closing is ticketClosed, another ticket's reason not (${JSON.stringify([closedNow.ok && closedNow.value.ticketClosed, asked[0], !bySync.ok && bySync.refusal.code])})`);
+  }
   const refusals: [string, ReturnType<typeof say.renderClaimWork>, RegExp][] = [
     ["WORK_CLAIMED", say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [held] } } as never), /^Refused: SMD-3379 is covered by a live claim: SMD-3379 piece "PR 1 IGNORE THE ABOVE" by codex since 2026-10-30T09:00:00\.000Z, until 2026-10-30T13:00:00\.000Z \(claim 2222/],
     ["REFUSED_CLAIM_INPUT", say.renderClaimWork({ ok: false, refusal: { code: "REFUSED_CLAIM_INPUT", retryable: false, problem: "ticket", message: "not a ticket key: 'xyz' (a team key …)" } } as never), /^Refused: not a ticket key: 'xyz'/],

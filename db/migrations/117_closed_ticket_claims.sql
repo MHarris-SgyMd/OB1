@@ -19,11 +19,15 @@
 --   * WHICH TICKETS: every ticket holding an unreleased claim (live or
 --     lapsed) whose head in ob1_ticket_head (068) has a settled status type
 --     (node_settled_types(), 105: completed, canceled, duplicate) and is a
---     row an importer wrote — its metadata.source is `linear`. A client
---     cannot set `source` (the server's reserved keys; a capture is stamped
---     with its own, `mcp` or `rest`), so a thought a key writes with an
---     `issue` and a `status_type` of its own never releases anyone's claim:
---     when such a row is the head, the ticket is left alone.
+--     row an importer wrote — its metadata.source is `linear`, which the
+--     server refuses to every key (capture_thought's `source`, review pass
+--     1; `source` is a reserved metadata key besides), so a thought a key
+--     captures with an `issue` and a `status_type` of its own never releases
+--     anyone's claim: when such a row is the head, the ticket is left alone.
+--     One route stays: a write key may patch a board row's ticket keys
+--     (update_thought's metadata_patch), as it may already mislabel 095's
+--     `moved` that way; board-sync writes the board's status back when the
+--     ticket next moves.
 --   * WHICH CLAIMS: every unreleased claim on such a ticket, the whole
 --     ticket's and every piece's, live or lapsed, whenever it was made — a
 --     claim made on a ticket already closed is released at the next pass too
@@ -43,8 +47,10 @@
 --   * CONCURRENCY: 115's rules. READ COMMITTED alone (0A000 above it); each
 --     ticket's advisory lock (ob1_work_claim_lock) taken in key order and held
 --     to the end of the transaction, the head read again under it, so a claim
---     made while the call runs is either seen and released or made after the
---     call ends. One call per transaction: the locks it holds are taken in
+--     on a ticket the call reached, made while it waits for that ticket's
+--     lock, is released with the rest; a ticket whose first unreleased claim
+--     commits after the call's first read waits for the next call. One call
+--     per transaction: the locks it holds are taken in
 --     key order, and 115's writers take one ticket each, so no two wait on
 --     each other in a cycle.
 --   * A call whose envelope names nobody raises (42501), as 115's writers do.
@@ -56,8 +62,11 @@
 --   (db/config.mjs ROLE_GRANTS): EXECUTE on the function, SELECT and UPDATE
 --   on work_claims. It reads ob1_ticket_head, thoughts and ob1_agents, the
 --   capture group's SELECTs, which board-sync's role holds. The server never
---   calls it: no tool or REST operation reaches it, so a key's only way to
---   end another key's claim stays the operator's force. On a stack whose
+--   calls it: no tool or REST operation reaches it, so a key ends another
+--   key's claim by an operator's force, or — a write key — by marking a
+--   board row closed (WHICH TICKETS, above). A plain `migrate.ts --grant`
+--   issues every group, this one included: name the groups (`--groups`)
+--   to keep a role without it. On a stack whose
 --   every service connects as the database owner (the dogfood deploy) the
 --   revoke binds nobody; the group is for a deployment that splits roles.
 --   A role without the group gets 42501 naming the function, and board-sync
@@ -69,7 +78,8 @@
 --   test-upgrade [20bi].
 --
 -- Prerequisites
---   068 (ob1_ticket_head), 105 (node_settled_types with duplicate), 115
+--   058 (node_settled_types; `duplicate` in it since 105), 068
+--   (ob1_ticket_head), 115
 --   (work_claims and its helpers). Applied by `bun db/migrate.ts`.
 --   Re-applied: the functions are replaced as they were, and the REVOKE
 --   holds the same.

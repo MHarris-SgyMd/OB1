@@ -2429,8 +2429,11 @@ whose holder merged and never released stayed on every read naming the ticket
 claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose
 head in `ob1_ticket_head` has a settled status type (`node_settled_types()`:
 completed, canceled, duplicate) and is an importer's row (`metadata.source` is
-`linear`; no client can set `source`, so a key's own thought with an `issue` and
-a `status_type` releases nothing). A claim made after the ticket closed is
+`linear`, which the server refuses to every key: capture_thought answers
+`REFUSED_SOURCE_RESERVED`, so a key's own thought with an `issue` and a
+`status_type` releases nothing). A write key can still mark a board row closed
+by patching its ticket keys, as it can already mislabel `moved`; board-sync
+writes the board's status back when the ticket next moves. A claim made after the ticket closed is
 released too, and a ticket that reopens brings none back. Each release is stamped
 from the call's envelope, with the reason `<issue> closed: <status>
 (<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
@@ -2438,10 +2441,11 @@ It takes each ticket's lock in key order under READ COMMITTED (0A000 above it),
 as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run`
 included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
 function so held, and granted by the **closedclaims** group (EXECUTE on the
-function, SELECT and UPDATE on `work_claims`); the server never calls it, so a
-key's only way to end another key's claim stays the operator's forced release.
-Soft: board-sync without the group says so once per run and goes on. Needs 068,
-058 and 115; a re-apply is a no-op. test-schema [105] (the tickets released and
+function, SELECT and UPDATE on `work_claims`); the server never calls it. A
+plain `migrate.ts --grant <role>` issues every group, this one included: grant a
+server's role by `--groups` to keep it out. Soft: board-sync without the group
+says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
+`duplicate`), 068 and 115; a re-apply is a no-op. test-schema [105] (the tickets released and
 left, the reason, the dry run, the group, the re-apply), test-upgrade [20bi]
 (onto a populated brain at 116).
 
@@ -2491,7 +2495,9 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups
-capture,worker,…` those alone (SMD-2289). `--groups` revokes nothing; `--exact` adds the
+capture,worker,…` those alone (SMD-2289). Every group includes **closedclaims**,
+the release of a closed ticket's claims that board-sync alone calls (117): a role
+granted by `--groups` without it cannot call that release, and a plain `--grant` can. `--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the

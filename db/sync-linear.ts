@@ -1135,7 +1135,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
 // ---------------------------------------------------------------------------
 
 /** One claim the call ended (or, in a dry run, would end): 115's claim json and the ticket's status. */
-export type ClosedClaim = { id: string; issue: string; piece: string | null; holder: string; state: string; expires_at: string; released_at: string | null; ticket_status: string | null };
+export type ClosedClaim = { id: string; issue: string; piece: string | null; holder: string; state: string; expires_at: string; released_at: string | null; ticket_status: string | null; ticket_status_type?: string | null };
 export type ClosedClaimsStep = { run: (opts: { run: string; dryRun: boolean }) => Promise<ClosedClaim[]> };
 const RELEASE_FN = "release_closed_ticket_claims(text, boolean, jsonb)";
 
@@ -1177,7 +1177,9 @@ export async function releaseClosedClaims(step: ClosedClaimsStep | null, o: { ru
 export function formatClosedClaims(released: ClosedClaim[], dryRun: boolean): string | null {
   if (!released.length) return null;
   const was = (c: ClosedClaim) => (c.released_at === null ? c.state : Date.parse(c.expires_at) <= Date.parse(c.released_at) ? "lapsed" : "live");
-  const named = released.slice(0, 10).map((c) => `${c.issue}${c.piece === null ? "" : ` ${JSON.stringify(c.piece)}`} by ${c.holder} (${was(c)}${c.ticket_status ? `, ${c.ticket_status}` : ""})`);
+  // The board's status name is its words: one line, bounded, its type when blank, as 117 writes it into the reason (review pass 1).
+  const status = (c: ClosedClaim) => (c.ticket_status ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 60) || c.ticket_status_type || "";
+  const named = released.slice(0, 10).map((c) => `${c.issue}${c.piece === null ? "" : ` ${JSON.stringify(c.piece)}`} by ${c.holder} (${was(c)}${status(c) ? `, ${status(c)}` : ""})`);
   return `  claims on closed tickets: ${dryRun ? "would release" : "released"} ${released.length} — ${named.join(", ")}${released.length > 10 ? ", …" : ""}`;
 }
 
@@ -1749,8 +1751,10 @@ function selfCheck(): Promise<number> {
       const line = formatClosedClaims([claimRow, { ...claimRow, id: "c2", piece: null, holder: "claude", expires_at: "2026-11-04T00:00:00Z" }], false);
       const dryLine = formatClosedClaims([{ ...claimRow, state: "live", released_at: null }], true);
       const many = formatClosedClaims(Array.from({ length: 12 }, (_, i) => ({ ...claimRow, id: `c${i}` })), false);
+      const odd = formatClosedClaims([{ ...claimRow, ticket_status: `Done\n\t${String.fromCharCode(0x202e)}x${String.fromCharCode(7)}${"y".repeat(100)}` }, { ...claimRow, ticket_status: "  ", ticket_status_type: "canceled" }], false);
       ok(formatClosedClaims([], false) === null && line === `  claims on closed tickets: released 2 — SMD-1 "PR 1" by codex (lapsed, Done), SMD-1 by claude (live, Done)`
-         && dryLine === `  claims on closed tickets: would release 1 — SMD-1 "PR 1" by codex (live, Done)` && many !== null && many.endsWith(", …") && many.split(" by ").length === 11,
+         && dryLine === `  claims on closed tickets: would release 1 — SMD-1 "PR 1" by codex (live, Done)` && many !== null && many.endsWith(", …") && many.split(" by ").length === 11
+         && odd === `  claims on closed tickets: released 2 — SMD-1 "PR 1" by codex (lapsed, Done x ${"y".repeat(53)}), SMD-1 "PR 1" by codex (lapsed, canceled)`,
         `the pass's line: none says nothing; each claim with its piece quoted, its holder, whether it had lapsed when released and the ticket's status; a dry run says would; ten named, then … (${line})`);
       // After a pass: the dry run passed on, the line said; a failure said and counted; nothing when off or stopping.
       const asked: boolean[] = [], logged: string[] = [], warned: string[] = [];

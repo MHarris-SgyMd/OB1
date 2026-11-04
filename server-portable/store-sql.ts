@@ -25,7 +25,7 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -998,6 +998,18 @@ export class SqlStore implements ThoughtStore {
        ORDER BY c.issue, c.piece_key, c.claimed_at, c.id
        LIMIT ${limit}::int` as { j: unknown }[];
     return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
+  }
+
+  async closedTicket(issue: string): Promise<ClosedTicket | null> {
+    // SMD-3600: 117's own test of a closed ticket, the one board-sync's release reads, so a claim's reply and the
+    // release agree. Its EXECUTE is PUBLIC's (the release's alone is held). A brain before 117 has none: open, as far as it says.
+    try {
+      const [r] = await this.sql`SELECT status, status_type FROM ob1_work_claim_closed_head(${issue}::text)` as { status: unknown; status_type: unknown }[];
+      return r && typeof r.status_type === "string" ? { status: typeof r.status === "string" ? r.status : null, statusType: r.status_type } : null;
+    } catch (e) {
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /ob1_work_claim_closed_head\(/.test(String((e as Error).message))) return null;
+      throw e;
+    }
   }
 
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside

@@ -43,6 +43,12 @@ import type { Reviewer } from "../proposal-review.ts";
 // (SMD-2657). A write key keeps them:
 // it can edit any thought through update_thought anyway.
 const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
+/**
+ * Origin labels capture_thought's `source` refuses (SMD-3600): the board's, which board-sync and ingest-records
+ * write through the store directly, never through this door. A ticket row under it is one board-sync's release
+ * of a closed ticket's claims trusts (migration 117), so a key that could write one could end other keys' claims.
+ */
+export const IMPORTER_SOURCES: ReadonlySet<string> = new Set<string>(["linear"]);
 export const RESERVED_META: ReadonlySet<string> = new Set<string>([...TAG_KEYS, "source", "actor_kind", "actor_name", "trust", "embedding_model", "metadata_extraction_failed", "client_key"]);
 const TICKET_META = new Set<string>(TICKET_META_KEYS);
 
@@ -188,6 +194,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // pointer shapes above are.
     const badMetadata = metadataProblem(clientMetadata, reader);
     if (badMetadata) return refuse(badMetadata);
+    // The board's own label, which its importers write through the store (SMD-3600), after the metadata's refusals.
+    if (IMPORTER_SOURCES.has(origin)) return refuse({ code: "REFUSED_SOURCE_RESERVED", retryable: false, source: origin });
     // The client's idempotency key (SMD-3314): a key that can read only, as
     // the reply to a key that names a thought already would tell a
     // capture-only key whether an id exists (SMD-1298's rule).

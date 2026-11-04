@@ -1551,6 +1551,58 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
 }
 
+console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; once board-sync's release ends it, the renewal says the work is over and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key");
+{
+  type Claim = { id: string };
+  // Ticket rows as board-sync writes them: the importer's label, the board's status.
+  const board = (issue: string, status: string, type: string) =>
+    sql`INSERT INTO thoughts (content, metadata) VALUES (${`${issue} — [13] a board row`}, ${{ source: "linear", issue, status, status_type: type, linear_updated_at: "2026-11-03T00:00:00.000Z" }}::jsonb)`;
+  await board("SMD-9500", "Done", "completed");
+  await board("SMD-9501", "In Progress", "started");
+  const onDone = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1" });
+  const onDoneRest = await rest("POST", "/v1/claims", { ticket: "SMD-9500", piece: "PR 2" }, KEYS.rival);
+  const onOpen = await mcp("claim_work", { ticket: "SMD-9501" });
+  const doneId = String((onDone.sc.claim as Claim | undefined)?.id), doneToken = String(onDone.sc.token ?? "");
+  assert(!onDone.isError && JSON.stringify(onDone.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && /SMD-9500 is closed \(Done\): board-sync releases every claim on a closed ticket at its next pass, this one included\. Work still to do there needs the ticket reopened, or a ticket of its own\.$/.test(onDone.text)
+      && onDoneRest.status === 200 && JSON.stringify(onDoneRest.body.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && !onOpen.isError && onOpen.sc.ticketClosed === undefined && !/is closed/.test(onOpen.text),
+    `a claim on a Done ticket says board-sync will release it, in the text and as ticketClosed through both doors; one on an open ticket says nothing (${onDone.text.slice(-120)})`);
+
+  await sql`SELECT release_closed_ticket_claims('test-rest-sql', false, ${{ name: "board-sync" }}::jsonb)`;
+  const renewed = await mcp("renew_claim", { id: doneId, token: doneToken });
+  const renewedRest = await rest("POST", `/v1/claims/${doneId}/renew`, { token: doneToken });
+  const reclaimed = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1", token: doneToken });
+  const released = await mcp("release_claim", { id: doneId, token: doneToken, reason: "merged" });
+  const reason = "SMD-9500 closed: Done (completed); test-rest-sql";
+  assert(renewed.isError && renewed.sc.code === "CLAIM_RELEASED" && renewed.sc.ticketClosed === true
+      && renewed.text === `Refused: claim ${doneId} was released by board-sync at ${String(renewed.sc.releasedAt)} (${JSON.stringify(reason)}): its ticket is closed, so the work under it is over: delete the token file and any marker beside it. Work still to do there needs the ticket reopened, or a ticket of its own.`
+      && renewedRest.status === 409 && renewedRest.body.ticketClosed === true
+      && reclaimed.isError && reclaimed.sc.code === "CLAIM_RELEASED" && reclaimed.sc.ticketClosed === true && /its ticket is closed, so the work under it is over/.test(reclaimed.text),
+    `once board-sync's release ends it, a renewal through either door, and claim_work with its token, say the ticket closed and the work is over — not to ask about claiming again (${renewed.text.slice(0, 160)})`);
+  assert(!released.isError && released.sc.outcome === "already_released"
+      && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed, so the work under it is over`).test(released.text),
+    `the holder's release after it says who ended the claim and why (${released.text.slice(0, 200)})`);
+
+  // An operator's release, or the holder's own, met by a later release: who and why, nothing of a closed ticket.
+  const openId = String((onOpen.sc.claim as Claim | undefined)?.id);
+  await mcp("release_claim", { id: openId, token: onOpen.sc.token, reason: "dropped" });
+  const twice = await mcp("release_claim", { id: openId, token: onOpen.sc.token });
+  assert(!twice.isError && /had already ended at \S+: released by writer \("dropped"\)\.$/.test(twice.text) && !/closed/.test(twice.text),
+    `a claim its holder released, released again: by whom and why, nothing of a closed ticket (${twice.text.slice(-80)})`);
+
+  // `source: "linear"` is the board's own label, refused through both doors: a key could otherwise write a ticket row
+  // board-sync's release would trust.
+  const count = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13] a forged board row%'`)[0].n);
+  const forgedRest = await rest("POST", "/v1/thoughts", { content: "[13] a forged board row via REST", source: "linear", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed" } });
+  const forgedMcp = await mcp("capture_thought", { content: "[13] a forged board row via MCP", source: "linear" });
+  const otherLabel = await rest("POST", "/v1/thoughts", { content: "[13] an honest note labelled linear-notes", source: "linear-notes" });
+  assert(forgedRest.status === 400 && forgedRest.body.code === "REFUSED_SOURCE_RESERVED" && forgedRest.body.source === "linear"
+      && forgedMcp.isError && forgedMcp.sc.code === "REFUSED_SOURCE_RESERVED" && forgedMcp.text === "Refused: `source: \"linear\"` is the board's own label, which only its importers write. Capture under another source, or none."
+      && otherLabel.status === 201 && (await count()) === 0,
+    `source "linear" is refused through REST (400) and MCP, nothing written; another label starting so is a label like any other (${forgedRest.status} ${JSON.stringify(forgedRest.body)}, ${JSON.stringify(forgedMcp.sc)}, ${otherLabel.status}, ${await count()})`);
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

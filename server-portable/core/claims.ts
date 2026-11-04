@@ -10,7 +10,7 @@
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
-import { ClaimRefused, UUID_RE, type ClaimAnswer, type ClaimLease, type ClaimLeaseWork, type WorkClaim } from "../store.ts";
+import { ClaimRefused, UUID_RE, type ClaimAnswer, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type HeldClaim, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -30,8 +30,8 @@ import { actorOf } from "./writes.ts";
 export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { renewedAt: string | null; state: WorkClaim["state"]; releasedAt: string | null })[] | null; moreSince?: number };
 /** How many of the claims made since a lapse a reply names (review pass 1: a long lapse could list without end). */
 const SINCE_MAX = 10;
-/** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. */
-export type ClaimWorkResult = { outcome: "claimed" | "renewed"; claim: WorkClaim; token?: string; lapsed?: ClaimLapse };
+/** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. `ticketClosed` when the brain records its ticket as closed: board-sync releases the claim at its next pass (SMD-3600). */
+export type ClaimWorkResult = { outcome: "claimed" | "renewed"; claim: WorkClaim; token?: string; lapsed?: ClaimLapse; ticketClosed?: ClosedTicket };
 export type ClaimWorkCode = "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY" | "CLAIM_RELEASED";
 export type RenewClaimResult = { claim: WorkClaim; lapsed?: ClaimLapse };
 export type RenewClaimCode = "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED" | "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "CLAIM_UNATTRIBUTED";
@@ -42,6 +42,9 @@ export type ListClaimsResult = { claims: WorkClaim[]; truncated: boolean };
 
 /** 115's own release reason for a claim taken over after it lapsed (its claim_work writes it). */
 export const TAKEN_OVER = "lapsed; taken over";
+/** 117's release reason for a claim board-sync ended because its ticket closed starts so (SMD-3600). */
+export const closedBySync = (issue: string | null | undefined, reason: string | null | undefined): boolean =>
+  !!issue && !!reason && reason.startsWith(`${issue} closed: `);
 /** 115's clamp on list_work_claims' limit. */
 const LIST_MAX = 1000;
 
@@ -50,7 +53,7 @@ const ownKey = (principal: Principal, c: WorkClaim | null) => !!c && c.holder ==
 const held = (principal: Principal) => (c: WorkClaim): HeldClaim => ({ id: c.id, issue: c.issue, piece: c.piece, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: ownKey(principal, c) });
 /** A claim that ended, refused a renewal: by whom and why, and whether it was taken over — work to stop. */
 const releasedRefusal = (id: string, c: WorkClaim | null) =>
-  refuse({ code: "CLAIM_RELEASED", retryable: false, id, releasedAt: c?.releasedAt ?? null, takenOver: c?.releaseReason === TAKEN_OVER, releasedBy: c?.releasedBy ?? null, reason: c?.releaseReason ?? null });
+  refuse({ code: "CLAIM_RELEASED", retryable: false, id, releasedAt: c?.releasedAt ?? null, takenOver: c?.releaseReason === TAKEN_OVER, releasedBy: c?.releasedBy ?? null, reason: c?.releaseReason ?? null, ticketClosed: closedBySync(c?.issue, c?.releaseReason) });
 const notYoursRefusal = (principal: Principal, id: string, c: WorkClaim | null, forced: boolean) =>
   refuse({ code: "CLAIM_NOT_YOURS", retryable: false, id, holder: c?.holder ?? "", forced, ownKey: ownKey(principal, c), expiresAt: c?.expiresAt ?? null });
 /** A token as claim_work mints it: lower-case hex. One a model upper-cased is the same token. */
@@ -122,6 +125,11 @@ async function lapseOf(ctx: Ctx, principal: Principal, before: LeaseBefore | und
   }
 }
 
+/** Whether the claim's ticket is one board-sync will release it from (SMD-3600): best-effort, as the claimed label is — a failed read says nothing, and the claim stands. */
+async function closedOf(ctx: Ctx, issue: string): Promise<ClosedTicket | null> {
+  try { return await (await ctx.store()).closedTicket(issue); } catch { return null; }
+}
+
 /** An outcome 115 does not give for this call — said without the answer, which may carry the token. */
 const unread = (what: string): never => {
   throw new Error(`${what} answered an outcome this server does not read`);
@@ -135,7 +143,7 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
   // pieces, the next ticket — is 115's to ignore, and a new claim is right (review pass 4). Another key's token is the
   // writer's too, as renew_claim names the holder before the end. Without a token, a new claim as before.
   if (before && before !== "unread" && before.releasedAt !== null && before.ownOnThisWork === true) {
-    return refuse({ code: "CLAIM_RELEASED", retryable: false, id: before.id, releasedAt: before.releasedAt, takenOver: before.releaseReason === TAKEN_OVER, releasedBy: before.releasedBy, reason: before.releaseReason });
+    return refuse({ code: "CLAIM_RELEASED", retryable: false, id: before.id, releasedAt: before.releasedAt, takenOver: before.releaseReason === TAKEN_OVER, releasedBy: before.releasedBy, reason: before.releaseReason, ticketClosed: closedBySync(input.ticket.trim().toUpperCase(), before.releaseReason) });
   }
   const a = await asked(async () => (await ctx.store()).claimWork({
     issue: input.ticket, piece: input.piece, label: input.label, leaseSeconds: input.lease_seconds, token: tokenOf(input.token), actor: actorOf(ctx, principal),
@@ -148,10 +156,14 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
     return refuse({ code: "WORK_CLAIMED", retryable: false, ticket: a.heldBy[0]?.issue ?? input.ticket.trim().toUpperCase(), piece: input.piece ?? null, heldBy: a.heldBy.map(held(principal)) });
   }
   // A claim is answered with the token that proves it; a `claimed` without one would leave a claim nobody can prove.
-  if (a.outcome === "claimed" && a.claim && a.token) return ok({ outcome: "claimed", claim: a.claim, token: a.token });
+  if (a.outcome === "claimed" && a.claim && a.token) {
+    const closed = await closedOf(ctx, a.claim.issue);
+    return ok({ outcome: "claimed", claim: a.claim, token: a.token, ...(closed ? { ticketClosed: closed } : {}) });
+  }
   if (a.outcome === "renewed" && a.claim) {
     const lapsed = await lapseOf(ctx, principal, before, a.claim);
-    return ok({ outcome: "renewed", claim: a.claim, ...(lapsed ? { lapsed } : {}) });
+    const closed = await closedOf(ctx, a.claim.issue);
+    return ok({ outcome: "renewed", claim: a.claim, ...(lapsed ? { lapsed } : {}), ...(closed ? { ticketClosed: closed } : {}) });
   }
   return unread("claim_work");
 }

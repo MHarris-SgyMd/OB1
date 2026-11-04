@@ -1015,9 +1015,17 @@ claims` before this ticket, is migration 015's: it keeps two workers off one tho
 **A closed ticket keeps no claim** (migration 117, SMD-3600). After each pass,
 board-sync (`db/sync-linear.ts`) releases every unreleased claim, live or lapsed, on a
 ticket the brain records as Done, Canceled or a Duplicate, with the reason
-`<ticket> closed: <status> (<type>); <run>`. A renewal then answers `CLAIM_RELEASED`
-with that reason, and a release `already_released`. No tool reaches the release:
-a key's only way to end another key's claim stays an operator's `force`.
+`<ticket> closed: <status> (<type>); <run>`.
+- `claim_work` on such a ticket still claims, and says the claim will go
+  (`ticketClosed`: the status and its type).
+- A renewal of a claim board-sync ended answers `CLAIM_RELEASED` with
+  `ticketClosed: true`: the work is over, not a release to ask about.
+- A release after it answers `already_released`, naming who ended the claim and why.
+
+No tool reaches the release. A row is trusted as the board's only under
+`source: "linear"`, which `capture_thought` refuses to every key
+(`REFUSED_SOURCE_RESERVED`, 400 over REST). A write key can still patch a board
+row's ticket keys and so end its claims, as it can already mislabel `moved`.
 
 ## Priority assertions (SMD-3664)
 

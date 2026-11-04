@@ -35,6 +35,8 @@ export type Refusal =
   // capture_thought's `client_key` (SMD-3314, migration 112).
   | { code: "REFUSED_CLIENT_KEY_SHAPE"; retryable: false; value: string } // not a UUID
   | { code: "REFUSED_CLIENT_KEY_SCOPE"; retryable: false }                // a capture-only key sent one: its dedup reply would say whether an id exists
+  // capture_thought's `source` (SMD-3600): a label the board's importers write directly, which a ticket row's closing release reads (migration 117).
+  | { code: "REFUSED_SOURCE_RESERVED"; retryable: false; source: string }
   // capture_thought's pointers (SMD-1298, SMD-1978).
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record, or whether it stands, could not be read
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // a capture key's id is not to hand while the registry may answer — whatever the target (SMD-2473)
@@ -55,7 +57,7 @@ export type Refusal =
   | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
   | { code: "CLAIM_NOT_FOUND"; retryable: false; id: string }         // no claim with that id
   | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean; ownKey: boolean; expiresAt: string | null } // not this key with this token; forced: a force refused (the key is no operator named by its agent id); ownKey: the caller's own key holds it, under a token this call did not give
-  | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy)
+  | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null; ticketClosed: boolean } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy); ticketClosed: board-sync released it because its ticket closed (SMD-3600)
   | { code: "REFUSED_CLAIM_INPUT"; retryable: false; problem: ClaimProblem; message: string } // an argument 115 refused by its rule (SQLSTATE 22023); message: the database's words, which never carry a token
   | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
   | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string; forced: boolean } // this key's agent id is not to hand while the registry may answer: its own claim made under it, by its token (forced: false), or a force, which the id classifies
@@ -134,6 +136,7 @@ const FACTS: Facts = {
   REFUSED_METADATA_SHAPE: (r) => ({ problem: r.problem, ...(r.key !== undefined && r.problem !== "bad_key" ? { key: r.key } : {}) }),
   REFUSED_CLIENT_KEY_SHAPE: none,
   REFUSED_CLIENT_KEY_SCOPE: none,
+  REFUSED_SOURCE_RESERVED: (r) => ({ source: r.source }),
   SUPERSEDES_UNJUDGED: none,
   REFUSED_SUPERSEDES_UNKNOWN: none,
   // The derived_from indices to drop — present only for a caller allowed to
@@ -154,7 +157,7 @@ const FACTS: Facts = {
   WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey })) }),
   CLAIM_NOT_FOUND: none,
   CLAIM_NOT_YOURS: (r) => ({ forced: r.forced, ownKey: r.ownKey }),
-  CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver }),
+  CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver, ticketClosed: r.ticketClosed }),
   REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
   REFUSED_CLAIM_KEY: none,
   CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced }),
