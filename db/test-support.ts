@@ -112,7 +112,7 @@ const TABLES = [
   // CONTRIB_SCHEMA_FILES after the community files, for the same reason and
   // with the same drop. No sequence among them (every id is a uuid or text);
   // their functions stay, as the community schemas' do.
-  ...grantedTables(["extensions", "recipes"]),
+  ...grantedTables(["recipes"]),
 ];
 
 /**

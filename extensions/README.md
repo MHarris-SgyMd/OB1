@@ -13,7 +13,7 @@ Extensions are the curated learning path of Open Brain. Build them in order — 
 | 5 | [Professional CRM](professional-crm/) | Contact tracking wired into your thoughts | Intermediate |
 | 6 | [Job Hunt Pipeline](job-hunt/) | Application tracking and interview pipeline | Advanced |
 
-Extensions compound. Your CRM knows about thoughts you've captured. Your meal planner checks who's home this week. Your job hunt contacts automatically become professional network contacts.
+Extensions compound. Your CRM knows about thoughts you've captured. Your meal planner checks who's home this week. Your job hunt contacts become professional network contacts.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Every extension requires a working Open Brain setup. If you haven't built one ye
 
 ## Access Keys
 
-Every extension is a plugin since SMD-2311: its tools are on the brain's own connector, behind the brain's own keys, with no server or key list of its own to set up, and each extension's README says how to turn it on. The extension servers authenticated the way the core server does, through `_shared/auth.ts` — a copy of `server-portable/auth.ts` beside the extensions, held byte-for-byte identical by the test — and `test-auth.ts` here still asserts every vendored recipe and integration server does (FORK.md change 67; `bun install && bun test-auth.ts`): keys are named, scoped `read` or `write`, and stored as SHA-256 hashes in the server's `MCP_ACCESS_KEYS` environment variable, each revocable on its own. A read-scoped key is never given the tools that write, so it does not see them in `tools/list` — that is the key to put in a connector URL. The older single `MCP_ACCESS_KEY` still works, with write scope. Step 3 of [Run a Remote MCP Server](../primitives/deploy-remote-mcp/) mints one. SMD-3747 retires what the extension servers left behind (`_shared/`, the template's server shape). Since change 78 it also fires three overlapping requests at each MCP server and asserts each is answered with its own id: a server built once and `connect()`ed to a fresh transport per request answers on the wrong one.
+Every extension is a plugin since SMD-2311: its tools are on the brain's own connector, behind the brain's own keys, with no server or key list of its own to set up, and each extension's README says how to turn it on. The extension servers authenticated the way the core server does, through `_shared/auth.ts` — a copy of `server-portable/auth.ts` beside the extensions, held byte-for-byte identical by the test — and `test-auth.ts` here still asserts every vendored recipe and integration server does (FORK.md change 67; `bun install && bun test-auth.ts`): keys are named, scoped `read` or `write`, and stored as SHA-256 hashes in the server's `MCP_ACCESS_KEYS` environment variable, each revocable on its own. A read-scoped key is never given the tools that write, so it does not see them in `tools/list` — that is the key to put in a connector URL. The older single `MCP_ACCESS_KEY` still works, with write scope. Step 3 of [Run a Remote MCP Server](../primitives/deploy-remote-mcp/) mints one. SMD-3747 retires what the extension servers left behind (`_shared/`, the template's server shape). Change 78 added three overlapping requests at each MCP server, each to be answered with its own id; no vendored MCP server is left to fire them at since SMD-2311 (SMD-3747 retires the check).
 
 ## Contributing
 

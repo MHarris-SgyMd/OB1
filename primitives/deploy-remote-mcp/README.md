@@ -138,7 +138,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the extension's `schema.sql` against that database.
 
 **`permission denied for table …`**
-- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **recipes** group (`db/README.md`, "Grants for a capturing role"; **extensions** grants nothing since SMD-2311). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
+- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **recipes** group (`db/README.md`, "Grants for a capturing role"; the **extensions** group retired with SMD-2311). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
 
 **The connector in Claude Desktop or ChatGPT cannot reach the server**
 - It dials from the vendor's side: the URL must be HTTPS and reachable from the internet (Step 5). A `127.0.0.1` or LAN address works only for a client on this machine or network.

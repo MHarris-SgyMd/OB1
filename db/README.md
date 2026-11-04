@@ -2449,7 +2449,9 @@ role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
 change 93 (SMD-1796) cut them; the extension and recipe schemas carried them
 too, with per-user policies on `auth.uid()`, until SMD-1810. Their tables are
-the **community**, **extensions** and **recipes** groups there.
+the **community** and **recipes** groups there. The **extensions** group,
+the learning path's schemas, retired in 2.0.0 when the six became plugins
+(SMD-2311): `--groups` refuses its name.
 
 ## Grants for a capturing role
 
@@ -2562,7 +2564,6 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — granted the learning path's `extensions/*/schema.sql` until SMD-2311 made the six extensions plugins, their tables in their own schemas under their own roles. The name stays one `--groups` accepts, granting nothing, so a script that names it still runs; it goes at the next major (FORK.md, "Versioning") | none | — |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
 | | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2616,9 +2617,8 @@ entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
 claim work (115), and **priority** for a role whose clients state priorities
 (116). The
-**community**, **extensions** and **recipes** groups are issued for whichever
-schema files you have applied (**extensions** grants nothing since SMD-2311:
-the extensions are plugins, each under its own role) — the objects not yet present are skipped and
+**community** and **recipes** groups are issued for whichever
+schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration

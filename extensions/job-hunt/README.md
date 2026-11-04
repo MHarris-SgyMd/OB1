@@ -31,20 +31,25 @@ On this fork the job hunt is a **plugin**: [`plugins/job-hunt`](../../plugins/jo
 **Tools** (each also a REST route under `/v1/plugins/job-hunt/`):
 - `job_hunt_add_company` — Add a company to track
 - `job_hunt_list_companies` — Find companies, and their ids
+- `job_hunt_update_company` — Rename a company, or fix its details
 - `job_hunt_add_job_posting` — Add a role at a company, with its salary range and requirements
-- `job_hunt_list_job_postings` — Find postings, by company, words, or still open
+- `job_hunt_list_job_postings` — Find postings, by company, words, still open, or closing soon
+- `job_hunt_update_job_posting` — Change a posting's salary, dates or requirements
 - `job_hunt_add_job_contact` — Add a recruiter, hiring manager, referral or interviewer
 - `job_hunt_search_job_contacts` — Find job contacts, or those not yet in your CRM
+- `job_hunt_update_job_contact` — Change a contact's details, or when you last spoke
 - `job_hunt_link_contact_to_professional_crm` — **The bridge:** record which CRM contact a job contact is
 - `job_hunt_submit_application` — Record an application
 - `job_hunt_list_applications` — Find applications by status, company or posting
 - `job_hunt_update_application` — Move an application on, from screening to an offer
 - `job_hunt_schedule_interview` — Schedule an interview for an application
+- `job_hunt_list_interviews` — Find interviews, past, cancelled or with no time yet
+- `job_hunt_update_interview` — Reschedule an interview, change its prep notes, or cancel it
 - `job_hunt_log_interview_notes` — Record how an interview went
 - `job_hunt_get_pipeline_overview` — **Your "how's it going?" tool:** every status counted, interviews coming up, and those still waiting for notes
 - `job_hunt_get_upcoming_interviews` — The interviews in the next N days, with their company and role
 
-The old server's ten tools keep their names under the plugin's prefix; the three lists and `update_application` are new. The plugin's [README](../../plugins/job-hunt/README.md) gives each one's input, output and refusals.
+The old server's ten tools keep their names under the plugin's prefix; the four lists and the five changes are new. The plugin's [README](../../plugins/job-hunt/README.md) gives each one's input, output and refusals.
 
 ## What You'll Learn
 
@@ -77,11 +82,11 @@ docker compose up -d migrate api mcp
 docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-The migrator makes the plugin's tables, and the servers start with its fourteen tools.
+The migrator makes the plugin's tables, and the servers start with its nineteen tools.
 
 ### 2. Check Your AI Sees It
 
-Your MCP client lists the `job_hunt_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the six that read. A write key sees all fourteen.
+Your MCP client lists the `job_hunt_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the seven that read. A write key sees all nineteen.
 
 ### 3. Test It
 
@@ -128,7 +133,7 @@ A recruiter you're talking to during the job search is also a professional conta
 1. You add a job contact: "Jessica Lee, TechCorp recruiter, jessica@techcorp.com"
 2. You have multiple interactions: phone screen, interview coordination, offer negotiation
 3. You ask to link her to your CRM. Your agent finds her `job_contact_id` with `job_hunt_search_job_contacts`
-4. It adds her to the CRM with `professional_crm_add_contact` (her name, TechCorp, her title and email, "Job search: recruiter" as how you met)
+4. It looks for her in the CRM with `professional_crm_search_contacts`, and adds her with `professional_crm_add_contact` only if she is not there (her name, TechCorp, her title and email, "Job search: recruiter" as how you met)
 5. It records that contact's id on her job contact with `job_hunt_link_contact_to_professional_crm`
 6. After the job search ends, Jessica is already in your CRM
 
@@ -162,6 +167,7 @@ Your agent will be able to answer questions like:
 - "Show me my pipeline overview"
 - "What interviews do I have this week?"
 - "Which of my interviews haven't I written up yet?"
+- "Which postings close this week?"
 - "Which applications are at the offer stage?"
 - "Who's the recruiter at TechCorp and when did I last talk to them?"
 - "Link all my TechCorp contacts to my professional CRM"
@@ -199,7 +205,7 @@ All wired together through your Open Brain, with cross-extension tools that let 
 
 ### What's Next?
 
-1. **Audit and optimize your tools** — With all six plugins on, your AI holds ~51 tool definitions from them. That's a lot of context weight. Run the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify redundancies and turn on only the plugins a workflow needs. This is the single highest-impact thing you can do to keep your AI performing well.
+1. **Audit and optimize your tools** — With all six plugins on, your AI holds ~56 tool definitions from them. That's a lot of context weight. Run the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify redundancies and turn on only the plugins a workflow needs. This is the single highest-impact thing you can do to keep your AI performing well.
 2. **Build your own** — Use these 6 as models for domains specific to your life: a new one is a plugin ([`plugins/`](../../plugins/), starting from `plugins/example/`)
 3. **Explore primitives** — Dive deeper into the [primitives](../../primitives/) and other patterns
 4. **Create compound queries** — Build tools that reason across multiple extensions simultaneously

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS job_postings (
   posted_date      date,
   closing_date     date,
   created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT job_postings_salary_range CHECK (salary_min IS NULL OR salary_max IS NULL OR salary_min <= salary_max),
   CONSTRAINT job_postings_dates CHECK (posted_date IS NULL OR closing_date IS NULL OR posted_date <= closing_date)
 );
@@ -66,7 +67,9 @@ CREATE TABLE IF NOT EXISTS applications (
   referral_contact    text,
   notes               text,
   created_at          timestamptz NOT NULL DEFAULT now(),
-  updated_at          timestamptz NOT NULL DEFAULT now()
+  updated_at          timestamptz NOT NULL DEFAULT now(),
+  -- The company answers after you applied, never before.
+  CONSTRAINT applications_dates CHECK (applied_date IS NULL OR response_date IS NULL OR applied_date <= response_date)
 );
 
 CREATE TABLE IF NOT EXISTS interviews (
@@ -140,7 +143,8 @@ CREATE OR REPLACE VIEW posting_rows AS
            'salary_min', p.salary_min, 'salary_max', p.salary_max, 'salary_currency', p.salary_currency,
            'requirements', to_jsonb(p.requirements), 'nice_to_haves', to_jsonb(p.nice_to_haves), 'notes', p.notes, 'source', p.source,
            'posted_date', p.posted_date::text, 'closing_date', p.closing_date::text,
-           'created_at', to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+           'created_at', to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+           'updated_at', to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
          ) AS answer
     FROM job_postings p JOIN companies c ON c.id = p.company_id;
 
@@ -159,7 +163,7 @@ CREATE OR REPLACE VIEW application_rows AS
 
 -- An interview, with its application's id and status, its posting's title and its company's name.
 CREATE OR REPLACE VIEW interview_rows AS
-  SELECT i.id, i.application_id, i.status, i.scheduled_at, i.created_at,
+  SELECT i.id, i.application_id, p.company_id, i.status, i.scheduled_at, i.created_at,
          jsonb_build_object(
            'id', i.id, 'application_id', i.application_id,
            'application', jsonb_build_object('id', a.id, 'status', a.status), 'posting', jsonb_build_object('id', p.id, 'title', p.title),

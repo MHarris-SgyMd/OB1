@@ -82,8 +82,8 @@ MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
 ```
 
-An extension sits beside `extensions/node_modules` and resolves its packages from
-there. A recipe or integration resolves the same pinned install through
+The install lives in `extensions/node_modules` (the extensions' servers used it
+until SMD-2311). A recipe or integration resolves that pinned install through
 `recipes/node_modules` and `integrations/node_modules`, committed links to
 `../extensions/node_modules`, so the one `bun install` above serves every server
 from any working directory (SMD-1991). `NODE_PATH`, which these commands used
@@ -94,7 +94,7 @@ Without it, Bun downloads whatever version npm serves when it finds no
 counts as none. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
-every server. An extension's `schema.sql` applies to
+every server. A recipe's `schema.sql` applies to
 a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
 are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-fork-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no

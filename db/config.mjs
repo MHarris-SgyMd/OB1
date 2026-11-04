@@ -2688,13 +2688,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
-  // The learning path's extensions/*/schema.sql granted here until SMD-2311
-  // made the six extensions plugins, their tables in their own schemas under
-  // their own roles (the plugin migrator's, not --grant's). The name stays one
-  // --groups accepts, granting nothing, so a script that names it still runs:
-  // dropping a name the ob1-migrate image accepts is a major, so it goes at
-  // the next major after (decided 2026-10-26; FORK.md, "Versioning").
-  extensions: Object.freeze([]),
   // The recipe SQL files a brain applies as a schema — six files creating
   // tables or views, applied by hand as each README says (SMD-1810; the list
   // is test-support's CONTRIB_SCHEMA_FILES). Upstream granted most of these
@@ -2781,14 +2774,17 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "priority", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "priority", "community", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read
  * of query_log (SMD-2678), retired in 2.0.0 with the search's wake (SMD-3315).
+ * `extensions` granted the tables of the learning path's extension schemas,
+ * retired in 2.0.0 when the six became plugins (SMD-2311).
  */
 export const RETIRED_GRANT_GROUPS = Object.freeze({
   sleep: "retired in 2.0.0: a search no longer wakes the sleep scheduler, which reads no query_log (SMD-3315)",
+  extensions: "retired in 2.0.0: the six extensions are plugins, each with its tables in its own schema under its own role, which --grant never touches (SMD-2311)",
 });
 
 /**

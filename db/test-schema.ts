@@ -63,6 +63,7 @@ import {
   grantedSequences,
   grantedTables,
   grantedViews,
+  RETIRED_GRANT_GROUPS,
   ROLE_GRANT_GROUPS,
   ROLE_GRANTS,
   SEARCH_THOUGHTS_CURRENT_SIGNATURE,
@@ -7359,7 +7360,7 @@ console.log("\n[49] Migration 054: resolve_agent writes a key's row only when la
   await db.query(`DELETE FROM ob1_agents WHERE label = 'touch-key-renamed'`);
 }
 
-console.log("\n[50] Every extension and recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's extensions and recipes groups are what make them usable (SMD-1810)");
+console.log("\n[50] Every recipe schema applies to a migrated brain carrying the community schemas, with no Supabase role and no auth schema present, and --grant's recipes group is what makes them usable (SMD-1810; the extensions' schemas and group went with SMD-2311)");
 {
   // [40]'s model on the files check 12 reaches since SMD-1810: the fourteen
   // under extensions/ and recipes/ that carried per-user policies on
@@ -7371,7 +7372,7 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   const contribFiles = CONTRIB_SCHEMA_FILES;
   const extensionSchemas = readdirSync(join(CONTRIB_DIR, "extensions"), { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
-  // None of the learning path's six: their tables are their plugins' since SMD-2311.
+  // None of the learning path's six: their tables are their plugins' since SMD-2311, and the extensions group is retired.
   assert(extensionSchemas.length === 0 && extensionSchemas.every((f) => contribFiles.includes(f)) && contribFiles.every((f) => existsSync(join(CONTRIB_DIR, f))),
     `every extensions/*/schema.sql is in CONTRIB_SCHEMA_FILES and every listed file exists (${extensionSchemas.length} extension schemas; ${contribFiles.length} files listed)`);
   // The rule, from inside the suite, over the whole of both trees as check 12
@@ -7416,23 +7417,23 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   }
   assert(failed.length === 0, `every listed file applies after the community schemas, in that order (${failed.length} failed: ${failed.join(" | ") || "none"})`);
 
-  // The two groups name exactly what the files created that a grant can
+  // The recipes group names exactly what the files created that a grant can
   // reach: every new table and every new view, no sequence (every id is a uuid
   // or text — measured, not recalled, as [40] measured the six bigserials) and
   // no function (none is REVOKEd FROM PUBLIC).
-  const GROUPS = ["extensions", "recipes"] as const;
+  const GROUPS = ["recipes"] as const;
   const objects = grantedObjects([...GROUPS]);
   const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
   const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
-  assert(presence.length === objects.length && objects.length === 28 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  assert(presence.length === objects.length && objects.length === 28 && absent.length === 0, `every object the recipes group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
   const listedTables = new Set(grantedTables([...GROUPS]));
   const listedViews = new Set(grantedViews([...GROUPS]));
   const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
   const newViews = [...(await viewsNow())].filter((v) => !baseViews.has(v)).sort();
   assert(newTables.length === 13 && listedTables.size === 13 && newTables.every((t) => listedTables.has(t)),
-    `the files created exactly the 13 tables the two groups list — none in extensions since SMD-2311, 13 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
-  assert(grantedTables(["extensions"]).length === 0 && grantedTables(["recipes"]).length === 13 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
-    "…0 and 13 (extensions a name that grants nothing), and none of them a community table under another name");
+    `the files created exactly the 13 tables the recipes group lists (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
+  assert(newTables.every((t) => !grantedTables(["community"]).includes(t)) && !(ROLE_GRANT_GROUPS as readonly string[]).includes("extensions") && Object.hasOwn(RETIRED_GRANT_GROUPS, "extensions"),
+    "…none of them a community table under another name, and the extensions group retired since SMD-2311, its name refused by --groups");
   const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
   assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
     `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
@@ -7444,7 +7445,7 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   // The role: nothing but USAGE on the schema, then [40]'s probe — an INSERT
   // of DEFAULT VALUES answers 42501 until the table is granted and some other
   // code or success after. Every listed table and view is refused first (the
-  // drop-the-mechanism mutant), none after the two groups' statements.
+  // drop-the-mechanism mutant), none after the group's statements.
   await xdb.exec(`GRANT USAGE ON SCHEMA public TO ob1_contrib`);
   const asRole = async (sql: string): Promise<{ code: string | null; message: string }> => {
     try {
@@ -7467,10 +7468,10 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
   assert(statements.length === 28 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
          statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
-    `--grant's statements for the two groups: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
+    `--grant's statements for the recipes group: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
   for (const s of statements) await xdb.exec(s);
   const after = [...(await codes())].filter(([, c]) => c === "42501").map(([n]) => n);
-  assert(after.length === 0, `granted both groups, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
+  assert(after.length === 0, `granted the group, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
   const verify = (await xdb.query<{ held: boolean; privilege: string; name: string }>(grantVerifySql("ob1_contrib", mergedGrants([...GROUPS], present)))).rows;
   // One row per privilege plus the schema's USAGE: 9 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
   const fourVerb = listedTables.size - 4;

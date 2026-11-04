@@ -1,18 +1,18 @@
 # Common Troubleshooting
 
-Solutions for issues that come up across any Open Brain extension. If your problem is specific to one extension (e.g., a particular table or tool), check that extension's README instead. Every server here — the brain's servers in the compose stack, each extension server under `bun` — logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core, the terminal the `bun` command runs in for an extension.
+Solutions for issues that come up across Open Brain's extensions, recipes and integrations. If your problem is specific to one (e.g., a particular table or tool), check its README instead. The extensions are plugins since SMD-2311, served by the brain's own servers; a recipe or integration server runs under `bun` beside them. Every server logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core (and every plugin's tools), the terminal the `bun` command runs in for a recipe or integration.
 
 ## Connection Issues
 
 **"Cannot connect to the database" / `ECONNREFUSED` on start**
 - `SUPABASE_URL` is the Postgres connection string (`postgres://user:password@host:5432/openbrain`) — the SQL shim keeps supabase-js's variable name, but the value is a database URL, not a `https://…supabase.co` project URL
-- From a shell on the host, the compose stack's database is not published (`deploy/README.md`, "What is reachable from where"); an extension server on the host reaches it only when the stack came up with `-f deploy/compose.host-ports.yaml`, or through its own connection string
-- The extension's tables are the connecting role's own when that role applied the schema; otherwise grant them with `bun db/migrate.ts --grant <role>`. No `auth.uid()` stub is needed (SMD-1810)
+- From a shell on the host, the compose stack's database is not published (`deploy/README.md`, "What is reachable from where"); a recipe or integration server on the host reaches it only when the stack came up with `-f deploy/compose.host-ports.yaml`, or through its own connection string
+- A recipe's tables are the connecting role's own when that role applied the schema; otherwise grant them with `bun db/migrate.ts --grant <role>`. No `auth.uid()` stub is needed (SMD-1810). An extension's tables are its plugin's, made by the brain's migrator
 
 **"Getting 401 Unauthorized"**
 - The URL or header must carry the **key**; the server's `MCP_ACCESS_KEYS` holds its **hash** — check that the two are that way round
 - Double-check that the `?key=` value in your Connection URL matches your MCP Access Key exactly
-- If using header-based auth (Claude Code): the extension servers and the core server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`, and try every form you send
+- If using header-based auth (Claude Code): the vendored servers and the core server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`, and try every form you send
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
 - An entry in `MCP_ACCESS_KEYS` that is not `name:read|write|capture|forward:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
 - A key's scope is what you expect: a read-scoped key does not see the tools that write, and a server whose only tools write shows it nothing
@@ -36,20 +36,20 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **The server won't start**
 - `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the compose stack's, and on macOS podman's `gvproxy` holds it too. Pick another port.
 - `Cannot find package 'hono'`: run `(cd extensions && bun install)` once; an integration or recipe server reaches that same install through the `node_modules` link in `integrations/` or `recipes/`
-- A missing environment variable: the server names it and exits. The extension's README lists what it reads.
+- A missing environment variable: the server names it and exits. The recipe's or integration's README lists what it reads.
 - The stack's `api` service exits with `preflight FAILED` (the image runs it first): read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
 
 **The server starts but tool calls error**
 - Read the server's output: a failed tool call logs its cause there
-- `relation "…" does not exist`: the extension's `schema.sql` did not run against the database `SUPABASE_URL` names
+- `relation "…" does not exist`: the recipe's `schema.sql` did not run against the database `SUPABASE_URL` names
 - `schema "auth" does not exist`, or `function auth.uid() does not exist` / `relation "auth.users" does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
 - Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
 
 ## Database Issues
 
 **"relation 'table_name' does not exist"**
-- The extension's `schema.sql` wasn't run successfully
-- Re-run it with `psql "$DATABASE_URL" -f extensions/<name>/schema.sql` (or paste it into whatever SQL client you use)
+- The recipe's `schema.sql` wasn't run successfully
+- Re-run it with `psql "$DATABASE_URL" -f recipes/<name>/schema.sql` (or paste it into whatever SQL client you use). An extension's tables are its plugin's: turn the plugin on, as its README says
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
 **"permission denied"**

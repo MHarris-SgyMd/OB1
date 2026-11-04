@@ -4,9 +4,9 @@
  * auth path: the extension servers did (SMD-1252, FORK.md change 64) until
  * SMD-2311 made the six plugins and retired meal-planning's shared server, and
  * the
- * recipes and integrations that compared a key the same way — six more MCP
- * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
- * change 67).
+ * recipes and integrations that compared a key the same way (SMD-1455,
+ * change 67) — an HTTP API, four workers and a webhook receiver now that no
+ * vendored MCP server is left.
  *
  * The claim is the one server-portable/test-auth.ts makes for the core server,
  * made here for each vendored server as it is deployed: a wrong key is refused;
@@ -517,9 +517,9 @@ console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive 
 // mcpReply's wiring of it, and the real transport's answer the slow probe's
 // stand-in copies. The route and transport were the last extension server's,
 // job-hunt's, until it became a plugin (SMD-2311 PR 4b): now they are a minimal
-// MCP server built here of the SDK's own packages from this install, as a
-// vendored server built it — hono, @hono/mcp's transport, the reply through
-// mcpReply — with one tool.
+// MCP server built here from this install's packages, as a vendored server
+// built it — hono, the SDK's McpServer, @hono/mcp's transport, the reply
+// through mcpReply — with one tool and no key gate (the cases here are past it).
 const realMcp = (req: Request): Response | Promise<Response> => {
   const app = new Hono();
   app.post("*", async (c) => {
@@ -587,7 +587,7 @@ const realMcp = (req: Request): Response | Promise<Response> => {
     // vendored server's POST is answered on an event stream, which is what mcpReply keeps alive.
     const real = await realMcp(new Request("http://extension.test/mcp", { method: "POST", headers: RPC, body: JSON.stringify(LIST) }));
     assert(real.status === 200 && /^text\/event-stream\b/.test(real.headers.get("content-type") ?? ""),
-      `the SDK's own transport answers a POST on an event stream, as the slow probe's stand-in does (${real.status}, ${real.headers.get("content-type")})`);
+      `@hono/mcp's transport answers a POST on an event stream, as the slow probe's stand-in does (${real.status}, ${real.headers.get("content-type")})`);
     await real.text();
   } finally {
     console.warn = realWarn;

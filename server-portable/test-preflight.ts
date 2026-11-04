@@ -3522,6 +3522,10 @@ else {
       assert(sleepGrant.code === 2 && /"sleep" was retired in 2\.0\.0: a search no longer wakes the sleep scheduler, which reads no query_log \(SMD-3315\) — drop it from --groups\. Nothing was granted\./.test(sleepGrant.out)
                && !/not a group/.test(sleepGrant.out) && !/^GRANT /m.test(sleepGrant.out),
              `…and --groups naming the retired sleep group is refused by name, nothing granted (exit ${sleepGrant.code}: ${sleepGrant.out.trim().split("\n").slice(-1)[0]})`);
+      const extGrant = await migrate(["--grant", "ob1_pf_capture", "--groups", "capture,extensions", "--url", LIVE]);
+      assert(extGrant.code === 2 && /"extensions" was retired in 2\.0\.0: the six extensions are plugins, each with its tables in its own schema under its own role, which --grant never touches \(SMD-2311\) — drop it from --groups\. Nothing was granted\./.test(extGrant.out)
+               && !/not a group/.test(extGrant.out) && !/^GRANT /m.test(extGrant.out),
+             `…and so is the retired extensions group (exit ${extGrant.code}: ${extGrant.out.trim().split("\n").slice(-1)[0]})`);
       // A subject pool named beside extraction (113): the ok names both, and the
       // capture below runs 113's trigger as the role too.
       await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
