@@ -105,6 +105,17 @@ const refusal = (argv: string[], positionals = 0): string => { const r = scan(ar
   ok(flagList({}) === "  flags: none", "…and says none for a script that takes none");
 }
 
+// A flag a release removed is refused with its own words, bare or with "=", ahead of the unknown flag's (SMD-3379 PR 1c-4b);
+// a name only the prototype has is no removed flag.
+{
+  const gone = { quiet: "--quiet was removed: use --capture" };
+  const removedRefusal = (argv: string[]) => { const r = scanArgs(argv, SPEC, { removed: gone }); return "error" in r ? r.error : ""; };
+  ok(removedRefusal(["--quiet", "300"]) === gone.quiet && removedRefusal(["--url", "x", "--quiet=300"]) === gone.quiet,
+    `a removed flag is refused with its words, bare or with "=" (${removedRefusal(["--quiet", "300"])} | ${removedRefusal(["--quiet=300"])})`);
+  ok(/unknown argument 1: not a flag this script has/.test(removedRefusal(["--toString"])) && !("error" in scanArgs(["--url", "x"], SPEC, { removed: gone })),
+    `…a prototype's name is still unknown, and a line without one scans as before (${removedRefusal(["--toString"])})`);
+}
+
 // ---------------------------------------------------------------------------
 // blankProblem: an engine's run() refuses a blank option in the scanner's
 // words (SMD-2425) — one wording, so the two cannot drift.
