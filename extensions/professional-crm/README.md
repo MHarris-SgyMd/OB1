@@ -51,7 +51,7 @@ On this fork the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins
 
 The old server's tools carried a `crm_` prefix of their own; the plugin's name prefixes them now. The plugin's [README](../../plugins/professional-crm/README.md) gives each one's input, output and refusals.
 
-`schema.sql` here is the old server's tables. It stays only because job-hunt's standalone server still writes its CRM link into them, until job-hunt is a plugin too (SMD-2311 PR 4b). The plugin does not read them. The plugin's README has the copy for a brain that held them.
+The old server's tables were in `public`, made by a `schema.sql` here that is gone. The plugin's README has the copy for a brain that held them.
 
 ## Prerequisites
 
@@ -127,7 +127,7 @@ The tool takes a `thought_id` (from `search_thoughts`) and a `contact_id` (from 
 
 ### Integration with Extension 6 (Job Hunt Pipeline)
 
-If you build Extension 6, its link works in reverse — recruiters and hiring managers from your job search become professional contacts. Your networking doesn't stop when the job search ends.
+If you build Extension 6, its link works in reverse — recruiters and hiring managers from your job search become professional contacts: your agent adds them here with `professional_crm_add_contact`, then records the contact on the job-hunt side. Your networking doesn't stop when the job search ends.
 
 ## Expected Outcome
 

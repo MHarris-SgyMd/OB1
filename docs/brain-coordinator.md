@@ -28,7 +28,7 @@ The decision table marks which rows are that direction, which the maintainer dec
 - **Scheduling.** board-sync's interval, sleep's work period and n8n's schedules are three separate clocks.
 
 **The extensions** sit where SMD-2308 left them, with three gaps:
-- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example, the family calendar, home maintenance, household knowledge, meal planning and the professional CRM use it. SMD-2311 ports the last extension, job hunt; it and three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
+- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example and the six extensions use it (SMD-2311). Three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
 - **A plugin runs inside the brain's servers**, so it must be curated, and its SQL needs a role boundary that one plugin cannot step out of (SMD-2756).
 - **A plugin has no way out of the brain.** Check 31 refuses `fetch` in plugin code, so anything that reaches an outside service has no home. n8n was chosen as the fork's integration point for exactly that (SMD-1863), but `orchestration-tool.md`'s decision 7 kept it away from the brain's own tools.
 

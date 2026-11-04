@@ -14276,7 +14276,7 @@ if (want("17")) {
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
 if (want("18")) {
-  console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
+  console.log("\n[18] Every schemas/*.sql, then every recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
   // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
@@ -14309,11 +14309,11 @@ if (want("18")) {
   };
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  // The extension and recipe schemas (SMD-1810), after the community files —
+  // The recipe schemas (SMD-1810; the extensions' went with SMD-2311), after the community files —
   // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
   // smart-ingest's and entity-extraction's tables. Same drop in the finally.
   const contribFiles = CONTRIB_SCHEMA_FILES;
-  const ALL_GROUPS = ["community", "extensions", "recipes"] as const;
+  const ALL_GROUPS = ["community", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 
@@ -14340,9 +14340,9 @@ if (want("18")) {
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
+      const contribObjects = [...grantedTables(["recipes"]), ...grantedViews(["recipes"])];
       assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
-             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
@@ -14363,7 +14363,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 8 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 6 && contribFailed.length === 0, `…and so does every listed recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -14384,7 +14384,7 @@ if (want("18")) {
         try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(denied.length === 0, `the role's INSERT into every community, extension and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      assert(denied.length === 0, `the role's INSERT into every community and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
       let viewDenied = "";
       for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
