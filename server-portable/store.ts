@@ -22,6 +22,7 @@ import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
+import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -1173,6 +1174,13 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
 }
 
 /**
+ * A ticket the brain records as closed (migration 118, SMD-3600): its head is an
+ * importer's row with a settled status type, so board-sync releases every claim
+ * on it at its next pass. The status as the board names it, and its type.
+ */
+export type ClosedTicket = { status: string | null; statusType: string };
+
+/**
  * A work claim as migration 115's functions answer it (SMD-3597): who holds a
  * ticket, or one piece of it, under a lease. Never its token or the token's
  * hash: neither leaves the database but in claim_work's one answer.
@@ -1201,8 +1209,8 @@ export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_Y
  * claim, the claims in the way, and the token — set on claim_work's `claimed`
  * alone, and passed through untouched to the caller who claimed.
  */
-/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. */
-export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean };
+/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). */
+export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; issue?: string; releasedByKind?: string | null };
 export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
 export type ClaimAnswer = {
   outcome: "claimed" | "renewed" | "released" | "already_released" | "refused";
@@ -1286,6 +1294,9 @@ export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
 /** An item a priority is stated on (migration 116, SMD-3663): its kind and its key, as 116 normalised them. */
 export type PriorityItem = { kind: PriorityKind; key: string };
 export { PRIORITY_KINDS };
+// Types alone: open-items.ts reads isoTimestamp from here, so its values are imported from it directly (review pass 1:
+// a value re-exported both ways was an import cycle).
+export type { ItemAnswer, ItemListRow, ItemProposal, ItemRecord, ItemStatus, OpenItem, OpenItemEvent } from "./open-items.ts";
 /**
  * One priority assertion as 116's ob1_priority_json answers it (SMD-3664): the
  * item, the level and times, the reason (the maker's free text, data), the
@@ -2058,6 +2069,8 @@ export interface ThoughtStore {
    * have paused). By ticket, piece and claim time; at most `limit`. Never a token or its hash.
    */
   unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]>;
+  /** Whether the brain records this ticket (keyed as 115 keys it) as closed — 118's ob1_work_claim_closed_head; null when open, unknown, or on a brain before 118 (SMD-3600). */
+  closedTicket(issue: string): Promise<ClosedTicket | null>;
   /**
    * The lease of the claim a token proves, read before a renewal (SMD-3654): its
    * id, its expiry and whether it was released, by whom and why — never the
@@ -2094,13 +2107,32 @@ export interface ThoughtStore {
    */
   assertPriority(opts: {
     kind: string; key: string; level: number; dueAt?: string; notBefore?: string; dueRef?: { kind: string; key: string }; reason?: string; inferred?: boolean;
-    actor?: Actor; scope: "write" | "capture";
+    actor?: Actor; scope: "write" | "capture"; plugin?: string;
   }): Promise<PriorityAnswer>;
   clearPriority(opts: { kind: string; key: string; actor?: Actor; scope: "write" | "capture" }): Promise<PriorityAnswer>;
   /** An item's priority record: the rule's winner and its level and priority_history's statements, in one statement. Throws PriorityRefused for a malformed item. */
   priorityRecord(kind: string, key: string): Promise<PriorityRecord>;
   /** An item as 116 keys it (ob1_priority_item) and whether the brain holds it (ob1_priority_item_exists): what a refusal names. Throws PriorityRefused for a malformed item. */
   priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }>;
+  /**
+   * Open items (migration 117, SMD-3665 PR 2): 117's writers, each one statement in its own transaction, the actor
+   * as the maker's envelope with `scope` stated (as 116's) and `plugin` the plugin a call came through (a plugin's
+   * ctx.call; never a caller's argument). A malformed argument throws ItemRefused; any other raise is the store's
+   * fault. A database before 117 throws.
+   */
+  openItem(opts: { text: string; owner?: string; dueAt?: string; originThought?: string; pluginRow?: string; proposed?: boolean; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer>;
+  updateItem(opts: { id: string; changes: { text?: string; owner?: string | null; dueAt?: string | null }; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer>;
+  setItemStatus(opts: { id: string; status: "open" | "done" | "dropped"; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer>;
+  proposeItemClose(opts: { id: string; status: "done" | "dropped"; evidenceThought?: string; label?: string; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer>;
+  decideItemClose(opts: { proposal: string; accept: boolean; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer>;
+  /** One item's record (117's open_item_history), in one statement. Throws ItemRefused for a malformed id. */
+  itemHistory(id: string): Promise<ItemRecord>;
+  /**
+   * Open items by status (any of `statuses`), overdue alone when asked (open or proposed, due before the read),
+   * from one origin thought or one plugin when asked: the first `limit` by due time (none last), then the newest
+   * noted, then id, and whether more stood beyond them. One statement.
+   */
+  listItems(opts: { statuses: ItemStatus[]; overdue: boolean; originThought?: string; plugin?: string; limit: number }): Promise<{ items: ItemListRow[]; truncated: boolean }>;
   /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
@@ -2373,7 +2405,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

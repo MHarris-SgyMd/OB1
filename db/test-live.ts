@@ -68,7 +68,7 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { newestLive, passDumpFile, run as runSleep, usText } from "./sleep.ts";
@@ -14343,8 +14343,11 @@ if (want("18")) {
       const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
       assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
              `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
-      assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             "…grants nothing of the community group, and grants the migrations' tables");
+      // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
+      const notSkipped = dry.out.replace(skippedLine, "");
+      const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
+      assert(!/ON SEQUENCE|agent_memories/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
@@ -15928,6 +15931,112 @@ if (want("23b")) {
 // store runs it (250 ms, SMD-2072); a case that must wait for a commit sets it
 // to 5 s, which also bounds a lock that never released. The holder is a second
 // connection with a transaction held open.
+
+if (want("23c")) {
+  console.log("\n[23c] Migration 118 on a real Postgres, through board-sync's own writer: a pass over open tickets releases nothing; a pass moving one to Done and one to Canceled is followed by the step ending every claim on them — a lapsed whole-ticket claim and two pieces — with the status and the run; the release waits on the ticket's lock, then ends a claim made while it waited; a ticket reopened under the lock keeps its claims (SMD-3600)");
+  const { store, writer, sync } = syncHarness(13);
+  // Its own clients for the race and the watch; the harness writes through the suite's, which [24] closes, so this runs before it.
+  const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });
+  type Answer = { outcome: string; claim: { id: string } | null; token: string | null };
+  const AGENT = { name: "closed-live-agent" }, OTHER = { name: "closed-live-other" };
+  const RUN = "sync-linear.ts@2026-11-03T12:00:00.000Z";
+  const ISSUES = ["SMD-90601", "SMD-90602", "SMD-90603"];
+  const claimOn = async (c: SQL, issue: string, actor: object, piece: string | null) =>
+    ((await c`SELECT claim_work(${issue}, ${piece}, NULL, 14400, NULL, ${actor}::jsonb) AS r`) as { r: Answer }[])[0].r;
+  const issueOf = (n: number, state: { name: string; type: string }, updatedAt: string): LinearIssue =>
+    ({ ...SAMPLE_ISSUE, identifier: `SMD-${n}`, title: `[23c] ticket ${n}`, description: "The synced text.", project: null, labels: { nodes: [] }, state, updatedAt });
+  const unreleased = async () => Number((await watch`SELECT count(*)::int AS n FROM work_claims WHERE issue IN ${watch(ISSUES)} AND released_at IS NULL`)[0].n);
+  // The step reads the whole brain: another section's claim on a closed ticket would be its too.
+  const mine = <C extends { issue: string }>(cs: C[]) => cs.filter((c) => ISSUES.includes(c.issue));
+  try {
+    const set = await closedClaimsStep(watch, writer.actor);
+    const step = "step" in set ? set.step : null;
+    assert(step !== null, `as the database's owner the step is on (${"off" in set ? set.off : "on"})`);
+
+    // Pass 1: both tickets open. A lapsed whole-ticket claim (a lapsed claim covers nothing) and two pieces on one, a claim on the other.
+    const open = issueOf(90601, { name: "In Progress", type: "started" }, "2026-11-03T01:00:00.000Z");
+    const todo = issueOf(90602, { name: "Todo", type: "unstarted" }, "2026-11-03T01:00:00.000Z");
+    await sync(open);
+    await sync(todo);
+    const whole = await claimOn(watch, "SMD-90601", AGENT, null);
+    await watch`UPDATE work_claims SET claimed_at = claimed_at - interval '6 hours', expires_at = now() - interval '1 hour' WHERE id = ${whole.claim!.id}::uuid`;
+    const made = [whole, await claimOn(watch, "SMD-90601", AGENT, "PR 1"), await claimOn(watch, "SMD-90601", OTHER, "PR 2"), await claimOn(watch, "SMD-90602", OTHER, null)];
+    const first = mine(step ? await step.run({ run: RUN, dryRun: false }) : []);
+    assert(made.every((c) => c.outcome === "claimed") && first.length === 0 && (await unreleased()) === 4,
+      `after a pass over two open tickets the step releases nothing: all four claims stand (${made.map((c) => c.outcome).join(", ")}; ${first.length} released)`);
+
+    // Pass 2: board-sync writes the moves, Done and Canceled; the dry run lists the four, the step ends them.
+    await sync({ ...open, state: { name: "Done", type: "completed" }, updatedAt: "2026-11-03T02:00:00.000Z" });
+    await sync({ ...todo, state: { name: "Canceled", type: "canceled" }, updatedAt: "2026-11-03T02:00:00.000Z" });
+    const dry = mine(step ? await step.run({ run: RUN, dryRun: true }) : []);
+    const stillOpen = await unreleased();
+    const done = mine(step ? await step.run({ run: RUN, dryRun: false }) : []);
+    const ended = (await watch`SELECT id::text AS id, release_reason AS reason, released_by AS by FROM work_claims WHERE issue IN ${watch(ISSUES)} ORDER BY issue, piece_key`) as { id: string; reason: string; by: string }[];
+    assert(dry.length === 4 && stillOpen === 4 && JSON.stringify(done.map((c) => c.id)) === JSON.stringify(made.map((c) => c.claim!.id))
+           && JSON.stringify(ended.map((r) => r.reason)) === JSON.stringify([...Array(3).fill(`SMD-90601 closed: Done (completed); ${RUN}`), `SMD-90602 closed: Canceled (canceled); ${RUN}`])
+           && ended.every((r) => r.by === SYNC_ACTOR) && (await unreleased()) === 0,
+      `after the pass that moves them, a dry run lists the four and writes nothing, and the step ends the lapsed whole claim, both pieces and the Canceled ticket's claim, each by board-sync with the status and the run (${JSON.stringify(ended.map((r) => r.reason))})`);
+    const line = formatClosedClaims(done, false);
+    assert(line === `  claims on closed tickets: released 4 — SMD-90601 by closed-live-agent (lapsed, Done), SMD-90601 "PR 1" by closed-live-agent (live, Done), SMD-90601 "PR 2" by closed-live-other (live, Done), SMD-90602 by closed-live-other (live, Canceled)`,
+      `the pass's line names each claim, its holder, whether it had lapsed and the ticket's status (${line})`);
+
+    // Held (SMD-2475's heldRace): A renews a live claim on a Done ticket and claims another piece in one open
+    // transaction; the release, dispatched on B, waits on the ticket's advisory lock — not on the renewed row —
+    // and once A commits ends both, the claim made while it waited too. Watched by B's pid from `watch`, which
+    // holds no transaction, so its view of pg_stat_activity is current (SMD-2742).
+    await sync(issueOf(90603, { name: "Done", type: "completed" }, "2026-11-03T03:00:00.000Z"));
+    const held = await claimOn(watch, "SMD-90603", AGENT, "PR 1");
+    const bPid = Number((await cB`SELECT pg_backend_pid() AS p`)[0].p);
+    await cA`BEGIN`;
+    let waitedOn = "", late: Answer | undefined, pb: Promise<unknown[]> | undefined;
+    try {
+      await cA`SELECT renew_work_claim(${held.claim!.id}::uuid, ${held.token}, 14400, ${AGENT}::jsonb)`;
+      late = await claimOn(cA, "SMD-90603", OTHER, "PR 2");
+      pb = (async () => (await cB`SELECT release_closed_ticket_claims(${RUN}, false, ${{ name: SYNC_ACTOR, via: "test-live" }}::jsonb) AS r`) as unknown[])();  // awaited at once: a Bun query is sent only when awaited
+      for (let i = 0; i < 100 && !waitedOn; i++) {
+        const w = (await watch`SELECT wait_event_type AS t, wait_event AS e FROM pg_stat_activity WHERE pid = ${bPid}`)[0] as { t: string | null; e: string | null } | undefined;
+        if (w?.t === "Lock") waitedOn = w.e ?? "Lock";
+        else await Bun.sleep(50);
+      }
+    } finally {
+      await cA`COMMIT`;
+    }
+    let raced: string[] = [], err = "";
+    try { raced = mine(((await pb!) as { r: { released: { id: string; issue: string }[] } }[])[0].r.released).map((c) => c.id); } catch (e) { err = (e as Error).message.split("\n")[0]; }
+    assert(waitedOn === "advisory" && late?.outcome === "claimed" && JSON.stringify(raced) === JSON.stringify([held.claim!.id, late!.claim!.id]),
+      `a release dispatched while another session holds the Done ticket's lock (a renewal and a new piece, uncommitted) waits on the advisory lock, then ends both claims (waited on ${waitedOn || "nothing"}; ${err || `${raced.length} released`})`);
+
+    // The head read again under the lock: the ticket reopened in the transaction holding it — a claim's renewal
+    // takes the lock, and the head row moves to In Progress — and the release, which found it closed before it
+    // waited, keeps its claims once that commits.
+    const reopenedRow = String((await watch`SELECT id::text AS id FROM thoughts WHERE metadata->>'issue' = 'SMD-90603'`)[0].id);
+    const kept = await claimOn(watch, "SMD-90603", AGENT, "PR 3");
+    await cA`BEGIN`;
+    let waitedAgain = "", pr: Promise<unknown[]> | undefined;
+    try {
+      await cA`SELECT renew_work_claim(${kept.claim!.id}::uuid, ${kept.token}, 14400, ${AGENT}::jsonb)`;
+      await cA`UPDATE thoughts SET metadata = metadata || '{"status": "In Progress", "status_type": "started"}'::jsonb WHERE id = ${reopenedRow}::uuid`;
+      pr = (async () => (await cB`SELECT release_closed_ticket_claims(${RUN}, false, ${{ name: SYNC_ACTOR, via: "test-live" }}::jsonb) AS r`) as unknown[])();
+      for (let i = 0; i < 100 && !waitedAgain; i++) {
+        const w = (await watch`SELECT wait_event_type AS t, wait_event AS e FROM pg_stat_activity WHERE pid = ${bPid}`)[0] as { t: string | null; e: string | null } | undefined;
+        if (w?.t === "Lock") waitedAgain = w.e ?? "Lock";
+        else await Bun.sleep(50);
+      }
+    } finally {
+      await cA`COMMIT`;
+    }
+    let reopenedReleased: string[] = [], err2 = "";
+    try { reopenedReleased = mine(((await pr!) as { r: { released: { id: string; issue: string }[] } }[])[0].r.released).map((c) => c.id); } catch (e) { err2 = (e as Error).message.split("\n")[0]; }
+    assert(waitedAgain === "advisory" && kept.outcome === "claimed" && reopenedReleased.length === 0 && (await unreleased()) === 1,
+      `a ticket reopened by the session holding its lock keeps its claims: the release waits, reads the head again under the lock and ends none (waited on ${waitedAgain || "nothing"}; ${err2 || `${reopenedReleased.length} released`})`);
+  } finally {
+    await watch`UPDATE work_claims SET released_at = now(), released_by = 'test-live', release_reason = '[23c]' WHERE issue IN ${watch(ISSUES)} AND released_at IS NULL`;
+    await cA.close();
+    await cB.close();
+    await watch.close();
+    await store.close();
+  }
+}
 
 if (want("24")) {
   console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");

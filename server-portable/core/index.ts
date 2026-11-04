@@ -11,6 +11,7 @@ import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
 import * as claims from "./claims.ts";
 import * as priority from "./priority.ts";
+import * as items from "./items.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
@@ -61,6 +62,13 @@ export function createCore(deps: CoreDeps) {
     setPriority: bind(ctx, priority.setPriority),
     clearPriority: bind(ctx, priority.clearPriority),
     priorityHistory: bind(ctx, priority.priorityHistory),
+    openItem: bind(ctx, items.openItem),
+    updateItem: bind(ctx, items.updateItem),
+    setItemStatus: bind(ctx, items.setItemStatus),
+    proposeItemClose: bind(ctx, items.proposeItemClose),
+    decideItemClose: bind(ctx, items.decideItemClose),
+    itemHistory: bind(ctx, items.itemHistory),
+    listItems: bind(ctx, items.listItems),
     /**
      * A plugin's own tables (SMD-2310): a transaction as its role, in its
      * schema (store-sql.ts's pluginTx). A store without one (a suite's fake)

@@ -1551,6 +1551,235 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
 }
 
+console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; renew_claim before the release says so too; once board-sync's release ends it, the renewal says done if the work merged, else tell the user, and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key, by capture and by update_thought's patch");
+{
+  type Claim = { id: string };
+  // Ticket rows as board-sync writes them: the importer's label, the board's status.
+  const board = (issue: string, status: string, type: string) =>
+    sql`INSERT INTO thoughts (content, metadata) VALUES (${`${issue} — [13] a board row`}, ${{ source: "linear", issue, status, status_type: type, linear_updated_at: "2026-11-03T00:00:00.000Z" }}::jsonb)`;
+  await board("SMD-9500", "Done", "completed");
+  await board("SMD-9501", "In Progress", "started");
+  const onDone = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1" });
+  const onDoneRest = await rest("POST", "/v1/claims", { ticket: "SMD-9500", piece: "PR 2" }, KEYS.rival);
+  const onOpen = await mcp("claim_work", { ticket: "SMD-9501" });
+  const doneId = String((onDone.sc.claim as Claim | undefined)?.id), doneToken = String(onDone.sc.token ?? "");
+  assert(!onDone.isError && JSON.stringify(onDone.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && /SMD-9500 is closed \(Done\): board-sync releases every claim on a closed ticket at its next pass, this one included\. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own\.$/.test(onDone.text)
+      && onDoneRest.status === 200 && JSON.stringify(onDoneRest.body.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && !onOpen.isError && onOpen.sc.ticketClosed === undefined && !/is closed/.test(onOpen.text),
+    `a claim on a Done ticket says board-sync will release it, in the text and as ticketClosed through both doors; one on an open ticket says nothing (${onDone.text.slice(-120)})`);
+
+  const renewedBefore = await mcp("renew_claim", { id: doneId, token: doneToken });
+  assert(!renewedBefore.isError && JSON.stringify(renewedBefore.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }) && /SMD-9500 is closed \(Done\): board-sync releases every claim/.test(renewedBefore.text),
+    `renew_claim on a closed ticket's claim, before board-sync's release, says it will go (${renewedBefore.text.slice(-120)})`);
+  await sql`SELECT release_closed_ticket_claims('test-rest-sql', false, ${{ name: "board-sync" }}::jsonb)`;
+  const renewed = await mcp("renew_claim", { id: doneId, token: doneToken });
+  const renewedRest = await rest("POST", `/v1/claims/${doneId}/renew`, { token: doneToken });
+  const reclaimed = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1", token: doneToken });
+  const released = await mcp("release_claim", { id: doneId, token: doneToken, reason: "merged" });
+  const reason = "SMD-9500 closed: Done (completed); test-rest-sql";
+  assert(renewed.isError && renewed.sc.code === "CLAIM_RELEASED" && renewed.sc.ticketClosed === true
+      && renewed.text === `Refused: claim ${doneId} was released by board-sync at ${String(renewed.sc.releasedAt)} (${JSON.stringify(reason)}): its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.`
+      && renewedRest.status === 409 && renewedRest.body.ticketClosed === true
+      && reclaimed.isError && reclaimed.sc.code === "CLAIM_RELEASED" && reclaimed.sc.ticketClosed === true && /its ticket is closed\. If your work under it merged, the release is done/.test(reclaimed.text),
+    `once board-sync's release ends it, a renewal through either door, and claim_work with its token, say the ticket closed — done if the work merged, else tell the user — not to ask about claiming again (${renewed.text.slice(0, 160)})`);
+  assert(!released.isError && released.sc.outcome === "already_released"
+      && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed\\. If your work under it merged`).test(released.text),
+    `the holder's release after it says who ended the claim and why (${released.text.slice(0, 200)})`);
+
+  // A release by its holder, met by a later release: who and why, nothing of a closed ticket.
+  const openId = String((onOpen.sc.claim as Claim | undefined)?.id);
+  await mcp("release_claim", { id: openId, token: onOpen.sc.token, reason: "dropped" });
+  const twice = await mcp("release_claim", { id: openId, token: onOpen.sc.token });
+  assert(!twice.isError && /had already ended at \S+: released by writer \("dropped"\)\.$/.test(twice.text) && !/closed/.test(twice.text),
+    `a claim its holder released, released again: by whom and why, nothing of a closed ticket (${twice.text.slice(-80)})`);
+
+  // A key's own row relabelled the board's by a patch: refused too, the row unmoved (review pass 2).
+  const own = await rest("POST", "/v1/thoughts", { content: "[13] a key's own ticket row", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed", linear_updated_at: "2099-01-01T00:00:00.000Z" } }, KEYS.rival);
+  const ownId = String(own.body.id);
+  const relabel = await mcp("update_thought", { id: ownId, metadata_patch: { source: "linear" } }, KEYS.rival);
+  const relabelRest = await rest("PATCH", `/v1/thoughts/${ownId}`, { metadata_patch: { source: " Linear " } }, KEYS.rival);
+  const [ownRow] = await sql`SELECT metadata->>'source' AS source FROM thoughts WHERE id = ${ownId}::uuid`;
+  const [head] = await sql`SELECT count(*)::int AS n FROM ob1_work_claim_closed_head('SMD-9501')`;
+  assert(own.status === 201 && relabel.isError && relabel.sc.code === "REFUSED_SOURCE_RESERVED" && relabel.text === "Refused: `metadata_patch.source: \"linear\"` is the board's own label, which only its importers write. Patch without it."
+      && relabelRest.status === 400 && relabelRest.body.code === "REFUSED_SOURCE_RESERVED" && ownRow?.source !== "linear" && head?.n === 0,
+    `update_thought relabelling a key's own ticket row the board's is refused through both doors, the row unmoved, the ticket not read closed (${relabel.text.slice(0, 80)}; ${relabelRest.status}; ${ownRow?.source}; ${head?.n})`);
+  // A capture-only key's ticket key keeps its refusal: the label's is said after the metadata's.
+  const hooked = await mcp("capture_thought", { content: "[13] a capture key's board row", source: "linear", metadata: { issue: "SMD-9501" } }, KEYS.hook);
+  assert(hooked.isError && hooked.sc.code === "REFUSED_METADATA_SHAPE" && hooked.sc.problem === "ticket_key" && hooked.sc.key === "issue",
+    `a capture-only key sending the board's label with a ticket key is refused for the ticket key, as before (${JSON.stringify(hooked.sc)})`);
+
+  // `source: "linear"` is the board's own label, refused through both doors: a key could otherwise write a ticket row
+  // board-sync's release would trust.
+  const count = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13] a forged board row%'`)[0].n);
+  const forgedRest = await rest("POST", "/v1/thoughts", { content: "[13] a forged board row via REST", source: "linear", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed" } });
+  const forgedMcp = await mcp("capture_thought", { content: "[13] a forged board row via MCP", source: "linear" });
+  const otherLabel = await rest("POST", "/v1/thoughts", { content: "[13] an honest note labelled linear-notes", source: "linear-notes" });
+  assert(forgedRest.status === 400 && forgedRest.body.code === "REFUSED_SOURCE_RESERVED" && forgedRest.body.source === "linear"
+      && forgedMcp.isError && forgedMcp.sc.code === "REFUSED_SOURCE_RESERVED" && forgedMcp.text === "Refused: `source: \"linear\"` is the board's own label, which only its importers write. Capture under another source, or none."
+      && otherLabel.status === 201 && (await count()) === 0,
+    `source "linear" is refused through REST (400) and MCP, nothing written; another label starting so is a label like any other (${forgedRest.status} ${JSON.stringify(forgedRest.body)}, ${JSON.stringify(forgedMcp.sc)}, ${otherLabel.status}, ${await count()})`);
+}
+
+console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2): an item opened over MCP from a thought is the one REST's history names, noted at the thought's capture time; a close another key proposes with the later thought as evidence is refused its proposer's accept and closes on the writer's; the same record through both doors; a read key may not open but lists, a capture-only key opens its own and is refused another's alike for one that is not there, never confirms its own proposed item and reads nothing; update, reopen and overdue; what 117 refuses answers by its rule and status; a plugin's hook through ctx.call keeps its row's item and states a priority on it, another plugin's refused; the registry's absence said after 117 answers, a plugin's call it grants going through");
+{
+  type I = { id: string; status: string; text: string; owner: string | null; dueAt: string | null; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null } };
+  type P = { id: string; status: string; evidenceThoughtId: string | null; label: string | null; decision: string | null; proposer: { name: string } };
+  const asReply = (e: unknown): Reply => ({ text: `(no reply: ${(e as Error).message})`, sc: {}, isError: true });
+  const origin = String((await rest("POST", "/v1/thoughts", { content: "omicron: remind me to call the dentist" })).body.id);
+  const later = String((await rest("POST", "/v1/thoughts", { content: "omicron: called the dentist, booked for Tuesday" })).body.id);
+  const [{ created_at: capturedAt }] = await sql`SELECT to_jsonb(created_at) #>> '{}' AS created_at FROM thoughts WHERE id = ${origin}::uuid`;
+  const NOWHERE = "00000000-0000-4000-8000-000000003665";
+
+  // Verify, through both doors: opened over MCP from a thought; its history over REST names it, noted at the thought's capture time.
+  const opened = await mcp("open_item", { text: "call the dentist", origin_thought: origin, owner: "me" });
+  const item = opened.sc.item as I | undefined;
+  const id = item?.id ?? NOWHERE;
+  const h = await rest("GET", `/v1/items/${id}`);
+  assert(!opened.isError && opened.sc.outcome === "opened" && item?.status === "open" && item.originThoughtId === origin && item.openedBy.name === "writer" && item.openedBy.scope === "write"
+      && new Date(item.notedAt).getTime() === new Date(String(capturedAt)).getTime()
+      && h.status === 200 && (h.body.item as I).id === id && (h.body.events as unknown[]).length === 1 && /^Opened open item \S+: "call the dentist", owner "me"\.$/.test(opened.text),
+    `an item opened over MCP from a thought is the one REST's history names, noted at the thought's capture time, the writer its opener at write scope (${opened.text.slice(0, 120)} | ${h.status})`);
+  const [ev] = await sql`SELECT actor_scope, actor_agent_id IS NOT NULL AS has_id FROM open_item_events WHERE item_id = ${id}::uuid`;
+  assert(ev?.actor_scope === "write" && ev?.has_id === true, `the envelope stated the write key's scope, and its agent id, to 117 (${JSON.stringify(ev)})`);
+  // The same record through both doors.
+  const hm = await mcp("item_history", { id });
+  const out = rendered((v) => say.renderItemHistory(ok(v)), h.body);
+  assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc),
+    `item_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 100)} | ${firstDiff(out.structuredContent, hm.sc)})`);
+
+  // The rival proposes the close, citing the later thought; its own accept is refused; the writer's closes the item.
+  const proposed = await rest("POST", `/v1/items/${id}/proposals`, { evidence_thought: later, label: "resolves", reason: "the later thought says it was done" }, KEYS.rival);
+  const prop = proposed.body.proposal as P | undefined;
+  const pid = prop?.id ?? NOWHERE;
+  const ownAccept = await rest("POST", `/v1/item-proposals/${pid}/decision`, { accept: true }, KEYS.rival);
+  const accepted = await mcp("decide_item_close", { id: pid, accept: true, reason: "agreed" });
+  const again = await rest("POST", `/v1/item-proposals/${pid}/decision`, { accept: false });
+  assert(proposed.status === 200 && proposed.body.outcome === "proposed" && prop?.label === "resolves" && prop.evidenceThoughtId === later && (proposed.body.item as I).status === "open"
+      && ownAccept.status === 403 && ownAccept.body.code === "PROPOSAL_YOURS" && ownAccept.body.proposal === pid
+      && !accepted.isError && accepted.sc.outcome === "accepted" && (accepted.sc.item as I).status === "done" && /^Accepted proposal \S+ to close it done \(resolves\)/.test(accepted.text)
+      && again.status === 409 && again.body.code === "PROPOSAL_DECIDED" && again.body.decision === "accepted",
+    `the rival's proposal, the later thought its evidence, leaves the item open; its own accept is 403 PROPOSAL_YOURS; the writer's accept over MCP closes it done; deciding again is 409 PROPOSAL_DECIDED (${proposed.status} ${ownAccept.status} ${ownAccept.body.code} | ${accepted.text.slice(0, 80)} | ${again.status} ${again.body.code})`);
+  const settled = await rest("POST", `/v1/items/${id}/proposals`, {}, KEYS.rival);
+  assert(settled.status === 409 && settled.body.code === "ITEM_SETTLED" && settled.body.status === "done" && settled.body.item === id,
+    `a close proposed on a done item is 409 ITEM_SETTLED, naming the item and its status (${settled.status} ${JSON.stringify(settled.body)})`);
+
+  // update_item: a JSON null clears; set_item_status reopens; list_items says overdue.
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const moved = await rest("PATCH", `/v1/items/${id}`, { owner: null, due_at: yesterday });
+  const reopened = await mcp("set_item_status", { id, status: "open", reason: "they cancelled" });
+  const listed = await rest("GET", `/v1/items?status=open&overdue=true`);
+  const row = ((listed.body.items ?? []) as (I & { overdue: boolean })[]).find((r) => r.id === id);
+  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && (moved.body.item as I).dueAt?.startsWith(yesterday)
+      && !reopened.isError && (reopened.sc.item as I).status === "open" && listed.status === 200 && row?.overdue === true && listed.body.truncated === false,
+    `a PATCH with owner null clears it and moves the due time to yesterday; reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+
+  // A read key may not open, and lists; a capture-only key opens its own, is refused another's alike for one that is not there, and reads nothing.
+  const readerOpen = await rest("POST", "/v1/items", { text: "a read key's to-do" }, KEYS.reader);
+  const readerList = await rest("GET", "/v1/items", undefined, KEYS.reader);
+  const hookOwn = await rest("POST", "/v1/items", { text: "omicron: the hook's own to-do", proposed: true }, KEYS.hook);
+  const hookId = String((hookOwn.body.item as I | undefined)?.id ?? NOWHERE);
+  const hookOther = await rest("PATCH", `/v1/items/${id}`, { owner: "the hook" }, KEYS.hook);
+  const hookNowhere = await rest("PATCH", `/v1/items/${NOWHERE}`, { owner: "the hook" }, KEYS.hook);
+  const hookConfirm = await rest("POST", `/v1/items/${hookId}/status`, { status: "open" }, KEYS.hook);
+  const hookConfirmMcp = await mcp("set_item_status", { id: hookId, status: "open" }, KEYS.hook).catch(asReply);
+  const hookDismiss = await rest("POST", `/v1/items/${hookId}/status`, { status: "dropped" }, KEYS.hook);
+  const hookReads = await rest("GET", `/v1/items/${hookId}`, undefined, KEYS.hook);
+  const { item: _o, ...otherFacts } = hookOther.body as Record<string, unknown>;
+  const { item: _n, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
+  assert(readerOpen.status === 403 && readerOpen.body.code === "FORBIDDEN" && readerList.status === 200,
+    `a read key may not open an item (403 FORBIDDEN) and lists them (${readerOpen.status} ${readerOpen.body.code} ${readerList.status})`);
+  assert(hookOwn.status === 200 && (hookOwn.body.item as I).status === "proposed" && (hookOwn.body.item as I).openedBy.scope === "capture"
+      && hookOther.status === 403 && hookOther.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(otherFacts, nowhereFacts)
+      && hookConfirm.status === 403 && hookConfirm.body.code === "CONFIRM_NOT_YOURS" && hookConfirmMcp.isError && /^Refused: open item \S+ was proposed, not stated; a write key confirms it/.test(hookConfirmMcp.text)
+      && hookDismiss.status === 200 && (hookDismiss.body.item as I).status === "dropped" && hookReads.status === 403,
+    `a capture-only key opens its own (proposed, at capture scope), is refused another's 403 ITEM_NOT_YOURS alike for one that is not there, may not confirm its own proposed item (CONFIRM_NOT_YOURS, in words over MCP) but dismisses it, and reads no item (${hookOwn.status} | ${hookOther.status} ${hookOther.body.code} | ${hookConfirm.body.code} | ${hookDismiss.status} | ${hookReads.status})`);
+
+  // What 117 refuses, each by its rule and status.
+  const noOrigin = await rest("POST", "/v1/items", { text: "from nowhere", origin_thought: NOWHERE });
+  const noRow = await rest("POST", "/v1/items", { text: "a row with no plugin", plugin_row: "task-1" });
+  const badId = await rest("GET", "/v1/items/not-a-uuid");
+  const noItem = await rest("GET", `/v1/items/${NOWHERE}`);
+  const noItemMcp = await mcp("item_history", { id: NOWHERE });
+  const noProposal = await rest("POST", `/v1/item-proposals/${NOWHERE}/decision`, { accept: true });
+  const noEvidence = await rest("POST", `/v1/items/${id}/proposals`, { evidence_thought: NOWHERE });
+  const badDue = await rest("PATCH", `/v1/items/${id}`, { due_at: "tomorrow" });
+  assert(noOrigin.status === 404 && noOrigin.body.code === "ORIGIN_NOT_FOUND" && noOrigin.body.thought === NOWHERE
+      && noRow.status === 400 && noRow.body.code === "REFUSED_ITEM_INPUT" && noRow.body.problem === "plugin_row" && badId.status === 400 && badId.body.code === "REFUSED_ITEM_INPUT" && badId.body.problem === "id"
+      && noItem.status === 404 && noItem.body.code === "ITEM_NOT_FOUND" && (noItem.body.item as { kind: string; key: string }).key === NOWHERE
+      && noItemMcp.isError && noItemMcp.text === `Refused: the brain holds no open item ${NOWHERE}.`
+      && noProposal.status === 404 && noProposal.body.code === "PROPOSAL_NOT_FOUND" && noEvidence.status === 404 && noEvidence.body.code === "EVIDENCE_NOT_FOUND"
+      && badDue.status === 400 && badDue.body.code === "REFUSED_INPUT",
+    `117's refusals by rule and status: a missing origin 404 ORIGIN_NOT_FOUND, a plugin row with no plugin 400 and a malformed id 400 REFUSED_ITEM_INPUT, an unknown item 404 ITEM_NOT_FOUND (in words over MCP), an unknown proposal 404 PROPOSAL_NOT_FOUND, a missing evidence 404 EVIDENCE_NOT_FOUND, a due time that is no ISO date 400 (${[noOrigin, noRow, badId, noItem, noProposal, noEvidence, badDue].map((r) => `${r.status} ${r.body.code}`).join(" | ")})`);
+
+  // Review pass 1: overdue alone lists proposed items too; a thought id Postgres reads but RFC 9562 does not is the
+  // brain's to answer; a NUL in a label is the schema's 400.
+  const lateProposed = await rest("POST", "/v1/items", { text: "omicron: an inferred to-do, overdue", proposed: true, due_at: yesterday });
+  const overdueAll = await rest("GET", "/v1/items?overdue=true");
+  const inOverdue = ((overdueAll.body.items ?? []) as I[]).some((r) => r.id === (lateProposed.body.item as I | undefined)?.id);
+  const nonRfc = await rest("POST", "/v1/items", { text: "from an imported id", origin_thought: "11111111-1111-1111-1111-111111111111" });
+  const nulLabel = await rest("POST", `/v1/items/${id}/proposals`, { label: "res" + String.fromCharCode(0) + "olves" });
+  assert(lateProposed.status === 200 && inOverdue && nonRfc.status === 404 && nonRfc.body.code === "ORIGIN_NOT_FOUND" && nulLabel.status === 400,
+    `overdue with no status lists a proposed item due yesterday; a non-RFC uuid is the brain's ORIGIN_NOT_FOUND, not the schema's; a NUL in a label is a 400 (${inOverdue} | ${nonRfc.status} ${nonRfc.body.code} | ${nulLabel.status} ${nulLabel.body.code})`);
+
+  // Review pass 2: another key's thought as a capture key's evidence is named as the thought; a padded thought id is trimmed.
+  const hookItem = await rest("POST", "/v1/items", { text: "omicron: the hook's item, to propose closing" }, KEYS.hook);
+  const otherEvidence = await rest("POST", `/v1/items/${(hookItem.body.item as I | undefined)?.id}/proposals`, { evidence_thought: later }, KEYS.hook);
+  const padded = await rest("POST", "/v1/items", { text: "call the dentist", origin_thought: `  ${origin}  ` });
+  assert(otherEvidence.status === 403 && otherEvidence.body.code === "ITEM_NOT_YOURS" && (otherEvidence.body.item as { kind: string; key: string } | undefined)?.kind === "thought"
+      && (otherEvidence.body.item as { key: string } | undefined)?.key === later && padded.status === 200 && padded.body.outcome === "unchanged",
+    `a capture key's proposal citing another key's thought is ITEM_NOT_YOURS naming the thought, not its own item; a padded origin thought is trimmed, the same item again (${JSON.stringify(otherEvidence.body.item)} | ${padded.status} ${padded.body.outcome})`);
+
+  // Review pass 3: an id whose words read like a server's raise is still the caller's 400; a padded, upper-cased
+  // proposal id is named back as the proposal's; a key the registry never resolved, not a hook, is told unattributed.
+  const fauxRaise = await rest("GET", `/v1/items/${encodeURIComponent("needs a maker")}`);
+  const paddedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(` ${pid.toUpperCase()} `)}/decision`, { accept: false });
+  const unresolved = { name: "cap-unresolved", scope: "capture", keyHash: "" } as unknown as Parameters<typeof direct.openItem>[0];
+  const unresolvedOpen = await direct.openItem(unresolved, { text: "omicron: a key the registry never resolved" } as never);
+  // Review pass 4: a blank owner is refused, not a silent clear; a proposal's id is a hyphenated uuid, as an item's.
+  const blankOwner = await rest("PATCH", `/v1/items/${id}`, { owner: "   " });
+  // Review pass 5: blank as 117 cleans it — a zero-width space and a control character are nothing to it.
+  const zeroWidthOwner = await rest("PATCH", `/v1/items/${id}`, { owner: String.fromCharCode(0x200b, 1) + " " });
+  const bracedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(`{${pid}}`)}/decision`, { accept: false });
+  assert(blankOwner.status === 400 && blankOwner.body.code === "REFUSED_INPUT" && zeroWidthOwner.status === 400 && zeroWidthOwner.body.code === "REFUSED_INPUT" && bracedDecide.status === 400 && bracedDecide.body.code === "REFUSED_INPUT"
+      && fauxRaise.status === 400 && fauxRaise.body.code === "REFUSED_ITEM_INPUT" && fauxRaise.body.problem === "id"
+      && paddedDecide.status === 409 && paddedDecide.body.proposal === pid
+      && unresolvedOpen.ok === false && (unresolvedOpen.refusal as { code: string }).code === "ITEM_UNATTRIBUTED" && (unresolvedOpen.refusal as { cause?: string }).cause === "registry_unknown",
+    `a blank owner and a braced proposal id are the schema's 400; an id reading "needs a maker" is 400 REFUSED_ITEM_INPUT (problem id), never a 500; a padded, upper-cased proposal id is named back as the proposal's own; a key with no agent id that is no hook is ITEM_UNATTRIBUTED, not ITEM_UNOWNABLE (${fauxRaise.status} ${fauxRaise.body.code} | ${paddedDecide.status} ${paddedDecide.body.proposal === pid} | ${JSON.stringify(unresolvedOpen.ok ? null : unresolvedOpen.refusal)})`);
+
+  // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
+  // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority
+  // on it; another plugin's hook may not touch it; with no row it opens nothing (ITEM_UNATTRIBUTED, no agent id).
+  const { contextFor, hookPrincipal } = await import("./core/plugins.ts");
+  const hm2 = contextFor("home-maintenance", { core: direct, principal: hookPrincipal("home-maintenance") });
+  const fc = contextFor("family-calendar", { core: direct, principal: hookPrincipal("family-calendar") });
+  type Out = { ok: boolean; value?: Record<string, unknown>; refusal?: Record<string, unknown> };
+  const rowOpen = await hm2.call("open_item", { text: "omicron: replace the furnace filter", plugin_row: "task-7", due_at: "2026-11-01" }) as Out;
+  const rowItem = rowOpen.value?.item as (I & { plugin: { name: string; row: string } | null }) | undefined;
+  const rowId = rowItem?.id ?? NOWHERE;
+  const rowMove = await hm2.call("update_item", { id: rowId, due_at: "2027-02-01" }) as Out;
+  const rowPrio = await hm2.call("set_priority", { kind: "item", key: rowId, level: 3 }) as Out;
+  const otherHook = await fc.call("update_item", { id: rowId, owner: "x" }) as Out;
+  const noRowHook = await hm2.call("open_item", { text: "omicron: a hook's item for no row" }) as Out;
+  // A capture key whose agent id the registry did not give: refused before the call on its own, but through a plugin
+  // 117 decides, and a plugin row's item is the plugin's (review pass 1).
+  const away = { name: "cap-away", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
+  const awayDirect = await direct.openItem(away, { text: "omicron: while the registry is away" } as never);
+  const awayPlugin = await contextFor("home-maintenance", { core: direct, principal: away }).call("open_item", { text: "omicron: a plugin row while the registry is away", plugin_row: "task-8" }) as Out;
+  // Review pass 2: decided after 117 answers. The hook key, its id not given, through a plugin on an item it opened
+  // (no plugin row): told to retry, never a final "not yours"; through the plugin on its row's item, set_priority goes.
+  const hookAway = { name: "hook", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
+  const ownAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("update_item", { id: hookId, owner: "while away" }) as Out;
+  const prioAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("set_priority", { kind: "item", key: rowId, level: 2 }) as Out;
+  const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
+  assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
+      && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
+      && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNOWNABLE"
+      && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true
+      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true,
+    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();
