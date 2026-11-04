@@ -3924,6 +3924,7 @@ type LayoutProbeArgs = Omit<LayoutArgs, "frontText" | "forkText"> & Partial<Pick
  */
 function forkLayoutProblems({ entries, indexText, frontText, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, frontCeiling = FRONT_CEILING_BYTES }: LayoutArgs) {
   if (typeof frontText !== "string" || typeof forkText !== "string") throw new Error("check 15's layout decision was called without MAINTAINING.md's or FORK.md's text");
+  if (frontText !== "" && frontText === forkText) throw new Error("check 15's layout decision was handed one text as both MAINTAINING.md's and FORK.md's");
   const problems: { where: string; kind: string; msg: string }[] = [];
   const at = (where: string, kind: string, msg: string) => problems.push({ where, kind, msg });
   const changes = classifyChanges(entries);
@@ -4003,6 +4004,9 @@ const LAYOUT_PROBES: [string, () => LayoutProbeArgs, string[]][] = [
   ["a second index left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: INDEX_FOR(en), ceilings: {} }; }, ["index-elsewhere"]],
   ["an index start marker alone in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: `intro\n${INDEX_START}\n`, ceilings: {} }; }, ["index-elsewhere"]],
   ["an index end marker alone in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: `tail\n${INDEX_END}\n`, ceilings: {} }; }, ["index-elsewhere"]],
+  ["a second index left in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: INDEX_FOR(en), ceilings: {} }; }, ["index-elsewhere"]],
+  ["an index start marker alone in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), forkText: `intro\n${INDEX_START}\n`, ceilings: {} }; }, ["index-elsewhere"]],
+  ["an index end marker alone in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: `tail\n${INDEX_END}\n`, ceilings: {} }; }, ["index-elsewhere"]],
   ["a fenced `# 1.` comment in MAINTAINING.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en), frontText: "```bash\n# 1. fetch\n```\n", ceilings: {} }; }, []],
   ["no index markers", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: "# changes/\nno markers\n", ceilings: {} }; }, ["index-missing"]],
   ["a duplicated end marker", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, indexText: INDEX_FOR(en, INDEX_END + "\n"), ceilings: {} }; }, ["index-missing"]],

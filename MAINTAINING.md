@@ -1,10 +1,10 @@
 # MAINTAINING.md — how Daemonic Brain is versioned, released, deployed and checked
 
 Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1):
-it began as a fork of that tree at `9543c29` (2026-08-30), and has been a
-project in its own right since 2026-11-04 (SMD-3765). It takes nothing further
-from upstream and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork era: the pin,
-changes 1–17, the detach and how rebases ran.
+it began as a fork of that tree at `9543c29` (2026-08-30), and is a project in
+its own right (decided 2026-11-04, SMD-3765). It takes nothing further from
+upstream and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork
+era: the pin, changes 1–17, the detach and how rebases ran.
 
 This file is for whoever changes the code: the version scheme and what it
 covers, cutting a release, the one deployment, CI and its checks, how a review
@@ -143,8 +143,8 @@ Changes 1–103 keep their numbers — the code comments cite them — as FORK.m
 table and the files they are.
 
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside the
-record in `changes/`: `## [Unreleased]` first, one dated section per release with entries
-under the six headings, each entry ending in its ticket and migration numbers. The
+record in `changes/`: `## [Unreleased]` first, one dated section per release with
+entries under the six headings, each entry ending in its ticket and migration numbers. The
 release step writes it and the change files from the same fragments in one commit,
 and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
 adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
@@ -450,9 +450,8 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **The access key still rides in the URL** — but it is now scoped, named and
   hashed (fix 14, FORK.md's table). `?key=` is kept because Claude Desktop
   connectors are URL-only, so a key in a URL still reaches access logs and
-  browser history. What changed is
-  what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
-  not even registered for it. Upstream
+  browser history. What changed is what a leak is worth: a read-scoped key
+  cannot write, and `capture_thought` is not even registered for it. Upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
   [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) were
   the upstream answer; Daemonic Brain has its own OAuth path now. The `auth`
@@ -531,7 +530,8 @@ Two constraints that are not engineering problems.
 reached with keys (scoped and hashed, FORK.md's fix 14; they can ride in a URL)
 or the `auth` profile's tokens. Every captured thought's text goes to the model
 endpoints — embedding, metadata extraction and the background passes — which are
-local Ollama by default. An endpoint not declared local (`OB1_LLM_LOCAL`) gets
+local Ollama by default. An endpoint not declared local (`OB1_LLM_LOCAL`, and
+`OB1_CHAT_LOCAL` for a chat endpoint of its own) gets
 only what the egress gate lets through, which by default is nothing until an
 `OB1_EGRESS_ALLOW` term names it ([`SETUP.md`](SETUP.md), "What may leave the
 box"). That is fine for personal notes. It is not an architecture

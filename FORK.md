@@ -3,8 +3,8 @@
 Daemonic Brain began as a fork of
 [NateBJones-Projects/OB1](https://github.com/NateBJones-Projects/OB1) (Open
 Brain), whose guide builds the brain on supabase.com. The fork was for running it
-without Supabase, on infrastructure you control. It has been a project in its own
-right since 2026-11-04 (SMD-3765): the pin was frozen on 2026-10-25 (SMD-1256),
+without Supabase, on infrastructure you control. It is a project in its own right
+(decided 2026-11-04, SMD-3765): the pin was frozen on 2026-10-25 (SMD-1256),
 nothing further is taken from upstream, and no parity is kept.
 
 This file is the record of that era — the pin, changes 1–17, the files the fork

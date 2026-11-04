@@ -125,8 +125,9 @@ changed, with two placements moved: the "second vector store beside Postgres"
 design (SMD-1038) sat inside change 19's span and is in
 [change 79](079-the-store-measured-against-pgvector.md), the measurement it
 pre-registered; "The recurring defect in this fork: a value defined twice" is a
-house rule and a standing section of FORK.md (of MAINTAINING.md since
-SMD-3765). Their history before the split is FORK.md's: `git log -- FORK.md`, or
+house rule and a standing section of FORK.md (MAINTAINING.md's "The recurring
+defect: a value defined twice" since SMD-3765). Their history before the split
+is FORK.md's: `git log -- FORK.md`, or
 `git log -S '<a phrase from the file>' -- FORK.md`. Git does not follow a split
 of one file into eighty-five, so `git log --follow` on a change file starts at
 the split.
