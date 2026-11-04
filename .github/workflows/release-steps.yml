@@ -10,7 +10,7 @@
 # the release job's, and a tag would fail at its first push to GHCR, which no
 # rehearsal reaches. Nor any trigger other than workflow_call: the runs it
 # started would want a `permissions:` here, which would narrow the callers'
-# tokens too.
+# tokens too. Nothing checks either yet (SMD-3751).
 #
 # Every `uses:` is a full commit SHA with its tag in a trailing comment, and the
 # runner image is named (check 23, SMD-2093): the release job runs these

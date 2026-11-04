@@ -9833,8 +9833,8 @@ checkBunPins();
 // pull request runs, runs it when its `run` calls bun or node on it, read from
 // the step's working-directory, the job's or the workflow's, or a directory a
 // `cd` in the same step names (which of those applies is the shell's to say, so
-// each is taken). release.yml (and release-steps.yml, which it calls) is not
-// read: it runs on a tag, and on a pull request only when its own paths
+// each is taken). release.yml and release-steps.yml, which it calls, are not
+// read: they run on a tag, and on a pull request only when release.yml's paths
 // change. A run counts only if the suite's failure fails the job, so nothing
 // counts from a step or job with
 // `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
