@@ -1354,7 +1354,7 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const { item: _hookItem, ...hookFacts } = hookSet.body as Record<string, unknown>;
     const { item: _nowhereItem, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
     assert(hookSet.status === 403 && hookSet.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(hookFacts, nowhereFacts) && hookTicket.status === 403 && hookTicket.body.code === "ITEM_NOT_YOURS"
-        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since\.$/.test(hookMcp.text) && hookReads.status === 403,
+        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it\.$/.test(hookMcp.text) && hookReads.status === 403,
       `a capture-only key's set on the writer's thought is refused 403 ITEM_NOT_YOURS, the same for a thought that is not there and for a ticket; in words over MCP; it may not read the history (${hookSet.status} ${hookSet.body.code} | ${hookNowhere.status} ${hookNowhere.body.code} | ${hookMcp.text} | ${hookReads.status})`);
     // …and on its own thought it may, at its own trust, shown no winner.
     const hookThought = String((await rest("POST", "/v1/thoughts", { content: "omega: a thought the hook captured, to state a priority on" }, KEYS.hook)).body.id);
@@ -1408,9 +1408,9 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const noHistoryMcp = await mcp("priority_history", { kind: "thought", key: nowhere });
     assert(noThought.status === 404 && noThought.body.code === "ITEM_NOT_FOUND" && same(noThought.body.item, { kind: "thought", key: nowhere }) && noThought.body.which === "item"
         && noTicket.status === 404 && same(noTicket.body.item, { kind: "ticket", key: "SMD-9401" }) && noRef.status === 404 && noRef.body.which === "due_ref"
-        && noOpen.isError && /^Refused: open items \(kind item\) arrive with SMD-3665/.test(noOpen.text) && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
+        && noOpen.isError && noOpen.text === `Refused: the brain holds no open item ${nowhere}.` && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
         && noHistoryMcp.isError && noHistoryMcp.text === `Refused: the brain holds no thought ${nowhere}.`,
-      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item until SMD-3665 — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
+      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
 
     // Review pass 1: the item a refusal names is 116's own keying, read from the brain — a zero-width space 116 strips
     // is stripped in the answer too; which argument is missing, or malformed, is told from the brain, not 116's words.
@@ -1549,6 +1549,76 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
       && /⚠ Claimed: SMD-9401 by rival since .* \(\+10 more tickets it names not checked: list_claims shows them\)/.test(wideMcp.text),
     `a result naming 60 tickets reads the first 50: a claim on the 2nd is named, one on the 56th is not, and 10 are counted not read (${JSON.stringify(wideHit?.claimed?.map((c) => c.ticket))} ${wideHit?.claimedNotRead})`);
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
+}
+
+console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; renew_claim before the release says so too; once board-sync's release ends it, the renewal says done if the work merged, else tell the user, and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key, by capture and by update_thought's patch");
+{
+  type Claim = { id: string };
+  // Ticket rows as board-sync writes them: the importer's label, the board's status.
+  const board = (issue: string, status: string, type: string) =>
+    sql`INSERT INTO thoughts (content, metadata) VALUES (${`${issue} — [13] a board row`}, ${{ source: "linear", issue, status, status_type: type, linear_updated_at: "2026-11-03T00:00:00.000Z" }}::jsonb)`;
+  await board("SMD-9500", "Done", "completed");
+  await board("SMD-9501", "In Progress", "started");
+  const onDone = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1" });
+  const onDoneRest = await rest("POST", "/v1/claims", { ticket: "SMD-9500", piece: "PR 2" }, KEYS.rival);
+  const onOpen = await mcp("claim_work", { ticket: "SMD-9501" });
+  const doneId = String((onDone.sc.claim as Claim | undefined)?.id), doneToken = String(onDone.sc.token ?? "");
+  assert(!onDone.isError && JSON.stringify(onDone.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && /SMD-9500 is closed \(Done\): board-sync releases every claim on a closed ticket at its next pass, this one included\. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own\.$/.test(onDone.text)
+      && onDoneRest.status === 200 && JSON.stringify(onDoneRest.body.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
+      && !onOpen.isError && onOpen.sc.ticketClosed === undefined && !/is closed/.test(onOpen.text),
+    `a claim on a Done ticket says board-sync will release it, in the text and as ticketClosed through both doors; one on an open ticket says nothing (${onDone.text.slice(-120)})`);
+
+  const renewedBefore = await mcp("renew_claim", { id: doneId, token: doneToken });
+  assert(!renewedBefore.isError && JSON.stringify(renewedBefore.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" }) && /SMD-9500 is closed \(Done\): board-sync releases every claim/.test(renewedBefore.text),
+    `renew_claim on a closed ticket's claim, before board-sync's release, says it will go (${renewedBefore.text.slice(-120)})`);
+  await sql`SELECT release_closed_ticket_claims('test-rest-sql', false, ${{ name: "board-sync" }}::jsonb)`;
+  const renewed = await mcp("renew_claim", { id: doneId, token: doneToken });
+  const renewedRest = await rest("POST", `/v1/claims/${doneId}/renew`, { token: doneToken });
+  const reclaimed = await mcp("claim_work", { ticket: "SMD-9500", piece: "PR 1", token: doneToken });
+  const released = await mcp("release_claim", { id: doneId, token: doneToken, reason: "merged" });
+  const reason = "SMD-9500 closed: Done (completed); test-rest-sql";
+  assert(renewed.isError && renewed.sc.code === "CLAIM_RELEASED" && renewed.sc.ticketClosed === true
+      && renewed.text === `Refused: claim ${doneId} was released by board-sync at ${String(renewed.sc.releasedAt)} (${JSON.stringify(reason)}): its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.`
+      && renewedRest.status === 409 && renewedRest.body.ticketClosed === true
+      && reclaimed.isError && reclaimed.sc.code === "CLAIM_RELEASED" && reclaimed.sc.ticketClosed === true && /its ticket is closed\. If your work under it merged, the release is done/.test(reclaimed.text),
+    `once board-sync's release ends it, a renewal through either door, and claim_work with its token, say the ticket closed — done if the work merged, else tell the user — not to ask about claiming again (${renewed.text.slice(0, 160)})`);
+  assert(!released.isError && released.sc.outcome === "already_released"
+      && new RegExp(`had already ended at \\S+: released by board-sync \\(${JSON.stringify(reason).replace(/[()]/g, "\\$&")}\\); its ticket is closed\\. If your work under it merged`).test(released.text),
+    `the holder's release after it says who ended the claim and why (${released.text.slice(0, 200)})`);
+
+  // A release by its holder, met by a later release: who and why, nothing of a closed ticket.
+  const openId = String((onOpen.sc.claim as Claim | undefined)?.id);
+  await mcp("release_claim", { id: openId, token: onOpen.sc.token, reason: "dropped" });
+  const twice = await mcp("release_claim", { id: openId, token: onOpen.sc.token });
+  assert(!twice.isError && /had already ended at \S+: released by writer \("dropped"\)\.$/.test(twice.text) && !/closed/.test(twice.text),
+    `a claim its holder released, released again: by whom and why, nothing of a closed ticket (${twice.text.slice(-80)})`);
+
+  // A key's own row relabelled the board's by a patch: refused too, the row unmoved (review pass 2).
+  const own = await rest("POST", "/v1/thoughts", { content: "[13] a key's own ticket row", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed", linear_updated_at: "2099-01-01T00:00:00.000Z" } }, KEYS.rival);
+  const ownId = String(own.body.id);
+  const relabel = await mcp("update_thought", { id: ownId, metadata_patch: { source: "linear" } }, KEYS.rival);
+  const relabelRest = await rest("PATCH", `/v1/thoughts/${ownId}`, { metadata_patch: { source: " Linear " } }, KEYS.rival);
+  const [ownRow] = await sql`SELECT metadata->>'source' AS source FROM thoughts WHERE id = ${ownId}::uuid`;
+  const [head] = await sql`SELECT count(*)::int AS n FROM ob1_work_claim_closed_head('SMD-9501')`;
+  assert(own.status === 201 && relabel.isError && relabel.sc.code === "REFUSED_SOURCE_RESERVED" && relabel.text === "Refused: `metadata_patch.source: \"linear\"` is the board's own label, which only its importers write. Patch without it."
+      && relabelRest.status === 400 && relabelRest.body.code === "REFUSED_SOURCE_RESERVED" && ownRow?.source !== "linear" && head?.n === 0,
+    `update_thought relabelling a key's own ticket row the board's is refused through both doors, the row unmoved, the ticket not read closed (${relabel.text.slice(0, 80)}; ${relabelRest.status}; ${ownRow?.source}; ${head?.n})`);
+  // A capture-only key's ticket key keeps its refusal: the label's is said after the metadata's.
+  const hooked = await mcp("capture_thought", { content: "[13] a capture key's board row", source: "linear", metadata: { issue: "SMD-9501" } }, KEYS.hook);
+  assert(hooked.isError && hooked.sc.code === "REFUSED_METADATA_SHAPE" && hooked.sc.problem === "ticket_key" && hooked.sc.key === "issue",
+    `a capture-only key sending the board's label with a ticket key is refused for the ticket key, as before (${JSON.stringify(hooked.sc)})`);
+
+  // `source: "linear"` is the board's own label, refused through both doors: a key could otherwise write a ticket row
+  // board-sync's release would trust.
+  const count = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13] a forged board row%'`)[0].n);
+  const forgedRest = await rest("POST", "/v1/thoughts", { content: "[13] a forged board row via REST", source: "linear", metadata: { issue: "SMD-9501", status: "Done", status_type: "completed" } });
+  const forgedMcp = await mcp("capture_thought", { content: "[13] a forged board row via MCP", source: "linear" });
+  const otherLabel = await rest("POST", "/v1/thoughts", { content: "[13] an honest note labelled linear-notes", source: "linear-notes" });
+  assert(forgedRest.status === 400 && forgedRest.body.code === "REFUSED_SOURCE_RESERVED" && forgedRest.body.source === "linear"
+      && forgedMcp.isError && forgedMcp.sc.code === "REFUSED_SOURCE_RESERVED" && forgedMcp.text === "Refused: `source: \"linear\"` is the board's own label, which only its importers write. Capture under another source, or none."
+      && otherLabel.status === 201 && (await count()) === 0,
+    `source "linear" is refused through REST (400) and MCP, nothing written; another label starting so is a label like any other (${forgedRest.status} ${JSON.stringify(forgedRest.body)}, ${JSON.stringify(forgedMcp.sc)}, ${otherLabel.status}, ${await count()})`);
 }
 
 apiServer.stop();

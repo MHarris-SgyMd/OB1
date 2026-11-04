@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and sixteen (116) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and eighteen (118) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2344,7 +2344,7 @@ Migration 116 adds priority assertions: a key states how much an item matters,
 by when and why, and every statement is kept (SMD-3663, docs/priority.md's
 decisions 1, 2, 4 and 10). An **item** is `(kind, key)`: a `thought` or an
 `entity` by its id, a `ticket` by its key (normalised as `work_claims.issue`
-is), or an `item`, an open item, refused until SMD-3665 adds its table.
+is), or an `item`, an open item (117).
 `assert_priority` checks the item exists (a ticket by its head row, 068). A
 **level** is 0 none to 5 critical, anything else raised (22023); unknown is no
 assertion at all, never low. An assertion may carry `due_at`, `not_before`, a
@@ -2422,6 +2422,96 @@ server-portable/README.md, Priority assertions).
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
+Migration 117 adds open items: a to-do, a commitment or a plugin's task gets an
+id, a status and a history (SMD-3665 PR 1; docs/priority.md decision 1's fourth
+kind). An item has its text (at most 1000 characters, cleaned as 115 cleans a
+label), an optional owner (free text: who is to do it, not a key) and due time,
+and a **status**: `proposed`, `open`, `done` or `dropped`. `proposed` is a start
+state alone, the extractor's (SMD-3665 PR 3): it reads as not yet open until a
+key confirms it (`open`) or dismisses it (`dropped`). Where it came from is fixed
+at the open: the thought it was read from, and the plugin row it stands for
+(decision 8) — the plugin read from the envelope's `plugin`, which the server's
+`ctx.call` stamps, never from an argument. `noted_at` is its thought's capture
+time, so an item read from an old thought reads as old. `open_item_events` holds
+every change (opened, updated or status), each carrying the item's whole state
+after it, its maker stamped from the envelope as 116 stamps a priority's, and a
+reason; a trigger refuses every UPDATE, DELETE and TRUNCATE. `open_items` is its
+projection, kept current in the write's transaction, with
+`ob1_item_projection_drift()` and `ob1_rebuild_item_projection()` (068's
+pattern). The writers are `open_item`, `update_item` (text, owner and due time
+from a JSON object, a JSON null clearing owner or due time), `set_item_status`
+(open, done or dropped, never back to proposed; settling moots the item's
+pending proposals), `propose_item_close` and `decide_item_close`; each answers
+`{outcome, code, message, …}` and changes nothing it was not asked to (the same
+again is `unchanged`). The same thought and text, or the same plugin row, opened
+again is the item that is there, so a re-run opens nothing twice; a plugin row
+is its item's identity, the thought and text that of an item standing for no
+row. A **proposed
+close** (`open_item_close_proposals`: the status, the evidence thought, a label
+such as `resolves`, a reason) never closes the item by itself: a key other than
+its proposer accepts it, which closes the item with an event naming it, or
+rejects it (`PROPOSAL_YOURS` for the proposer accepting its own, matched by its
+name or its agent id, so the guard fails closed). A proposer's second proposal
+with the same evidence withdraws its first when it says something else, the
+first matched as 116 matches a maker (by agent id when one was recorded, else by
+name), so no key given another's old name withdraws its proposals. A row changes only to be decided, once. The scope rule fails closed as 116's. A
+**capture-only key** may open an item, from a thought only if it captured the
+thought, and change only an item it opened under its envelope's agent id that
+no other key has changed since, or one that stands for a row of the plugin its
+call came through (a plugin hook, `hook:<plugin>`, has no agent id) — asked
+before any existence answer, and refused alike for an item that is not there
+(`ITEM_NOT_YOURS`); one whose envelope carries no agent id of its own opens no
+item but a plugin row's (`ITEM_UNATTRIBUTED`), since it could never prove one its
+own. A missing origin thought is `ORIGIN_NOT_FOUND`. A due time is ISO 8601
+alone (a date, or a date and time with an optional offset), so none of
+Postgres's words (`now`, `tomorrow`, `epoch`) anywhere in it; anything else is
+refused (22023), and text without an offset is UTC, as `set_priority` reads a
+bare date. A capture-only key may dismiss a proposed item but not confirm it,
+directly or by reopening it (`CONFIRM_NOT_YOURS`). 117 replaces 116's
+`ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
+whose capture rule now admits an open item the key owns, and redefines
+`ob1_priority_actor` on `ob1_actor_maker`, the maker reader the item writers
+share (its answers as 116's); `ob1_priority_item_exists` is PL/pgSQL now, so a
+role granted the priority group at 116 reaches `open_items` only for an item of
+kind `item`. `open_item_history`
+reads one item, every event and every proposal. Each writer raises (0A000) above
+READ COMMITTED and takes an advisory lock on its item, then its projection row.
+An item's text, owner and reasons may hold personal data: `forget_thought`
+(SMD-1723) has to reach the items read from a forgotten thought. The **items**
+grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
+and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
+REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
+
+Migration 118 releases a closed ticket's claims (SMD-3600). Without it, a claim
+whose holder merged and never released stayed on every read naming the ticket
+(SMD-3599's `claimed` label shows lapsed claims never released).
+`release_closed_ticket_claims(p_run, p_dry_run, p_actor)` ends every unreleased
+claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose
+head in `ob1_ticket_head` has a settled status type (`node_settled_types()`:
+completed, canceled, duplicate) and is an importer's row (`metadata.source` is
+`linear`, which the server refuses to every key: capture_thought and
+update_thought's patch answer `REFUSED_SOURCE_RESERVED`, so a key's own thought
+with an `issue` and a `status_type` releases nothing). A write key can still
+make a ticket read closed by editing the board's own rows (patching one's
+ticket keys, or retiring an open head over an older closed board row: a delete,
+or a `supersedes` pointing at it), as it
+can already mislabel `moved`; board-sync writes the board's status back when
+the ticket next moves. A claim made after the ticket closed is
+released too, and a ticket that reopens brings none back. Each release is stamped
+from the call's envelope, with the reason `<issue> closed: <status>
+(<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
+It takes each ticket's lock in key order under READ COMMITTED (0A000 above it),
+as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run` and
+`--only` included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
+function so held, and granted by the **closedclaims** group (EXECUTE on the
+function, SELECT and UPDATE on `work_claims`); the server never calls it. A
+plain `migrate.ts --grant <role>` issues every group, this one included: grant a
+server's role by `--groups` to keep it out. Soft: board-sync without the group
+says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
+`duplicate`), 068 and 115; a re-apply is a no-op. test-schema [106] (the tickets released and
+left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
+(onto a populated brain at 117).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2468,7 +2558,11 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups
-capture,worker,…` those alone (SMD-2289). `--groups` revokes nothing; `--exact` adds the
+capture,worker,…` those alone (SMD-2289). The full set a plain `--grant` issues
+includes **closedclaims**, the release of a closed ticket's claims that board-sync
+alone calls (118): a role granted by `--groups` without it cannot call that
+release, and one granted by a plain `--grant` can.
+`--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
@@ -2540,11 +2634,17 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
+| | `work_claims` (115) | `SELECT, UPDATE` |
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
+| | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
+| **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
+| | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2615,8 +2715,8 @@ ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
-claim work (115), and **priority** for a role whose clients state priorities
-(116). The
+claim work (115), **priority** for a role whose clients state priorities
+(116), and **items** for a role whose clients open items (117). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -6098,6 +6198,16 @@ the same rule). Comments are the corpus builder's for the retrieval eval; the bo
 mirror keeps the hand captures' shape, which had none. A Linear webhook would be
 exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
 which would call this tool's `syncIssue` with the one identifier it was told.
+
+**A closed ticket's claims (SMD-3600).** After each pass, `--dry-run` and `--only`
+included and `--audit` not, one call to migration 118's
+`release_closed_ticket_claims` ends every unreleased claim (live or lapsed) on a
+ticket whose head is this tool's row and says Done, Canceled or a Duplicate,
+and the pass prints `claims on closed tickets: released N — …`, ten named. A dry
+run's `would release` reads the brain as it stands, so a ticket the pass would
+close is not in it. A failed call fails the pass, as a failed findings post does. Asked once at start: a
+brain before 118, or a role without the **closedclaims** group, is said once, and
+the claims stay until their holders release them.
 
 **What it tells the board (SMD-2681).** The board comes in; consolidation's
 findings about it went nowhere until someone read the queue. With

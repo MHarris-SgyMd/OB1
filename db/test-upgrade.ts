@@ -709,13 +709,17 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // and fourteen functions — refusing by name without 008, 046 or 061
   // ([20bg]); 116 adds priority assertions — three tables, two refusing
   // triggers and nineteen functions — refusing by name without 008, 046, 061,
-  // 068, 082 or 115 ([20bh]) — all
+  // 068, 082 or 115 ([20bh]); 117 adds open items — three tables, four
+  // refusing triggers and twenty-nine functions, and redefines three of 116's
+  // — refusing by name without 008, 046, 061, 115 or 116 ([20bi]); 118 adds board-sync's release of a closed
+  // ticket's claims — two functions, one held from PUBLIC — refusing by name
+  // without 058, 068 or 115 ([20bj]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 87, `030 is among the last eighty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 89, `030 is among the last eighty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5280,15 +5284,118 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
          && bot.outcome === "asserted" && bot.assertion?.tier_name === "agent" && bot.winner?.maker.name === "upgrade-op",
     `applied, the file moves no thought nor audit row; an operator's High and an agent's Urgent on one thought, the operator's the winner (${op.outcome}, ${bot.assertion?.tier_name}, ${bot.winner?.maker.name})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["priority"] });
-  assert(grants.length === 4 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
+  // 117's open items join the group (SELECT on open_items and open_item_events): the statements are the group's whole list.
+  assert(grants.length === 6 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
          && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO "ob1_upgrade_probe";`
          && grants[2] === `GRANT SELECT ON priority_sources TO "ob1_upgrade_probe";`
-         && grants[3] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`,
+         && grants[3] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
+         && grants[4] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[5] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`,
     `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the116 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM priority_assertions`)[0].n);
   const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
   assert((await rows()) === before && kept === 2 && drift === 0, `a re-apply is a no-op: the thoughts as they were, both assertions kept, the projection exact (${kept}, drift ${drift})`);
+  await sql.close();
+}
+
+console.log("\n[20bi] Migration 117: onto a populated brain at the file before it — thoughts, their audit and 116's assertions standing as they were; refused by name without 116's ob1_priority_owns, nothing created; then applied: an open item opened from a thought, noted at its capture time, and a priority stated on it; the items grant group issued by --grant; a re-apply a no-op, the item, its event and the projection kept (SMD-3665)");
+{
+  const the117 = MIGRATIONS.find((f) => /^\d{3}_open_items\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the117 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "upgrade-op", via: "open-brain" };
+  const W = { ...actor, scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  for (const i of [0, 1])
+    await sql`SELECT upsert_thought(${`upgrade 117: thought ${i}`}::text, ${{ metadata: { source: "mcp", action_items: ["renew the passport"] }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`;
+  const target = String((await sql`SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1`)[0].id);
+  const capturedAt = String((await sql`SELECT created_at::text AS c FROM thoughts WHERE id = ${target}::uuid`)[0].c);
+  await sql`SELECT assert_priority('thought', ${target}, 3, p_actor => ${W}::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const assertions = async () => JSON.stringify(await sql`SELECT id, closed_at FROM priority_assertions ORDER BY seq`);
+  const table = async () => String((await sql`SELECT to_regclass('open_items')::text AS t`)[0].t ?? "");
+
+  // Without 116's ownership reader: refused by name, nothing created.
+  await sql`ALTER FUNCTION ob1_priority_owns(text, uuid) RENAME TO ob1_priority_owns_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_owns_away(text, uuid) RENAME TO ob1_priority_owns`;
+  assert(/^migration 117 needs 116 \(ob1_priority_owns\); this schema lacks it/.test(without) && (await table()) === "",
+    `without 116's ob1_priority_owns: refused by name, no table created (${without.slice(0, 80)})`);
+
+  const before = await rows(), auditBefore = await audits(), assertedBefore = await assertions();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 });
+  type Opened = { outcome: string; item: { id: string; status: string } | null };
+  const opened = ((await sql`SELECT open_item('renew the passport', p_origin_thought => ${target}::uuid, p_actor => ${W}::jsonb) AS r`)[0] as { r: Opened }).r;
+  const noted = String((await sql`SELECT noted_at::text AS c FROM open_items WHERE item_id = ${opened.item?.id ?? null}::uuid`)[0]?.c ?? "");
+  // Read before the item's own priority, which adds an assertion of its own.
+  const unmoved = (await rows()) === before && (await audits()) === auditBefore && (await assertions()) === assertedBefore;
+  const prio = ((await sql`SELECT assert_priority('item', ${opened.item?.id ?? ""}, 4, p_actor => ${W}::jsonb) AS r`)[0] as { r: { outcome: string } }).r;
+  assert(unmoved
+         && opened.outcome === "opened" && opened.item?.status === "open" && noted === capturedAt && prio.outcome === "asserted",
+    `applied, the file moves no thought, audit row or assertion; an item opened from a thought, noted at the thought's capture time, takes a priority (${unmoved}, ${opened.outcome}, ${noted === capturedAt}, ${prio.outcome})`);
+  const grants = grantStatements("ob1_upgrade_probe", { groups: ["items"] });
+  assert(grants.length === 3 && grants[0] === `GRANT SELECT, INSERT ON open_item_events TO "ob1_upgrade_probe";`
+         && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON open_items TO "ob1_upgrade_probe";`
+         && grants[2] === `GRANT SELECT, INSERT, UPDATE ON open_item_close_proposals TO "ob1_upgrade_probe";`,
+    `--grant's items group: SELECT and INSERT on the events, all four on the projection, SELECT, INSERT and UPDATE on the proposals (${grants.join("; ")})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 });
+  const kept = Number((await sql`SELECT count(*)::int AS n FROM open_item_events`)[0].n);
+  const items = Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
+  const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_item_projection_drift()`)[0].n);
+  assert((await rows()) === before && kept === 1 && items === 1 && drift === 0, `a re-apply is a no-op: the thoughts as they were, the item and its event kept, the projection exact (${kept}, ${items}, drift ${drift})`);
+  await sql.close();
+}
+
+console.log("\n[20bj] Migration 118: onto a populated brain at the file before it — thoughts, their audit and the claims standing as they were; refused by name without 115's ob1_work_claim_lock, nothing created; then applied: a closed ticket's claims released with the reason, an open ticket's kept; EXECUTE not PUBLIC's; the closedclaims group issued by --grant; a re-apply a no-op, the release still held from PUBLIC (SMD-3600)");
+{
+  const the118 = MIGRATIONS.find((f) => /^\d{3}_closed_ticket_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the118 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const board = { name: "upgrade-board", via: "sync-linear.ts" };
+  const agent = { name: "upgrade-agent", via: "open-brain" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-board', 'ingested'), ('upgrade-agent', 'agent')`;
+  const ticket = (issue: string, status: string, type: string, axis: number) =>
+    sql`SELECT upsert_thought(${`${issue} — upgrade 118\nProject: P · Status: ${status}`}::text, ${{ metadata: { source: "linear", issue, status, status_type: type, linear_updated_at: "2026-11-03T00:00:00.000Z" }, actor: board, embedding_model: OPTS.model }}::jsonb, ${vec(axis)}::vector) AS r`;
+  await ticket("SMD-9701", "Done", "completed", 0);
+  await ticket("SMD-9702", "In Progress", "started", 1);
+  for (const issue of ["SMD-9701", "SMD-9702"]) await sql`SELECT claim_work(${issue}::text, NULL, NULL, 14400, NULL, ${agent}::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const claims = async () => JSON.stringify(await sql`SELECT issue, released_at IS NULL AS open, release_reason FROM work_claims ORDER BY issue`);
+  const fn = async () => String((await sql`SELECT to_regprocedure('release_closed_ticket_claims(text, boolean, jsonb)')::text AS t`)[0].t ?? "");
+
+  // Without 115's lock: refused by name, nothing created.
+  await sql`ALTER FUNCTION ob1_work_claim_lock(text) RENAME TO ob1_work_claim_lock_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the118 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_lock_away(text) RENAME TO ob1_work_claim_lock`;
+  assert(/^migration 118 needs 115 \(ob1_work_claim_lock\); this schema lacks it/.test(without) && (await fn()) === "",
+    `without 115's ob1_work_claim_lock: refused by name, no function created (${without.slice(0, 80)})`);
+
+  const before = await rows(), auditBefore = await audits(), claimsBefore = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the118 });
+  assert((await rows()) === before && (await audits()) === auditBefore && (await claims()) === claimsBefore,
+    `applied, the file moves no thought, audit row or claim (${claimsBefore})`);
+  type Released = { outcome: string; released: { issue: string; release_reason: string; released_by: string }[] };
+  const r = ((await sql`SELECT release_closed_ticket_claims('upgrade-run', false, ${board}::jsonb) AS r`)[0] as { r: Released }).r;
+  const left = JSON.parse(await claims()) as { issue: string; open: boolean }[];
+  assert(r.outcome === "released" && r.released.length === 1 && r.released[0].issue === "SMD-9701" && r.released[0].release_reason === "SMD-9701 closed: Done (completed); upgrade-run"
+         && r.released[0].released_by === "upgrade-board" && left.find((c) => c.issue === "SMD-9702")?.open === true,
+    `the Done ticket's claim released with the reason, by the caller's key; the open ticket's kept (${JSON.stringify(r.released.map((c) => c.release_reason))})`);
+  const publicExec = async () => Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = 'release_closed_ticket_claims(text, boolean, jsonb)'::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS e`)[0].e);
+  assert(!(await publicExec()), "EXECUTE on release_closed_ticket_claims is not PUBLIC's");
+  const grants = grantStatements("ob1_upgrade_probe", { groups: ["closedclaims"] });
+  assert(grants.length === 2 && grants[0] === `GRANT EXECUTE ON FUNCTION release_closed_ticket_claims(text, boolean, jsonb) TO "ob1_upgrade_probe";`
+         && grants[1] === `GRANT SELECT, UPDATE ON work_claims TO "ob1_upgrade_probe";`,
+    `--grant's closedclaims group: EXECUTE on the release, SELECT and UPDATE on the claims (${grants.join("; ")})`);
+  const after = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the118 });
+  assert((await rows()) === before && (await claims()) === after && !(await publicExec()),
+    `a re-apply is a no-op: the thoughts and the claims as they were, EXECUTE still not PUBLIC's`);
   await sql.close();
 }
 

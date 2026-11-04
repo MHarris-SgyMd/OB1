@@ -4859,9 +4859,12 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  const unlistedFns = definersWithoutPublic.filter((f) => !listedOids.has(f.oid)).map((f) => f.sig);
-  assert(definersWithoutPublic.length === listedFns.length && unlistedFns.length === 0,
-    `every function the files REVOKEd FROM PUBLIC is in the community group, and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
+  const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
+  const lockedOids = new Set(await fnOids(lockedFns));
+  const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
+  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 1,
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 118's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -16461,7 +16464,7 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
 }
 
-console.log("\n[104] Migration 116: priority assertions — a key states how much an item matters, the maker, kind, trust and tier stamped from the envelope and the registry, never the call; the winner by tier (operator, source, agent, inferred), then newest; a maker's own statement replaced and its window closed, every statement kept; a capture-only key only on a thought it wrote, a read key never; items checked to exist, open items refused until SMD-3665; append-only but for closing; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the priority grant group, sources the operator's; a re-apply a no-op (SMD-3663)");
+console.log("\n[104] Migration 116: priority assertions — a key states how much an item matters, the maker, kind, trust and tier stamped from the envelope and the registry, never the call; the winner by tier (operator, source, agent, inferred), then newest; a maker's own statement replaced and its window closed, every statement kept; a capture-only key only on a thought it wrote, a read key never; items checked to exist, an open item among them (117); append-only but for closing; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the priority grant group, sources the operator's; a re-apply a no-op (SMD-3663)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; due_at: string | null; due_ref: { kind: string; key: string } | null; reason: string | null; inferred: boolean;
     maker: { name: string; agent_id: string | null; kind: string | null; trust: string | null; scope: string | null; source: boolean }; tier: number; tier_name: string; closed_at: string | null; close_reason: string | null; closed_by: string | null };
@@ -16645,15 +16648,15 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(readKey.code === "READ_ONLY_KEY" && readClear.code === "READ_ONLY_KEY" && unstated.code === "READ_ONLY_KEY" && unstatedClear.code === "READ_ONLY_KEY",
     `a read key may neither state nor clear a priority, and neither may an envelope stating no scope — the rule fails closed (${readKey.code}, ${readClear.code}, ${unstated.code}, ${unstatedClear.code})`);
 
-  // Items: a ticket's key normalised, an unknown one refused, an entity, an open item refused until SMD-3665.
+  // Items: a ticket's key normalised, an unknown one refused, an entity, an unknown open item refused (117's table: [105] states one on an open item).
   const ticket = await put("ticket", " smd-9301 ", 3, SYNC);
   const unknownTicket = await put("ticket", "SMD-9399", 3, OP);
   const ent = await put("entity", entity.toUpperCase(), 2, OP);
   const openItem = await put("item", "11111111-2222-4333-8444-555555555555", 2, OP);
   const ghost = await put("thought", "11111111-2222-4333-8444-555555555555", 2, OP);
   assert(ticket.outcome === "asserted" && ticket.assertion?.item.key === "SMD-9301" && ticket.assertion?.tier_name === "source" && unknownTicket.code === "ITEM_NOT_FOUND"
-         && ent.assertion?.item.key === entity && openItem.code === "ITEM_NOT_FOUND" && /SMD-3665/.test(openItem.message ?? "") && ghost.code === "ITEM_NOT_FOUND",
-    `a ticket's key upper-cased and trimmed, the source's statement at tier 2; an unknown ticket, an open item (until SMD-3665) and a missing thought refused ITEM_NOT_FOUND; an entity by its id lower-cased (${ticket.assertion?.item.key}, ${openItem.message})`);
+         && ent.assertion?.item.key === entity && openItem.code === "ITEM_NOT_FOUND" && /^no open item 11111111/.test(openItem.message ?? "") && ghost.code === "ITEM_NOT_FOUND",
+    `a ticket's key upper-cased and trimmed, the source's statement at tier 2; an unknown ticket, an unknown open item and a missing thought refused ITEM_NOT_FOUND; an entity by its id lower-cased (${ticket.assertion?.item.key}, ${openItem.message})`);
 
   // Arguments: off the scale, a malformed item, a half or self due reference, a reason too long — raised; a due reference kept; a reason cleaned.
   const bad = await Promise.all([put("thought", opThought, 6, OP), put("thought", opThought, -1, OP), put("thought", opThought, null, OP), put("folder", opThought, 2, OP),
@@ -16780,6 +16783,567 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(after === before && ones.every((n) => n === 1) && (await drift()) === 0, `116 applied again changes nothing: ${after} assertions stand, one of each call, the projection exact (${ones.join(",")})`);
 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late', 'prio-late2', 'prio-fresh')`);
+}
+
+console.log("\n[105] Migration 117: open items — an item opened from a thought, noted at its capture time; proposed, open, done and dropped, never back to proposed; every change an event stamped from the envelope; the same thought and text, or plugin row, again the item that is there; a plugin row's plugin from the envelope alone; a proposed close accepted only by another key, settling mooting the rest; a capture-only key on its own items alone, one answer whether the item exists or not; a priority on an open item; append-only and decided once; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the items grant group; a re-apply a no-op (SMD-3665)");
+{
+  type Item = { id: string; status: string; text: string; owner: string | null; due_at: string | null; origin_thought_id: string | null; plugin: { name: string; row: string } | null;
+    noted_at: string; opened_at: string; opened_by: { name: string; agent_id: string | null; trust: string | null; scope: string | null }; changed_at: string; closed_at: string | null };
+  type Event = { id: string; event: string; status: string; text: string; owner: string | null; due_at: string | null; reason: string | null; proposal_id: string | null; maker: { name: string; kind: string | null; trust: string | null } };
+  type Proposal = { id: string; item_id: string; status: string; evidence_thought_id: string | null; label: string | null; decision: string | null; decider: { name: string } | null; proposer: { name: string } };
+  type Answer = { outcome: string; code: string | null; message: string | null; item?: Item | null; event?: Event | null; proposal?: Proposal | null; mooted?: number };
+  const file = files.find((f) => /^\d{3}_open_items\.sql$/.test(f)) ?? "no NNN_open_items.sql";
+  const src = readFileSync(join(MIGRATIONS, file), "utf8");
+  // [104] re-applied 116 last, which put back 116's assert_priority: 117 is applied again first, as a brain at 117 has it.
+  await reapply(file);
+  const W = { scope: "write" };
+  const OP = { name: "item-op", ...W }, BOT = { name: "item-bot", ...W };
+  const READ = { name: "item-read", scope: "read" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-op', 'operator'), ('item-bot', 'agent'), ('item-cap', 'agent'), ('item-cap2', 'agent'), ('item-read', 'agent')`);
+  const agentOf = async (label: string) => (await db.query<{ id: string | null }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).rows[0]?.id ?? null;
+  const CAP = { name: "item-cap", scope: "capture", agent_id: await agentOf("item-cap") };
+  const CAP2 = { name: "item-cap2", scope: "capture", agent_id: await agentOf("item-cap2") };
+  // A raise is an outcome here, named, so a broken rule fails its own row rather than ending the suite.
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: String((e as { code?: string }).code ?? "?"), message: null }; }
+  };
+  const j = (o: object | null) => (o === null ? null : JSON.stringify(o));
+  const open = (text: string, actor: object | null, o: { owner?: string; due_at?: string; thought?: string; row?: string; proposed?: boolean } = {}) =>
+    ans(`SELECT open_item($1, $2, $3, $4::uuid, $5, $6, $7::jsonb) AS r`, [text, o.owner ?? null, o.due_at ?? null, o.thought ?? null, o.row ?? null, o.proposed ?? false, j(actor)]);
+  const update = (item: string, changes: object, actor: object) => ans(`SELECT update_item($1, $2::jsonb, $3::jsonb) AS r`, [item, JSON.stringify(changes), j(actor)]);
+  const status = (item: string, s: string, actor: object, reason: string | null = null) => ans(`SELECT set_item_status($1, $2, $3, $4::jsonb) AS r`, [item, s, reason, j(actor)]);
+  const propose = (item: string, actor: object, o: { status?: string; evidence?: string; label?: string; reason?: string } = {}) =>
+    ans(`SELECT propose_item_close($1, $2, $3::uuid, $4, $5, $6::jsonb) AS r`, [item, o.status ?? "done", o.evidence ?? null, o.label ?? null, o.reason ?? null, j(actor)]);
+  const decide = (proposal: string, accept: boolean, actor: object, reason: string | null = null) => ans(`SELECT decide_item_close($1::uuid, $2, $3, $4::jsonb) AS r`, [proposal, accept, reason, j(actor)]);
+  const history = async (item: string) => (await db.query<{ r: { item: Item | null; events: Event[]; proposals: Proposal[] } }>(`SELECT open_item_history($1) AS r`, [item])).rows[0].r;
+  const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_item_projection_drift()`)).rows[0].n;
+  const events = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM open_item_events`)).rows[0].n;
+  const thoughtBy = async (who: string, content: string) => {
+    let id = "";
+    const agent = await agentOf(who);
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(agent ? { name: who, agent_id: agent } : { name: who })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
+    });
+    return id;
+  };
+  const createdAt = async (id: string) => (await db.query<{ t: string }>(`SELECT to_jsonb(created_at) #>> '{}' AS t FROM thoughts WHERE id = $1::uuid`, [id])).rows[0].t;
+  const GHOST = "11111111-2222-4333-8444-555555555555";
+
+  // The shape: three tables and their comments, the unique indexes, the triggers, the sentinels.
+  const comments = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass(t), 'pg_class') AS c FROM unnest(ARRAY['open_item_events', 'open_items', 'open_item_close_proposals']) t`)).rows.map((r) => r.c ?? "");
+  const triggers = (await db.query<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE tgrelid IN ('open_item_events'::regclass, 'open_item_close_proposals'::regclass) AND NOT tgisinternal ORDER BY 1`)).rows.map((r) => r.t);
+  const origin = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_origin')) AS d`)).rows[0].d ?? "";
+  const pluginIdx = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_plugin_row')) AS d`)).rows[0].d ?? "";
+  assert(comments.length === 3 && comments.every((c) => /Migration 117 \/ SMD-3665/.test(c))
+         && JSON.stringify(triggers) === JSON.stringify(["open_item_close_proposals_decided_once", "open_item_close_proposals_no_truncate", "open_item_events_append_only", "open_item_events_no_truncate"])
+         && /^CREATE UNIQUE INDEX open_items_one_per_origin ON public\.open_items USING btree \(origin_key\) WHERE \(origin_key IS NOT NULL\)$/.test(origin)
+         && /^CREATE UNIQUE INDEX open_items_one_per_plugin_row ON public\.open_items USING btree \(plugin, plugin_row\) WHERE \(plugin IS NOT NULL\)$/.test(pluginIdx)
+         && ["ob1:item-maker-from-the-envelope", "ob1:item-proposal-never-alone", "ob1:item-one-per-origin"].every((s) => src.includes(s)),
+    `three tables commented, four refusing triggers, one item per thought and text and per plugin row, the three sentinels (${triggers.join(",")})`);
+
+  // The ticket's first Verify, at the store: an item from a thought, open; a later thought proposes its close; the proposer cannot accept it; another key does, and it is done.
+  const dentist = await thoughtBy("item-op", "[105] remind me to call the dentist");
+  const opened = await open("call the dentist", OP, { thought: dentist, owner: "me" });
+  const item = opened.item?.id ?? GHOST;
+  const booked = await thoughtBy("item-op", "[105] called the dentist, booked for Tuesday");
+  const proposed = await propose(item, BOT, { evidence: booked, label: "Resolves", reason: "the later thought says it was done" });
+  const stillOpen = (await history(item)).item?.status;
+  const ownAccept = await decide(proposed.proposal?.id ?? GHOST, true, BOT);
+  const accepted = await decide(proposed.proposal?.id ?? GHOST, true, OP);
+  const h = await history(item);
+  assert(opened.outcome === "opened" && opened.item?.status === "open" && opened.item?.origin_thought_id === dentist && opened.item?.noted_at === (await createdAt(dentist))
+         && opened.event?.maker.kind === "operator" && opened.item?.opened_by.name === "item-op"
+         && proposed.outcome === "proposed" && proposed.proposal?.label === "resolves" && proposed.proposal?.evidence_thought_id === booked && stillOpen === "open"
+         && ownAccept.code === "PROPOSAL_YOURS" && accepted.outcome === "accepted" && accepted.item?.status === "done" && accepted.item?.closed_at !== null
+         && accepted.event?.proposal_id === proposed.proposal?.id && accepted.proposal?.decision === "accepted" && accepted.proposal?.decider?.name === "item-op"
+         && JSON.stringify(h.events.map((e) => `${e.event}:${e.status}`)) === JSON.stringify(["opened:open", "status:done"]) && h.proposals.length === 1,
+    `an item opened from a thought, noted at the thought's capture time, the maker stamped from the registry; a proposed close with the later thought as evidence leaves it open; its proposer may not accept it (PROPOSAL_YOURS); another key's accept closes it done with an event naming the proposal; the history holds both events and the proposal (${opened.outcome}, ${proposed.outcome}, ${stillOpen}, ${ownAccept.code}, ${accepted.outcome}, ${h.events.map((e) => e.event).join(",")})`);
+
+  // An item changed after it settled keeps the time it settled: closed_at is the settling event's, not the last event's.
+  const touched = await update(item, { owner: "the front desk" }, OP);
+  assert(touched.outcome === "updated" && touched.item?.status === "done" && touched.item?.closed_at === accepted.item?.closed_at && touched.item?.changed_at !== accepted.item?.changed_at,
+    `an item changed after it settled is still done, its closed_at the settling event's, its changed_at moved (${touched.item?.closed_at === accepted.item?.closed_at}, ${touched.item?.changed_at !== accepted.item?.changed_at})`);
+
+  // Statuses: proposed a start state alone; confirm, dismiss, reopen; the same status again unchanged; settling moots the pending proposals; a settled item takes none.
+  const prop = await open("water the ferns", OP, { proposed: true });
+  const pid = prop.item?.id ?? GHOST;
+  const backToProposed = await status(pid, "proposed", OP);
+  const confirmed = await status(pid, "open", BOT, "yes, this is mine");
+  const sameAgain = await status(pid, "open", BOT);
+  const p1 = await propose(pid, BOT, { status: "dropped" });
+  const p2 = await propose(pid, OP);
+  const p1Again = await propose(pid, BOT, { status: "dropped" });
+  const settled = await status(pid, "done", OP);
+  const afterSettle = await history(pid);
+  const onSettled = await propose(pid, BOT);
+  const decideMoot = await decide(p2.proposal?.id ?? GHOST, true, BOT);
+  const reopened = await status(pid, "open", OP);
+  const dismissed = await open("mow the lawn", OP, { proposed: true });
+  const dismissedNow = await status(dismissed.item?.id ?? GHOST, "dropped", OP, "not a real to-do");
+  assert(prop.item?.status === "proposed" && backToProposed.code === "22023" && confirmed.outcome === "changed" && confirmed.item?.status === "open" && confirmed.event?.reason === "yes, this is mine"
+         && sameAgain.outcome === "unchanged" && p1.outcome === "proposed" && p2.outcome === "proposed" && p1Again.outcome === "unchanged" && p1Again.proposal?.id === p1.proposal?.id
+         && settled.outcome === "changed" && settled.mooted === 2 && afterSettle.proposals.every((p) => p.decision === "moot" && p.decider === null)
+         && onSettled.code === "ITEM_SETTLED" && decideMoot.code === "PROPOSAL_DECIDED" && reopened.item?.status === "open" && reopened.item?.closed_at === null
+         && dismissedNow.item?.status === "dropped",
+    `an item may start proposed and never return there (raised); confirmed open, the same status again unchanged; the same proposer and evidence pending once; settling moots both pending proposals, deciding nothing; a settled item takes no proposal, a moot one no decision; a settled item reopened has no closed_at; a proposed one dismissed is dropped (${backToProposed.code}, ${settled.mooted}, ${onSettled.code}, ${decideMoot.code})`);
+
+  // The same item again: by thought and text (any case), or by plugin row — the item that is there, no event written. A plugin row's plugin from the envelope alone.
+  const before = await events();
+  const again = await open("Call The Dentist", OP, { thought: dentist });
+  const afterAgain = await events();
+  const HM = { ...OP, plugin: "home-maintenance" };
+  const task = await open("clean the gutters", HM, { row: "task-17", due_at: "2026-11-02T00:00:00Z" });
+  const taskAgain = await open("clean the gutters (renamed)", HM, { row: "task-17" });
+  const taskSame = await open("clean the gutters", HM, { row: "task-17", due_at: "2026-11-02T00:00:00Z" });
+  const otherPlugin = await open("clean the gutters", { ...OP, plugin: "family-calendar" }, { row: "task-17" });
+  const noPlugin = await open("a row with no plugin", OP, { row: "task-18" });
+  const badPlugin = await open("a row", { ...OP, plugin: "Home Maintenance" }, { row: "task-19" });
+  const pluginNoRow = await open("from a plugin, no row", HM);
+  assert(again.outcome === "unchanged" && again.item?.id === item && afterAgain === before
+         && task.outcome === "opened" && task.item?.plugin?.name === "home-maintenance" && task.item?.plugin?.row === "task-17"
+         && taskAgain.outcome === "unchanged" && taskAgain.item?.id === task.item?.id && /stands as it was, not as this call says: update_item/.test(taskAgain.message ?? "")
+         && taskSame.outcome === "unchanged" && taskSame.message === null && otherPlugin.outcome === "opened" && otherPlugin.item?.id !== task.item?.id
+         && noPlugin.code === "22023" && /needs the call to come through its plugin/.test(noPlugin.outcome) && badPlugin.code === "22023" && pluginNoRow.item?.plugin === null,
+    `the same thought and text again (another case) is the item there, no event written; a plugin row once per plugin, its plugin the envelope's; a row with no plugin in the envelope, or a malformed plugin, raises; a plugin's call with no row names no plugin (${again.outcome}, ${afterAgain - before}, ${taskAgain.outcome}, ${noPlugin.code}, ${badPlugin.code})`);
+
+  // update_item: text, owner and due time; a JSON null clears; the same values unchanged; anything else raised.
+  const tid = task.item?.id ?? GHOST;
+  const moved = await update(tid, { due_at: "2026-12-01T00:00:00Z", owner: "Sam" }, OP);
+  const cleared = await update(tid, { owner: null }, OP);
+  const same = await update(tid, { due_at: "2026-12-01T00:00:00Z" }, OP);
+  const badUpdates = await Promise.all([update(tid, {}, OP), update(tid, { status: "done" }, OP), update(tid, { text: null }, OP), update(tid, { text: "  " }, OP),
+    update(tid, { owner: 7 }, OP), update("not-a-uuid", { owner: "x" }, OP), ans(`SELECT update_item($1, '[]'::jsonb, $2::jsonb) AS r`, [tid, j(OP)])]);
+  const unknown = await update(GHOST, { owner: "x" }, OP);
+  assert(moved.outcome === "updated" && moved.item?.owner === "Sam" && moved.event?.event === "updated" && moved.event?.status === "open"
+         && cleared.item?.owner === null && cleared.item?.due_at === moved.item?.due_at && same.outcome === "unchanged"
+         && badUpdates.every((b) => b.code === "22023") && unknown.code === "ITEM_NOT_FOUND",
+    `update_item moves the due time and sets an owner, a JSON null clears the owner and keeps the rest, the same values are unchanged; no change, an unknown key, a cleared or blank text, a non-string owner, a malformed id and a non-object raise 22023; an unknown id is refused (${moved.outcome}, ${same.outcome}, ${badUpdates.map((b) => b.code).join(",")}, ${unknown.code})`);
+
+  // A capture-only key: opens items, from a thought only its own; changes only items it opened that no other key has changed since; one answer whether the item exists or not.
+  const capThought = await thoughtBy("item-cap", "[105] a capture key's to-do: book the vet");
+  const capOwn = await open("book the vet", CAP, { thought: capThought });
+  const capPlain = await open("buy dog food", CAP);
+  const capFromOther = await open("call the dentist", CAP, { thought: dentist });
+  const capFromGhost = await open("a ghost's to-do", CAP, { thought: GHOST });
+  const capUpdate = await update(capPlain.item?.id ?? GHOST, { due_at: "2026-11-10" }, CAP);
+  const capOnOther = await update(item, { owner: "x" }, CAP);
+  const capOnGhost = await update(GHOST, { owner: "x" }, CAP);
+  const capOnOtherCap = await status(capPlain.item?.id ?? GHOST, "done", CAP2);
+  const capNoId = await status(capPlain.item?.id ?? GHOST, "done", { name: "item-cap", scope: "capture" });
+  const capSeesOther = await open("Call the dentist", CAP, { thought: capThought });
+  const capAgainOther = await open("call the dentist", OP, { thought: capThought });
+  const capAgainShown = await open("call the dentist", CAP, { thought: capThought });
+  await status(capOwn.item?.id ?? GHOST, "open", OP);  // no change: the item is open already, so nothing is taken
+  const capStillOwns = await update(capOwn.item?.id ?? GHOST, { owner: "me" }, CAP);
+  await update(capOwn.item?.id ?? GHOST, { owner: "the operator" }, OP);  // taken
+  const capTaken = await update(capOwn.item?.id ?? GHOST, { owner: "me again" }, CAP);
+  const capProposeOther = await propose(item, CAP);
+  const capEvidenceOther = await propose(capPlain.item?.id ?? GHOST, CAP, { evidence: dentist });
+  assert(capOwn.outcome === "opened" && capOwn.item?.opened_by.scope === "capture" && capPlain.outcome === "opened"
+         && capFromOther.code === "ITEM_NOT_YOURS" && capFromGhost.code === "ITEM_NOT_YOURS" && capFromOther.message === capFromGhost.message
+         && capUpdate.outcome === "updated" && capOnOther.code === "ITEM_NOT_YOURS" && capOnGhost.code === "ITEM_NOT_YOURS" && capOnOther.message === capOnGhost.message
+         && capOnOtherCap.code === "ITEM_NOT_YOURS" && capNoId.code === "ITEM_NOT_YOURS" && capSeesOther.outcome === "opened"
+         && capAgainOther.outcome === "unchanged" && capAgainOther.item?.id === capSeesOther.item?.id
+         && capAgainShown.outcome === "unchanged" && capAgainShown.item?.id === capSeesOther.item?.id
+         && capStillOwns.outcome === "updated" && capTaken.code === "ITEM_NOT_YOURS" && capProposeOther.code === "ITEM_NOT_YOURS" && capEvidenceOther.code === "ITEM_NOT_YOURS",
+    `a capture key opens items, from its own thought but not another key's or one that is not there (one answer); it changes its own, but not another key's item or one that is not there (one answer), nor another capture key's, nor its own without its agent id; an item another key changed is no longer its own; it proposes no close on another's item, nor with another key's thought as evidence (${capFromOther.code}, ${capFromGhost.code}, ${capOnOther.code}, ${capOnGhost.code}, ${capNoId.code}, ${capStillOwns.outcome}, ${capTaken.code})`);
+  // A capture key whose envelope carries no agent id of its own opens no item it could never prove its own (review pass 2); an item made so by a raw write is never proved its own either.
+  const capUnproved = await open("an item opened by name alone", { name: "item-cap", scope: "capture" });
+  const capUnprovedThought = await open("from its own thought, by name alone", { name: "item-cap", scope: "capture" }, { thought: capThought });
+  const capUnprovedRow = await open("a plugin row by name alone", { name: "item-cap", scope: "capture", plugin: "home-maintenance" }, { row: "task-50" });
+  const rawUnproved = (await db.query<{ id: string }>(`SELECT gen_random_uuid()::text AS id`)).rows[0].id;
+  await db.query(`INSERT INTO open_item_events (item_id, event, status, text, noted_at, actor_name, actor_agent_id, actor_proved, actor_scope, at) VALUES ($1::uuid, 'opened', 'open', 'opened unproved', now(), 'item-cap', $2::uuid, false, 'capture', now())`, [rawUnproved, CAP.agent_id]);
+  await db.query(`SELECT * FROM ob1_rebuild_item_projection()`);
+  const capProvedLater = await update(rawUnproved, { owner: "me" }, CAP);
+  assert(capUnproved.code === "ITEM_UNATTRIBUTED" && capUnprovedThought.code === "ITEM_UNATTRIBUTED" && capUnprovedRow.outcome === "opened" && capProvedLater.code === "ITEM_NOT_YOURS",
+    `a capture key without its envelope's agent id opens no item (ITEM_UNATTRIBUTED), from its thought or not, but a plugin row's; an opening whose id was not proved by the envelope is never the key's own (${capUnproved.code}, ${capUnprovedThought.code}, ${capUnprovedRow.outcome}, ${capProvedLater.code})`);
+  // A capture key opening what another key already opened from its thought is told it is open, and shown nothing of it.
+  const opFromCap = await open("feed the cat", OP, { thought: capThought });
+  const capSameAsOp = await open("feed the cat", CAP, { thought: capThought });
+  const capSameAsOpGhost = await decide(GHOST, true, CAP);
+  const capDecideOthers = await decide(proposed.proposal?.id ?? GHOST, false, CAP);
+  const opDecideGhost = await decide(GHOST, true, OP);
+  const opFromGhost = await open("from a thought that is not there", OP, { thought: GHOST });
+  assert(opFromCap.outcome === "opened" && capSameAsOp.outcome === "unchanged" && capSameAsOp.item === null && /exists already/.test(capSameAsOp.message ?? "")
+         && capSameAsOpGhost.code === "ITEM_NOT_YOURS" && capDecideOthers.code === "ITEM_NOT_YOURS" && capSameAsOpGhost.message === capDecideOthers.message
+         && opDecideGhost.code === "PROPOSAL_NOT_FOUND" && opFromGhost.code === "ORIGIN_NOT_FOUND",
+    `a capture key opening an item another key opened from its thought is answered unchanged and shown none of it; a proposal that is not there is ITEM_NOT_YOURS to a capture key, in the words it gets for one on another key's item, and PROPOSAL_NOT_FOUND to a write key; a write key's open from a thought that is not there is ORIGIN_NOT_FOUND (${capSameAsOp.outcome}, ${JSON.stringify(capSameAsOp.item)}, ${capSameAsOpGhost.code}, ${opDecideGhost.code})`);
+
+  // A read key, and an envelope stating no scope, change nothing.
+  const reads = await Promise.all([open("a read key's", READ), update(item, { owner: "x" }, READ), status(item, "open", READ), propose(item, READ),
+    decide(proposed.proposal?.id ?? GHOST, false, READ), open("no scope", { name: "item-bot" }), status(item, "open", { name: "item-bot" })]);
+  assert(reads.every((r) => r.code === "READ_ONLY_KEY"), `a read key may open, change, settle, propose and decide nothing, nor may an envelope stating no scope (${reads.map((r) => r.code).join(",")})`);
+
+  // A priority on an open item: a write key's on any; a capture key's on its own alone, one answer whether it exists or not; an unknown item refused.
+  const prio = (kind: string, key: string, actor: object, ref?: [string, string]) =>
+    ans(`SELECT assert_priority($1, $2, 3, NULL, NULL, $3, $4, NULL, false, $5::jsonb) AS r`, [kind, key, ref?.[0] ?? null, ref?.[1] ?? null, j(actor)]);
+  const opOnItem = await prio("item", tid.toUpperCase(), OP);
+  const opOnGhost = await prio("item", GHOST, OP);
+  const capOnOwnItem = await prio("item", capPlain.item?.id ?? GHOST, CAP);
+  const capOnOthersItem = await prio("item", tid, CAP);
+  const capOnGhostItem = await prio("item", GHOST, CAP);
+  const capRefOwnItem = await prio("thought", capThought, CAP, ["item", capPlain.item?.id ?? GHOST]);
+  const capRefOthersItem = await prio("thought", capThought, CAP, ["item", tid]);
+  assert(opOnItem.outcome === "asserted" && opOnGhost.code === "ITEM_NOT_FOUND" && /^no open item 11111111/.test(opOnGhost.message ?? "")
+         && capOnOwnItem.outcome === "asserted" && capOnOthersItem.code === "ITEM_NOT_YOURS" && capOnGhostItem.code === "ITEM_NOT_YOURS" && capOnOthersItem.message === capOnGhostItem.message
+         && capRefOwnItem.outcome === "asserted" && capRefOthersItem.code === "ITEM_NOT_YOURS",
+    `a write key states a priority on an open item (its id in any case), an unknown one refused naming it an open item; a capture key on its own open item, not another key's nor one that is not there (one answer), and a due time from its own open item alone (${opOnItem.outcome}, ${opOnGhost.message}, ${capOnOwnItem.outcome}, ${capOnOthersItem.code}, ${capOnGhostItem.code}, ${capRefOwnItem.outcome}, ${capRefOthersItem.code})`);
+
+  // A proposal made by name before the key had an agent id is still its own: its proposer may not accept it once it has one (review pass 1).
+  const lateItem = await open("[105] a late key's item", OP);
+  const lateProp = await propose(lateItem.item?.id ?? GHOST, { name: "item-late", scope: "write" });
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-late', 'agent')`);
+  const lateAccept = await decide(lateProp.proposal?.id ?? GHOST, true, { name: "item-late", scope: "write", agent_id: await agentOf("item-late") });
+  assert(lateProp.outcome === "proposed" && lateAccept.code === "PROPOSAL_YOURS",
+    `a proposal made by name before the key had an agent id is still its proposer's once it has one: its accept is PROPOSAL_YOURS (${lateProp.outcome}, ${lateAccept.code})`);
+
+  // A proposer's second proposal with the same evidence: the same words unchanged, other words a correction that withdraws the first (review pass 1).
+  const corrItem = await open("[105] an item a judge corrects itself on", OP);
+  const cid = corrItem.item?.id ?? GHOST;
+  const first = await propose(cid, BOT, { evidence: booked, status: "done", reason: "looks done" });
+  const firstAgain = await propose(cid, BOT, { evidence: booked, status: "done", reason: "looks done" });
+  const corrected = await propose(cid, BOT, { evidence: booked, status: "dropped", reason: "it was dropped, not done" });
+  const pendingNow = (await history(cid)).proposals.filter((x) => x.decision === null);
+  assert(first.outcome === "proposed" && firstAgain.outcome === "unchanged" && firstAgain.proposal?.id === first.proposal?.id
+         && corrected.outcome === "proposed" && corrected.proposal?.status === "dropped" && (corrected as { replaced?: Proposal | null }).replaced?.id === first.proposal?.id
+         && (corrected as { replaced?: Proposal | null }).replaced?.decision === "rejected" && pendingNow.length === 1 && pendingNow[0].id === corrected.proposal?.id,
+    `the same proposal again is unchanged; the same proposer and evidence with another status is a correction: the first withdrawn (rejected), one pending (${firstAgain.outcome}, ${corrected.outcome}, ${pendingNow.length})`);
+
+  // A plugin hook's principal (capture scope, no agent id) owns the items its plugin's rows stand for, and no other plugin's (review pass 1).
+  const HOOK = { name: "hook:home-maintenance", scope: "capture", plugin: "home-maintenance" };
+  const hooked = await open("[105] replace the furnace filter", HOOK, { row: "task-40", due_at: "2026-11-01T00:00:00Z" });
+  const hid = hooked.item?.id ?? GHOST;
+  const hookMoves = await update(hid, { due_at: "2027-02-01T00:00:00Z" }, HOOK);
+  const hookPrio = await ans(`SELECT assert_priority('item', $1, 2, p_actor => $2::jsonb) AS r`, [hid, j(HOOK)]);
+  const otherHook = await update(hid, { owner: "x" }, { name: "hook:family-calendar", scope: "capture", plugin: "family-calendar" });
+  const badHookPrio = await ans(`SELECT assert_priority('item', $1, 2, p_actor => $2::jsonb) AS r`, [hid, j({ ...HOOK, plugin: "Home Maintenance" })]);
+  const hookDone = await status(hid, "done", HOOK, "the log row says it was replaced");
+  assert(hooked.outcome === "opened" && hookMoves.outcome === "updated" && hookPrio.outcome === "asserted" && otherHook.code === "ITEM_NOT_YOURS" && hookDone.item?.status === "done"
+         && badHookPrio.code === "22023",
+    `a plugin hook (capture scope, no agent id) moves the due time of, states a priority on and settles the item its plugin's row stands for; another plugin's hook may not touch it (${hookMoves.outcome}, ${hookPrio.outcome}, ${otherHook.code}, ${hookDone.outcome})`);
+
+  // A plugin row is its item's identity: opened with a thought another item came from, it is its own item, and found again without the thought (review pass 1).
+  const passport = await thoughtBy("item-op", "[105] I need to renew the passport");
+  const fromThought = await open("renew the passport", OP, { thought: passport });
+  const fromRow = await open("renew the passport", HM, { thought: passport, row: "task-41" });
+  const rowAgain = await open("renew the passport", HM, { row: "task-41" });
+  assert(fromThought.outcome === "opened" && fromRow.outcome === "opened" && fromRow.item?.id !== fromThought.item?.id && fromRow.item?.origin_thought_id === passport
+         && rowAgain.outcome === "unchanged" && rowAgain.item?.id === fromRow.item?.id,
+    `a plugin row opened with a thought another item came from is an item of its own, its thought kept, and its next sync without the thought finds it (${fromRow.outcome}, ${rowAgain.outcome})`);
+
+  // Due times: one Postgres can't read, or an infinite one, raise 22023 (review pass 1).
+  const dues = await Promise.all([update(tid, { due_at: "next tuesday" }, OP), update(tid, { due_at: "infinity" }, OP), open("[105] never due", OP, { due_at: "infinity" }),
+    update(tid, { due_at: "epoch" }, OP), update(tid, { due_at: " tomorrow" }, OP), update(tid, { due_at: "now" }, OP)]);
+  assert(dues.every((d) => d.code === "22023"), `a due time that is no time, an infinite one, or one of Postgres's words for one (epoch, tomorrow, now), raises 22023 from update_item and open_item (${dues.map((d) => d.code).join(",")})`);
+
+  // A proposer whose call carries no agent id (its registry label renamed, so its name resolves to none) is still its proposal's proposer, by its name (review pass 3).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-ren', 'agent')`);
+  const renItem = await open("[105] an item a renamed key proposes on", OP);
+  const renProp = await propose(renItem.item?.id ?? GHOST, { name: "item-ren", scope: "write", agent_id: await agentOf("item-ren") });
+  await db.exec(`UPDATE ob1_agents SET label = 'item-ren-renamed' WHERE label = 'item-ren'`);
+  const renAccept = await decide(renProp.proposal?.id ?? GHOST, true, { name: "item-ren", scope: "write" });
+  assert(renProp.outcome === "proposed" && renAccept.code === "PROPOSAL_YOURS",
+    `a proposer whose later call carries no agent id is matched by its name: its accept is PROPOSAL_YOURS (${renProp.outcome}, ${renAccept.code})`);
+
+  // A key given a renamed key's old name does not withdraw that key's proposal: a correction withdraws only the proposer's own, by 116's maker rule (review pass 5).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-old', 'agent')`);
+  const namesakeItem = await open("[105] an item two keys of one name propose on", OP);
+  const oldProp = await propose(namesakeItem.item?.id ?? GHOST, { name: "item-old", scope: "write", agent_id: await agentOf("item-old") }, { evidence: booked, status: "done" });
+  await db.exec(`UPDATE ob1_agents SET label = 'item-old-renamed' WHERE label = 'item-old'`);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-old', 'agent')`);
+  const newProp = await propose(namesakeItem.item?.id ?? GHOST, { name: "item-old", scope: "write", agent_id: await agentOf("item-old") }, { evidence: booked, status: "dropped" });
+  const bothPending = (await history(namesakeItem.item?.id ?? GHOST)).proposals.filter((x) => x.decision === null).length;
+  assert(oldProp.outcome === "proposed" && newProp.outcome === "proposed" && (newProp as { replaced?: Proposal | null }).replaced === null && bothPending === 2,
+    `a new key given a renamed key's old name proposes beside that key's proposal and withdraws none of it (${newProp.outcome}, ${JSON.stringify((newProp as { replaced?: Proposal | null }).replaced)}, ${bothPending})`);
+
+  // A capture-only key may dismiss its own proposed item, never confirm it (review pass 3).
+  const capProposed = await open("[105] the extractor's guess", CAP, { proposed: true });
+  const capConfirm = await status(capProposed.item?.id ?? GHOST, "open", CAP);
+  const capDismiss = await status(capProposed.item?.id ?? GHOST, "dropped", CAP);
+  const capReopen = await status(capProposed.item?.id ?? GHOST, "open", CAP);
+  const capOpened = await open("[105] a capture key's own open item", CAP);
+  await status(capOpened.item?.id ?? GHOST, "done", CAP);
+  const capReopenOwn = await status(capOpened.item?.id ?? GHOST, "open", CAP);
+  assert(capProposed.item?.status === "proposed" && capConfirm.code === "CONFIRM_NOT_YOURS" && capDismiss.outcome === "changed" && capDismiss.item?.status === "dropped"
+         && capReopen.code === "CONFIRM_NOT_YOURS" && capReopenOwn.outcome === "changed",
+    `a capture key's proposed item is not confirmed by it (CONFIRM_NOT_YOURS), nor by dismissing then reopening it (review pass 4), but may be dismissed; an item it opened open it may settle and reopen (${capConfirm.code}, ${capDismiss.outcome}, ${capReopen.code}, ${capReopenOwn.outcome})`);
+
+  // Due times are ISO 8601 alone, through both writers: a relative word anywhere in the text raises (review pass 3); a date, and a time with or without an offset, are kept.
+  const isoBad = await Promise.all([update(tid, { due_at: "2026-11-05 17:00 tomorrow" }, OP), update(tid, { due_at: "17:00 tomorrow" }, OP), open("[105] due now", OP, { due_at: "now" }),
+    open("[105] due a date and a word", OP, { due_at: "2027-03-01 today" })]);
+  const isoGood = await Promise.all([update(tid, { due_at: "2027-03-01" }, OP), update(tid, { due_at: "2027-03-01T17:00:00+01:00" }, OP), open("[105] due a time", OP, { due_at: "2027-03-02 09:30Z" })]);
+  assert(isoBad.every((d) => d.code === "22023") && isoGood.every((d) => d.outcome === "updated" || d.outcome === "opened") && isoGood[1].item?.due_at === "2027-03-01T16:00:00+00:00",
+    `a due time with a relative word anywhere raises 22023 from both writers; a date, a time with an offset and one with Z are kept, the offset honoured (${isoBad.map((d) => d.code).join(",")}; ${isoGood.map((d) => d.outcome).join(",")}, ${isoGood[1].item?.due_at})`);
+
+  // A due time without an offset is UTC whatever the session's time zone, as set_priority reads a bare date (review pass 4).
+  let nyEpoch = -1;
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL TimeZone = 'America/New_York'`);
+    await tx.query(`SELECT update_item($1, '{"due_at": "2027-04-01"}'::jsonb, $2::jsonb)`, [tid, j(OP)]);
+    nyEpoch = Number((await tx.query<{ e: string }>(`SELECT extract(epoch FROM due_at)::text AS e FROM open_items WHERE item_id = $1::uuid`, [tid])).rows[0].e);
+  });
+  assert(nyEpoch === Date.UTC(2027, 3, 1) / 1000, `a bare date under a New York session is the start of that day in UTC (${nyEpoch})`);
+
+  // An item found by its thought and text is the opening's text: the source re-sending it after an edit is not told to undo the edit (review pass 4).
+  await update(fromThought.item?.id ?? GHOST, { text: "renew the passport by May" }, OP);
+  const resent = await open("renew the passport", OP, { thought: passport });
+  assert(resent.outcome === "unchanged" && resent.item?.id === fromThought.item?.id && resent.message === null && resent.item?.text === "renew the passport by May",
+    `the opening's text re-sent after the item's text was edited is the same item, unchanged, with no word of a difference (${resent.outcome}, ${JSON.stringify(resent.message)})`);
+
+  // Append-only events; proposals decided once — for the owner too.
+  const anyEvent = h.events[0].id;
+  const edits = await Promise.all([
+    raised(`UPDATE open_item_events SET text = 'edited' WHERE id = $1::uuid`, [anyEvent]),
+    raised(`DELETE FROM open_item_events WHERE id = $1::uuid`, [anyEvent]),
+    raised(`TRUNCATE open_item_events`)]);
+  const pending = await propose(tid, BOT, { reason: "the gutters are clean" });
+  const propEdits = await Promise.all([
+    raised(`UPDATE open_item_close_proposals SET reason = 'edited' WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`UPDATE open_item_close_proposals SET decision = 'rejected', decided_at = now(), decider_name = 'x', status = 'dropped' WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`UPDATE open_item_close_proposals SET decision = NULL, decided_at = NULL, decider_name = NULL, decider_agent_id = NULL WHERE id = $1::uuid`, [proposed.proposal?.id ?? GHOST]),
+    raised(`DELETE FROM open_item_close_proposals WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`TRUNCATE open_item_close_proposals`)]);
+  const rejected = await decide(pending.proposal?.id ?? GHOST, false, BOT, "withdrawn: not yet");
+  assert(edits.every((e) => e.code === "23001" && /append-only/.test(e.message)) && propEdits.every((e) => e.code === "23001")
+         && rejected.outcome === "rejected" && rejected.proposal?.decision === "rejected" && rejected.item?.status === "open",
+    `open_item_events refuses an edit, a DELETE and a TRUNCATE, naming itself append-only; a proposal refuses an edit, a decision that edits as it decides, an undecision, a DELETE and a TRUNCATE; its proposer may withdraw it (rejected), the item untouched (${edits.map((e) => e.code).join(",")}; ${propEdits.map((e) => e.code).join(",")}; ${rejected.outcome})`);
+
+  // The projection: exact after every call; a raw event or a raw row seen by the drift check and repaired by the rebuild.
+  const exact = await drift();
+  await db.query(`INSERT INTO open_item_events (item_id, event, status, text, actor_name, actor_proved, at) VALUES ($1::uuid, 'status', 'done', 'clean the gutters', 'raw-writer', false, now())`, [tid]);
+  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq) VALUES ($1::uuid, 'open', 'nobody opened me', now(), now(), 'raw-writer', now(), 0)`, [GHOST]);
+  const behind = await drift();
+  const rebuilt = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_item_projection()`)).rows[0];
+  const again2 = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_item_projection()`)).rows[0];
+  const repaired = (await history(tid)).item;
+  assert(exact === 0 && behind === 2 && rebuilt.written === 1 && rebuilt.deleted === 1 && again2.written === 0 && again2.deleted === 0 && (await drift()) === 0
+         && repaired?.status === "done" && repaired?.closed_at !== null && (await history(GHOST)).item === null,
+    `the projection is exact after every call; a raw event and a raw row with no event leave it wrong, the drift check names both, the rebuild writes one and removes the other, a second counting nothing (${exact}, ${behind}, ${JSON.stringify(rebuilt)}, ${JSON.stringify(again2)})`);
+
+  // No maker, and above READ COMMITTED: raised. A history of a malformed id raised; of an unknown one, empty.
+  const nobody = await open("nobody's", null);
+  let rr = { code: "" };
+  try { await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(`SELECT open_item('x', p_actor => $1::jsonb)`, [j(OP)]); }); }
+  catch (e) { rr = { code: String((e as { code?: string }).code ?? "?") }; }
+  const badHistory = await raised(`SELECT open_item_history('nope')`);
+  const ghostHistory = await history(GHOST);
+  const noText = await open("   ", OP);
+  assert(nobody.code === "42501" && rr.code === "0A000" && badHistory.code === "22023" && ghostHistory.item === null && ghostHistory.events.length === 0 && noText.code === "22023",
+    `no envelope naming a maker raises 42501; a transaction above READ COMMITTED raises 0A000; a malformed id's history raises, an unknown one's is empty; a blank text raises (${nobody.code}, ${rr.code}, ${badHistory.code}, ${noText.code})`);
+
+  // The items grant group: with it a role opens, changes, settles, proposes, decides and reads; it cannot delete an event; without it, refused naming the table.
+  const ROLE = "ob1_test_items";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "items"] })]) await db.exec(st);
+  const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
+    try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleUse = await asRole(async (tx) => {
+    const one = async (sql: string, params: unknown[]) => (await tx.query<{ r: Answer }>(sql, params)).rows[0].r;
+    const o = await one(`SELECT open_item('a role''s item', p_actor => $1::jsonb) AS r`, [j(BOT)]);
+    const id = o.item?.id ?? GHOST;
+    await one(`SELECT update_item($1, '{"owner": "Ada"}'::jsonb, $2::jsonb) AS r`, [id, j(BOT)]);
+    const p = await one(`SELECT propose_item_close($1, p_actor => $2::jsonb) AS r`, [id, j(BOT)]);
+    const d = await one(`SELECT decide_item_close($1::uuid, true, p_actor => $2::jsonb) AS r`, [p.proposal?.id ?? GHOST, j(OP)]);
+    const s = await one(`SELECT set_item_status($1, 'open', p_actor => $2::jsonb) AS r`, [id, j(OP)]);
+    await tx.query(`SELECT open_item_history($1)`, [id]);
+    return `${o.outcome},${d.outcome},${s.outcome}`;
+  });
+  const roleDelete = await asRole((tx) => tx.query(`DELETE FROM open_item_events WHERE false`));
+  await db.exec(`REVOKE ALL ON open_item_events FROM ${ROLE}`);
+  const roleWithout = await asRole((tx) => tx.query(`SELECT open_item('refused', p_actor => $1::jsonb)`, [j(BOT)]));
+  assert(roleUse.code === "" && roleUse.r === "opened,accepted,changed" && roleDelete.code === "42501"
+         && roleWithout.code === "42501" && /permission denied for table open_item_events/.test(roleWithout.message ?? ""),
+    `a role granted capture, server and items opens, changes, proposes, decides, reopens and reads an item; it cannot DELETE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleDelete.code}, ${roleWithout.message?.slice(0, 60)})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // A role with the priority group and not the items group: a capture key's priority on its own thought and its own open item (review pass 1: a row lock on open_items needed UPDATE, which only the items group grants).
+  const PROLE = "ob1_test_items_priority";
+  await db.exec(`CREATE ROLE ${PROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${PROLE}`, ...grantStatements(PROLE, { groups: ["capture", "server", "priority"] })]) await db.exec(st);
+  const capFresh = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role without the items group");
+  let pRole: { code: string; r?: string; message?: string };
+  try {
+    let r = "";
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${PROLE}`);
+      const onThought = (await tx.query<{ r: Answer }>(`SELECT assert_priority('thought', $1, 3, p_actor => $2::jsonb) AS r`, [capFresh, j(CAP)])).rows[0].r;
+      const onItem = (await tx.query<{ r: Answer }>(`SELECT assert_priority('item', $1, 4, p_actor => $2::jsonb) AS r`, [capPlain.item?.id ?? GHOST, j(CAP)])).rows[0].r;  // 4: its 3 stands already
+      r = `${onThought.outcome},${onItem.outcome}`;
+    });
+    pRole = { code: "", r };
+  } catch (e) { pRole = { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  assert(pRole.code === "" && pRole.r === "asserted,asserted",
+    `a role granted capture, server and priority, without items, states a capture key's priority on its own thought and its own open item (${JSON.stringify(pRole)})`);
+  await db.exec(`DROP OWNED BY ${PROLE}; DROP ROLE ${PROLE}`);
+
+  // A role granted the priority group as 116 listed it, not re-granted after 117: every priority call it made still answers; only an item of kind item reaches open_items (review pass 2).
+  const OLDROLE = "ob1_test_priority_at_116";
+  await db.exec(`CREATE ROLE ${OLDROLE} NOLOGIN`);
+  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON open_item/.test(st));
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${OLDROLE}`, ...grantStatements(OLDROLE, { groups: ["capture", "server"] }), ...at116]) await db.exec(st);
+  const capOld = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role granted at 116");
+  const oldUse = async (sql: string, params: unknown[]) => {
+    try { let r = ""; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${OLDROLE}`); r = JSON.stringify((await tx.query(sql, params)).rows[0]); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), r: (e as Error).message.split("\n")[0] }; }
+  };
+  const oldWrite = await oldUse(`SELECT assert_priority('thought', $1, 2, p_actor => $2::jsonb)->>'outcome' AS o`, [dentist, j(OP)]);
+  const oldCap = await oldUse(`SELECT assert_priority('thought', $1, 2, p_actor => $2::jsonb)->>'outcome' AS o`, [capOld, j(CAP)]);
+  const oldClear = await oldUse(`SELECT clear_priority('thought', $1, $2::jsonb)->>'outcome' AS o`, [dentist, j(OP)]);
+  const oldHistory = await oldUse(`SELECT jsonb_array_length(priority_history('thought', $1)) AS n, ob1_priority_item_exists('thought', $1) AS e`, [dentist]);
+  const oldItem = await oldUse(`SELECT assert_priority('item', $1, 2, p_actor => $2::jsonb)->>'outcome' AS o`, [tid, j(OP)]);
+  assert(at116.length === 4 && oldWrite.r === '{"o":"asserted"}' && oldCap.r === '{"o":"asserted"}' && oldClear.r === '{"o":"cleared"}' && oldHistory.code === ""
+         && oldItem.code === "42501" && /permission denied for table open_items/.test(oldItem.r),
+    `a role granted the priority group as 116 listed it, not re-granted: a write key's and a capture key's priority on a thought, a clear and a history answer; an item of kind item alone is refused, naming open_items (${JSON.stringify({ oldWrite, oldCap, oldClear, oldHistory, oldItem })})`);
+  await db.exec(`DROP OWNED BY ${OLDROLE}; DROP ROLE ${OLDROLE}`);
+
+  // Re-applied: the items, their events and proposals stand, one of each call, the projection exact.
+  const counts = async () => JSON.stringify((await db.query(`SELECT (SELECT count(*) FROM open_item_events) AS e, (SELECT count(*) FROM open_items) AS i, (SELECT count(*) FROM open_item_close_proposals) AS p`)).rows);
+  const beforeRe = await counts();
+  await reapply(file);
+  const afterRe = await counts();
+  const ones = await Promise.all(["open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "open_item_history", "assert_priority"].map(functionsNamed));
+  assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
+
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late', 'item-ren-renamed', 'item-old', 'item-old-renamed')`);
+}
+
+console.log("\n[106] Migration 118: a closed ticket's claims released — every unreleased claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose head is an importer's row with a settled status type (Done, Canceled, Duplicate), stamped from the envelope with the status and the run; an open ticket's, a ticket without a head and one whose head a key wrote kept; a claim made after the close released at the next call, a reopen bringing none back; the dry run writing nothing; refusals by SQLSTATE; EXECUTE the closedclaims group's, not PUBLIC's; a re-apply a no-op (SMD-3600)");
+{
+  type Claim = { id: string; issue: string; piece: string | null; holder: string; state: string; released_by: string | null; released_by_kind: string | null; release_reason: string | null; ticket_status: string; ticket_status_type: string };
+  type Answer = { outcome: string; released: Claim[] };
+  const file = files.find((f) => /^\d{3}_closed_ticket_claims\.sql$/.test(f)) ?? "no NNN_closed_ticket_claims.sql";
+  const BOARD = { name: "closed-board", via: "sync-linear.ts" }, AGENT = { name: "closed-agent" }, OTHER = { name: "closed-other" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('closed-board', 'ingested'), ('closed-agent', 'agent'), ('closed-other', 'agent')`);
+  const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
+  // A ticket row as board-sync writes one (source linear), or as a key would (the server stamps its own source).
+  const ticket = async (issue: string, status: string, type: string, source = "linear", synced = "2026-11-03T00:00:00.000Z") =>
+    (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`,
+      [`${issue} — [106] ${status} ${source} ${synced}`, JSON.stringify({ source, issue, status, status_type: type, linear_updated_at: synced })])).rows[0].id;
+  const move = (id: string, status: string, type: string) =>
+    db.query(`UPDATE thoughts SET metadata = metadata || jsonb_build_object('status', $2::text, 'status_type', $3::text) WHERE id = $1::uuid`, [id, status, type]);
+  const claim = async (issue: string, actor: object, piece: string | null = null, lease = 14400) =>
+    (await db.query<{ r: { outcome: string; claim: { id: string } | null; token: string | null } }>(`SELECT claim_work($1, $2, NULL, $3, NULL, $4::jsonb) AS r`, [issue, piece, lease, JSON.stringify(actor)])).rows[0].r;
+  const release = async (dry = false, run = "sync-linear.ts@2026-11-03T12:00:00.000Z", actor: object | null = BOARD) =>
+    (await db.query<{ r: Answer }>(`SELECT release_closed_ticket_claims($1, $2, $3::jsonb) AS r`, [run, dry, actor === null ? null : JSON.stringify(actor)])).rows[0].r;
+  const open = async (issue: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE issue = $1 AND released_at IS NULL`, [issue])).rows[0].n;
+  const unreleased = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+
+  // SMD-9801 Done: a lapsed whole-ticket claim (a lapsed claim covers nothing), then two pieces under two keys, and one its holder released.
+  const done = await ticket("SMD-9801", "Done", "completed");
+  const whole = await claim("SMD-9801", AGENT, null, 60);
+  await db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid`, [whole.claim!.id]);
+  const pr1 = await claim("SMD-9801", AGENT, "PR 1");
+  const pr2 = await claim("SMD-9801", OTHER, "PR 2");
+  const pr3 = await claim("SMD-9801", OTHER, "PR 3");
+  await db.query(`SELECT release_work_claim($1::uuid, $2, 'merged', false, $3::jsonb)`, [pr3.claim!.id, pr3.token, JSON.stringify(OTHER)]);
+  await ticket("SMD-9802", "Canceled", "canceled");
+  await claim("SMD-9802", AGENT);
+  await ticket("SMD-9803", "Duplicate", "duplicate");
+  await claim("SMD-9803", OTHER);
+  await ticket("SMD-9804", "In Progress", "started");
+  await claim("SMD-9804", AGENT);
+  // A key's own thought saying SMD-9805 is Done is no importer's row: the ticket is left alone, even as its head.
+  await ticket("SMD-9805", "Done", "completed", "mcp");
+  await claim("SMD-9805", AGENT);
+  // SMD-9806 has a board row, Done, but a key's newer-synced row is its head: left alone too.
+  await ticket("SMD-9806", "Done", "completed");
+  await ticket("SMD-9806", "Done", "completed", "mcp", "2027-01-01T00:00:00.000Z");
+  await claim("SMD-9806", AGENT);
+  // SMD-9807 has no row at all.
+  await claim("SMD-9807", AGENT);
+  assert([whole, pr1, pr2, pr3].every((c) => c.outcome === "claimed"), `the fixture's claims are made (${[whole, pr1, pr2, pr3].map((c) => c.outcome).join(", ")})`);
+
+  // The dry run: the same claims, as they stand, nothing written.
+  const before = await unreleased();
+  const dry = await release(true);
+  const said = (r: Answer) => r.released.map((c) => `${c.issue}/${c.piece}/${c.state}/${c.ticket_status}/${c.ticket_status_type}`);
+  assert(dry.outcome === "dry_run" && JSON.stringify(said(dry)) === JSON.stringify(["SMD-9801/null/lapsed/Done/completed", "SMD-9801/PR 1/live/Done/completed", "SMD-9801/PR 2/live/Done/completed", "SMD-9802/null/live/Canceled/canceled", "SMD-9803/null/live/Duplicate/duplicate"])
+         && dry.released.every((c) => c.released_by === null && !("token" in c) && !("token_hash" in c)) && (await unreleased()) === before,
+    `a dry run lists every unreleased claim on the Done, Canceled and Duplicate tickets — the lapsed whole ticket and both pieces — by ticket and piece, with the ticket's status, no token, and writes nothing (${JSON.stringify(said(dry))})`);
+
+  // The release: the same five, each stamped from the envelope with the status and the run.
+  const r = await release();
+  const reasons = r.released.map((c) => c.release_reason);
+  const work = (x: Answer) => JSON.stringify(x.released.map((c) => c.id));
+  assert(r.outcome === "released" && work(r) === work(dry)
+         && r.released.every((c) => c.state === "released" && c.released_by === "closed-board" && c.released_by_kind === "ingested")
+         && JSON.stringify(reasons) === JSON.stringify([
+           "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9801 closed: Done (completed); sync-linear.ts@2026-11-03T12:00:00.000Z",
+           "SMD-9802 closed: Canceled (canceled); sync-linear.ts@2026-11-03T12:00:00.000Z", "SMD-9803 closed: Duplicate (duplicate); sync-linear.ts@2026-11-03T12:00:00.000Z"]),
+    `the release ends the same five claims, each released by the caller's key and kind, the reason naming the ticket, its status, its type and the run (${JSON.stringify(reasons)})`);
+  const kept = await Promise.all(["SMD-9804", "SMD-9805", "SMD-9806", "SMD-9807"].map(open));
+  const pr3Row = (await db.query<{ reason: string; by: string }>(`SELECT release_reason AS reason, released_by AS by FROM work_claims WHERE id = $1::uuid`, [pr3.claim!.id])).rows[0];
+  assert(JSON.stringify(kept) === "[1,1,1,1]" && pr3Row.reason === "merged" && pr3Row.by === "closed-other",
+    `kept: the In Progress ticket's claim, the ticket whose only row a key wrote, the one whose head a key wrote over a Done board row, the one with no row; a claim its holder released keeps its own end (${JSON.stringify(kept)}, ${pr3Row.reason} by ${pr3Row.by})`);
+  const renewed = (await db.query<{ r: { outcome: string; code: string } }>(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [pr1.claim!.id, pr1.token, JSON.stringify(AGENT)])).rows[0].r;
+  const again = await release();
+  assert(renewed.code === "CLAIM_RELEASED" && again.outcome === "released" && again.released.length === 0,
+    `the holder's renewal after it is refused CLAIM_RELEASED; a second call releases nothing (${renewed.code}, ${again.released.length})`);
+
+  // A claim made on a closed ticket is released at the next call; a reopen brings none back, and a claim on the reopened ticket stays.
+  const late = await claim("SMD-9802", OTHER);
+  const lateGone = (await release()).released.map((c) => c.id);
+  await move(done, "In Progress", "started");
+  const reopened = await open("SMD-9801");
+  const onReopened = await claim("SMD-9801", AGENT, "PR 4");
+  const whileOpen = (await release()).released.length;
+  await move(done, "Done", "completed");
+  const closedAgain = (await release()).released.map((c) => c.id);
+  assert(late.outcome === "claimed" && JSON.stringify(lateGone) === JSON.stringify([late.claim!.id]) && reopened === 0 && onReopened.outcome === "claimed" && whileOpen === 0
+         && JSON.stringify(closedAgain) === JSON.stringify([onReopened.claim!.id]),
+    `a claim made on the Canceled ticket is released at the next call; reopened, the Done ticket's claims stay released and a new one is kept until it closes again (${lateGone.length}, ${reopened}, ${whileOpen}, ${closedAgain.length})`);
+
+  // Board-sync's key cannot claim (115: an ingested key).
+  const boardClaims = await raised(`SELECT claim_work('SMD-9804', NULL, NULL, 14400, NULL, $1::jsonb)`, [JSON.stringify(BOARD)]);
+  // Refusals: no run, no holder, above READ COMMITTED.
+  const noRun = await raised(`SELECT release_closed_ticket_claims(' ', false, $1::jsonb)`, [JSON.stringify(BOARD)]);
+  const noHolder = await raised(`SELECT release_closed_ticket_claims('run', false, NULL)`);
+  let iso = { code: "", message: "" };
+  try { await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(`SELECT release_closed_ticket_claims('run', false, $1::jsonb)`, [JSON.stringify(BOARD)]); }); }
+  catch (e) { iso = { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message }; }
+  assert(boardClaims.code === "42501" && /closed-board is an ingested key/.test(boardClaims.message) && noRun.code === "22023" && /needs a run/.test(noRun.message)
+         && noHolder.code === "42501" && /release_closed_ticket_claims needs a holder/.test(noHolder.message)
+         && iso.code === "0A000" && /release_closed_ticket_claims must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(iso.message),
+    `board-sync's ingested key is refused a claim; a blank run 22023, no holder 42501, REPEATABLE READ 0A000, each by name (${boardClaims.code}, ${noRun.code}, ${noHolder.code}, ${iso.code})`);
+
+  // EXECUTE: not PUBLIC's; a role with capture, server and claims is refused naming the function; with closedclaims and capture it releases.
+  const publicExec = async () => (await db.query<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = 'release_closed_ticket_claims(text, boolean, jsonb)'::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS e`)).rows[0].e;
+  const ROLE = "ob1_test_closedclaims";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "claims"] })]) await db.exec(st);
+  await claim("SMD-9803", AGENT);
+  const asRole = async () => {
+    try {
+      let n = -1;
+      await db.transaction(async (tx) => {
+        await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+        n = (await tx.query<{ r: Answer }>(`SELECT release_closed_ticket_claims('run', false, $1::jsonb) AS r`, [JSON.stringify(BOARD)])).rows[0].r.released.length;
+      });
+      return { code: "", message: "", n };
+    } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0], n: -1 }; }
+  };
+  const withoutGroup = await asRole();
+  await db.exec(`REVOKE ALL ON work_claims FROM ${ROLE}`);
+  for (const st of grantStatements(ROLE, { groups: ["closedclaims"] })) await db.exec(st);
+  const withGroup = await asRole();
+  assert(!(await publicExec()) && withoutGroup.code === "42501" && /permission denied for function release_closed_ticket_claims/.test(withoutGroup.message) && withGroup.code === "" && withGroup.n === 1,
+    `EXECUTE is not PUBLIC's: a role granted capture, server and claims is refused naming the function; granted closedclaims and capture (no claims group), it releases the Duplicate ticket's new claim (${withoutGroup.message.slice(0, 80)}, ${withGroup.code || withGroup.n})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // Re-applied: the claims stand, one function, still not PUBLIC's.
+  const claimsBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+  await reapply(file);
+  const claimsAfter = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL`)).rows[0].n;
+  assert(claimsAfter === claimsBefore && (await functionsNamed("release_closed_ticket_claims")) === 1 && !(await publicExec()),
+    `118 applied again changes nothing: ${claimsAfter} unreleased claims stand, one release function, EXECUTE still not PUBLIC's`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

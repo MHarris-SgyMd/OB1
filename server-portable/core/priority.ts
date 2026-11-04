@@ -53,8 +53,8 @@ async function asked<T>(run: () => Promise<T>): Promise<T | PriorityRefused> {
 }
 const inputRefused = (e: PriorityRefused) => refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: e.problem, message: e.message });
 const readOnly = (principal: Principal) => refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
-/** The brain holds no such item, or no such due reference (`which`); an open item none until SMD-3665. */
-const notFound = (which: "item" | "due_ref", item: PriorityItem) => refuse({ code: "ITEM_NOT_FOUND", retryable: false, which, item, openItem: item.kind === "item" });
+/** The brain holds no such item, or no such due reference (`which`). */
+const notFound = (which: "item" | "due_ref", item: PriorityItem) => refuse({ code: "ITEM_NOT_FOUND", retryable: false, which, item });
 
 /**
  * A capture-only key's own thought is proved by the agent id its envelope carries (082, by id alone): with that id

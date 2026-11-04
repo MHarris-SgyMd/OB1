@@ -3048,16 +3048,18 @@ if (configFailed) {
             "priority_history(text,text)", "ob1_priority_item(text,text)", "ob1_priority_item_exists(text,text)", "ob1_priority_winner(text,text)", "ob1_priority_json(public.priority_assertions)"];
           // The group's grants, each table and privilege a pair, read from db/config.mjs's ROLE_GRANTS — the list
           // `migrate.ts --grant` grants — not copied here (review pass 1: a copy drifts from a group that grows).
-          const PRIORITY_GRANTS = ROLE_GRANTS.priority.flatMap((g) => (g.table ? g.privileges.map((p) => [g.table as string, p] as const) : []));
+          const PRIORITY_GRANTS = ROLE_GRANTS.priority.flatMap((g) => (g.table ? g.privileges.map((p) => [g.table as string, p, g.since] as const) : []));
           // Its own read, caught here, as the ticket claims' is: a refusal warns this row alone.
           const prRows = await sql.unsafe(`
             SELECT to_regclass('public.priority_assertions') IS NOT NULL AS has_table,
                    ARRAY(SELECT f FROM unnest(ARRAY[${PRIORITY_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
                    CASE WHEN to_regclass('public.priority_assertions') IS NULL THEN NULL
-                        ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${PRIORITY_GRANTS.map(([t, p]) => `('${t}', '${p}')`).join(", ")}) g(t, p)
+                        ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${PRIORITY_GRANTS.map(([t, p, since]) => `('${t}', '${p}', '${since}')`).join(", ")}) g(t, p, since)
                                     -- CASE, not OR: Postgres keeps no order among OR's arms, and the text form raises for a
-                                    -- table that is not there (review pass 1; the write-privileges row's guard).
-                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN true ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
+                                    -- table that is not there (review pass 1; the write-privileges row's guard). A table a
+                                    -- later migration adds, absent, is no grant missing: 117's open_items on a brain at 116
+                                    -- (SMD-3665 review pass 3); 116's own, absent, still are (pass 5).
+                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN g.since <= '116' ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
             .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const pr = Array.isArray(prRows) ? prRows[0] : null;
           if (!pr) {
@@ -3069,8 +3071,16 @@ if (configFailed) {
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
             // A read (priority_history) needs SELECT on the assertions and on what keys an item (ob1_entities); the
-            // writers need every grant (review pass 3: the history was said to fail for a missing write).
-            const failing = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
+            // writers need every grant (review pass 3: the history was said to fail for a missing write). 117's
+            // open-item reads are asked only of an item of kind item, by set_priority and priority_history alone
+            // (SMD-3665 review pass 2).
+            // open_items is read for an item's existence (set_priority, priority_history); open_item_events only for
+            // whether a capture-only key owns one (its set_priority) — review pass 5.
+            const itemOnly = pr.ungranted.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
+            const eventsOnly = pr.ungranted.every((g) => g.startsWith("open_item_events "));
+            const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
+              : itemOnly ? "set_priority and priority_history on an open item (kind item)"
+              : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
