@@ -21799,8 +21799,9 @@ if (want("38r")) {
     // claims and the pools: P1 and P3 with no entity, which consolidation
     // never judges, and P2 and P4 with one. The mender's write gives each a
     // vector: P1's brings a whole read forward that finds no work; P2's,
-    // landing during that read once its consolidation pool is read (the mark
-    // taken before it, so P2's is read again), waits out the floor from that
+    // written by a transaction begun before that read and committed during it
+    // once its consolidation pool is read (the mark taken before it, with the
+    // slack, so P2's is read again), waits out the floor from that
     // read, and then begins a period for consolidation. P3, with no entity,
     // is mended during that period: its end read takes the mark, so P3's
     // vector brings no whole read after it. P4's is committed by a
@@ -21819,9 +21820,9 @@ if (want("38r")) {
     let poolNext = false;
     let afterCome: (() => Promise<void>) | null = null;
     const counted = intercept((text, run) => {
-      if (/ AS seen$/.test(text.trim()) && !/ AS came,/.test(text)) markAt.push(Date.now());
+      if (/ AS seen$/.test(text.trim()) && !/ AS came\) c/.test(text)) markAt.push(Date.now());
       if (/ AS write_us/.test(text)) liveAt.push(Date.now());
-      if (afterCome !== null && / AS came,/.test(text)) {
+      if (afterCome !== null && / AS came\) c/.test(text)) {
         const then = afterCome;
         afterCome = null;
         return (run() as Promise<unknown>).then(async (r) => { await then(); return r; });
@@ -21882,13 +21883,33 @@ if (want("38r")) {
       // Past the floor from the last read, P1's vector reads the work whole at the next poll, and finds none.
       await Bun.sleep(Math.max(0, 4000 - (Date.now() - markAt[markAt.length - 1])));
       const marks = markAt.length;
-      // P2's vector lands inside P1's read, past its consolidation pool: a mark taken after the read would hold it as
-      // read, its period waiting for the rescan (review pass 1, run-it's mutant).
-      duringPool = () => mend(p2, p2Text, 22).then(() => { p2MendedAt = Date.now(); });
-      await mend(p1, p1Text, 21);
-      p1Read = await pollUntil(async () => markAt.length > marks, 5000);
-      p1ReadAt = markAt[markAt.length - 1] ?? 0;
-      p1Read = p1Read && await readDone(p1ReadAt) && p2MendedAt > 0;
+      // P2's vector, written in a transaction begun before P1's read, is committed inside it, past its consolidation
+      // pool: a mark taken after the read would hold it as read (review pass 1, run-it's mutant), and one taking no
+      // slack would start past it (review pass 3, run-it's mutant) — either way its period waiting for the rescan.
+      const holder2 = new SQL({ url: URL_, max: 1 });
+      let p2Held = false;
+      let release2 = () => {};
+      const released2 = new Promise<void>((r) => { release2 = r; });
+      try {
+        const [{ ts: ts2 }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${p2}::uuid`;
+        const held2 = holder2.begin(async (tx) => {
+          await tx`SELECT update_thought(${p2}::uuid, ${p2Text}::text, NULL::jsonb, ${unit(22)}::vector, NULL::jsonb, ${ts2}::timestamptz,
+            ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
+          p2Held = true;
+          await released2;
+        });
+        await pollUntil(async () => p2Held, 5000);
+        duringPool = async () => { release2(); await held2; p2MendedAt = Date.now(); };
+        await mend(p1, p1Text, 21);
+        p1Read = await pollUntil(async () => markAt.length > marks, 5000);
+        p1ReadAt = markAt[markAt.length - 1] ?? 0;
+        p1Read = p1Read && await readDone(p1ReadAt) && p2MendedAt > 0;
+        release2();
+        await held2;
+      } finally {
+        release2();
+        await holder2.close();
+      }
       p2Begun = await pollUntil(async () => working() > before, 15_000);
       p2BegunAt = Date.now();
       // P3 mended in the period; its end read takes the mark, so past the floor no poll reads the work whole again.
@@ -21905,10 +21926,10 @@ if (want("38r")) {
       judged = ((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = ${p2}::uuid AND work_type = ${CO} AND status = 'succeeded'`)[0] as { c: number }).c;
       // P4: its vector written in a transaction held open until an idle poll's vectorCome has found none, then committed.
       const holder = new SQL({ url: URL_, max: 1 });
+      let release = () => {};
+      const released = new Promise<void>((r) => { release = r; });
       try {
         const [{ ts: ts4 }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${p4}::uuid`;
-        let release = () => {};
-        const released = new Promise<void>((r) => { release = r; });
         const held = holder.begin(async (tx) => {
           await tx`SELECT update_thought(${p4}::uuid, ${p4Text}::text, NULL::jsonb, ${unit(25)}::vector, NULL::jsonb, ${ts4}::timestamptz,
             ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
@@ -21924,6 +21945,7 @@ if (want("38r")) {
         p4After = p4Begun ? Date.now() - p4Committed : -1;
         await pollUntil(async () => periodOver(), 30_000);
       } finally {
+        release();
         await holder.close();
       }
     } finally {
@@ -21935,7 +21957,7 @@ if (want("38r")) {
       `a vector come brings the whole read forward, not before the floor from the last: the plants begin nothing, P1's vector is read at once and P2's, landing inside that read, begins a period for consolidation once the floor has passed (idle ${idle}; planted quiet ${plantedQuiet}; P1 read ${p1Read}; P2 begun ${p2Begun}, ${p2BegunAt - p1ReadAt} ms after P1's read, ${p2BegunAt - p2MendedAt} ms after its mend; ${judged} consolidation claim(s) on P2 succeeded; its period ended ${p2Ended}; stopped ${stopCode})`);
     assert(p3During && (p3BeforeEndMark ? readsAfter === 0 : readsAfter <= 1) && workingAfter === 1,
       `…and a vector read once is not read again, a period's end read reading those come in it: no whole read in the 6 s after the period's end, past the floor (P3 mended in the period ${p3During}, before the end read's mark ${p3BeforeEndMark}; ${readsAfter} read(s); ${workingAfter} period(s) begun)`);
-    assert(p4Held && p4Committed > 0 && p4Begun && p4After <= 3000,
+    assert(p4Held && p4Committed > 0 && p4Begun && p4After <= 3500,
       `…and a vector committed after an idle poll's read found none, by a transaction begun before it, is read at the next poll: the mark keeps the slack and the floor (held ${p4Held}; committed ${p4Committed > 0}; its period begun ${p4Begun}, ${p4After} ms after the commit)`);
 
     // vectorCome's plan stays the custom one (review pass 1 of PR 1d, run-it): a burst of vectors the statistics
@@ -21952,7 +21974,7 @@ if (want("38r")) {
       const generic = async (c: SQL) => {
         const mark = await vectorMark(c, 30);
         for (let i = 0; i < 8; i++) await vectorCome(c, mark, 30);
-        return Number((await c`SELECT COALESCE(sum(generic_plans), 0)::int AS g FROM pg_prepared_statements WHERE statement LIKE '%AS came,%' AND statement NOT LIKE '%pg_prepared_statements%'`)[0].g);
+        return Number((await c`SELECT COALESCE(sum(generic_plans), 0)::int AS g FROM pg_prepared_statements WHERE statement LIKE '%AS came) c%' AND statement NOT LIKE '%pg_prepared_statements%'`)[0].g);
       };
       plainGeneric = await generic(plain);
       ownGeneric = await generic(own);

@@ -2247,7 +2247,7 @@ there (its call in hand given 2 s, then cancelled). A period ends once its
 pools drain, however long that takes (SMD-3379 PR 1c-4b), and the next begins
 once there is work again: a capture's claim, read each poll, or what the
 idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
-(unset, 3600), and within about a minute of a vector arriving — the vector
+(unset, 3600), and within about a minute and a poll of a vector arriving — the vector
 mender's, say, which gives consolidation a thought to judge (SMD-3379 PR 1d).
 Each pass's cost is the same as under `workers`, spent only while nobody is
 writing to the brain.

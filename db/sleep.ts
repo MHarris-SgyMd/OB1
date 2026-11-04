@@ -386,8 +386,8 @@ const DEFAULT_RESCAN_S = 3600;
 /**
  * The least time between two whole reads a vector's arrival brings forward
  * (SMD-3379 PR 1d): a burst of vectors — the mender after an outage, a
- * re-embed run by hand — reads the work whole once a minute at most, not
- * every poll.
+ * re-embed of vectorless rows by hand — reads the work whole once a minute at
+ * most, not every poll.
  */
 const VECTOR_FLOOR_S = 60;
 /** How often the logs are read in a period: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound once paused. */
@@ -788,15 +788,18 @@ export async function vectorMark(sql: SQL, slackS: number): Promise<VectorMark> 
  * slack's rows for the next — an update's diff alone read. With none, the
  * mark moved on in the same snapshot — every vector visible after it was in
  * `seen` — so an idle poll reads the slack's rows, not every row since the last
- * whole read (review pass 1); `atMs`, the floor's, kept.
+ * whole read (review pass 1); `atMs`, the floor's, kept. The moved mark's
+ * `seen` is empty past the first miss unless the floor is shorter than the
+ * slack, as test-live's 4 s floor is (review pass 3).
  */
 export async function vectorCome(sql: SQL, mark: VectorMark, slackS: number): Promise<{ came: boolean; mark: VectorMark }> {
+  // The next mark's rows read only with none come: one come is read whole, which takes its own (review pass 3).
   const [r] = await sql`
-    SELECT EXISTS (SELECT 1 FROM thought_audit WHERE created_at > ${usText(mark.fromUs)}::timestamptz
-                     AND action = 'update' AND diff->>'embedding_present' = 'true' AND NOT (id::text = ANY(${sql.array(mark.seen, "TEXT")}::text[]))) AS came,
-           ((extract(epoch FROM now()) - ${slackS}::float8) * 1000000)::bigint::text AS from_us,
-           ARRAY(SELECT id::text FROM thought_audit WHERE created_at > now() - make_interval(secs => ${slackS}::float8)
-                    AND action = 'update' AND diff->>'embedding_present' = 'true') AS seen`;
+    SELECT c.came, ((extract(epoch FROM now()) - ${slackS}::float8) * 1000000)::bigint::text AS from_us,
+           CASE WHEN c.came THEN '{}'::text[] ELSE ARRAY(SELECT id::text FROM thought_audit WHERE created_at > now() - make_interval(secs => ${slackS}::float8)
+                                                     AND action = 'update' AND diff->>'embedding_present' = 'true') END AS seen
+      FROM (SELECT EXISTS (SELECT 1 FROM thought_audit WHERE created_at > ${usText(mark.fromUs)}::timestamptz
+                             AND action = 'update' AND diff->>'embedding_present' = 'true' AND NOT (id::text = ANY(${sql.array(mark.seen, "TEXT")}::text[]))) AS came) c`;
   const came = (r as { came: boolean }).came;
   return { came, mark: came ? mark : { fromUs: Math.max(mark.fromUs, Number(r.from_us)), seen: r.seen as string[], atMs: mark.atMs } };
 }

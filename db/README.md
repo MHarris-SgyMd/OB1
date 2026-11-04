@@ -4659,10 +4659,12 @@ beat the role's and the database's own: a timeout of 0 is left out, so theirs
 stands); the start's check runs under them. The scheduler's own two
 connections take the memory settings and statement_timeout 0, beating a
 role's or database's own — its poll reads the pools, a scan of every thought,
-and a timeout there would end the scheduler. The settings go out as startup
-parameters, which a transaction pooler (PgBouncer, a managed host's pooled
-endpoint) refuses: connect the scheduler to Postgres directly, as the compose
-stack does.
+and a timeout there would end the scheduler — and `plan_cache_mode =
+force_custom_plan`, so a prepared read of `thought_audit` each poll is planned
+for its values, not by a generic plan that scans the table (SMD-3379 PR 1d).
+The settings go out as startup parameters, which a transaction pooler
+(PgBouncer, a managed host's pooled endpoint) refuses: connect the scheduler
+to Postgres directly, as the compose stack does.
 A statement past its timeout — a start-of-pass scan the brain has outgrown,
 most likely — holds its pass until a restart (N9, SMD-3379 PR 1c-4b): said,
 with `OB1_SLEEP_STATEMENT_TIMEOUT` to raise and the coordinator to recreate;
