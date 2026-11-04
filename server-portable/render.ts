@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -31,7 +31,7 @@ import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refu
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
-import { TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
+import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
@@ -1228,6 +1228,7 @@ function captureRefusal(r: Refusal): string {
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "REFUSED_CLIENT_KEY_SHAPE": return `Refused: \`client_key\` must be a UUID — by convention the thought's id on the brain the write was first made on — not "${r.value.slice(0, 40)}".`;
     case "REFUSED_CLIENT_KEY_SCOPE": return "Refused: `client_key` needs a key that can read — a capture-only key cannot send one. Capture without it.";
+    case "REFUSED_SOURCE_RESERVED": return `Refused: \`source: "${r.source}"\` is the board's own label, which only its importers write. Capture under another source, or none.`;
     case "SUPERSEDES_UNJUDGED":
       return r.cause === "check_failed"
         ? `Error: this key's \`supersedes\` could not be checked against the target's capture record (${r.detail})${r.noPrivilege ? " — the server role needs SELECT on thought_audit and thoughts: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`
@@ -1427,6 +1428,7 @@ function mutationRefusalText(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_NOTHING_TO_UPDATE": return "Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.";
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
+    case "REFUSED_SOURCE_RESERVED": return `Refused: \`metadata_patch.source: "${r.source}"\` is the board's own label, which only its importers write. Patch without it.`;
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
@@ -1859,8 +1861,12 @@ const fetchedMarked = (v: FetchedThought): FetchedThought => {
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
-/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
-const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
+/** What to do once board-sync has ended a claim because its ticket closed (SMD-3600). */
+const CLOSED_DONE = "its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.";
+/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why; released because its ticket closed — done if the work merged, else tell the user. */
+const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.ticketClosed
+  ? `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}: ${CLOSED_DONE}`
+  : r.takenOver
   ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
   : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`;
 /**
@@ -1902,17 +1908,21 @@ const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
       ? `Refused: claim ${r.id} is held by your own key (${oneLine(snipText(r.holder, 80))}) under a token this call did not give — another session of yours, or this one having lost its token. If this session lost it, claim the work again once the claim lapses${r.expiresAt ? ` at ${r.expiresAt}` : ""}, or ask an operator to release it with force and a reason.`
       : `Refused: claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}, not by this key with this token.`;
 
+/** A claim on a ticket the brain records as closed (SMD-3600): board-sync ends it at its next pass. */
+const closedText = (v: { claim: WorkClaim; ticketClosed?: ClosedTicket }) => v.ticketClosed
+  ? ` ${v.claim.issue} is closed (${oneLine(snipText(v.ticketClosed.status ?? "", 60)) || v.ticketClosed.statusType}): board-sync releases every claim on a closed ticket at its next pass, this one included. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own.`
+  : "";
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"
-    ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
-    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
+    ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.${closedText(v)}`
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}${closedText(v)}`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
-  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}${closedText(v)}`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
@@ -1920,10 +1930,18 @@ export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): 
     : r.code === "WORK_CLAIMED" ? `${inTheWay(r, OWN_KEY_RENEWING)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
+/** Who ended a claim already ended, and why (review pass 1): taken over; released because its ticket closed — done if the work merged, else tell the user; or released, by whom and for what. */
+const endedBy = (c: WorkClaim) => {
+  const by = c.releasedBy ? ` by ${oneLine(snipText(c.releasedBy, 80))}` : "";
+  if (c.releaseReason === TAKEN_OVER) return `: it lapsed and was taken over${by}.`;
+  const why = c.releaseReason ? ` (${JSON.stringify(oneLine(snipText(c.releaseReason, 200)))})` : "";
+  if (closedBySync(c.issue, c.releaseReason, c.releasedByKind)) return `: released${by}${why}; ${CLOSED_DONE}`;
+  return by || why ? `: released${by}${why}.` : ".";
+};
 export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
   (v) => v.outcome === "released"
     ? `Released claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)}${v.claim.releaseReason ? ` (${oneLine(snipText(v.claim.releaseReason, 200))})` : ""}.`
-    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}${v.claim.releaseReason === TAKEN_OVER ? `: it lapsed and was taken over${v.claim.releasedBy ? ` by ${oneLine(snipText(v.claim.releasedBy, 80))}` : ""}` : ""}.`,
+    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}${endedBy(v.claim)}`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)

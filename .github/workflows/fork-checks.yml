@@ -2175,9 +2175,9 @@ jobs:
       # Each holds with variables substituted and again with none
       # (--no-interpolate), so a value that matches under CI's settings and
       # moves under an operator's fails (pass 6), the tables' text included
-      # (pass 7). release.yml holds the overlay a release actually ships. A
-      # compose file here that no combination renders fails the step, so a
-      # new overlay gets one.
+      # (pass 7). release-steps.yml holds the overlay a release actually
+      # ships. A compose file here that no combination renders fails the step,
+      # so a new overlay gets one.
       - name: The proxy loads only the held route tables
         working-directory: deploy
         run: |
@@ -2343,9 +2343,9 @@ jobs:
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
-          # cut). release.yml holds the overlay a release actually ships. Each
-          # mode's renders end before the next mode rewrites the file, and each
-          # render checks it read its own mode's (release_sum); the renders
+          # cut). release-steps.yml holds the overlay a release actually ships.
+          # Each mode's renders end before the next mode rewrites the file, and
+          # each render checks it read its own mode's (release_sum); the renders
           # above read no release overlay, and run on beside both.
           for mode in rehearsal tag; do
             from=${#pids[@]}
