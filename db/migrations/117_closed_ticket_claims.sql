@@ -26,7 +26,8 @@
 --     its own never releases anyone's claim: when such a row is the head,
 --     the ticket is left alone. A write key may still edit the board's own
 --     rows — patch one's ticket keys (its status, or its `issue` to another
---     ticket), or delete an open head over an older closed board row — and
+--     ticket), or retire an open head over an older closed board row (delete
+--     it, or point a supersedes at it) — and
 --     so make a ticket read closed, as it may already mislabel 095's `moved`
 --     that way; board-sync writes the board's status back when the ticket
 --     next moves. Only the server refuses the label: a raw SQL writer is

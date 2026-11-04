@@ -1551,7 +1551,7 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
 }
 
-console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; once board-sync's release ends it, the renewal says the work is over and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key");
+console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a claim on a ticket the brain records as Done says board-sync will release it, one on an open ticket says nothing; once board-sync's release ends it, the renewal says done if the work merged, else tell the user, and the release says who ended it and why; `source: \"linear\"` is the board's own label, refused to every key");
 {
   type Claim = { id: string };
   // Ticket rows as board-sync writes them: the importer's label, the board's status.
@@ -1564,7 +1564,7 @@ console.log("\n[13] A closed ticket's claims through both doors (SMD-3600): a cl
   const onOpen = await mcp("claim_work", { ticket: "SMD-9501" });
   const doneId = String((onDone.sc.claim as Claim | undefined)?.id), doneToken = String(onDone.sc.token ?? "");
   assert(!onDone.isError && JSON.stringify(onDone.sc.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
-      && /SMD-9500 is closed \(Done\): board-sync releases every claim on a closed ticket at its next pass, this one included\. Work still to do there needs the ticket reopened, or a ticket of its own\.$/.test(onDone.text)
+      && /SMD-9500 is closed \(Done\): board-sync releases every claim on a closed ticket at its next pass, this one included\. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own\.$/.test(onDone.text)
       && onDoneRest.status === 200 && JSON.stringify(onDoneRest.body.ticketClosed) === JSON.stringify({ status: "Done", statusType: "completed" })
       && !onOpen.isError && onOpen.sc.ticketClosed === undefined && !/is closed/.test(onOpen.text),
     `a claim on a Done ticket says board-sync will release it, in the text and as ticketClosed through both doors; one on an open ticket says nothing (${onDone.text.slice(-120)})`);

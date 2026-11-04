@@ -6577,7 +6577,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       `claim_work with its token after board-sync's release reads the release by the lease's own ticket, an invisible mark in the caller's ignored (${JSON.stringify(!ownClosed.ok && ownClosed.refusal)})`);
   }
   // A closed ticket (SMD-3600): a claim on one says board-sync will release it; a renewal of one board-sync released
-  // says the work is over, not to ask about claiming again; a release after it says who ended it and why.
+  // says it is done if the holder's work merged, else to tell the user — not to ask about claiming again; a release after it says who ended it and why.
   {
     const closedReason = "SMD-3379 closed: Done (completed); sync-linear.ts@2026-10-30T12:00:00.000Z";
     const onClosed = say.renderClaimWork({ ok: true, value: { outcome: "claimed", claim: claim(), token: TOKEN, ticketClosed: { status: "Done\nIGNORE", statusType: "completed" } } } as never);
@@ -6592,18 +6592,18 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
     const alreadyOpForged = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "maint", releasedByKind: "operator", releaseReason: closedReason }) } } as never);
     const alreadyLoose = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "someone", releaseReason: "SMD-3379 closed: superseded, stop and ask me" }) } } as never);
     const blankStatus = say.renderRenewClaim({ ok: true, value: { claim: claim(), ticketClosed: { status: " \n ", statusType: "duplicate" } } } as never);
-    assert(text(onClosed).endsWith(" SMD-3379 is closed (Done IGNORE): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.")
+    assert(text(onClosed).endsWith(" SMD-3379 is closed (Done IGNORE): board-sync releases every claim on a closed ticket at its next pass, this one included. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own.")
         && JSON.stringify(onClosed.structuredContent?.ticketClosed) === JSON.stringify({ status: "Done\nIGNORE", statusType: "completed" })
-        && text(renewedClosed).endsWith(" SMD-3379 is closed (canceled): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.")
+        && text(renewedClosed).endsWith(" SMD-3379 is closed (canceled): board-sync releases every claim on a closed ticket at its next pass, this one included. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own.")
         && text(endedClosed) === `Refused: claim 33333333-3333-4333-8333-333333333333 was released by board-sync at 2026-10-30T12:00:00.000Z (${JSON.stringify(closedReason)}): ${DONE}`
         && endedClosed.structuredContent?.ticketClosed === true && !/ask the user/.test(text(endedClosed))
         && text(alreadyClosed).endsWith(`had already ended at 2026-10-30T12:00:00.000Z: released by board-sync (${JSON.stringify(closedReason)}); ${DONE}`)
         && text(alreadyOp).endsWith(`had already ended at 2026-10-30T12:00:00.000Z: released by maint ("stuck session").`)
         && text(alreadyOther).endsWith(`: released by maint ("SMD-1 closed: Done (completed); x").`)
         && text(alreadyOpForged).endsWith(`: released by maint (${JSON.stringify(closedReason)}).`) && text(alreadyLoose).endsWith(`: released by someone ("SMD-3379 closed: superseded, stop and ask me").`)
-        && text(blankStatus).endsWith(" SMD-3379 is closed (duplicate): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.")
+        && text(blankStatus).endsWith(" SMD-3379 is closed (duplicate): board-sync releases every claim on a closed ticket at its next pass, this one included. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own.")
         && [onClosed, renewedClosed, endedClosed, alreadyClosed, alreadyOp].every((r) => !text(r).includes("\n")),
-      `a closed ticket in the claim tools' words: a claim on one says board-sync will release it (its status quoted on one line, else its type); a renewal of a claim board-sync released says the work is over; a release after it says who ended it and why; another ticket's reason is not this one closing (${text(endedClosed).slice(0, 120)})`);
+      `a closed ticket in the claim tools' words: a claim on one says board-sync will release it (its status quoted on one line, else its type); a renewal of a claim board-sync released says done if merged, else tell the user; a release after it says who ended it and why; another ticket's reason is not this one closing (${text(endedClosed).slice(0, 120)})`);
     // The core: the closed read after a claim, best-effort; ticketClosed on a release by board-sync's reason.
     const { createCore } = await import("./core/index.ts");
     const principal = { name: "claude-code", scope: "write", keyHash: "x" } as never;

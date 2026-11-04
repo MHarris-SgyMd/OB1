@@ -1029,7 +1029,7 @@ ticket the brain records as Done, Canceled or a Duplicate, with the reason
 No tool reaches the release. A row is trusted as the board's only under
 `source: "linear"`, which `capture_thought` and `update_thought`'s patch refuse
 to every key (`REFUSED_SOURCE_RESERVED`, 400 over REST). A write key can still
-edit the board's own rows, a ticket key or a delete, and so end a ticket's
+edit the board's own rows (a ticket key, a delete, a `supersedes` at a head) and so end a ticket's
 claims, as it can already mislabel `moved`.
 
 ## Priority assertions (SMD-3664)

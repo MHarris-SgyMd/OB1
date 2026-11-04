@@ -448,7 +448,7 @@ export interface paths {
         put?: never;
         /**
          * Renew Work Claim
-         * @description Set your claim's lease to lease_seconds from now (default four hours; a shorter one shortens it): the claim id and the token claim_work returned. Renew well before the lease runs out — about hourly on the default. Refused when another key holds the claim, or your key under another token; when it ended (released, or taken over after it lapsed: stop work on it; released by board-sync because its ticket closed, `ticketClosed`: the work is over); or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed, and the reply says when it had lapsed and names any claim made or renewed on its work meanwhile: another agent may have built part of it. The label changes through claim_work with your token.
+         * @description Set your claim's lease to lease_seconds from now (default four hours; a shorter one shortens it): the claim id and the token claim_work returned. Renew well before the lease runs out — about hourly on the default. Refused when another key holds the claim, or your key under another token; when it ended (released, or taken over after it lapsed: stop work on it; released by board-sync because its ticket closed, `ticketClosed`: done if your work merged, else the ticket closed under you, so stop and tell the user); or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed, and the reply says when it had lapsed and names any claim made or renewed on its work meanwhile: another agent may have built part of it. The label changes through claim_work with your token.
          */
         post: operations["renew_claim"];
         delete?: never;
@@ -942,7 +942,7 @@ export interface operations {
                 "application/json": {
                     /** @description Replacement text. Omit to leave the text, embedding and chunks untouched */
                     content?: string;
-                    /** @description Keys to merge into the existing metadata. Unmentioned keys are left alone. actor_kind, actor_name and trust are the server's: the kind and name of the key that wrote the current text, and the trust a change of text declares (none above the key's kind). A patch naming them sets none of them — save a trust no higher than your key's kind (ingested for a key with no kind) sent with a change of text — while its other keys still merge, and the reply names each one the thought kept. `client_key` is set only by capture_thought: a patch naming it is refused */
+                    /** @description Keys to merge into the existing metadata. Unmentioned keys are left alone. actor_kind, actor_name and trust are the server's: the kind and name of the key that wrote the current text, and the trust a change of text declares (none above the key's kind). A patch naming them sets none of them — save a trust no higher than your key's kind (ingested for a key with no kind) sent with a change of text — while its other keys still merge, and the reply names each one the thought kept. `client_key` is set only by capture_thought: a patch naming it is refused. A `source` of `linear` is the board's own label, which only its importers write: a patch setting it is refused (REFUSED_SOURCE_RESERVED) */
                     metadata_patch?: {
                         [key: string]: unknown;
                     };

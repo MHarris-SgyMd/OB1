@@ -1908,7 +1908,7 @@ const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
 
 /** A claim on a ticket the brain records as closed (SMD-3600): board-sync ends it at its next pass. */
 const closedText = (v: { claim: WorkClaim; ticketClosed?: ClosedTicket }) => v.ticketClosed
-  ? ` ${v.claim.issue} is closed (${oneLine(snipText(v.ticketClosed.status ?? "", 60)) || v.ticketClosed.statusType}): board-sync releases every claim on a closed ticket at its next pass, this one included. Work still to do there needs the ticket reopened, or a ticket of its own.`
+  ? ` ${v.claim.issue} is closed (${oneLine(snipText(v.ticketClosed.status ?? "", 60)) || v.ticketClosed.statusType}): board-sync releases every claim on a closed ticket at its next pass, this one included. If your work under it merged, that is its end; if not, the ticket closed under you: tell the user, who reopens it or files the rest as a ticket of its own.`
   : "";
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"

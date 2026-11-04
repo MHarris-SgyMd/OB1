@@ -2433,7 +2433,8 @@ completed, canceled, duplicate) and is an importer's row (`metadata.source` is
 update_thought's patch answer `REFUSED_SOURCE_RESERVED`, so a key's own thought
 with an `issue` and a `status_type` releases nothing). A write key can still
 make a ticket read closed by editing the board's own rows (patching one's
-ticket keys, or deleting an open head over an older closed board row), as it
+ticket keys, or retiring an open head over an older closed board row: a delete,
+or a `supersedes` pointing at it), as it
 can already mislabel `moved`; board-sync writes the board's status back when
 the ticket next moves. A claim made after the ticket closed is
 released too, and a ticket that reopens brings none back. Each release is stamped

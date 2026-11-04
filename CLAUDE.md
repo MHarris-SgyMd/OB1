@@ -93,7 +93,7 @@ If `open-brain` has no `claim_work` tool, say why:
    - **your key's, but not in your files:** another session of yours. Stop, and give the user its label from `list_claims`.
    - **another key's:** stop, and tell the user who holds it.
 
-   **A ticket that is Done, Canceled or a Duplicate** keeps no claim: board-sync releases every claim on it at its next pass (SMD-3600). Work on a closed ticket, such as its Verify or a follow-up, needs the ticket reopened or a ticket of its own.
+   **A ticket that is Done, Canceled or a Duplicate** keeps no claim: board-sync releases every claim on it at its next pass (SMD-3600). Work on a closed ticket, such as its Verify or a follow-up, needs the ticket reopened or a ticket of its own. A claim or renewal on one says so (`ticketClosed`): if your work under it merged, that is its end; if not, the ticket closed under you, so tell the user.
 
    **When a ticket's work splits into several PRs,** release the whole-ticket claim and delete its token file and any marker beside it, with `rm -f`: the hook may have just made an `.ended.json` of it. Claim the open PR's piece with `lease_seconds: 604800`, and each later piece when you create its worktree.
 
