@@ -81,6 +81,13 @@ const TABLES = [
   "priority_assertions",
   "priority_current",
   "priority_sources",
+  // 117's open items (SMD-3665): no foreign key either way — an event, a
+  // projection row and a proposal name their item by id, not a reference —
+  // so their place is free. Each CASCADE takes the helpers whose arguments or
+  // result are its row type, and its triggers.
+  "open_item_events",
+  "open_items",
+  "open_item_close_proposals",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -418,6 +425,38 @@ const FUNCTIONS = [
   "ob1_priority_lock(text, text)",
   "ob1_priority_winner(text, text)",
   "ob1_priority_project(text, text)",
+  // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
+  // the triggers' functions and the helpers (those taking or returning a row
+  // type of 117's go with its table's CASCADE, and are named anyway).
+  "open_item(text, text, text, uuid, text, boolean, jsonb)",
+  "update_item(text, jsonb, jsonb)",
+  "set_item_status(text, text, text, jsonb)",
+  "propose_item_close(text, text, uuid, text, text, jsonb)",
+  "decide_item_close(uuid, boolean, text, jsonb)",
+  "open_item_history(text)",
+  "ob1_item_projection_drift()",
+  "ob1_rebuild_item_projection()",
+  "ob1_item_events_guard()",
+  "ob1_item_proposals_guard()",
+  "ob1_item_json(open_items)",
+  "ob1_item_event_json(open_item_events)",
+  "ob1_item_proposal_json(open_item_close_proposals)",
+  "ob1_item_lock(uuid)",
+  "ob1_item_owns(uuid, uuid, text)",
+  "ob1_item_is_proposer(open_item_close_proposals, text, uuid)",
+  "ob1_item_proposal_is_own(open_item_close_proposals, text, uuid)",
+  "ob1_actor_maker(jsonb, text)",
+  "ob1_envelope_plugin(text)",
+  "ob1_item_not_yours(text, text)",
+  "ob1_item_due(text)",
+  "ob1_item_id(text)",
+  "ob1_item_actor(jsonb, text)",
+  "ob1_item_refused(text, text)",
+  "ob1_item_event(uuid, text, text, text, text, timestamp with time zone, text, uuid, record, timestamp with time zone, uuid, text, text, timestamp with time zone)",
+  "ob1_item_project(uuid)",
+  "ob1_item_moot(uuid, timestamp with time zone, uuid)",
+  "ob1_item_gate(uuid, record, text)",
+  "ob1_priority_owns_item(text, text, uuid, text)",
   // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
   "release_closed_ticket_claims(text, boolean, jsonb)",
   "ob1_work_claim_closed_head(text)",

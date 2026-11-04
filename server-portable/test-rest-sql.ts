@@ -1354,7 +1354,7 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const { item: _hookItem, ...hookFacts } = hookSet.body as Record<string, unknown>;
     const { item: _nowhereItem, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
     assert(hookSet.status === 403 && hookSet.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(hookFacts, nowhereFacts) && hookTicket.status === 403 && hookTicket.body.code === "ITEM_NOT_YOURS"
-        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since\.$/.test(hookMcp.text) && hookReads.status === 403,
+        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it\.$/.test(hookMcp.text) && hookReads.status === 403,
       `a capture-only key's set on the writer's thought is refused 403 ITEM_NOT_YOURS, the same for a thought that is not there and for a ticket; in words over MCP; it may not read the history (${hookSet.status} ${hookSet.body.code} | ${hookNowhere.status} ${hookNowhere.body.code} | ${hookMcp.text} | ${hookReads.status})`);
     // …and on its own thought it may, at its own trust, shown no winner.
     const hookThought = String((await rest("POST", "/v1/thoughts", { content: "omega: a thought the hook captured, to state a priority on" }, KEYS.hook)).body.id);
@@ -1408,9 +1408,9 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const noHistoryMcp = await mcp("priority_history", { kind: "thought", key: nowhere });
     assert(noThought.status === 404 && noThought.body.code === "ITEM_NOT_FOUND" && same(noThought.body.item, { kind: "thought", key: nowhere }) && noThought.body.which === "item"
         && noTicket.status === 404 && same(noTicket.body.item, { kind: "ticket", key: "SMD-9401" }) && noRef.status === 404 && noRef.body.which === "due_ref"
-        && noOpen.isError && /^Refused: open items \(kind item\) arrive with SMD-3665/.test(noOpen.text) && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
+        && noOpen.isError && noOpen.text === `Refused: the brain holds no open item ${nowhere}.` && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
         && noHistoryMcp.isError && noHistoryMcp.text === `Refused: the brain holds no thought ${nowhere}.`,
-      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item until SMD-3665 — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
+      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
 
     // Review pass 1: the item a refusal names is 116's own keying, read from the brain — a zero-width space 116 strips
     // is stripped in the answer too; which argument is missing, or malformed, is told from the brain, not 116's words.

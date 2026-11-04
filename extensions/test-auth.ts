@@ -154,12 +154,10 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
 const SERVERS: Server[] = [
-  // The extension servers (change 64): two of the seven, four plugins since SMD-2311 and meal-planning's shared server retired with them.
+  // The extension servers (change 64): one of the seven, job-hunt's; five are plugins since SMD-2311, and meal-planning's shared server retired with them.
   ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
     ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
      "log_interview_notes", "link_contact_to_professional_crm"], { health: "/" }),
-  ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
-    ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   // The recipes and integrations (change 67).
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
@@ -963,7 +961,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
 // ── Drift guards ─────────────────────────────────────────────────────────────
 
 /** Stored functions a tool or route may call and still be a read; any other `.rpc(` is a write. */
-const RPC_READS = ["crm_search_contacts_fts", "match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
+const RPC_READS = ["match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
 /** Tables a READ may insert into: a recall records itself (for a write-scoped key). An update or delete on them, or an insert anywhere else, is a write. */
 const LOG_TABLES = ["agent_memory_recall_traces", "agent_memory_recall_items", "agent_memory_audit_events"];
 const LOG_INSERT = new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)\s*\.insert\(`);

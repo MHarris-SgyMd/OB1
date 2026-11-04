@@ -1952,7 +1952,7 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
 const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
-const itemText = (i: PriorityItem) => `${i.kind} ${i.key}`;
+const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
@@ -1970,10 +1970,9 @@ const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean 
   : ` The item's winner is ${statementText(v.winner)}.`;
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
-    ? r.openItem ? "Refused: open items (kind item) arrive with SMD-3665; the brain holds none yet."
-      : r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
+    ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
   : r.code === "ITEM_NOT_YOURS"
-    ? `Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since${r.dueRef ? ", and take a due time only from another such thought" : ""}.`
+    ? `Refused: a capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it${r.dueRef ? ", and take a due time only from another such item" : ""}.`
   : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
   : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not state or clear a priority.`
   : r.code === "PRIORITY_UNATTRIBUTED"

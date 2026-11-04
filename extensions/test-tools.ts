@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the two MCP servers with a schema of their
- * own on the SQL shim — the extension servers — answers against a real
- * Postgres carrying those schemas. (The ob-graph recipe was the eighth until it
- * retired with SMD-2920; family-calendar, home-maintenance, household-knowledge
- * and meal-planning were four more until they became plugins with SMD-2311,
- * which server-portable/test-plugin-ports.ts drives now, and meal-planning's
- * shared server retired with them.)
+ * test-tools.ts — every tool of the one MCP server with a schema of its own
+ * on the SQL shim — job-hunt, the last extension server — answers against a
+ * real Postgres carrying its schema. (The ob-graph recipe was the eighth until
+ * it retired with SMD-2920; family-calendar, home-maintenance,
+ * household-knowledge, meal-planning and professional-crm were five more until
+ * they became plugins with SMD-2311, which server-portable/test-plugin-ports.ts
+ * drives now, and meal-planning's shared server retired with them.
+ * professional-crm's schema.sql is applied here still: job-hunt's link to the
+ * CRM writes into its table until job-hunt is a plugin too, SMD-2311 PR 4b.)
  *
  * SMD-1798 added the three servers that were still on supabase-js — family-
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
@@ -34,8 +36,8 @@
  * optional filter on its own, each error path the tool documents — and what
  * comes back is read: the row a write stored, the rows a read chose, the
  * embedded relation as an object or null, the trigger's effect, the message a
- * failure carries. The database is the fork's migrations (crm_link_thought
- * reads `thoughts`) plus the six `schema.sql` files, applied as their READMEs'
+ * failure carries. The database is the fork's migrations plus the two
+ * `schema.sql` files, applied as their READMEs'
  * Step 1 says — with no `auth.*` stub and no Supabase role: since SMD-1810 the
  * files carry no policy on auth.uid() and no GRANT to a role Postgres does not
  * have — and dropped again at the end, whether or not the run finished,
@@ -44,8 +46,7 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Twenty tools on two servers: professional-crm's ten, which
- * change 77 drove, and job-hunt's ten.
+ * it is driven. Ten tools on the one server: job-hunt's.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -61,14 +62,13 @@ const ROOT = resolve(HERE, "..");
 const URL_ = requireDatabaseUrl("test-tools.ts");
 const { assert, report } = createAssert();
 
-// ── The database: the fork's schema and the six extension schemas ──
+// ── The database: the fork's schema and the two extension schemas ──
 
-// The width is pinned as test-writes.ts pins it: one thought is planted through upsert_thought for crm_link_thought, and no
-// vector is involved.
+// The width is pinned as test-writes.ts pins it; no vector is involved.
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The two servers, by the schema that owns their tables (job-hunt's last tool writes into professional-crm's). */
+/** The schemas job-hunt's tools write into: its own, and professional-crm's, which its last tool writes into until PR 4b. */
 const SCHEMAS = ["extensions/professional-crm/schema.sql",
   "extensions/job-hunt/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
@@ -152,111 +152,10 @@ const failure = (r: Called) => (r.body?.success === false ? String(r.body?.error
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NO_ROW = "00000000-0000-4000-8000-00000000dead";
 const isoDaysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
-const dateDaysFromNow = (days: number) => isoDaysFromNow(days).slice(0, 10);
 const eqJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // Everything below runs inside one try so the schemas are dropped however it ends.
 try {
-
-// ── extensions/professional-crm ──────────────────────────────────────────────
-
-{
-  const F = "extensions/professional-crm/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-
-  const ada = await c("crm_add_contact", { name: "Ada Lovelace", company: "Analytical Engines", title: "Engineer", email: "ada@example.test", how_we_met: "a conference", tags: ["ai", "math"], notes: "met at the engine talk" });
-  assert(ok(ada) && UUID.test(ada.body?.contact?.id) && eqJson(ada.body?.contact?.tags, ["ai", "math"]), `crm_add_contact stores tags into text[] (${failure(ada) || JSON.stringify(ada.body?.contact?.tags)})`);
-  const bob = await c("crm_add_contact", { name: "Bob Builder", company: "Bricks", tags: [] });
-  assert(ok(bob) && eqJson(bob.body?.contact?.tags, []), `…and tags: [] — the ticket's 22P02 case — as an empty array (${failure(bob)})`);
-  const cy = await c("crm_add_contact", { name: "Cy Nolan" });
-  assert(ok(cy) && eqJson(cy.body?.contact?.tags, []), "…and no tags as []");
-  const ids = { ada: ada.body?.contact?.id as string, bob: bob.body?.contact?.id as string, cy: cy.body?.contact?.id as string };
-
-  // Full-text search through crm_search_contacts_fts(search_tags text[]): the tool falls back to ILIKE on an rpc error and
-  // says so in search_mode — so "fts" is the assertion that the text[] argument bound.
-  const fts = await c("crm_search_contacts", { query: "engineer" });
-  assert(ok(fts) && fts.body?.search_mode === "fts" && fts.body?.count === 1 && fts.body?.contacts?.[0]?.name === "Ada Lovelace", `crm_search_contacts by query is full-text search (${failure(fts) || fts.body?.search_mode})`);
-  const ftsTags = await c("crm_search_contacts", { query: "engineer", tags: ["ai"] });
-  assert(ok(ftsTags) && ftsTags.body?.search_mode === "fts" && ftsTags.body?.count === 1, `…with tags, still fts — the text[] argument bound as an array, not the ILIKE fallback (${failure(ftsTags) || ftsTags.body?.search_mode})`);
-  assert(fts.body?.contacts?.[0]?.follow_up_date === null && typeof fts.body?.contacts?.[0]?.created_at === "string", "…its rows through the function are JSON-shaped as the table's are (timestamps strings)");
-  const ftsNoTag = await c("crm_search_contacts", { query: "engineer", tags: ["nope"] });
-  assert(ok(ftsNoTag) && ftsNoTag.body?.search_mode === "fts" && ftsNoTag.body?.count === 0, "…and a tag she lacks finds none, through fts");
-  const ftsTwo = await c("crm_search_contacts", { query: "engine talk" });
-  assert(ok(ftsTwo) && ftsTwo.body?.search_mode === "fts" && ftsTwo.body?.count === 1, "…two words AND together");
-  const byTag = await c("crm_search_contacts", { tags: ["math"] });
-  assert(ok(byTag) && byTag.body?.count === 1 && byTag.body?.contacts?.[0]?.name === "Ada Lovelace" && byTag.body?.search_mode === undefined, `…tags without a query — .contains() on text[] (${failure(byTag) || byTag.body?.count})`);
-  const everyone = await c("crm_search_contacts", {});
-  assert(ok(everyone) && everyone.body?.count === 3 && everyone.body?.contacts?.map((x: any) => x.name).join() === "Ada Lovelace,Bob Builder,Cy Nolan", "…nothing lists everyone by name");
-  const limited = await c("crm_search_contacts", { limit: 2 });
-  assert(ok(limited) && limited.body?.count === 2, "…limit applies");
-
-  const met = isoDaysFromNow(-3);
-  const interaction = await c("crm_log_interaction", { contact_id: ids.ada, interaction_type: "coffee", occurred_at: met, summary: "talked about the difference engine", follow_up_needed: true, follow_up_notes: "send the paper" });
-  assert(ok(interaction) && UUID.test(interaction.body?.interaction?.id) && interaction.body?.interaction?.follow_up_needed === true, `crm_log_interaction stores the row (${failure(interaction)})`);
-  const badType = await c("crm_log_interaction", { contact_id: ids.ada, interaction_type: "carrier pigeon", summary: "x" });
-  assert(badType.isError && /Invalid arguments/.test(badType.toolText), `…a type outside the enum is refused by the tool's schema, before the database (${badType.toolText.slice(0, 60)})`);
-
-  const history = await c("crm_get_contact_history", { contact_id: ids.ada });
-  assert(ok(history) && history.body?.contact?.last_contacted === met, `crm_get_contact_history: the trigger set last_contacted to the interaction's time (${failure(history) || history.body?.contact?.last_contacted})`);
-  assert(history.body?.interaction_count === 1 && history.body?.interactions?.[0]?.summary === "talked about the difference engine" && eqJson(history.body?.opportunities, []), "…one interaction, no opportunities yet");
-  const noContact = await c("crm_get_contact_history", { contact_id: NO_ROW });
-  assert(noContact.isError && /Failed to get contact: .*rows returned/.test(noContact.toolText), `…a missing contact is the tool's own error (${noContact.toolText.slice(0, 70)})`);
-
-  const deal = await c("crm_create_opportunity", { contact_id: ids.ada, title: "Engine consult", description: "a week of analysis", stage: "proposal", value: 12000.5, expected_close_date: "2026-12-01" });
-  assert(ok(deal) && UUID.test(deal.body?.opportunity?.id) && deal.body?.opportunity?.value === "12000.50" && deal.body?.opportunity?.stage === "proposal", `crm_create_opportunity stores the row (${failure(deal) || JSON.stringify(deal.body?.opportunity?.value)})`);
-  const unlinked = await c("crm_create_opportunity", { title: "Speculative" });
-  assert(ok(unlinked) && unlinked.body?.opportunity?.contact_id === null && unlinked.body?.opportunity?.stage === "identified", "…and one with no contact, stage defaulted");
-
-  const bobDue = await c("crm_update_contact", { contact_id: ids.bob, follow_up_date: dateDaysFromNow(2), tags: ["ops"], title: "Foreman" });
-  assert(ok(bobDue) && eqJson(bobDue.body?.contact?.tags, ["ops"]) && bobDue.body?.contact?.title === "Foreman" && bobDue.body?.contact?.follow_up_date === dateDaysFromNow(2),
-    `crm_update_contact replaces tags and sets a follow-up (${failure(bobDue) || JSON.stringify(bobDue.body?.contact?.tags)})`);
-  const cyDue = await c("crm_update_contact", { contact_id: ids.cy, follow_up_date: dateDaysFromNow(-2) });
-  assert(ok(cyDue), "…a follow-up already past");
-  const nothing = await c("crm_update_contact", { contact_id: ids.cy });
-  assert(nothing.isError && /No fields provided to update/.test(nothing.toolText), "…no fields is the tool's own error");
-
-  // .not("follow_up_date", "is", null): Ada, with none, is out; Cy's is overdue, Bob's upcoming.
-  const followUps = await c("crm_get_follow_ups", { days_ahead: 7 });
-  assert(ok(followUps) && followUps.body?.overdue_count === 1 && followUps.body?.overdue?.[0]?.name === "Cy Nolan" && followUps.body?.upcoming_count === 1 && followUps.body?.upcoming?.[0]?.name === "Bob Builder",
-    `crm_get_follow_ups splits overdue from upcoming and leaves out the contact with none (${failure(followUps) || JSON.stringify([followUps.body?.overdue_count, followUps.body?.upcoming_count])})`);
-  const soon = await c("crm_get_follow_ups", { days_ahead: 1 });
-  assert(ok(soon) && soon.body?.overdue_count === 1 && soon.body?.upcoming_count === 0, "…a one-day window keeps only the overdue one");
-  const cleared = await c("crm_update_contact", { contact_id: ids.cy, follow_up_date: null });
-  assert(ok(cleared) && cleared.body?.contact?.follow_up_date === null, "crm_update_contact clears a follow-up with null");
-  const ftsDated = await c("crm_search_contacts", { query: "bricks" });
-  assert(ok(ftsDated) && ftsDated.body?.search_mode === "fts" && ftsDated.body?.contacts?.[0]?.follow_up_date === dateDaysFromNow(2), `…a date column through the function's rows is the bare date the table's rows give — one shape whichever path the tool takes (${ftsDated.body?.contacts?.[0]?.follow_up_date})`);
-  const afterClear = await c("crm_get_follow_ups", {});
-  assert(ok(afterClear) && afterClear.body?.overdue_count === 0 && afterClear.body?.upcoming_count === 1, "…and the follow-ups no longer list it");
-
-  // A thought through the fork's own function, then linked.
-  const [{ t }] = await sql`SELECT upsert_thought('Ada described the analytical engine as a loom for numbers.'::text, '{"type":"note"}'::jsonb) AS t`;
-  const thoughtId = (t as { id: string }).id;
-  const linked = await c("crm_link_thought", { thought_id: thoughtId, contact_id: ids.ada });
-  assert(ok(linked) && /\[Linked Thought \d{4}-\d\d-\d\d\]: Ada described the analytical engine/.test(linked.body?.contact?.notes ?? "") && linked.body?.contact?.notes?.startsWith("met at the engine talk"),
-    `crm_link_thought appends the thought's text to the notes (${failure(linked) || JSON.stringify(linked.body?.contact?.notes)})`);
-  const noThought = await c("crm_link_thought", { thought_id: NO_ROW, contact_id: ids.ada });
-  assert(noThought.isError && /Failed to retrieve thought/.test(noThought.toolText), "…a missing thought is the tool's own error");
-
-  const prep = await c("crm_prep_context", { contact_id: ids.ada });
-  const b = prep.body?.briefing;
-  assert(ok(prep) && b?.contact?.name === "Ada Lovelace" && eqJson(b?.contact?.tags, ["ai", "math"]), `crm_prep_context gathers the contact (${failure(prep)})`);
-  assert(b?.relationship?.total_interactions === 1 && b?.relationship?.days_since_last_contact === 3 && b?.relationship?.last_contacted === met, `…the relationship's numbers (${JSON.stringify(b?.relationship)})`);
-  assert(b?.pending_follow_ups?.length === 1 && b?.pending_follow_ups?.[0]?.notes === "send the paper", "…the pending follow-up from the interaction");
-  assert(b?.opportunities?.active_count === 1 && b?.opportunities?.total_pipeline_value === 12000.5 && b?.opportunities?.items?.[0]?.title === "Engine consult", `…and the pipeline, its numeric value parsed (${JSON.stringify(b?.opportunities)})`);
-  const prepMissing = await c("crm_prep_context", { contact_id: NO_ROW });
-  assert(prepMissing.isError && /Contact not found/.test(prepMissing.toolText), "…a missing contact is the tool's own error");
-
-  // .or("last_contacted.lt.…,last_contacted.is.null") with nulls first: the two never contacted, then Ada only when the threshold reaches her.
-  const stale = await c("crm_stale_contacts", { days_threshold: 7 });
-  assert(ok(stale) && stale.body?.count === 2 && stale.body?.stale_contacts?.every((x: any) => x.last_contacted === null && x.days_since_contact === null) && stale.body?.stale_contacts?.map((x: any) => x.name).sort().join() === "Bob Builder,Cy Nolan",
-    `crm_stale_contacts at 7 days: the two never contacted, not Ada at 3 (${failure(stale) || stale.body?.count})`);
-  const staler = await c("crm_stale_contacts", { days_threshold: 1, limit: 10 });
-  assert(ok(staler) && staler.body?.count === 3 && staler.body?.stale_contacts?.[2]?.name === "Ada Lovelace" && staler.body?.stale_contacts?.[2]?.days_since_contact === 3, "…at 1 day Ada too, after the nulls");
-  const staleOne = await c("crm_stale_contacts", { days_threshold: 1, limit: 1 });
-  assert(ok(staleOne) && staleOne.body?.count === 1, "…limit applies");
-}
 
 // ── extensions/job-hunt (SMD-1798) ───────────────────────────────────────────
 
@@ -337,8 +236,7 @@ console.log("\n[the servers' clients share one pool]");
 
 console.log("\n[every tool each server registers is driven here]");
 {
-  const files = ["extensions/professional-crm/index.ts",
-    "extensions/job-hunt/index.ts"];
+  const files = ["extensions/job-hunt/index.ts"];
   let total = 0;
   for (const file of files) {
     const handler = handlers.get(file);
@@ -347,7 +245,7 @@ console.log("\n[every tool each server registers is driven here]");
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 20, `twenty tools on the two servers (${total})`);
+  assert(total === 10, `ten tools on the one server (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);
