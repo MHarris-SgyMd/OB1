@@ -155,7 +155,8 @@ The stack above builds the server image (as `api`) and `migrate` from the checko
 `postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
 `compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder`, `n8n`, `lgtm` and `pg-exporter` by digest in
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the workflow
-`.github/workflows/release.yml` (SMD-1860; its steps are in `release-steps.yml`) runs on the tag a cut is named by —
+`.github/workflows/release.yml` (SMD-1860; its steps are in `release-steps.yml`)
+runs on the tag a cut is named by —
 `v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
 publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and

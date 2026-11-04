@@ -5040,7 +5040,7 @@ const MAY_REPORT_CASES: [name: string, answer: "carries" | "could render as" | n
   ["Schema against real Postgres (${{ matrix.shard }})", null],
   ["${{ inputs.label }} tests", null],
   ["Fork Checks (${{ matrix.os }})", null],
-  ["Release (images, stack from them, notes)", null],
+  ["Images, stack from them, notes", null],
   ["Fork Checks passe${{ x }}d!", null],
   ["Fork ${{ x }} Checks ${{ y }} passed ${{ z }}", null],
   ["Fork Checks pa${{ x }}ks passed", null],
