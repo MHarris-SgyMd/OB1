@@ -540,12 +540,11 @@ main() {
   run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
   run compat/supabase-sql test-compat.ts
-  # The vendored writers of a thought's content or vector (change 69), then
-  # every extension tool on the SQL shim, as CI's data-layer job runs them —
-  # last, since each applies vendored schemas to the shared database and drops
-  # them after.
+  # The vendored writers of a thought's content or vector (change 69), as CI's
+  # data-layer job runs them — last, since it applies vendored schemas to the
+  # shared database and drops them after. (The extension tools' suite,
+  # test-tools.ts, retired with the last extension server: SMD-2311.)
   run extensions         test-writes.ts
-  run extensions         test-tools.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
   local shard pid
