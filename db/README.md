@@ -2484,6 +2484,22 @@ REST and MCP are `open_item`, `update_item`, `set_item_status`, `propose_item_cl
 `decide_item_close`, `item_history` and `list_items` (SMD-3665 PR 2;
 server-portable/README.md, Open items); node_state's open-item kind is SMD-3667's.
 
+`backfill-open-items.ts` (SMD-3665 PR 3a) opens a proposed item, through 117's
+`open_item`, for each distinct non-blank string in a thought's
+`metadata.action_items`, from that thought (so it is noted at the thought's capture
+time) and by the key `--as` names (default `backfill-open-items`, classified an
+agent in the registry when it has no kind yet):
+
+```bash
+bun backfill-open-items.ts --url … --dry-run     # counts what it would open; writes nothing
+bun backfill-open-items.ts --url …               # opens them
+```
+
+117's identity (the thought and the text) makes a second run open nothing, so it is
+safe to run again — and running it again is how board-sync's thoughts, written
+through `db/` and not the core's capture, gain their items. No thought's row is
+written. A capture through the server proposes its own items as it lands.
+
 Migration 118 releases a closed ticket's claims (SMD-3600). Without it, a claim
 whose holder merged and never released stayed on every read naming the ticket
 (SMD-3599's `claimed` label shows lapsed claims never released).

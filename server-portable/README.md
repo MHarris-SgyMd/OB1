@@ -1095,6 +1095,11 @@ it, each over REST and MCP alike:
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
 
+- **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
+  `proposed` item for each distinct non-blank action item the extractor reads from it, at
+  most 20, from that thought and by the capturing key; a re-capture proposes none, and the
+  capture never fails for it. `db/backfill-open-items.ts` does the same for thoughts
+  captured before.
 - **Opening.** An item read from a thought (`origin_thought`) is noted at that thought's
   capture time, so an old to-do reads as old. The same thought and text again is the item
   already there (`unchanged`, nothing written), and so is a plugin's row. `proposed: true`

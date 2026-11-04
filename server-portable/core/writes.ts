@@ -7,6 +7,7 @@
 
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
+import { proposeActionItems } from "./items.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
@@ -517,6 +518,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     if (captured.existed === false) {
       await ctx.logActions(principal, citeRows("capture_thought", { derived_from: derivedFrom, supersedes: pointer }));
     }
+    // The extractor's action items as proposed open items (SMD-3665 PR 3a), for a thought this capture wrote: a
+    // re-capture's extraction may word them otherwise, and its first capture proposed them already. Never fails the
+    // capture.
+    if (captured.existed !== true) await proposeActionItems(ctx, principal, captured.id, metadata as Record<string, unknown>);
 
     // What a key that cannot read may be told about the row: not whether
     // the text was already a thought, nor what it points at (first review

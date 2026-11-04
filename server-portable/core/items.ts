@@ -182,3 +182,35 @@ export async function listItems(ctx: Ctx, _principal: Principal, input: Input<"l
   if (r instanceof ItemRefused) return inputRefused(r);
   return ok(r);
 }
+
+
+/** At most this many items are proposed from one capture: an extraction listing more is reading a list, not to-dos. */
+export const MAX_PROPOSED_PER_CAPTURE = 20;
+
+/**
+ * The extractor's action items as proposed open items (SMD-3665 PR 3a): one per distinct non-blank string in the
+ * capture's `action_items`, read from the captured thought and opened by the capturing key, `proposed` (a write key
+ * confirms one; the maintainer's decision, 2026-11-03). The same thought and text again is the item already there
+ * (117's identity), so a retried capture opens nothing twice. Never fails the capture: an item 117 refuses (a text
+ * past its length, a capture key whose agent id the registry did not give) is skipped, and a store that cannot open
+ * items at all (a brain before 117) is logged once per capture. Returns how many were opened.
+ */
+export async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<number> {
+  const scope = writerScope(principal);
+  const raw = metadata.action_items;
+  if (!scope || !Array.isArray(raw)) return 0;
+  const texts = [...new Set(raw.filter((t): t is string => typeof t === "string").map((t) => t.trim()).filter((t) => t.length > 0))].slice(0, MAX_PROPOSED_PER_CAPTURE);
+  let opened = 0;
+  const store = await ctx.store();
+  for (const text of texts) {
+    try {
+      const a = await store.openItem({ text, originThought: thoughtId, proposed: true, actor: actorOf(ctx, principal), scope });
+      if (a.outcome === "opened") opened++;
+    } catch (e) {
+      if (e instanceof ItemRefused) continue;
+      console.error(`capture: the action items of thought ${thoughtId} were not proposed as open items: ${(e as Error)?.message ?? e}`);
+      break;
+    }
+  }
+  return opened;
+}

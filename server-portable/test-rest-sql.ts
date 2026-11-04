@@ -61,7 +61,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       v[axisFor(String(body.input))] = 1;
       return new Response(JSON.stringify({ data: [{ embedding: v }] }), { headers: { "Content-Type": "application/json" } });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea" }) } }] }), { headers: { "Content-Type": "application/json" } });
+    // A capture marked "rho: remind me" reads action items (SMD-3665 PR 3a's [15]): a repeat in another case, a blank and a number among them.
+    const actionItems = JSON.stringify(body).includes("rho: remind me") ? ["call the dentist", "Call the dentist", "  ", 7, "book the vet"] : undefined;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea", ...(actionItems ? { action_items: actionItems } : {}) }) } }] }), { headers: { "Content-Type": "application/json" } });
   }
   return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
@@ -1778,6 +1780,54 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
       && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true
       && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true,
     `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+}
+
+console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, noted at its capture time; a re-capture opens none; a capture key's own; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts, classifying its key an agent, no thought's metadata changed, and a second run opens nothing");
+{
+  type I = { id: string; status: string; text: string; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null; trust: string | null } };
+  const listed = async (thought: string, key?: string) => ((await rest("GET", `/v1/items?status=all&origin_thought=${thought}`, undefined, key)).body.items ?? []) as I[];
+  // A capture whose extraction reads action items: one item per distinct non-blank string, proposed, from the thought.
+  const cap = await rest("POST", "/v1/thoughts", { content: "rho: remind me to call the dentist and book the vet" });
+  const capId = String(cap.body.id);
+  const [{ created_at: capAt }] = await sql`SELECT to_jsonb(created_at) #>> '{}' AS created_at FROM thoughts WHERE id = ${capId}::uuid`;
+  const proposed = await listed(capId);
+  assert(cap.status === 201 && proposed.length === 2 && proposed.every((i) => i.status === "proposed" && i.originThoughtId === capId && i.openedBy.name === "writer" && i.openedBy.scope === "write")
+      && JSON.stringify(proposed.map((i) => i.text).sort()) === JSON.stringify(["book the vet", "call the dentist"])
+      && proposed.every((i) => new Date(i.notedAt).getTime() === new Date(String(capAt)).getTime()),
+    `a capture's action items are two proposed items — the repeat in another case, the blank and the number left out — from the thought, opened by the writer, noted at its capture time (${JSON.stringify(proposed.map((i) => [i.text, i.status]))})`);
+  // A re-capture of the same text opens none; a capture key's capture opens its own.
+  const again = await rest("POST", "/v1/thoughts", { content: "rho: remind me to call the dentist and book the vet" });
+  const capHook = await rest("POST", "/v1/thoughts", { content: "rho: remind me, says the hook" }, KEYS.hook);
+  const hookItems = await listed(String(capHook.body.id));
+  assert(again.status === 201 && String(again.body.id) === capId && (await listed(capId)).length === 2
+      && hookItems.length === 2 && hookItems.every((i) => i.openedBy.name === "hook" && i.openedBy.scope === "capture" && i.status === "proposed"),
+    `a re-capture opens no item; a capture key's capture opens its own, at capture scope (${(await listed(capId)).length} | ${JSON.stringify(hookItems.map((i) => i.openedBy))})`);
+
+  // The backfill: thoughts written with action items and no items yet (as board-sync writes them, past the capture).
+  const raw = async (content: string, actionItems: unknown) => String((await sql`
+    SELECT (upsert_thought(${content}::text, ${{ metadata: { source: "linear", action_items: actionItems } }}::jsonb, NULL::vector)->>'id') AS id`)[0].id);
+  const b1 = await raw("rho backfill: a ticket's to-dos", ["water the ferns", "Water the ferns", "", 7, "x".repeat(1100)]);
+  const b2 = await raw("rho backfill: a second ticket", ["renew the passport"]);
+  const meta = async () => JSON.stringify(await sql`SELECT id, metadata, updated_at::text AS u FROM thoughts WHERE id IN (${b1}::uuid, ${b2}::uuid) ORDER BY id`);
+  const itemCount = async () => Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
+  const before = await meta(), itemsBefore = await itemCount();
+  const run = async (...args: string[]) => {
+    const p = Bun.spawn(["bun", "--no-env-file", new URL("../db/backfill-open-items.ts", import.meta.url).pathname, "--url", URL_!, ...args], { stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    return { out, err, code };
+  };
+  const dry = await run("--dry-run");
+  const itemsAfterDry = await itemCount();
+  const real = await run();
+  const b1Items = await listed(b1), b2Items = await listed(b2);
+  const kind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'backfill-open-items'`)[0] as { kind?: string } | undefined)?.kind;
+  const second = await run();
+  assert(dry.code === 0 && /dry run: nothing written/.test(dry.out) && /2 to open; 1 past 1000 characters/.test(dry.out) && itemsAfterDry === itemsBefore,
+    `the dry run counts what it would open — two, the long one left out — and writes nothing (${dry.code} ${dry.out.trim().replace(/\n/g, " | ")} ${dry.err.trim()})`);
+  assert(real.code === 0 && /opened 2,/.test(real.out) && b1Items.length === 1 && b1Items[0].text === "water the ferns" && b1Items[0].status === "proposed" && b1Items[0].openedBy.name === "backfill-open-items"
+      && b1Items[0].openedBy.trust === "agent" && b2Items.length === 1 && kind === "agent" && (await meta()) === before
+      && second.code === 0 && /opened 0, \d+ already items/.test(second.out),
+    `the backfill opens the two as proposed from their thoughts, its key classified an agent, no thought's metadata or updated_at moved; a second run opens nothing (${real.out.trim().replace(/\n/g, " | ")} ${real.err.trim()} | ${second.out.trim().replace(/\n/g, " | ")})`);
 }
 
 apiServer.stop();
