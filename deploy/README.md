@@ -2225,8 +2225,9 @@ consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. A migration run beside it — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
-(SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses re-embed — the embedding
-key, credit, the model not served — or its endpoint down sets it down for
+(SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses
+re-embed — the embedding key, credit, the model not served — or its endpoint
+down sets it down for
 that period, said in its log and on `heartbeat:sleep`, and extraction and
 consolidation run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
@@ -2234,11 +2235,12 @@ labelled by the first periods, one embedding call a row, before extraction;
 `bun db/reembed.ts --dry-run` says how many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
-it can print the model names), and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
-re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
-back and recreate `api` and the coordinator, which read them once. On the next live call it pauses them within `OB1_SLEEP_POLL` seconds
-(unset, 5): they wait between thoughts and go on once `OB1_SLEEP_CAPTURE`
-seconds pass with no live call, a model call in
+it can print the model names), and the others run on: run
+`bun db/reembed.ts --switch-model` (db/README.md's re-embed section), or put
+`OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`) back and recreate `api` and
+the coordinator, which read them once. On the next live call it pauses them
+within `OB1_SLEEP_POLL` seconds (unset, 5): they wait between thoughts and go
+on once `OB1_SLEEP_CAPTURE` seconds pass with no live call, a model call in
 hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
 its thought set back (SMD-3379 PR 1c-3b). One during the sweep ends the period
 there (its call in hand given 2 s, then cancelled). A period ends once its
@@ -2289,12 +2291,12 @@ coordinator — by hand, or an old stack's `extract` and `consolidate`
 containers, which `up -d --remove-orphans` removes — still keeps the
 scheduler down: it refuses to run (exit 2, its log naming them) while a
 follower's heartbeat is fresh, at its start or when a poll, idle or in a
-period, finds one, since a follower does not yield to a live call. A follower stopped
-cleanly marks its row ended, so the refusal lifts at once; one killed past
-its grace leaves its row fresh for up to three of its intervals (3 min). The
-coordinator does not exit on the refusal: its supervisor tries again after 1,
-2, 4, 8, then every 15 minutes (SMD-3214), and preflight's `sleep` row says it
-is held and names the followers keeping it down.
+period, finds one, since a follower does not yield to a live call. A follower
+stopped cleanly marks its row ended, so the refusal lifts at once; one killed
+past its grace leaves its row fresh for up to three of its intervals (3 min).
+The coordinator does not exit on the refusal: its supervisor tries again
+after 1, 2, 4, 8, then every 15 minutes (SMD-3214), and preflight's `sleep`
+row says it is held and names the followers keeping it down.
 
 ```bash
 # deploy/.env: OB1_PASSES=sleep (in place of workers)
@@ -2306,9 +2308,10 @@ podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -
 **Settings.** `OB1_SLEEP_CAPTURE` (1–86400, unset 20: the time after the
 newest live call before a period begins or paused passes go on),
 `OB1_SLEEP_RESCAN` (60–86400, unset 3600: how often the idle scheduler reads
-its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER` (60–86400, unset 60: how long a model
-call in hand may have run, counted from its start, when a pause aborts it, its thought set back;
-at least extraction's stall floor, so each abort counts as a long stop),
+its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
+(60–86400, unset 60: how long a model call in hand may have run, counted from
+its start, when a pause aborts it, its thought set back; at least
+extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
@@ -2316,7 +2319,8 @@ digits only (`deploy/.env.example`). The budget (SMD-2679), each pass's
 session settings:
 `OB1_SLEEP_STATEMENT_TIMEOUT` in seconds (0–86400, unset 300; 0 leaves the
 role's or the database's own: a statement past it holds its pass until a
-restart, the others going on), `OB1_SLEEP_WORK_MEM` and `OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
+restart, the others going on), `OB1_SLEEP_WORK_MEM` and
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
 (1–2097151, unset 4 and 64). Preflight's `sleep` row says the budget and any
 pass a statement holds. **Upgrading to 2.0.0:** `OB1_SLEEP_QUIET` and
 `OB1_SLEEP_BUDGET` were removed — the coordinator no longer reads them, so

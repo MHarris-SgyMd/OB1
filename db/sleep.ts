@@ -28,10 +28,11 @@
  * extracted already, a delete's orphans, re-embed's backlog — waits for the
  * rescan, or goes with a period other work begins; the next poll reads whole
  * after a live write or its limit cut the sweep, a retried start refusal's
- * wait, and a set-aside cleared. The sweep's census reads one window of 10,001 lineage
- * rows a whole read, an empty one moving the place on, so on an idle brain
- * an orphan k windows in is found at the k-th rescan; a one-shot run, and
- * the dry run, walk every window, having no later read. A pass held begins none: one a statement held
+ * wait, and a set-aside cleared. The sweep's census reads one window of
+ * 10,001 lineage rows a whole read, an empty one moving the place on, so on
+ * an idle brain an orphan k windows in is found at the k-th rescan; a
+ * one-shot run, and the dry run, walk up to 100 windows, having no later read. A
+ * pass held begins none: one a statement held
  * (Budget), re-embed set aside or down (Working) — a set-down re-armed at the
  * next period's start, or by the next rescan, so one refused again begins no
  * period every poll. Without --follow, a read that finds no work exits 0 —
@@ -76,9 +77,9 @@
  * rolled back, the supersession lock let go; a call waiting on a lock gives
  * up after 2 s (lock_timeout), so no wait behind a row holds the lock past
  * it, and is passed over, its thought named. A live write ends the period
- * there, no pass started (Work). A thought whose call fails is
- * passed over, said in the summary, and tried again when the sweep comes
- * round; a failure of the sweep itself is said once and the passes go on; a replay's refusal
+ * there, no pass started (Work). A thought whose call fails is passed over,
+ * said in the summary, and tried again when the sweep comes round; a failure
+ * of the sweep itself is said once and the passes go on; a replay's refusal
  * stops it, said once; a brain without 063, or a role without EXECUTE on the
  * function, is told once at the start and sweeps nothing — and the function
  * is SECURITY INVOKER over four groups' tables, so a role short of one of
@@ -116,18 +117,19 @@
  * a pause's abort setting the one in hand back — and the start line and
  * --dry-run count them (reembed.ts --dry-run before upgrading). The
  * extraction follower runs alone until its pool is drained — nothing
- * pending, in flight or not yet in the pool — because consolidation judges a thought against neighbours that must be
- * extracted first (consolidate.ts's header; deploy/README.md's "Extraction
- * alone on a backlog", a rule there until now). The consolidation follower
- * then joins it, beside it as the coordinator's workers pass runs the two (SMD-2424):
- * safe for what arrives from then on, as a candidate was captured on an
+ * pending, in flight or not yet in the pool — because consolidation judges
+ * a thought against neighbours that must be extracted first (consolidate.ts's
+ * header; deploy/README.md's "Extraction alone on a backlog", a rule there
+ * until now). The consolidation follower then joins it, beside it as the
+ * coordinator's workers pass runs the two (SMD-2424): safe for what arrives
+ * from then on, as a candidate was captured on an
  * earlier UTC date. It joins as well once extraction holds nothing but
  * thoughts that SLEEP_STALLED_JOIN (3) or more long hard stops in a row took
  * with no window saved between, and none saved since (migration 093's
  * `stalled` and `gained`, SMD-2694; long: the thought held a minute,
- * provider pauses aside, so short holds count none): a single window longer than
- * any run between stops — or a stop
- * that keeps landing past the last window, in the decider's call or the
+ * provider pauses aside, so short holds count none): a single window longer
+ * than any run between stops — or a stop that keeps landing past the last
+ * window, in the decider's call or the
  * write — which would otherwise hold consolidation back for as long as the
  * brain keeps pausing it. The cost is consolidate.ts's for an unextracted
  * neighbour: a newer thought judged meanwhile misses its pair with such a
@@ -143,7 +145,8 @@
  * restart it, the stalled thought(s) moved behind that work, at most once a
  * minute. Once consolidation has joined, a stalled thought in hand keeps its
  * turn, and such a capture goes first at the next period; nor is a thought
- * still gaining windows, or a stall or two short of the join, stopped for one. When consolidation joins past,
+ * still gaining windows, or a stall or two short of the join, stopped for
+ * one. When consolidation joins past,
  * extraction is set aside — stopped, if in hand with a stalled thought —
  * until consolidation's pool drains, then resumes, so on a one-slot model the
  * judge is not left waiting behind the window. While consolidation waits for
@@ -196,9 +199,9 @@
  * aborted (N12, lease.ts' abortInHand), its thought set back in the queue —
  * extraction keeping its answered windows and counting the stop on 093, which
  * stalls a window longer than every pause as a wake's stop did —
- * consolidation's none once CONSOLIDATE_ABORTS are made in a period's hour (one poll
- * with more workers may pass it). As the gate opens, the stopped thoughts are
- * moved behind the newer work first (stoppedLast).
+ * consolidation's none once CONSOLIDATE_ABORTS are made in a period's hour
+ * (one poll with more workers may pass it). As the gate opens, the stopped
+ * thoughts are moved behind the newer work first (stoppedLast).
  * A period ends once its pools drain (PR 1c-4b, draft 5's end-of-period
  * read): past consolidation's join, each poll reads the claims, one EXISTS a
  * pass, and with none pending or in hand the pools whole — consolidation's
@@ -315,9 +318,9 @@
  * read at the first stamp idle or poll in a period, after each period, at
  * least every minute and before the row ends — so the row names a thought the
  * periods cannot finish (SMD-2694). The passes stamp through it, not their
- * own rows, so a period's end does not end a follower's row for preflight to warn
- * about, and preflight's
- * consolidate pass row reads it as the scheduler at work. Only --follow
+ * own rows, so a period's end does not end a follower's row for preflight to
+ * warn about, and preflight's consolidate pass row reads it as the scheduler
+ * at work. Only --follow
  * stamps: one period leaves no row to go stale, as a one-shot pass does not.
  * Followers run outside sleep (the coordinator's workers, never beside it
  * there, or a hand run) do not yield, so the two are alternatives: a run
@@ -327,10 +330,11 @@
  * --dry-run names them, each with how to stop them and retire their rows
  * (SMD-2678). Under --follow a refusal, at the start too, ends the row on a
  * failure, its last period kept, so preflight names the followers keeping it
- * down. Preflight's `sleep` row reads this heartbeat, with its `slept` mark
- * and its `reads` word on the query log, and the coordinator runs
- * `--follow` when OB1_PASSES names sleep (db/coordinator.ts, SMD-3476). The start's reads, like a period's,
- * wait out a database not answering yet, and so does each pass's start at
+ * down. Preflight's `sleep` row reads this heartbeat, with its `slept` mark,
+ * and the coordinator runs
+ * `--follow` when OB1_PASSES names sleep (db/coordinator.ts, SMD-3476). The
+ * start's reads, like a period's, wait out a database not answering yet, and
+ * so does each pass's start at
  * every period, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
@@ -375,9 +379,9 @@ const DEFAULT_RESCAN_S = 3600;
 /** How often the logs are read in a period: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound once paused. */
 const DEFAULT_POLL_S = 5;
 /**
- * The quiet after the newest live write before paused passes go on
- * (SMD-3379 PR 1c-3b): draft 5's 20 s until 1c measures the gaps between a
- * brain's live writes (`--capture`, OB1_SLEEP_CAPTURE).
+ * The time after the newest live write before a period begins or paused
+ * passes go on (SMD-3379 PR 1c-3b, 1c-4b): draft 5's 20 s until 1c measures
+ * the gaps between a brain's live writes (`--capture`, OB1_SLEEP_CAPTURE).
  */
 const DEFAULT_CAPTURE_S = 20;
 /**
@@ -396,11 +400,11 @@ const CONSOLIDATE_ABORTS = 3;
 const CONSOLIDATE_CAP_WINDOW_MS = 3_600_000;
 /** The followers' own poll for new work, their bare --follow's. */
 const PASS_FOLLOW_S = 15;
-/** How far ahead the stopped thoughts are dated as a sleep begins (stoppedLast): past any sleep, so every capture made during one is taken first (SMD-3008). */
+/** How far ahead the stopped thoughts are dated as a period begins (stoppedLast): past any period shorter than that, so every capture made during one is taken first (SMD-3008). */
 const FORWARD_DAYS = 30;
 /** The least time between two restarts of extraction for work that lands behind a stalled thought in hand (asleep(), SMD-3008). */
 const RESTART_EVERY_MS = 60_000;
-/** How far before a sleep began its wake reads, for a write committed after it in a transaction begun before (asleep()). */
+/** How far before a period began its live reads reach, for a write committed after it in a transaction begun before (asleep()). */
 const WAKE_SLACK_S = 30;
 /** The longest --poll: the idle wait is at most a minute, the heartbeat's floor, and a poll past it would break that. */
 const MAX_POLL_S = 60;
@@ -441,7 +445,7 @@ export interface SleepOptions {
   env?: Record<string, string | undefined>;
   /** How often the idle scheduler reads its work whole, in seconds (DEFAULT_RESCAN_S): --rescan (SMD-3379 PR 1c-4b). */
   rescan?: number;
-  /** The quiet in seconds after the newest live write before paused passes go on (DEFAULT_CAPTURE_S): --capture (SMD-3379 PR 1c-3b). */
+  /** The time in seconds after the newest live write before a period begins or paused passes go on (DEFAULT_CAPTURE_S): --capture (SMD-3379 PR 1c-3b). */
   capture?: number;
   /** N12's bound in seconds (DEFAULT_ABORT_AFTER_S): --abort-after, at or above the stall floor (SMD-3379 PR 1c-4a). */
   abortAfter?: number;
@@ -551,9 +555,9 @@ type Pool = { pending: number; claimed: number; failed: number; unpooled: number
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
 const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 /**
- * Extraction holds only thoughts whose single window outlasts every sleep,
- * or whose stops land past their last window:
- * nothing to add, and every row pending or in flight stalled. Consolidation
+ * Extraction holds only thoughts whose single window outlasts every run
+ * between pauses, or whose stops land past their last window: nothing to
+ * add, and every row pending or in flight stalled. Consolidation
  * joins past them (SMD-2694), as it would never join behind them.
  */
 const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claimed > 0 && p.pending + p.claimed === p.stalled;
@@ -566,8 +570,8 @@ const newerWork = (p: Pool): number => p.pending - p.stalledPending + p.unpooled
 /**
  * Extraction has only stalled thoughts in hand while newer work waits behind
  * them — a row pending that is not stalled, or a thought not yet in the pool:
- * a capture made during the sleep, which a sync write's is, as nothing wakes
- * the brain for it (SMD-3008). The pool is not all stalled, so consolidation
+ * a capture made during the period, which a sync write's is, as it pauses
+ * nothing (SMD-3008). The pool is not all stalled, so consolidation
  * would not join past it either, and both waited out the window in hand.
  * In hand is this process's: a lapsed lease another left is not (review pass 2).
  */
@@ -613,7 +617,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   // Re-embed's is its own backlog read (reembed.ts): the rows pending or in
   // flight, and what a first pool would add — the thoughts not at the model,
   // and the finished rows whose thought has moved (SMD-2679 PR 4b).
-  // In a sleep (`mineSince`), only the leases this process can work count:
+  // With `mineSince`, only the leases this process can work count:
   // another's live lease is not its follower's to claim (review pass 1).
   if (pass === "reembed") {
     const b = await reembedBacklog(sql, job, mineSince === undefined ? undefined : { prefix: REEMBED_MINE, since: mineSince });
@@ -666,9 +670,10 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
 /**
  * The thoughts extraction holds back across its stops: pending or in flight,
  * a hard stop counted on them (093), of the text and windowing in force —
- * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped: by the
- * wakes and a paused sleep's aborts, the scheduler's own cuts counted apart (101, SMD-3060) and only said —
- * none where `cuts` is not there to read (a brain before 101).
+ * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped: by a
+ * paused period's aborts (before 2.0.0, the wakes too), the scheduler's own
+ * cuts counted apart (101, SMD-3060) and only said — none where `cuts` is
+ * not there to read (a brain before 101).
  */
 async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Promise<SleepHeld> {
   const rows = (await sql`
@@ -762,11 +767,10 @@ async function lastSlept(sql: SQL): Promise<SleepMark | null> {
   try {
     const s = (JSON.parse(r.value) as { slept?: { from?: unknown; to?: unknown } }).slept;
     if (!(s && typeof s.from === "string" && (s.to === null || typeof s.to === "string"))) return null;
-    // A sleep the last process never ended — killed mid-sleep, most likely,
-    // as it is asleep most of the time — ends at its row's last stamp, within
-    // a minute of the truth (it stamped at least that often asleep): a mark
-    // with no end reads "no sleep yet" to preflight's awake row (SMD-2752 PR 3,
-    // review pass 2).
+    // A period the last process never ended — killed mid-period, most likely
+    // — ends at its row's last stamp, within a minute of the truth (it stamped
+    // at least that often in one): a mark with no end reads "none yet" to
+    // preflight's idle row (SMD-2752 PR 3, review pass 2).
     const { budget, limit } = s as { budget?: unknown; limit?: unknown };
     const stopped = s.to !== null && (budget === "clock" || budget === "statement") ? budget : undefined;
     // The bound within its kind's range, as brain-info.ts reads it.
@@ -804,7 +808,7 @@ const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.roun
 
 /**
  * The scheduler's line for a pass's start refusal that ends it — at the
- * check, a permanent one at a later sleep, or one at a pass's first start in
+ * check, a permanent one at a later period, or one at a pass's first start in
  * this process — with what to do beyond the pass's own words: those name the
  * cause, but the key's name a --switch-key this script does not take, and a
  * revoked key's no way back (review pass 6, an operator's walk through each
@@ -818,7 +822,7 @@ function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: strin
 
 /**
  * The file a consolidation pass's verdicts go to under --dump-dir (SMD-3203): one per pass key, so a new judge or
- * decide version starts a file of its own, and each sleep of a pass appends to it. Each run of characters outside
+ * decide version starts a file of its own, and each period's pass appends to it. Each run of characters outside
  * letters, digits, ".", "_" and "-" (the key's ":", "+" and "@", a model name's "/") becomes one "_", so two keys
  * differing only there share a file; each line names its key.
  */
@@ -937,7 +941,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The poll in seconds: a test's milliseconds in place of the flag's whole seconds (SMD-3196). */
   const POLL = opts.pollMs !== undefined ? opts.pollMs / 1000 : n.poll;
   /**
-   * The capture in seconds (SMD-3379 PR 1c-3b): the quiet after the newest
+   * The capture in seconds (SMD-3379 PR 1c-3b): the time after the newest
    * live write before a paused period goes on, and before an idle scheduler
    * with work begins one (PR 1c-4b).
    */
@@ -950,9 +954,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** How far before a read the next reads back (WAKE_SLACK_S). */
   const WAKE_SLACK = opts.wakeSlackMs !== undefined ? opts.wakeSlackMs / 1000 : WAKE_SLACK_S;
   /**
-   * The admit gate every pass of the current sleep waits at (SMD-3379 PR
+   * The admit gate every pass of the current period waits at (SMD-3379 PR
    * 1c-3b, lease.ts' liveGate): closed by a live write, open again after
-   * CAPTURE of quiet. One a sleep, so a pass of an earlier sleep holds none.
+   * CAPTURE with no live write. One a period, so a pass of an earlier
+   * period holds none.
    */
   let gate = liveGate();
   /** Each pass's session settings, named as the scheduler's own (SCHEDULER_TAG) (SMD-2679). */
@@ -978,7 +983,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** --dump-dir: every consolidation verdict, appended to the pass key's own file (SMD-3203). */
   const DUMP = opts.dumpDir === undefined ? undefined : passDumpFile(opts.dumpDir, JOBS.consolidate);
 
-  // The start's reads wait out a database not answering yet, as the sleep's
+  // The start's reads wait out a database not answering yet, as a period's
   // own do (reading, below): the compose service starts beside a Postgres that
   // may be restarting, and an exit here would spend one of its three restarts
   // (SMD-2678). A stop during the wait ends the run as a stop before it began.
@@ -1019,10 +1024,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
   const outside = await atStart(() => followersOutside(sql));
   if (outside === null) { err(STOPPED_EARLY); return 130; }
-  // Followers outside the scheduler do not yield to a live call, so a sleep
-  // beside them is no sleep: a run refuses (2) rather than start one, and the
-  // dry run names them (SMD-2678). The workers and sleep passes are
-  // alternatives, which the coordinator never runs together (SMD-3476).
+  // Followers outside the scheduler do not yield to a live call, so a period
+  // beside them would not pause for one: a run refuses (2) rather than start
+  // one, and the dry run names them (SMD-2678). The workers and sleep passes
+  // are alternatives, which the coordinator never runs together (SMD-3476).
   // A signal aborted during the start's reads — one that did not wait on an
   // outage, where the wait returns 130 itself — is a stop before the run
   // began, and wins over what the reads found, a follower included: 130 and
@@ -1044,7 +1049,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * A refusal at the start, under --follow said on the row too, ended on a
    * failure, so preflight's `sleep` row names what keeps the service down
    * rather than reading it as never run, or as one to start again (review
-   * pass 3). The row's last sleep is carried over, since a stamp writes the
+   * pass 3). The row's last period is carried over, since a stamp writes the
    * whole value (review pass 4).
    */
   const endAtStart = async (refused?: StartRefusal): Promise<void> => {
@@ -1084,13 +1089,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
   if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought its stops hold back goes unnamed; a running scheduler takes it up once restarted`);
   // The re-derive sweep's function (063) and this role's EXECUTE on it, read
-  // once as the rest are (SMD-2679): without either the sleeps sweep nothing,
+  // once as the rest are (SMD-2679): without either the periods sweep nothing,
   // said once.
   const sweepRead = await atStart(async () => (await sql`
     SELECT CASE WHEN to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NULL THEN 'missing'
                 WHEN has_function_privilege('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)', 'EXECUTE') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
   if (sweepRead === null) { err(STOPPED_EARLY); return 130; }
-  /** Whether each sleep runs the re-derive sweep: off for this process once a call is refused its privilege. */
+  /** Whether each period runs the re-derive sweep: off for this process once a call is refused its privilege. */
   let sweeps = sweepRead === "yes";
   if (!sweeps) err(`  re-derive: ${sweepRead === "missing" ? "rebuild_derived is not on this brain (migration 063 not applied)" : "this role cannot execute rebuild_derived (GRANT EXECUTE ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) TO the role, as the owner)"} — the periods sweep no orphaned lineage row; a running scheduler takes it up once restarted`);
 
@@ -1103,17 +1108,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Re-embed set aside for a model switch it will not make (SMD-2679 PR 4b,
    * the maintainer's choice): the model the brain records while it differs
-   * from this stack's, or null while re-embed runs. Set at a sleep's start,
+   * from this stack's, or null while re-embed runs. Set at a period's start,
    * or by the pass refusing `model-switch`; read again at each poll while
-   * set, so a record put right — a --switch-model run by hand, which wakes
-   * nothing — clears it within the sleep, and the next sleep re-embeds.
+   * set, so a record put right — a --switch-model run by hand, which pauses
+   * nothing — clears it within the period, and the next period re-embeds.
    */
   let reembedAside: { recorded: string } | null = null;
   /**
-   * Re-embed set down for this sleep (review pass 1, the maintainer's
-   * choice): refused at its start or mid-pass, a statement past its timeout,
-   * its provider not answering — said, on the row, the claim passes running
-   * on; the next sleep with work tries it again. Cleared as each sleep begins.
+   * Re-embed set down for this period (review pass 1, the maintainer's
+   * choice): refused at its start or mid-pass, its provider not answering —
+   * said, on the row, the claim passes running on; the next period with work
+   * tries it again. Cleared as each period begins — but a statement past its
+   * timeout holds it until a restart (N9).
    */
   let reembedDown: ReembedDown | null = null;
   /** Re-embed set down or aside at any point of this period: its pool left, so a one-shot run exits 1 (review pass 3: one taken up mid-sleep exited 0). */
@@ -1123,7 +1129,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * A claim pass whose start refusal --follow retries, held until its retry
    * wait ends (SMD-3379 PR 1c-4a): `until` the database's clock then; the next
-   * sleep retries it. A stop during the wait leaves it on the ended row.
+   * period retries it. A stop during the wait leaves it on the ended row.
    */
   let retryHold: SleepHold | null = null;
   /**
@@ -1135,7 +1141,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const statementHeld = new Set<PassName>();
   /**
    * The row's `holds` (SMD-3379 PR 1c-4a, brain-info's SleepHold): re-embed
-   * set aside on a model switch, or set down until the next sleep — neither
+   * set aside on a model switch, or set down until the next period — neither
    * with a time — and a claim pass held for its start's retry, one whose
    * refusal names no kind holding nothing. Only a reason brain-info reads,
    * which reads none of a list with one it does not.
@@ -1196,8 +1202,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // Each pass's own start — its banner, the egress gate, the tables, the
   // model's probe, the worker key, extraction's recorded key — run once here
   // (the engines' `check`), so a misconfiguration ends the service at its
-  // start rather than at the first quiet, or after extraction's backlog for
-  // consolidation's judge. The passes each sleep starts leave their banner to
+  // start rather than at the first period, or after extraction's backlog for
+  // consolidation's judge. The passes each period starts leave their banner to
   // this. A provider that does not answer is no refusal: each pass waits for
   // it at its own start, as before. The check runs before this process's
   // heartbeat exists — its probes up to a minute each, a database outage as
@@ -1208,15 +1214,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // each model, which on a tight GPU may swap a model in once per start.
   /**
    * The passes whose start got through in this process — the provider
-   * answered their probe, the keys resolved — at this check or at a sleep's
+   * answered their probe, the keys resolved — at this check or at a period's
    * start (onPass). A model or provider refusal at a later start is then one
    * a re-pull or a top-up can mend, and is retried (review pass 3 of
    * SMD-1794; the check feeds it since SMD-2752).
    */
   const begun = new Set<PassName>();
   for (const pass of PASSES) {
-    // Re-embed's start is each sleep's, run only when its backlog has work,
-    // and whatever refuses it sets it down for that sleep rather than ending
+    // Re-embed's start is each period's, run only when its backlog has work,
+    // and whatever refuses it sets it down for that period rather than ending
     // the scheduler (review pass 1, the maintainer's choice): no probe of the
     // embedding endpoint at the scheduler's start.
     if (pass === "reembed") continue;
@@ -1224,7 +1230,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // the cast keeps the declared type (SMD-1932's idiom).
     let result = null as StartResult | null;
     // A check that throws — a grant refused on a read, say — ends the row
-    // failed before it propagates, as a pass that throws at a sleep does in
+    // failed before it propagates, as a pass that throws in a period does in
     // the loop below, rather than leave the last process's row (review pass 3).
     const checking = {
       url, env, workers: WORKERS, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: opts.signal, check: true, session: SESSION,
@@ -1251,7 +1257,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   }
 
   // ── The heartbeat ────────────────────────────────────────────────────────
-  // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
+  // Only --follow stamps, as only a follower does: one period leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
     ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => seen.migration || err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
@@ -1261,34 +1267,35 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     stamper.holds?.(holdList());
   };
   sayAside();
-  /**
-   * The session settings on the row, with no clock (SMD-2679; PR 1c-4b), and
-   * `stops` the passes a statement past its timeout holds (N9).
-   */
   /** A statement hold's timeout and remedy, in words: with OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out (review pass 1 of PR 1c-4b). */
   const statementFix = n.statementTimeout
     ? `(${n.statementTimeout} s) — raise OB1_SLEEP_STATEMENT_TIMEOUT and recreate the coordinator`
     : "(the role's or the database's own; OB1_SLEEP_STATEMENT_TIMEOUT is 0) — raise that one, or set OB1_SLEEP_STATEMENT_TIMEOUT and recreate the coordinator";
+  /**
+   * The session settings on the row, with no clock (SMD-2679; PR 1c-4b), and
+   * `stops` the passes a statement past its timeout holds (N9).
+   */
   const sayBudget = (): void => stamper.budget?.({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: statementHeld.size });
   sayBudget();
-  // The last process's sleep, carried until this one sleeps: a stamp writes
+  // The last process's period, kept until this one begins one: a stamp writes
   // the whole value, and a restarted scheduler's first row read "no sleep
   // yet" in preflight (review pass 1 of SMD-2752 PR 3; SMD-2678's mark).
   if (FOLLOW) {
     // Through the start's outage wait, as the other start reads: a blip here
     // would drop the mark (review pass 2). A stop during the wait, or another
-    // error, leaves it to the first sleep.
+    // error, leaves it to the first period.
     const last = await atStart(() => lastSlept(sql)).catch(() => null);
     if (last) stamper.slept?.(last);
   }
   /**
    * The thoughts extraction holds back across its stops, on the row for
    * preflight's `sleep` row (SMD-2694): read at the first stamp idle or the
-   * first poll in a period, after each period or resume, at least every minute after — a thought held back is most
-   * often finished in a long sleep, which ends once its pools drain or on its
-   * clock, an hour or more later (review pass 1) — and before the row ends; carried by the next
-   * write. A courtesy, as the tail move is: a read that fails is said once and
-   * leaves the row's last word on them.
+   * first poll in a period, after each period or resume, at least every
+   * minute after — a thought held back is most often finished in a long
+   * period, which ends once its pools drain, an hour or more later (review
+   * pass 1) — and before the row ends; carried by the next write. A courtesy,
+   * as the tail move is: a read that fails is said once and leaves the row's
+   * last word on them.
    */
   let saidHeld = false;
   let heldAt = 0;
@@ -1319,15 +1326,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     await stamper.end(o, m);
   };
   const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
-  /** Each pass's last word in this sleep, and extraction's last judged block. */
+  /** Each pass's last word in this period, and extraction's last judged block. */
   const words: Partial<Record<PassName, PassOutcome>> = {};
   let malformed: MalformedBlock | null | undefined;
   const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
   /**
    * The passes waiting at their start for a provider that does not answer,
    * as each says through its stamper: heartbeat:sleep carries them, so
-   * preflight's row says the sleep waits on the provider rather than that its
-   * passes run (SMD-2752).
+   * preflight's row says the scheduler waits on the provider rather than
+   * that its passes run (SMD-2752).
    */
   const waitingAtStart = new Set<PassName>();
   /**
@@ -1342,7 +1349,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     stamper.waitingMidPass?.(PASSES.filter((p) => waitingMidPass.has(p)));
     await stamper.alive(outcome);
   };
-  /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
+  /** What a pass stamps goes to the sleep's row: its outcome mid-period, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
     key: stamper.key,
     async stamp(o, m) {
@@ -1378,7 +1385,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   let stopping = false;
   let hardStopped = false;
   let finished = false;
-  /** Aborted by the first stop: the awake wait and the sleep's poll wake on it. */
+  /** Aborted by the first stop: the idle wait and the period's poll wake on it. */
   const onStop = new AbortController();
   const running: Running[] = [];
   // A pass's signal is its first stop, and aborting it again does nothing; its
@@ -1390,7 +1397,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     p.hushed = true;
     if (!p.settled) p.abort.abort();
   };
-  /** `cut`: the scheduler's own (setAside, or stopPasses for a reason of its own), counted on the thought in hand apart from its stops, which say the wakes (101, SMD-3060). */
+  /** `cut`: the scheduler's own (setAside, or stopPasses for a reason of its own), counted on the thought in hand apart from its stops, which say a paused period's aborts (101, SMD-3060). */
   const hardStop = async (p: Running, cut = false): Promise<void> => {
     p.hushed = true;
     if (p.settled) return;
@@ -1432,7 +1439,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const said = { down: false };
   const reading = <T>(read: () => Promise<T>): Promise<T | null> => throughOutage(read, { wake: onStop.signal, said, out, err });
 
-  /** Aborted when a pass of the current sleep settles, so its poll wakes to read why. */
+  /** Aborted when a pass of the current period settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
   const start = (name: PassName, workers = WORKERS): Running => {
     const abort = new AbortController();
@@ -1449,14 +1456,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abortInHand: null, abort, hushed: false, start: null, timedOut: false };
     // Its banner and its summary's queries are left out: the check said the
     // one at the scheduler's start, and the other is a scan the scheduler
-    // would wait for at a wake (SMD-2752). Its start is reported, so a
+    // would wait for at a period's end (SMD-2752). Its start is reported, so a
     // refusal is told apart.
     const common = {
       url, env, workers, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
       banner: false, summary: false, session: SESSION,
       onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop, a?: InHandAbort) => { p.stop = s; p.abortInHand = a ?? null; begun.add(name); },
-      // The sleep's gate (SMD-3379 PR 1c-3b): closed while the brain is live.
+      // The period's gate (SMD-3379 PR 1c-3b): closed while the brain is live.
       admit: gate.admit,
       writer: tagged(name, () => p.hushed),
     };
@@ -1471,8 +1478,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       p.settled = true;
       ended.abort();
       // A statement past the pass's statement_timeout ends the pass, not the
-      // scheduler: the poll reads it as the sleep's budget (SMD-2679). Before,
-      // it rejected out of the sleep and the scheduler ended with 1.
+      // scheduler: the poll holds the pass until a restart (N9, SMD-2679).
+      // Before, it rejected out of the sleep and the scheduler ended with 1.
       if (statementTimedOut(e)) {
         p.timedOut = true;
         p.code = 1;
@@ -1514,11 +1521,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   };
 
   /**
-   * Stop every pass — hard, a wake; soft, a sleep done — and wait for each to
-   * return. A pass that threw rejects here, once the others have stopped.
-   * `cut`: a hard stop of the scheduler's own, not a wake's nor the
-   * operator's — a pass ended by itself, a follower found outside, an error —
-   * counted on the thought in hand as a cut (101, SMD-3060).
+   * Stop every pass — hard, the operator's second signal or a stop of the
+   * scheduler's own; soft, a period done — and wait for each to return. A
+   * pass that threw rejects here, once the others have stopped. `cut`: a
+   * hard stop of the scheduler's own, not the operator's — a pass ended by
+   * itself, a follower found outside, an error — counted on the thought in
+   * hand as a cut (101, SMD-3060).
    */
   const stopPasses = async (hard: boolean, cut = false): Promise<void> => {
     if (hard) await Promise.all(running.map((p) => hardStop(p, cut)));
@@ -1541,7 +1549,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   };
 
   /**
-   * The thoughts a stop has taken, to the back of the queue as each sleep
+   * The thoughts a stop has taken, to the back of the queue as each period
    * begins (093's stops, at the text and windowing in force; review pass 5):
    * a wake's tail move dates them at the wake, so every capture of the awake
    * period after it queued behind them — a stalled thought then held the one
@@ -1551,16 +1559,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * alike, claim_thoughts' tie fell the same way every sleep, so a stalled
    * thought could hold the worker ahead of a document still gaining windows,
    * or of one stall short of the join, and neither advanced (review pass 6).
-   * Dated FORWARD_DAYS ahead, not now: a capture made during the sleep —
-   * a sync write's, which wakes nothing — is enqueued at its own now(), and
-   * behind a stalled thought dated at the sleep's start it waited out the
+   * Dated FORWARD_DAYS ahead, not now: a capture made during the period —
+   * a sync write's, which pauses nothing — is enqueued at its own now(), and
+   * behind a stalled thought dated at the period's start it waited out the
    * window in hand (SMD-3008). claim_thoughts orders by enqueued_at and reads
    * no clock (015), so the date is an order, not a delay; a wake's tail move
-   * dates the thought(s) in hand now, and the next sleep dates every stopped
+   * dates the thought(s) in hand now, and the next period dates every stopped
    * thought forward again. A courtesy, as the
    * wake's tail move is: one that fails is said once, and returns false.
    * A lapsed lease is moved too: a scheduler gone left it claimed, and the
-   * next claim reaps it with its old date, ahead of the sleep's captures
+   * next claim reaps it with its old date, ahead of the period's captures
    * (review pass 2).
    */
   let saidRetail = false;
@@ -1762,7 +1770,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     return null;
   };
 
-  /** Said once: a sweep that failed, a replay's refusal, a table larger than one window — so none is a line every sleep. */
+  /** Said once: a sweep that failed, a replay's refusal, a table larger than one window — so none is a line every period. */
   let saidSweep = false;
   /** Whether every call of a sweep failing has been said: once, until a sweep's call succeeds (review pass 4: said every sleep). */
   let saidAllFailed = false;
@@ -1771,26 +1779,26 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Where the next sweep's window begins: the lineage rows in id order after
    * this one, null for the start. Moved on once a window is swept whole — its
-   * orphans fewer than the limit, nothing stopped — so successive sleeps walk
+   * orphans fewer than the limit, nothing stopped — so successive periods walk
    * a table larger than one window, which read in no order the same first
    * rows every sleep and never reached an orphan past them (review pass 1).
    */
   let sweepAfter = null as string | null;
-  /** How long a stopped sweep's call in hand may run before it is cancelled on the server: a lock it waits on would hold the wake or the stop (review passes 1 and 2). */
+  /** How long a stopped sweep's call in hand may run before it is cancelled on the server: a lock it waits on would hold the period's end or the stop (review passes 1 and 2). */
   const SWEEP_GRACE_MS = 2000;
   /**
    * The sweep's lock wait, beside the budget's session: a call waiting on a
    * thought's row holds the supersession lock, which live deletes, edits and
-   * reviews wait on — uncommitted, so no wake sees them. Past it the call is
+   * reviews wait on — uncommitted, unseen by the live read. Past it the call is
    * passed over, tried again when the sweep comes round (review pass 3).
    */
   const SWEEP_LOCK_TIMEOUT = "2s";
   /**
-   * The re-derive pass, first in each sleep (SMD-1794's order, SMD-2679):
+   * The re-derive pass, first in each period (SMD-1794's order, SMD-2679):
    * rebuild_derived's orphans-only sweep over the lineage rows whose artifact
    * is gone (rebuild.ts's sweepOrphans) — no model, at most its 500 thoughts —
-   * on a connection of its own under the budget's session, the wake read every
-   * --poll seconds meanwhile: a live event or a stop stops it between
+   * on a connection of its own under the budget's session, the live read every
+   * --poll seconds meanwhile: a live write or a stop stops it between
    * thoughts, its call in hand given SWEEP_GRACE_MS before it is cancelled on
    * the server; a live write ends the period, the next beginning once the
    * gate is open (SMD-3379 PR 1c-4b). A courtesy, as the
@@ -1837,7 +1845,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     })().then((r) => ({ r }), (e: unknown) => ({ e: e as Error }));
     /** Why the sweep was stopped, if it was: none of these is a failure to say (review pass 2). */
     let why = null as "woke" | "stopping" | null;
-    /** The live call that woke it, said as the passes' wake is (review pass 4). */
+    /** The live write that stopped it, said as the passes' pause is (review pass 4). */
     let wokeBy = "";
     let ended = null as { r?: SweepResult; e?: Error } | null;
     try {
@@ -1873,7 +1881,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
       }
     } finally {
-      // A wake read that throws leaves here too: the sweep stops before its next call (review pass 4).
+      // A live read that throws leaves here too: the sweep stops before its next call (review pass 4).
       halt.abort();
       await client.close({ timeout: 1 }).catch(() => {});
     }
@@ -1924,7 +1932,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     return null;
   };
 
-  /** The database's now() at the sleep's last read: the end of its `slept` mark (SMD-2678). */
+  /** The database's now() at the period's last read: the end of its `slept` mark (SMD-2678). */
   let sleptUntil = new Date(0);
   /**
    * A work period from `since` (SMD-3379 PR 1c-4b): the sweep, then re-embed
@@ -1934,12 +1942,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * every pass with work is held; "stopped" on a stop, the passes
    * stopped before it returns, inside the heartbeat's `during`; or, for a pass
    * that ended by itself (a refusal), its name, its code and whether it had
-   * got past its start in this sleep; or "outside" when a poll found a
+   * got past its start in this period; or "outside" when a poll found a
    * follower running outside it, the passes stopped (hard) first.
    */
   const asleep = async (since: Moment): Promise<"woken" | "done" | "stopped" | "outside" | { pass: PassName; code: number; started: boolean; refused?: StartRefusal }> => {
     for (const k of PASSES) delete words[k];
-    // The last sleep's set-down gone before the sweep, whose clock reads it (review pass 4: the row kept its word).
+    // The last period's set-down gone before the sweep, whose clock reads it (review pass 4: the row kept its word).
     reembedLeft = false;
     // Not a statement's hold, which lasts until a restart (N9; review pass 1 of PR 1c-4b).
     if (reembedDown !== null && !statementHeld.has("reembed")) {
@@ -1964,7 +1972,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (swept === "stopped") return stopped();
     if (swept === "woken") return "woken";
     // ── The pause (SMD-3379 PR 1c-3b) ──────────────────────────────────────
-    // A live write closes this sleep's gate: the passes stay up and wait at it
+    // A live write closes this period's gate: the passes stay up and wait at it
     // between thoughts, windows and pairs, holding no claim between thoughts,
     // and go on once CAPTURE has passed with no live write. A closed poll
     // starts, restarts, joins and sets aside nothing; it aborts a call in hand
@@ -1972,7 +1980,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // CONSOLIDATE_ABORTS an hour. The period ends once its pools drain, a live
     // write no end of it (PR 1c-4b).
     gate = liveGate();
-    /** The live read's lower bound: the last poll's now less the slack, so a long sleep's read stays short. */
+    /** The live read's lower bound: the last poll's now less the slack, so a long period's read stays short. */
     let readFrom = from;
     /** The newest live write seen, and when it landed, in the database's epoch microseconds: the capture counts from the landing. */
     let lastWrite: number | null = null;
@@ -2000,7 +2008,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * when extraction holds only stalled thoughts, starting it would claim one
      * at once, and on a one-slot model its window held the slot the judge
      * waited for until the wake aborted it — joining past judged nothing. It
-     * starts once consolidation's pool drains, so a long sleep still reaches
+     * starts once consolidation's pool drains, so a long period still reaches
      * the stalled thought.
      */
     let parked = false;
@@ -2013,13 +2021,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let behindPolls = 0;
     let restartedAt = 0;
     const restartEvery = opts.restartEveryMs ?? RESTART_EVERY_MS;
-    /** Extraction's pool as this sleep reads it: 093's stalled read, this run's claims, the claims alone when asked. */
+    /** Extraction's pool as this period reads it: 093's stalled read, this run's claims, the claims alone when asked. */
     const extractPool = (claimsOnly = false) => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, claimsOnly, startedAt);
     /**
      * Extraction let out of the set-aside while consolidation waits for its
      * provider — at its start, or mid-pass (providerWait) — for the
      * newer work only: its pool would not drain until the judge answered, and
-     * extraction got nothing for the sleep (SMD-3008). Set aside again once it
+     * extraction got nothing for the period (SMD-3008). Set aside again once it
      * reaches the stalled thought(s), which wait for consolidation as before,
      * so the judge, on the same chat endpoint, never queues behind their
      * window when it answers. Let out at most once a minute, the restart's bound.
@@ -2027,7 +2035,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let aside = false;
     const judgeWaits = (): boolean => waitingAtStart.has("consolidate") || waitingMidPass.has("consolidate");
     /**
-     * Extraction stopped hard and taken out of the sleep's passes, for the
+     * Extraction stopped hard and taken out of the period's passes, for the
      * join, the restart, the let-out's set-aside and the drain's alike — a
      * cut of the scheduler's own, counted apart from the stops (101). True
      * when a stop landed while it settled: no
@@ -2039,12 +2047,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (ex) {
         await hardStop(ex, true);
         await ex.done.catch(() => {});
-        // One whose statement timed out stays, for the poll to stop the sleep
-        // on its budget: dropped here, the stop was lost (review pass 1).
+        // One whose statement timed out stays, for the poll to hold until a
+        // restart (N9): dropped here, the stop was lost (review pass 1).
         if (!ex.timedOut) running.splice(running.indexOf(ex), 1);
-        // Its settling aborted the sleep's pass-ended signal, which the poll
+        // Its settling aborted the period's pass-ended signal, which the poll
         // waits on: re-armed, or every poll after returned at once and the
-        // rest of the sleep read the database without pause (review pass 5).
+        // rest of the period read the database without pause (review pass 5).
         passEnded = new AbortController();
         wake = AbortSignal.any([onStop.signal, passEnded.signal]);
       }
@@ -2075,14 +2083,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     };
     /**
      * Re-embed set aside from now on, said and on the row — briefly at each
-     * later sleep: a model switch it will not make, at a sleep's start or its
+     * later period: a model switch it will not make, at a period's start or its
      * own refusal.
      */
     const setReembedAside = async (recorded: string): Promise<void> => {
-      // The sleep's outcome reads failed while it is aside: a switch the operator mends (review pass 2).
+      // The period's outcome reads failed while it is aside: a switch the operator mends (review pass 2).
       words.reembed = "failed";
       reembedLeft = true;
-      // Said again at each sleep, briefly: each sleep's log says why re-embed did not run (review pass 3).
+      // Said again at each period, briefly: each period's log says why re-embed did not run (review pass 3).
       if (reembedAside?.recorded === recorded) {
         out(`  re-embed set aside: the brain still records ${recorded}, this stack ${EMBED.model}`);
         return;
@@ -2098,8 +2106,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     };
     /**
      * The record read again finds no switch: the set-aside cleared, said, the
-     * row's word gone. At a sleep's start re-embed runs in it; at a poll, the
-     * next sleep with work re-embeds (review pass 4: the start said the next).
+     * row's word gone. At a period's start re-embed runs in it; at a poll, the
+     * next period with work re-embeds (review pass 4: the start said the next).
      */
     const takeUpReembed = async (recorded: string, atStart = false): Promise<void> => {
       const when = atStart ? "re-embed runs in this period when it has work" : "the next period with work re-embeds";
@@ -2115,7 +2123,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * asks: a throw (its reason said, which the pass does not say itself:
      * review pass 2, a privilege refused read only "it ended by itself"), a
      * statement past its timeout, a 2 — a model switch sets it aside, anything
-     * else sets it down for this sleep. False when a stop ended the record's read.
+     * else sets it down for this period. False when a stop ended the record's read.
      */
     const reembedEnded = async (re: Running): Promise<boolean> => {
       const why = re.timedOut ? null : await re.done.then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
@@ -2135,7 +2143,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       return true;
     };
     /**
-     * Re-embed stopped and taken out of the sleep's passes — its pool drained,
+     * Re-embed stopped and taken out of the period's passes — its pool drained,
      * or its provider not answering — after the thought in hand: true when a
      * stop landed meanwhile (setAside's rule). Its settling aborted the poll's
      * pass-ended signal, re-armed here.
@@ -2166,8 +2174,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       failed: "it ended by itself",
     };
     /**
-     * Re-embed set down for this sleep: said, on the row; the next sleep with
-     * work tries again. The sleep's outcome reads failed for a cause the
+     * Re-embed set down for this period: said, on the row; the next period with
+     * work tries again. The period's outcome reads failed for a cause the
      * operator mends — a refusal, a statement timeout, a throw — so preflight's
      * row flags it before it reads `aside`; not for its provider not answering,
      * the provider's state (review pass 2).
@@ -2186,7 +2194,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // neighbours by vector, so the vectors are made current before it runs.
     // Only when its backlog has work — an empty one starts no pass, so no
     // probe loads the embedding model for nothing — and not while a model
-    // switch sets it aside; the record is read again at each sleep. A width
+    // switch sets it aside; the record is read again at each period. A width
     // or model name that forms no key its row carries keeps re-embed out of
     // sleep whatever the record says (SMD-3486).
     const recorded = await reading(recordedModel);
@@ -2194,14 +2202,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (REEMBED_OK && switched(recorded)) await setReembedAside(recorded);
     else if (reembedAside !== null) await takeUpReembed(recorded, true);
     /**
-     * Re-embed's pool as this sleep reads it: the leases this process can work
-     * — its own taken in this sleep, not one an earlier sleep's failed release
-     * stranded, which its follower could not claim either (review pass 2).
+     * Re-embed's pool as this period reads it: the leases this process can
+     * work — its own taken in this period, not one an earlier period's failed
+     * release stranded, which its follower could not claim either (review
+     * pass 2).
      */
     const reembedPool = () => poolOf(sql, "reembed", JOBS.reembed, undefined, undefined, false, since.at);
-    /** Whether re-embed's pool is this sleep's work: not set aside, not set down, its key formed. */
+    /** Whether re-embed's pool is this period's work: not set aside, not set down, its key formed. */
     const reembedRuns = (): boolean => REEMBED_OK && reembedAside === null && reembedDown === null && !statementHeld.has("reembed");
-    /** The claim passes due to start, re-embed having ended by itself: started after this poll's wake and clock reads (review pass 2). */
+    /** The claim passes due to start, re-embed having ended by itself: started after this poll's live read (review pass 2). */
     let claimsDue = false;
     let reembedding = false;
     if (reembedRuns()) {
@@ -2223,12 +2232,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       sleptUntil = live.now.at;
       const nowUs = live.now.us;
       // A write newer than any seen: it stays new, read again, until a poll
-      // reaches the wake below — one cut short by a pass's end (re-embed's
+      // reaches the pause below — one cut short by a pass's end (re-embed's
       // set-down) acts on it at the next (review pass 3).
       const wrote = live.write !== null && (lastWrite === null || live.write.us > lastWrite);
       const lastNowBefore = lastNow;
       lastNow = nowUs;
-      // A thought held back finished in this sleep is not named until the next wake otherwise.
+      // A thought held back finished in this period is not named until the next resume otherwise.
       if (Date.now() - heldAt >= everyMs) await sayHeld();
       if (await outsideNow()) {
         // A soft stop that landed during the reads keeps its own: the thought
@@ -2258,7 +2267,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // A pass that ended by itself before the pause is read first: a refusal
       // and a live call in one poll would otherwise read as the pause alone.
       const ended = running.find((p) => p.settled);
-      // Re-embed ending by itself ends no sleep and no scheduler (review pass
+      // Re-embed ending by itself ends no period and no scheduler (review pass
       // 1, the maintainer's choice): a model switch — refused at its start, or
       // the record moved under it (a follower exits 2 then, its start long
       // through) — sets it aside; anything else — refused at its start (its
@@ -2353,7 +2362,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
       }
       // While aside, the record read each poll: a --switch-model run by hand
-      // writes no audited row, so it wakes nothing, and the row asked for it
+      // writes no audited row, so it pauses nothing, and the row asked for it
       // for as long as the brain stayed asleep (review pass 2).
       if (reembedAside !== null) {
         const rec = await reading(recordedModel);
@@ -2367,7 +2376,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // Re-embed alone first: once its pool drains, or while its provider
       // does not answer — the embedding endpoint can be down while chat
       // serves — it stops after the thought in hand and the claim passes
-      // start as they would have; it tries again at the next sleep.
+      // start as they would have; it tries again at the next period.
       if (reembedding) {
         const rp = await reading(reembedPool);
         if (rp === null) return stopped();
@@ -2383,7 +2392,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         continue;
       }
       // The pools decide when consolidation joins, when extraction resumes
-      // after it, and when one sleep is done — so a --follow consolidating
+      // after it, and when one period is done — so a --follow consolidating
       // with extraction running reads none: the extraction pool's count is a
       // scan of every thought.
       if (parked) {
@@ -2393,8 +2402,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         const co = coHeld ? undefined : await reading(() => poolOf(sql, "consolidate", JOBS.consolidate));
         if (co === null) return stopped();
         if (co === undefined || drained(co)) {
-          // Captures made while it was set aside (a sync write wakes nothing)
-          // go ahead of the stalled thoughts, as the sleep's own did (review
+          // Captures made while it was set aside (a sync write pauses nothing)
+          // go ahead of the stalled thoughts, as the period's own did (review
           // pass 6: one waited out the stuck window first).
           await stoppedLast();
           // A stop that landed during the move: no pass starts after it (review pass 1).
@@ -2449,7 +2458,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           if (co === null) return stopped();
           // The let-out ran one worker: with more, it ends through the
           // set-aside once it holds nothing, so the drain's resume starts them
-          // all, where it ran one for the rest of the sleep (review pass 2).
+          // all, where it ran one for the rest of the period (review pass 2).
           // A held consolidation counts as drained (N9).
           if (co === undefined || drained(co)) {
             if (WORKERS === 1) aside = false;
@@ -2498,18 +2507,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           parked = true;
         } else if (behindPolls >= 2 && reorders && Date.now() - restartedAt >= restartEvery && !running.some((r) => r.name === "extract" && r.settled)) {
           // Work landed behind the stalled thought(s) in hand — a capture made
-          // during the sleep, dated after the move at its start — and neither
+          // during the period, dated after the move at its start — and neither
           // it nor consolidation, which joins past only an all-stalled pool,
-          // would move before the window in hand ends or the brain wakes
+          // would move before the window in hand ends or a pause aborts it
           // (SMD-3008). Not once consolidation has joined: the stalled thought
-          // has its turn then, and such a capture goes first next sleep. The
+          // has its turn then, and such a capture goes first next period. The
           // stop counts on the thought as a cut, not a stop: it stalls
           // nothing, and this one is stalled already (101, SMD-3060).
           out(`  extraction has only stalled thought(s) in hand, and ${newerWork(pools.extract)} newer thought(s) wait behind — extraction restarts, the stalled thought(s) after them`);
           if (await setAside()) return stopped();
           behindPolls = 0;
           restartedAt = Date.now();
-          // The release keeps the stalled thought's date, this sleep's forward
+          // The release keeps the stalled thought's date, this period's forward
           // one, so the newer work is claimed first; the move covers one dated
           // before it — a lease another process left, reclaimed with its old
           // date — and a move that fails ends the restarts, as such a thought
@@ -2621,7 +2630,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   })();
 
   try {
-    /** Refusals in a row, reset by a sleep that ends without one: the next is tried on SMD-2599's outage schedule. */
+    /** Refusals in a row, reset by a period that ends without one: the next is tried on SMD-2599's outage schedule. */
     let refusals = 0;
     for (;;) {
       const since = await awaitWork();
@@ -2641,7 +2650,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // Paused no longer once the period is over, however it ended (SMD-3379 PR 1c-3b).
       stamper.paused?.(null);
       stamper.slept?.({ from: since.at.toISOString(), to: sleptUntil.toISOString() });
-      // A stop that landed while the follower was found wins, as it does awake (review pass 2).
+      // A stop that landed while the follower was found wins, as it does idle (review pass 2).
       if (r === "outside" && !stopping) return refuseOutside();
       if (r === "outside") {
         await endRow("stopped", malformed ?? undefined);
@@ -2652,9 +2661,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         return FOLLOW && !hardStopped ? 0 : 130;
       }
       if (typeof r === "object") {
-        // Every sleep starts its passes afresh, so each meets its start's
+        // Every period starts its passes afresh, so each meets its start's
         // refusals again. One at the start (2 before onPass: the probe, the
-        // key) by a pass that got past its start in an earlier sleep is one a
+        // key) by a pass that got past its start in an earlier period is one a
         // restart could meet as well — a model re-pulled, a 402 cleared — and
         // under --follow it is retried, the row failed meanwhile, rather than
         // ending a scheduler nothing restarts. A pass refusing at its first

@@ -203,10 +203,9 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
     const flag = name.includes("=") ? name.slice(0, name.indexOf("=")) : name;
     if (options.removed && Object.hasOwn(options.removed, flag)) return { error: options.removed[flag] };
     if (name.includes("=")) {
-      const base = name.slice(0, name.indexOf("="));
-      if (!known(base)) return { error: `unknown argument ${i + 1}: a flag this script does not have, with a value joined by "="` };
-      if (spec[base] === "none") return { error: `argument ${i + 1} gives --${base} a value with "=", and --${base} takes none` };
-      return { error: `argument ${i + 1} joins a value to --${base} with "="; give it as --${base} <value>` };
+      if (!known(flag)) return { error: `unknown argument ${i + 1}: a flag this script does not have, with a value joined by "="` };
+      if (spec[flag] === "none") return { error: `argument ${i + 1} gives --${flag} a value with "=", and --${flag} takes none` };
+      return { error: `argument ${i + 1} joins a value to --${flag} with "="; give it as --${flag} <value>` };
     }
     if (!known(name)) return { error: `unknown argument ${i + 1}: not a flag this script has` };
     const takes = spec[name];
