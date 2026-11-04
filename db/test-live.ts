@@ -20504,7 +20504,7 @@ if (want("38")) {
       return coClaimed === 0;
     }, 10_000);
     assert(judgeAborted && judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && coClaimed === 0,
-      `paused with a judgement in hand past N12's bound, the call is aborted and the thought set back behind consolidation's queue (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}; ${coClaimed} claimed${held ? "" : "; no judge call was held within 40 s"})`);
+      `paused with a judgement in hand past N12's bound, the call is aborted and the thought set back behind consolidation's queue (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}; ${coClaimed < 0 ? "no abort line within 10 s" : `${coClaimed} claimed`}${held ? "" : "; no judge call was held within 40 s"})`);
     // At its cap, said once in the pause that reached it, the next pause
     // aborts none of consolidation's calls: the judgement in hand answers.
     const abortAt = lines.findIndex((l) => /^  paused: 1 call\(s\) in hand past/.test(l));
