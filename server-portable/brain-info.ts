@@ -397,9 +397,13 @@ export type BudgetStop = (typeof BUDGET_STOPS)[number];
 /** The sleep scheduler's budget (WorkerHeartbeat.budget): minutes and seconds 0 for none, the memory in MB. */
 export type SleepBudget = { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number };
 
-/** A budget in words, the scheduler's and preflight's: "a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB". */
+/**
+ * A budget in words, the scheduler's and preflight's: "statement_timeout 300 s,
+ * work_mem 4 MB, maintenance_work_mem 64 MB" — led by "a 60 min clock, " on a
+ * row a scheduler before 2.0.0 wrote, its clock set (SMD-3379 PR 1c-4b).
+ */
 export function budgetWords(b: SleepBudget): string {
-  return `${b.minutes ? `a ${b.minutes} min clock` : "no clock"}, statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
+  return `${b.minutes ? `a ${b.minutes} min clock, ` : ""}statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
 }
 
 /**

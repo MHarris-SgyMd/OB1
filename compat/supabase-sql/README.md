@@ -118,9 +118,9 @@ cd compat/supabase-sql && bun run test
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page has
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-tools.ts` then drives every tool of the two MCP servers with
-a schema of their own — the extensions, twenty tools since four became
-plugins (SMD-2311) — against those
+`extensions/test-tools.ts` then drives every tool of the one MCP server with
+a schema of its own — job-hunt, the last extension, ten tools since five
+became plugins (SMD-2311) — against those
 schemas, and `extensions/test-writes.ts` the servers
 that need the model provider stubbed (agent-memory-api's nine routes,
 the two consolidation workers, smart-ingest): the migrated
@@ -337,9 +337,9 @@ development — the test caught it.
   migrated file is verified to parse; `extensions/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
   filters on a JSON path, found the two gaps change 73 closed); and
-  `extensions/test-tools.ts` drives every tool of the two MCP servers with a
-  schema of their own — twenty tools, since SMD-2920 retired ob-graph's ten and
-  SMD-2311 made four extensions plugins — against those
+  `extensions/test-tools.ts` drives every tool of the one MCP server with a
+  schema of its own — ten tools, since SMD-2920 retired ob-graph's ten and
+  SMD-2311 made five extensions plugins — against those
   schemas (change 74's review had found seven of the first twenty-nine
   failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
   four embedded selects the codemod's blocker regex let through — and driving

@@ -507,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -2693,9 +2693,11 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
   // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): two of the six, professional-crm's and
-  // job-hunt's; the other four are plugins since SMD-2311, their tables in
-  // their own schemas under their own roles.
+  // README's Step 1 says (SMD-1810): two of the six files, job-hunt's and
+  // professional-crm's, whose tables job-hunt's link writes into until it is a
+  // plugin too (SMD-2311 PR 4b). The professional CRM and the other four are
+  // plugins since SMD-2311, their tables in their own schemas under their own
+  // roles.
   // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
   // granted nothing — Supabase's default privileges carried its service role;
   // the policies are gone, and this group is what a role other than the
