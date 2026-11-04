@@ -1771,13 +1771,17 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
   const hookAway = { name: "hook", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
   const ownAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("update_item", { id: hookId, owner: "while away" }) as Out;
   const prioAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("set_priority", { kind: "item", key: rowId, level: 2 }) as Out;
+  // SMD-3780: the registry set up wrong is final on the same item, as claims' [10] and priority's [11] say it.
+  const hookMisconfigured = { ...(hookAway as object), agentUnresolved: "misconfigured" } as unknown as Parameters<typeof direct.openItem>[0];
+  const ownMisconfigured = await contextFor("home-maintenance", { core: direct, principal: hookMisconfigured }).call("update_item", { id: hookId, owner: "while set up wrong" }) as Out;
   const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
   assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
       && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
       && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNOWNABLE"
       && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true
-      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true,
-    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true
+      && ownMisconfigured.ok === false && ownMisconfigured.refusal?.code === "ITEM_UNATTRIBUTED" && ownMisconfigured.refusal?.retryable === false && ownMisconfigured.refusal?.cause === "registry_misconfigured",
+    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final); its own item with the registry set up wrong, ITEM_UNATTRIBUTED final (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal, misconfigured: ownMisconfigured.refusal })})`);
 }
 
 apiServer.stop();
