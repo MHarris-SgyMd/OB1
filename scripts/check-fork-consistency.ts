@@ -3913,14 +3913,17 @@ const CITATION_PROBES: [string, boolean, number[]][] = [
 /** A citation as the layout decision sees it: where in the tree, the number, and the file name when it was cited as a path. */
 type LayoutCitation = { where: string; n: number; name?: string };
 /** forkLayoutProblems' inputs; the constants default to the shipped values, a probe passes its own. */
-type LayoutArgs = { entries: ChangeEntry[]; indexText: string; frontText?: string; forkText?: string; citations?: LayoutCitation[]; ceilings?: Record<number, number>; cap?: number; frontCeiling?: number };
+type LayoutArgs = { entries: ChangeEntry[]; indexText: string; frontText: string; forkText: string; citations?: LayoutCitation[]; ceilings?: Record<number, number>; cap?: number; frontCeiling?: number };
+/** A probe's arguments: the two texts default to empty, which the live call may not leave them. */
+type LayoutProbeArgs = Omit<LayoutArgs, "frontText" | "forkText"> & Partial<Pick<LayoutArgs, "frontText" | "forkText">>;
 /**
  * The layout decision, pure: what changes/ holds (as `{ name, text }` entries),
  * changes/README.md's text (the index), MAINTAINING.md's and FORK.md's, the
  * citations found in the tree, and the constants. Returns [{ where, kind, msg }];
  * the caller turns them into failures.
  */
-function forkLayoutProblems({ entries, indexText, frontText = "", forkText = "", citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, frontCeiling = FRONT_CEILING_BYTES }: LayoutArgs) {
+function forkLayoutProblems({ entries, indexText, frontText, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, frontCeiling = FRONT_CEILING_BYTES }: LayoutArgs) {
+  if (typeof frontText !== "string" || typeof forkText !== "string") throw new Error("check 15's layout decision was called without MAINTAINING.md's or FORK.md's text");
   const problems: { where: string; kind: string; msg: string }[] = [];
   const at = (where: string, kind: string, msg: string) => problems.push({ where, kind, msg });
   const changes = classifyChanges(entries);
@@ -3976,7 +3979,7 @@ const LAYOUT_ENTRIES = (...files: [string, string | null][]): ChangeEntry[] => f
 const CH = (n: number, title = "A thing — a consequence (SMD-1)", body = "Body.\n"): [string, string] => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
 const INDEX_FOR = (entries: ChangeEntry[], extra = "") => `# changes/\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries).numbered)}${INDEX_END}\n\ntail\n${extra}`;
 const LONG = "line\n".repeat(200);
-const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
+const LAYOUT_PROBES: [string, () => LayoutProbeArgs, string[]][] = [
   // [label, args, expected kinds]
   ["a consistent layout", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19), ["README.md", "x"], ["smd-1804.md", "---\n"]); return { entries: en, indexText: INDEX_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }, { where: "b.md:2", n: 3 }] }; }, []],
   ["a stray name", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.md", "x"]); return { entries: en, indexText: INDEX_FOR(en), ceilings: {} }; }, ["bad-name"]],
@@ -4091,11 +4094,16 @@ function checkForkLayout() {
   const named = citedChangesIn('see changes/079-the-store-measured-against-pgvector.md and changes/080 and changes/081-The_Store.md and changes/082_x.md and [79](079-the-store.md) and [a](./079-a.md#top "t")', { record: true }).map((c) => c.name ?? null);
   if (JSON.stringify(named) !== JSON.stringify(["079-the-store-measured-against-pgvector.md", null, "081-The_Store.md", "082_x.md", "079-the-store.md", "079-a.md"])) fail(SELF, `check 15's citation reader keeps a slugged path's name (mis-cased, underscored, or a relative link inside the record too — a dead link on Linux), got ${JSON.stringify(named)} (its own probe)`);
   for (const [label, args, want] of LAYOUT_PROBES) {
-    const got = forkLayoutProblems(args()).map((p) => p.kind);
+    const got = forkLayoutProblems({ frontText: "", forkText: "", ...args() }).map((p) => p.kind);
     if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 15's layout decision reports [${got}] for ${label}, expected [${want}] (its own probe)`);
   }
 
   const [indexText, frontText, forkText] = [INDEX_FILE, FRONT_DOOR, FORK_RECORD].map((rel) => readFileSync(join(ROOT, rel), "utf8"));
+  // Each text is the file it is passed as: the layout decision is pure, so a swap or a dropped argument
+  // here would leave both files unchecked with every probe still passing.
+  for (const [rel, text, title] of [[INDEX_FILE, indexText, `# ${CHANGES_DIR}/`], [FRONT_DOOR, frontText, `# ${FRONT_DOOR}`], [FORK_RECORD, forkText, `# ${FORK_RECORD}`]] as const) {
+    if (!text.startsWith(title)) fail(SELF, `check 15 read ${rel} without its \`${title}\` title — the file was retitled, or the read was miswired`);
+  }
   const entries = changesOnDisk().entries; // every entry, any extension — a stray is a finding
   const citations: LayoutCitation[] = [];
   // A citation inside a fenced block or a code span counts: a quoted "change N" is
@@ -4110,7 +4118,7 @@ function checkForkLayout() {
     for (const c of found) citations.push({ where: `${rel}:${lineAt(c.index)}`, n: c.n, ...(c.name ? { name: c.name } : {}) });
   }
   for (const [rel, want] of [[FORK_RECORD, true], [FRONT_DOOR, true], [`${CHANGES_DIR}/018-x.md`, true], ["README.md", false], ["SETUP.md", false]] as const) {
-    if (isRecordFile(rel) !== want) fail(SELF, `check 15 reads ${rel} ${want ? "as prose" : "as the record"}, where its bare "change N" citations are ${want ? "" : "not "}the record's (its own probe)`);
+    if (isRecordFile(rel) !== want) fail(SELF, `check 15 reads ${rel} ${want ? "as prose" : "as the record"}, where its bare "change N" citations are ${want ? "the record's" : "not the record's"} (its own probe)`);
   }
   for (const p of forkLayoutProblems({ entries, indexText, frontText, forkText, citations })) fail(p.where, `${p.msg} (SMD-1917)`);
 }

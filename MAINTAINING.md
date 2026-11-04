@@ -2,8 +2,8 @@
 
 Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1):
 it began as a fork of that tree at `9543c29` (2026-08-30), and has been a
-project in its own right since 2026-11-04 (SMD-3765). It takes nothing further from upstream
-and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork era: the pin,
+project in its own right since 2026-11-04 (SMD-3765). It takes nothing further
+from upstream and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork era: the pin,
 changes 1–17, the detach and how rebases ran.
 
 This file is for whoever changes the code: the version scheme and what it
@@ -142,8 +142,8 @@ never moves it — a cut does, or a numbered record's retitle (SMD-2084).
 Changes 1–103 keep their numbers — the code comments cite them — as FORK.md's
 table and the files they are.
 
-`CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
-design record: `## [Unreleased]` first, one dated section per release with entries
+`CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside the
+record in `changes/`: `## [Unreleased]` first, one dated section per release with entries
 under the six headings, each entry ending in its ticket and migration numbers. The
 release step writes it and the change files from the same fragments in one commit,
 and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
@@ -330,7 +330,7 @@ cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-sch
 
 Measured 2026-09-18 with `bun scripts/mechanism-yield.ts` over the commit log
 as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
-adds this ticket's own passes to every figure: 221 review-pass commits across
+adds SMD-1711's own passes to every figure: 221 review-pass commits across
 61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
 bodies. **None of the 511 says what found it.** Each says what was wrong and
 what changed. A keyword search for phrases that name a catcher ("mutant", "the
@@ -448,8 +448,9 @@ keyed a stub off exact input text. A suite should pin what it does not test.
 Deliberate. Recorded so nobody assumes they were missed.
 
 - **The access key still rides in the URL** — but it is now scoped, named and
-  hashed (fix 14, FORK.md's table). `?key=` is kept because Claude Desktop connectors are URL-only,
-  so a key in a URL still reaches access logs and browser history. What changed is
+  hashed (fix 14, FORK.md's table). `?key=` is kept because Claude Desktop
+  connectors are URL-only, so a key in a URL still reaches access logs and
+  browser history. What changed is
   what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
   not even registered for it. Upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
@@ -527,12 +528,13 @@ Deliberate. Recorded so nobody assumes they were missed.
 Two constraints that are not engineering problems.
 
 **Data.** A brain is one shared `thoughts` table with no per-user isolation,
-reached with keys (scoped and hashed, fix 14, which can ride in a URL) or the
-`auth` profile's tokens. Every captured thought's text goes to the model
-endpoints for embedding and metadata extraction: local Ollama by default, and a
-hosted endpoint only for what the egress gate lets through, which by default is
-nothing until an `OB1_EGRESS_ALLOW` term names it ([`SETUP.md`](SETUP.md), "What
-may leave the box"). That is fine for personal notes. It is not an architecture
+reached with keys (scoped and hashed, FORK.md's fix 14; they can ride in a URL)
+or the `auth` profile's tokens. Every captured thought's text goes to the model
+endpoints — embedding, metadata extraction and the background passes — which are
+local Ollama by default. An endpoint not declared local (`OB1_LLM_LOCAL`) gets
+only what the egress gate lets through, which by default is nothing until an
+`OB1_EGRESS_ALLOW` term names it ([`SETUP.md`](SETUP.md), "What may leave the
+box"). That is fine for personal notes. It is not an architecture
 to put regulated or patient-adjacent data into.
 
 **Licence.** Daemonic Brain is a derivative of Open Brain under its licence,

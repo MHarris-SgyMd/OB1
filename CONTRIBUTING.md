@@ -320,9 +320,9 @@ than by editing a hand-numbered FORK.md section:
   in one commit, after the commit that bumps the version and adds its migration;
   the maintainer tags the merge and `.github/workflows/release.yml` publishes the
   images and the release (MAINTAINING.md, "Cutting a release"). **Do not
-  hand-number a new change file or edit `CHANGELOG.md` by hand.** (Changes 1–103 predate this
-  and keep their numbers; a `### N.` section in MAINTAINING.md or FORK.md is
-  refused by `check-fork-consistency`.)
+  hand-number a new change file or edit `CHANGELOG.md` by hand.** (Changes
+  1–103 predate this and keep their numbers; a `### N.` section in
+  MAINTAINING.md or FORK.md is refused by `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
 - A new migration, like a cut, moves what the server reports about itself: rerun
