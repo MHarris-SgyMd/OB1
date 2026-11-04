@@ -1707,7 +1707,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const CHANGES_HINT = JSON.stringify({ destructiveHint: true, openWorldHint: false });
   const hints = await hintsOf(P);
   const wantHint = (k: string) => (scopes[k] === "read" ? READ_HINT : k.startsWith("update_") || ["link_contact_to_professional_crm", "log_interview_notes"].includes(k) ? CHANGES_HINT : ADDS_HINT);
-  const refusedOverMcp = (r: Called, code: string) => r.viaMcp.result?.isError === true && JSON.stringify(r.viaMcp).includes(code);
+  const refusedOverMcp = (r: Called, code: string) => r.viaMcp.result?.isError === true && r.body.code === code;
   assert(Object.keys(hints).length === 19 && Object.entries(hints).every(([k, h]) => h === wantHint(k)),
     `its hints, all nineteen: a change that overwrites is destructive, an add is not, a read is read-only (${JSON.stringify(hints).slice(0, 240)})`);
 
@@ -1899,7 +1899,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const notDraft = await c("update_application", { application_id: appIds.draft, status: "applied", today: await dayFromToday(-1) });
   const keptDay = await c("update_application", { application_id: appIds.earlier, status: "interviewing" });
   assert(notDraft.body.application?.applied_date === (await dayFromToday(-1)) && notDraft.body.application?.status === "applied" && keptDay.body.application?.applied_date === (await dayFromToday(-20)),
-    `…a draft moved on with no applied_date is dated the user's today; an application already dated keeps its day (${notDraft.body.application?.applied_date}, ${keptDay.body.application?.applied_date})`);
+    `…a draft sent with no applied_date is dated the user's today; an application already dated keeps its day (${notDraft.body.application?.applied_date}, ${keptDay.body.application?.applied_date})`);
   await c("update_application", { application_id: appIds.earlier, status: "applied" });
 
   // Interviews.
@@ -2147,6 +2147,27 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
          && beforeEnd.unscheduled_count === afterEnd.unscheduled_count + 1 && !byName((await c("get_upcoming_interviews", { days_ahead: 30 })).body.interviews).includes("E1")
          && endedSchedule.status === 422 && endedSchedule.body.code === "APPLICATION_ENDED" && endedSchedule.body.application_status === "rejected",
     `a rejected application's interviews leave upcoming, awaiting notes and the undated count; scheduling one for it is 422 APPLICATION_ENDED (${JSON.stringify([beforeEnd.upcoming_count, afterEnd.upcoming_count, beforeEnd.awaiting_notes_count, afterEnd.awaiting_notes_count, beforeEnd.unscheduled_count, afterEnd.unscheduled_count])})`);
+  // An ended application's cancelled interview is not scheduled again, by a new time or by status.
+  const e1 = String(endAhead.body.interview?.id);
+  await c("update_interview", { interview_id: e1, status: "cancelled" });
+  const e1Moved = await c("update_interview", { interview_id: e1, scheduled_at: hours(50) });
+  const e1Back = await c("update_interview", { interview_id: e1, status: "scheduled" });
+  assert(e1Moved.status === 200 && e1Moved.body.interview?.status === "cancelled" && e1Back.status === 422 && e1Back.body.code === "APPLICATION_ENDED",
+    `update_interview: a new time leaves a rejected application's cancelled interview cancelled, and status scheduled for it is 422 APPLICATION_ENDED (${e1Moved.body.interview?.status}, ${e1Back.status})`);
+  // A withdrawal and a schedule of one application at once, forced to race: the schedule reads the status under its lock,
+  // so it either comes first or sees the withdrawal; without the lock it would not wait at all.
+  const raceSchedApp = String((await c("submit_application", { job_posting_id: await datePost("D7") })).body.application?.id);
+  const schedRace = await race(`SELECT 1 FROM plugin_job_hunt.applications WHERE id = '${raceSchedApp}' FOR NO KEY UPDATE`, () => [
+    c("update_application", { application_id: raceSchedApp, status: "withdrawn" }), c("schedule_interview", { application_id: raceSchedApp, interview_type: "final" }),
+  ]);
+  const raceIvApp = String((await c("submit_application", { job_posting_id: await datePost("D8") })).body.application?.id);
+  const raceIv = String((await c("schedule_interview", { application_id: raceIvApp, interview_type: "final", scheduled_at: hours(40) })).body.interview?.id);
+  await c("update_interview", { interview_id: raceIv, status: "cancelled" });
+  const ivRace = await race(`SELECT 1 FROM plugin_job_hunt.applications WHERE id = '${raceIvApp}' FOR NO KEY UPDATE`, () => [
+    c("update_application", { application_id: raceIvApp, status: "withdrawn" }), c("update_interview", { interview_id: raceIv, status: "scheduled" }),
+  ]);
+  assert(schedRace.bothWait && ["200,200", "200,422"].includes(schedRace.results) && ivRace.bothWait && ["200,200", "200,422"].includes(ivRace.results),
+    `a withdrawal and a schedule of one application at once, and a withdrawal and its interview scheduled again, both wait on its row and decide in turn (${JSON.stringify([schedRace, ivRace])})`);
   // update_interview: completed is the log's; a new time brings back a cancelled one, not a completed one.
   const openApp = String((await c("submit_application", { job_posting_id: await datePost("D6") })).body.application?.id);
   const iv = String((await c("schedule_interview", { application_id: openApp, interview_type: "final", scheduled_at: hours(-2) })).body.interview?.id);
@@ -2171,6 +2192,152 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   assert(postedAhead.status === 422 && postedAhead.body.code === "FUTURE_DATE" && postedAheadUpd.status === 422 && postedAheadUpd.body.code === "FUTURE_DATE"
          && postedTomorrow.status === 200 && nullAgain.status === 200 && nullAgain.body.already_linked === false && nullAgain.body.job_contact?.updated_at === hanaBefore,
     `a posted day two days ahead is FUTURE_DATE on add and change, one a day ahead (some zone's today) taken; null on an unlinked contact writes nothing (${postedAhead.status}, ${postedAheadUpd.status}, ${postedTomorrow.status})`);
+
+  // Review pass 3: what its whole-diff mutation pass found unpinned.
+  // Each bound's edge value taken (outOfBounds sends one past it).
+  const edgeApp = String((await c("submit_application", { job_posting_id: await datePost("Edge") })).body.application?.id);
+  const edgeIv = String((await c("schedule_interview", { application_id: edgeApp, interview_type: "system_design", scheduled_at: hours(-1) })).body.interview?.id);
+  const takes: [string, string, Body][] = [
+    ["a company name of 200 characters", "add_company", { name: "n".repeat(200), glassdoor_rating: 1.0 }], ["a rating of 5.0", "add_company", { name: "Rated Five", glassdoor_rating: 5.0 }],
+    ["a URL of 2000 characters", "add_company", { name: "Long URL", website: `https://e.example/${"p".repeat(1982)}` }], ["notes of 10000 characters", "add_company", { name: "Long Notes", notes: "n".repeat(10000) }],
+    ["a posting title of 200 characters, salaries of 0 and 100,000,000, 50 requirements of 500 characters, posted in the year 0001", "add_job_posting",
+      { company_id: vx, title: "t".repeat(200), salary_min: 0, salary_max: 100_000_000, requirements: Array.from({ length: 50 }, (_, i) => `${i}`.padEnd(500, "r")),
+        nice_to_haves: Array.from({ length: 50 }, (_, i) => `n${i}`), posted_date: "0001-01-01" }],
+    ["an email of 320 characters and a phone of 50", "add_job_contact", { name: "Edge Contact", email: `${"e".repeat(308)}@example.com`, phone: "5".repeat(50) }],
+    ["a cover letter of 5000 characters", "submit_application", { job_posting_id: await datePost("Cover"), status: "rejected", cover_letter_notes: "c".repeat(5000) }],
+    ["a duration of 1", "schedule_interview", { application_id: edgeApp, interview_type: "final", duration_minutes: 1 }], ["a duration of 1440", "schedule_interview", { application_id: edgeApp, interview_type: "final", duration_minutes: 1440 }],
+    ["a rating of 1", "log_interview_notes", { interview_id: edgeIv, rating: 1 }], ["a rating of 5", "log_interview_notes", { interview_id: edgeIv, rating: 5 }],
+    ["days ahead of 365", "get_upcoming_interviews", { days_ahead: 365 }], ["pipeline days ahead of 365", "get_pipeline_overview", { days_ahead: 365 }],
+    ["a limit of 200", "list_applications", { limit: 200 }], ["a company limit of 200", "list_companies", { limit: 200 }], ["a minimum salary of 100,000,000", "add_job_posting", { company_id: vx, title: "Top Minimum", salary_min: 100_000_000 }],
+  ];
+  const refusedEdges: string[] = [];
+  for (const [label, key, input] of takes) { const r = await c(key, input); if (r.status !== 200) refusedEdges.push(`${label}: ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); }
+  const total = Number((await c("get_pipeline_overview", {})).body.total_applications);
+  const listedDefault = ((await c("list_applications", {})).body.applications as unknown[]).length;
+  assert(refusedEdges.length === 0 && total > 5 && listedDefault === Math.min(total, 50),
+    `each bound's own edge is taken, and list_applications' default limit is 50 (${refusedEdges.join("; ") || "all taken"}; ${listedDefault} of ${total})`);
+  const tableTakes: string[] = [];
+  for (const q of [
+    "INSERT INTO plugin_job_hunt.companies (name, glassdoor_rating) VALUES (repeat('n', 200), 1.0), ('t', 5.0)",
+    `INSERT INTO plugin_job_hunt.job_postings (company_id, title, salary_min, salary_max) VALUES ('${vx}', repeat('t', 200), 0, 0)`,
+    `INSERT INTO plugin_job_hunt.interviews (application_id, interview_type, duration_minutes, rating) VALUES ('${edgeApp}', 'final', 1, 1), ('${edgeApp}', 'final', 1440, 5)`,
+    "INSERT INTO plugin_job_hunt.job_contacts (name) VALUES (repeat('n', 200))",
+  ]) { try { await sql.unsafe(q); } catch (e) { tableTakes.push(`${q.slice(0, 60)}: ${(e as Error).message}`); } }
+  assert(tableTakes.length === 0, `…and so do the tables, each check's edge row stored (${tableTakes.join("; ") || "all stored"})`);
+  // Refusals: the HTTP status and the fields named, at each code.
+  const noIvRest = await c("log_interview_notes", { interview_id: NO_ROW, rating: 2 });
+  const noAppRest = await c("update_application", { application_id: NO_ROW, notes: "x" });
+  const noPostRest = await c("update_job_posting", { job_posting_id: NO_ROW, notes: "x" });
+  const noContactRest = await c("update_job_contact", { job_contact_id: NO_ROW, notes: "x" });
+  assert(/list_applications/.test(String(noAppRest.body.message)) && /search_job_contacts/.test(String(noContactRest.body.message))
+         && /update_application reopens it first/.test(String(endedSchedule.body.message)) && /closing_date is before posted_date/.test(String(closingBefore.body.message)),
+    "…and each message says where the ids are, how to reopen, and which day is before which");
+  assert(noIvRest.status === 404 && noIvRest.body.code === "NO_SUCH_INTERVIEW" && noIvRest.body.interview_id === NO_ROW && /list_interviews/.test(String(noIvRest.body.message))
+         && noAppRest.status === 404 && noAppRest.body.code === "NO_SUCH_APPLICATION" && noPostRest.status === 404 && noPostRest.body.job_posting_id === NO_ROW
+         && noContactRest.status === 404 && noContactRest.body.code === "NO_SUCH_JOB_CONTACT",
+    `each NO_SUCH refusal is a 404 naming the id given (${[noIvRest, noAppRest, noPostRest, noContactRest].map((r) => r.status).join(",")})`);
+  assert(twice.body.job_posting_id === postIds.robo && other.body.job_contact_id === String(ritaId) && endedSchedule.body.application_id === endApp
+         && contactFuture.body.last_contacted !== undefined && postedAhead.body.posted_date === (await dayFromToday(2)) && companyNothing.body.company_id === ids.beta
+         && salaryBelow.body.salary_min === 200000 && salaryBelow.body.salary_max === 190000 && closingBefore.body.posted_date === (await dayFromToday(-5))
+         && closingBefore.body.closing_date === (await dayFromToday(-6)) && responseBefore.body.applied_date === utcToday && responseBefore.body.response_date === (await dayFromToday(-1))
+         && futureResponse.body.response_date === (await dayFromToday(3)) && futureResponse.body.applied_date === undefined,
+    "each refusal names what it refused: ALREADY_APPLIED its posting, ALREADY_LINKED its contact, APPLICATION_ENDED its application, FUTURE_DATE the field given, NOTHING_TO_CHANGE the id, an update's BAD_SALARY and BAD_DATES the values as they would stand");
+  // Values no other case uses: no_show, offer and accepted, and each remaining enum member.
+  const nsIv = String((await c("schedule_interview", { application_id: edgeApp, interview_type: "behavioral", scheduled_at: hours(-5) })).body.interview?.id);
+  const noShow = await c("update_interview", { interview_id: nsIv, status: "no_show" });
+  const noShowLogged = await c("log_interview_notes", { interview_id: nsIv, feedback: "They never joined" });
+  const noShowBack = await c("update_interview", { interview_id: nsIv, scheduled_at: hours(72) });
+  const offerApp = String((await c("submit_application", { job_posting_id: await datePost("Offer") })).body.application?.id);
+  const before = (await c("get_pipeline_overview", {})).body.status_breakdown as Record<string, number>;
+  await c("update_application", { application_id: offerApp, status: "offer" });
+  const atOffer = (await c("get_pipeline_overview", {})).body;
+  await c("update_application", { application_id: offerApp, status: "accepted" });
+  const atAccepted = (await c("get_pipeline_overview", {})).body.status_breakdown as Record<string, number>;
+  const gamma = await c("add_company", { name: "Gamma", size: "enterprise", remote_policy: "onsite" });
+  const recruiterPost = await c("add_job_posting", { company_id: vx, title: "Agency Post", source: "recruiter", salary_currency: " eur " });
+  const otherRole = await c("add_job_contact", { name: "Other Role", role_in_process: "other" });
+  assert(noShow.body.interview?.status === "no_show" && noShowLogged.body.interview?.status === "no_show" && noShowBack.body.interview?.status === "scheduled"
+         && (atOffer.status_breakdown as Record<string, number>).offer === before.offer + 1 && atOffer.total_applications === Object.values(before).reduce((a, b) => a + b, 0)
+         && atAccepted.accepted === before.accepted + 1 && atAccepted.offer === before.offer
+         && gamma.body.company?.size === "enterprise" && gamma.body.company?.remote_policy === "onsite" && recruiterPost.body.job_posting?.source === "recruiter"
+         && recruiterPost.body.job_posting?.salary_currency === "EUR" && otherRole.body.job_contact?.role_in_process === "other"
+         && (await c("list_interviews", { application_id: edgeApp, status: "no_show" })).body.interviews?.length === 0,
+    `no_show set, kept by a log, and scheduled again by a new time; offer then accepted counted; enterprise, onsite, recruiter, other and system_design stored; a padded currency trimmed (${noShow.body.interview?.status}, ${noShowLogged.body.interview?.status}, ${noShowBack.body.interview?.status})`);
+  // Search: each separator splits; a backslash matches itself; fields outside the described set are not searched.
+  const nbsp = String.fromCharCode(160), backslash = String.fromCharCode(92);
+  const urlProbe = await c("add_job_posting", { company_id: vx, title: "Url Probe", url: "https://zzqurl.example/x" });
+  await c("add_company", { name: `Back${backslash}slash Co` });
+  await c("update_job_contact", { job_contact_id: String(otherRole.body.job_contact?.id), linkedin_url: "https://www.LinkedIn.com/in/QqLink" });
+  const linkedIn = (((await c("search_job_contacts", { query: "other role" })).body.contacts ?? []) as { linkedin_url: string }[])[0]?.linkedin_url;
+  assert((await companies({ query: "robot;austin" })) === "Acme Robotics" && (await companies({ query: `robot${String.fromCharCode(9)}austin` })) === "Acme Robotics"
+         && (await companies({ query: `robot${nbsp}austin` })) === "Acme Robotics" && (await companies({ query: backslash })) === `Back${backslash}slash Co` && urlProbe.status === 200
+         && (await companies({ query: "robot automation warehouse qqq" })) === ""
+         && (await titles({ query: "zzqurl" })) === "" && (await titles({ query: "recruiter" })) === "" && (await people({ query: "qqlink" })) === ""
+         && (await companies({ query: "enterprise" })) === "" && (await companies({ query: "onsite" })) === "" && linkedIn === "https://www.LinkedIn.com/in/QqLink",
+    `a semicolon, a tab and a no-break space each split words; a backslash matches itself and only itself; a long query is matched whole; a posting's URL and source, a contact's LinkedIn URL and a company's size and remote policy are not searched; a URL kept as given (${linkedIn})`);
+  // Each update: every field changed at once, then one alone leaving the rest.
+  const strip = (row: unknown) => { const { updated_at: _u, ...rest } = row as Record<string, unknown>; return rest; };
+  const keeps = (before: unknown, after: unknown, changed: Record<string, unknown>) => canon({ ...strip(before), ...changed }) === canon(strip(after));
+  const g0 = gamma.body.company;
+  const gAll = { name: "Gamma Two", industry: "Mining", website: "https://gamma.example", size: "startup", location: "Perth", remote_policy: "remote", notes: "Ore", glassdoor_rating: 3.1 };
+  const g1 = (await c("update_company", { company_id: String(g0?.id), ...gAll })).body.company;
+  const g2 = (await c("update_company", { company_id: String(g0?.id), location: "Darwin" })).body.company;
+  const p0 = recruiterPost.body.job_posting;
+  const pAll = { title: "Via Agency", url: "https://agency.example/1", salary_min: 1000, salary_max: 2000, salary_currency: "GBP", requirements: ["A"], nice_to_haves: ["B"], notes: "Agency", source: "other",
+    posted_date: await dayFromToday(-2), closing_date: await dayFromToday(5) };
+  const p1 = (await c("update_job_posting", { job_posting_id: String(p0?.id), ...pAll })).body.job_posting;
+  const p2 = (await c("update_job_posting", { job_posting_id: String(p0?.id), notes: "Agency two" })).body.job_posting;
+  const j0 = (await c("add_job_contact", { name: "Full Change", company_id: vx, title: "T", email: "f@c.example", phone: "1", linkedin_url: "https://l.example/f", role_in_process: "recruiter", notes: "N",
+    last_contacted: "2026-10-01T10:00:00.000Z" })).body.job_contact;
+  const jAll = { company_id: ids.zed, name: "Full Changed", title: "T2", email: "g@c.example", phone: "2", linkedin_url: "https://l.example/g", role_in_process: "referral", notes: "N2",
+    last_contacted: "2026-10-02T10:00:00.000Z" };
+  const j1 = (await c("update_job_contact", { job_contact_id: String(j0?.id), ...jAll })).body.job_contact;
+  const j2 = (await c("update_job_contact", { job_contact_id: String(j0?.id), title: "T3" })).body.job_contact;
+  const i0 = (await c("schedule_interview", { application_id: edgeApp, interview_type: "team", scheduled_at: hours(90), duration_minutes: 30, interviewer_name: "A", interviewer_title: "B", notes: "C" })).body.interview;
+  const iAll = { interview_type: "technical", scheduled_at: "2027-05-05T12:00:00.000Z", duration_minutes: 60, interviewer_name: "D", interviewer_title: "E", notes: "F" };
+  const i1 = (await c("update_interview", { interview_id: String(i0?.id), ...iAll })).body.interview;
+  const i2 = (await c("update_interview", { interview_id: String(i0?.id), interviewer_name: "G" })).body.interview;
+  assert(keeps(g0, g1, gAll) && keeps(g1, g2, { location: "Darwin" }) && keeps(p0, p1, pAll) && keeps(p1, p2, { notes: "Agency two" })
+         && keeps(j0, j1, { ...jAll, company: { id: ids.zed, name: "Zed Systems" } }) && keeps(j1, j2, { title: "T3" }) && keeps(i0, i1, iAll) && keeps(i1, i2, { interviewer_name: "G" }),
+    `update_company, update_job_posting, update_job_contact and update_interview: every field changed at once is each changed, and one changed alone leaves every other (${String(JSON.stringify([strip(p1), strip(i1)])).slice(0, 240)})`);
+  // Semantics at the edges.
+  const cancelledIv = String((await c("schedule_interview", { application_id: edgeApp, interview_type: "final", scheduled_at: hours(20) })).body.interview?.id);
+  await c("update_interview", { interview_id: cancelledIv, status: "cancelled" });
+  const clearedTime = await c("update_interview", { interview_id: cancelledIv, scheduled_at: null });
+  const timeButCancelled = await c("update_interview", { interview_id: cancelledIv, scheduled_at: hours(30), status: "cancelled" });
+  const endedPost = await datePost("Ended Edits");
+  await c("submit_application", { job_posting_id: endedPost });
+  const endedBeside = String((await c("submit_application", { job_posting_id: endedPost, status: "rejected" })).body.application?.id);
+  const endedNotes = await c("update_application", { application_id: endedBeside, notes: "Kept for the record" });
+  const endedToWithdrawn = await c("update_application", { application_id: endedBeside, status: "withdrawn" });
+  const datedDraft = String((await c("submit_application", { job_posting_id: await datePost("Dated Draft"), status: "draft", applied_date: await dayFromToday(-6) })).body.application?.id);
+  const datedSent = await c("update_application", { application_id: datedDraft, status: "applied" });
+  const todayDraft = String((await c("submit_application", { job_posting_id: await datePost("Today Draft"), status: "draft" })).body.application?.id);
+  await c("update_application", { application_id: todayDraft, response_date: utcToday });
+  const todaySent = await c("update_application", { application_id: todayDraft, status: "applied" });
+  const wReopen = String((await c("submit_application", { job_posting_id: await datePost("Withdrawn Reopen"), status: "withdrawn" })).body.application?.id);
+  const wReopened = await c("update_application", { application_id: wReopen, status: "applied" });
+  const halfSalary = await c("add_job_posting", { company_id: vx, title: "Half Salary", salary_min: 1000 });
+  const noCompanyContact = await c("add_job_contact", { name: "No Company", company_id: null });
+  const dayAhead = await c("add_job_contact", { name: "x", last_contacted: new Date(Date.now() + 25 * 3_600_000).toISOString() });
+  assert(clearedTime.body.interview?.status === "cancelled" && clearedTime.body.interview?.scheduled_at === null && timeButCancelled.body.interview?.status === "cancelled"
+         && endedNotes.status === 200 && endedToWithdrawn.status === 200 && endedToWithdrawn.body.application?.status === "withdrawn"
+         && datedSent.body.application?.applied_date === (await dayFromToday(-6)) && todaySent.status === 200 && todaySent.body.application?.applied_date === utcToday
+         && wReopened.status === 200 && wReopened.body.application?.applied_date === null && sameDay.body.application?.cover_letter_notes === "Glazes"
+         && halfSalary.body.job_posting?.salary_min === 1000 && halfSalary.body.job_posting?.salary_max === null && noCompanyContact.status === 200 && noCompanyContact.body.job_contact?.company === null
+         && dayAhead.status === 422 && dayAhead.body.code === "FUTURE_DATE" && again.body.job_contact?.updated_at === linked.body.job_contact?.updated_at,
+    `a time cleared or given with status cancelled leaves a cancelled interview cancelled; an ended application changed beside an open one; a dated draft sent keeps its day; a draft answered today is dated today when sent; a withdrawn one reopened stays undated; a minimum salary alone; no company; a last contact 25 hours ahead refused; already_linked writes nothing (${JSON.stringify([timeButCancelled.body.interview?.status, todaySent.body.application?.applied_date, wReopened.body.application?.applied_date])})`);
+  // Orders: the same name in two cases, oldest first; two undated interviews, newest first; only_unlinked false is everyone.
+  await c("add_company", { name: "Twin" });
+  await c("add_company", { name: "twin" });
+  await c("add_job_contact", { name: "Duo Person" });
+  await c("add_job_contact", { name: "duo person" });
+  const undated1 = String((await c("schedule_interview", { application_id: edgeApp, interview_type: "phone_screen" })).body.interview?.id);
+  const undated2 = String((await c("schedule_interview", { application_id: edgeApp, interview_type: "hiring_manager" })).body.interview?.id);
+  const undatedOrder = (((await c("list_interviews", { application_id: edgeApp })).body.interviews ?? []) as { id: string }[]).map((x) => x.id).slice(0, 2);
+  assert((await companies({ query: "twin" })) === "Twin,twin" && (await people({ query: "duo" })) === "Duo Person,duo person"
+         && JSON.stringify(undatedOrder) === JSON.stringify([undated2, undated1]) && (await people({ only_unlinked: false, limit: 200 })) === (await people({ limit: 200 })),
+    `a name in two cases lists the older first; two undated interviews list the newer first; only_unlinked false lists everyone (${JSON.stringify(undatedOrder)})`);
 
   const missed = await outOfBounds(c, [
     ["a company name of 201 characters", "add_company", { name: "x".repeat(201) }], ["an empty company name", "add_company", { name: " " }], ["a NUL in a name", "add_company", { name: "x\u0000" }],
@@ -2247,7 +2414,7 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const named404 = await Promise.all([
     c("add_job_posting", { company_id: NO_ROW, title: "x" }), c("submit_application", { job_posting_id: NO_ROW }), c("update_job_contact", { job_contact_id: NO_ROW, notes: "x" }),
   ]);
-  assert(named404[0].body.company_id === NO_ROW && named404[1].body.job_posting_id === NO_ROW && /^no job posting has this id: list_job_postings/.test(String(named404[1].body.message))
+  assert(named404.every((r) => r.status === 404) && named404[0].body.company_id === NO_ROW && named404[1].body.job_posting_id === NO_ROW && /^no job posting has this id: list_job_postings/.test(String(named404[1].body.message))
          && named404[2].body.job_contact_id === NO_ROW,
     "NO_SUCH_COMPANY, NO_SUCH_POSTING and NO_SUCH_JOB_CONTACT each name the id given, and NO_SUCH_POSTING says where the ids are");
   assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all twenty-nine"})`);

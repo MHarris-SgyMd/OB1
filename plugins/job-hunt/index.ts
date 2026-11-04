@@ -112,7 +112,7 @@ const isFutureMoment = (moment: string | null | undefined) => !!moment && Date.p
 /** A posted day after every time zone's today (UTC's and a day), refused: it is the day it was posted. */
 const futurePosted = (day: string | null | undefined) => {
   if (!day || Date.parse(`${day}T00:00:00Z`) <= Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`) + 86_400_000) return null;
-  return refuse(422, "FUTURE_DATE", { posted_date: day, message: "posted_date is after today: it is the day it was posted" });
+  return refuse(422, "FUTURE_DATE", { posted_date: day, message: "posted_date is after every time zone's today: it is the day it was posted" });
 };
 /** Whether an update gave a field: absent is kept, null clears. */
 const givenIn = <T extends object>(u: T) => (k: keyof T) => u[k] !== undefined;
@@ -249,7 +249,7 @@ export default definePlugin({
     }),
     add_job_posting: operation({
       title: "Add a job posting",
-      description: "Adds a posting at a company (company_id, from list_companies) and answers it with its id, which submit_application takes. list_job_postings lists them, so check it first rather than adding one twice. Salaries are whole amounts in salary_currency (ISO 4217, USD unless given), the minimum no more than the maximum; the closing date no earlier than the posted one. Refused: a company that is not there (NO_SUCH_COMPANY), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), and a posted date after today (FUTURE_DATE).",
+      description: "Adds a posting at a company (company_id, from list_companies) and answers it with its id, which submit_application takes. list_job_postings lists them, so check it first rather than adding one twice. Salaries are whole amounts in salary_currency (ISO 4217, USD unless given), the minimum no more than the maximum; the closing date no earlier than the posted one. Refused: a company that is not there (NO_SUCH_COMPANY), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), and a posted date after every time zone's today (FUTURE_DATE).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -321,7 +321,7 @@ export default definePlugin({
     }),
     update_job_posting: operation({
       title: "Change a job posting",
-      description: "Changes the fields given of a posting (job_posting_id, from list_job_postings), leaving the rest: a salary range or closing date learnt later, a typo. A field given as null is cleared (the title cannot be); requirements and nice_to_haves, when given, replace the list. The salary range and the dates are checked as they will stand. Refused: a posting that is not there (NO_SUCH_POSTING), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), a posted date after today (FUTURE_DATE), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of a posting (job_posting_id, from list_job_postings), leaving the rest: a salary range or closing date learnt later, a typo. A field given as null is cleared (the title, the currency and the two lists cannot be); requirements and nice_to_haves, when given, replace the list. The salary range and the dates are checked as they will stand. Refused: a posting that is not there (NO_SUCH_POSTING), a minimum above the maximum (BAD_SALARY), a closing date before the posted one (BAD_DATES), a posted date after every time zone's today (FUTURE_DATE), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -586,7 +586,7 @@ export default definePlugin({
     }),
     update_application: operation({
       title: "Change an application",
-      description: "Changes the fields given of an application (application_id, from list_applications), leaving the rest: its status as it moves on, the day the company answered (response_date), and its other fields. A field given as null is cleared. A draft moved on to a status that sends it (not withdrawn) with no applied_date is dated today, the user's own date, unless the response recorded is earlier. Reopening a rejected or withdrawn application needs its posting to have no other open one. Refused: an application that is not there (NO_SUCH_APPLICATION), a day after today (FUTURE_DATE), a response before the application (BAD_DATES), a reopened one whose posting has another open (ALREADY_APPLIED), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of an application (application_id, from list_applications), leaving the rest: its status as it moves on, the day the company answered (response_date), and its other fields. A field given as null is cleared (the status cannot be). A draft moved on to a status that sends it (not withdrawn) with no applied_date is dated today, the user's own date, unless the response recorded is earlier; a withdrawn one reopened stays undated, so give applied_date. Reopening a rejected or withdrawn application needs its posting to have no other open one. Refused: an application that is not there (NO_SUCH_APPLICATION), a day after today (FUTURE_DATE), a response before the application (BAD_DATES), a reopened one whose posting has another open (ALREADY_APPLIED), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -664,7 +664,8 @@ export default definePlugin({
       output: { interview: Interview },
       async handler(ctx, i) {
         return ctx.db.tx(async (sql) => {
-          const [application] = await sql<{ status: string }>`SELECT status FROM applications WHERE id = ${i.application_id}`;
+          // Shared with update_application's lock: an application ended at the same moment ends first, or waits for this.
+          const [application] = await sql<{ status: string }>`SELECT status FROM applications WHERE id = ${i.application_id} FOR SHARE`;
           if (!application) return noSuchApplication(i.application_id);
           if (ENDED.includes(application.status)) {
             return refuse(422, "APPLICATION_ENDED", { application_id: i.application_id, application_status: application.status,
@@ -706,7 +707,7 @@ export default definePlugin({
     }),
     update_interview: operation({
       title: "Change an interview",
-      description: "Changes the fields given of an interview (interview_id, from list_interviews or get_upcoming_interviews), leaving the rest: a new time (rescheduled: a cancelled or no-show interview given one is scheduled again, unless status says otherwise), its prep notes, who interviews, or its status (scheduled, cancelled, no_show). A field given as null is cleared. How it went, and completing it, is log_interview_notes'. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
+      description: "Changes the fields given of an interview (interview_id, from list_interviews or get_upcoming_interviews), leaving the rest: a new time (rescheduled: a cancelled or no-show interview given one is scheduled again, unless status says otherwise or its application has ended), its prep notes, who interviews, or its status (scheduled, cancelled, no_show). A field given as null is cleared (the type and the status cannot be). How it went, and completing it, is log_interview_notes'. Refused: an interview that is not there (NO_SUCH_INTERVIEW), status scheduled for an interview whose application was rejected or withdrawn (APPLICATION_ENDED), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -726,8 +727,17 @@ export default definePlugin({
         const given = givenIn(u);
         const fields = ["interview_type", "scheduled_at", "duration_minutes", "interviewer_name", "interviewer_title", "notes", "status"] as const;
         if (!fields.some(given)) return nothingToChange("interview_id", u.interview_id);
-        const interview = await ctx.db.tx(async (sql) => {
-          const changed = await sql<{ id: string }>`
+        return ctx.db.tx(async (sql) => {
+          // The application's status under a share lock, as schedule_interview reads it.
+          const [held] = await sql<{ application_status: string }>`
+            SELECT a.status AS application_status FROM interviews i JOIN applications a ON a.id = i.application_id WHERE i.id = ${u.interview_id} FOR SHARE OF a`;
+          if (!held) return noSuchInterview(u.interview_id);
+          const ended = ENDED.includes(held.application_status);
+          if (ended && u.status === "scheduled") {
+            return refuse(422, "APPLICATION_ENDED", { interview_id: u.interview_id, application_status: held.application_status,
+              message: `the interview's application is ${held.application_status}: update_application reopens it first` });
+          }
+          await sql`
             UPDATE interviews SET
               interview_type = CASE WHEN ${given("interview_type")} THEN ${u.interview_type ?? null} ELSE interview_type END,
               scheduled_at = CASE WHEN ${given("scheduled_at")} THEN ${u.scheduled_at ?? null}::timestamptz ELSE scheduled_at END,
@@ -736,15 +746,12 @@ export default definePlugin({
               interviewer_title = CASE WHEN ${given("interviewer_title")} THEN ${u.interviewer_title ?? null} ELSE interviewer_title END,
               notes = CASE WHEN ${given("notes")} THEN nullif(${u.notes ?? null}::text, '') ELSE notes END,
               status = CASE WHEN ${given("status")} THEN ${u.status ?? null}
-                            WHEN ${u.scheduled_at != null} AND status IN ('cancelled', 'no_show') THEN 'scheduled'
+                            WHEN ${u.scheduled_at != null && !ended} AND status IN ('cancelled', 'no_show') THEN 'scheduled'
                             ELSE status END,
               updated_at = now()
-            WHERE id = ${u.interview_id}
-            RETURNING id`;
-          return changed.length === 0 ? null : interviewOf(sql, u.interview_id);
+            WHERE id = ${u.interview_id}`;
+          return ok({ interview: (await interviewOf(sql, u.interview_id))! });
         });
-        if (!interview) return noSuchInterview(u.interview_id);
-        return ok({ interview });
       },
     }),
     log_interview_notes: operation({
