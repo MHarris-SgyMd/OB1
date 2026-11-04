@@ -24,15 +24,22 @@
  * thoughts not yet in its pool among them, and the sweep's orphans — and
  * every --rescan seconds after; between, each poll reads one EXISTS a claim
  * pass, a row pending or in hand under its key, which a capture queues in its
- * own transaction (016). What no claim row shows — a vector come for a thought
- * extracted already, a delete's orphans, re-embed's backlog — waits for the
- * rescan, or goes with a period other work begins; the next poll reads whole
- * after a live write or its limit cut the sweep, a retried start refusal's
- * wait, and a set-aside cleared. The sweep's census reads one window of
- * 10,001 lineage rows a whole read, an empty one moving the place on, so on
- * an idle brain an orphan k windows in is found at the k-th rescan; a
- * one-shot run, and the dry run, walk up to 100 windows, having no later read. A
- * pass held begins none: one a statement held
+ * own transaction (016). A vector come since the last whole read — an audited
+ * update whose diff says embedding_present true, the mender's or a re-embed's
+ * — brings the next forward, at most once a VECTOR_FLOOR_S (60) after the end
+ * of the last whole read or a period's end read, so within that and a poll; a
+ * vector read once is not read again, and the rescan keeps its own clock
+ * (SMD-3379 PR 1d): consolidation judges only a thought with a vector (029),
+ * and its arrival queues no claim. What else no claim row shows — the orphans
+ * a raw delete of a window or a replay leaves, re-embed's backlog — waits for
+ * the rescan, or goes with a period other work begins (a thought's delete
+ * leaves none: its lineage rows go with it, thoughts_drop_derivations); the
+ * next poll reads whole after a live write or its limit cut the sweep, a
+ * retried start refusal's wait, and a set-aside cleared. The sweep's census
+ * reads one window of 10,001 lineage rows a whole read, an empty one moving
+ * the place on, so on an idle brain an orphan k windows in is found at the
+ * k-th whole read; a one-shot run, and the dry run, walk up to 100 windows,
+ * having no later read. A pass held begins none: one a statement held
  * (Budget), re-embed set aside or down (Working) — a set-down re-armed at the
  * next period's start, or by the next rescan, so one refused again begins no
  * period every poll. Without --follow, a read that finds no work exits 0 —
@@ -376,6 +383,13 @@ const REMOVED_FLAGS: Record<string, string> = {
 };
 /** How often a period's work is read whole while idle — the pools, re-embed's backlog, the sweep — beyond the claims each poll reads (`--rescan`, OB1_SLEEP_RESCAN, SMD-3379 PR 1c-4b). */
 const DEFAULT_RESCAN_S = 3600;
+/**
+ * The least time between two whole reads a vector's arrival brings forward
+ * (SMD-3379 PR 1d): a burst of vectors — the mender after an outage, a
+ * re-embed of vectorless rows by hand — reads the work whole once a minute at
+ * most, not every poll.
+ */
+const VECTOR_FLOOR_S = 60;
 /** How often the logs are read in a period: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound once paused. */
 const DEFAULT_POLL_S = 5;
 /**
@@ -490,6 +504,8 @@ export interface SleepOptions {
   consolidateAborts?: number;
   /** The live read's slack in ms, in place of WAKE_SLACK_S, when a test reaches past it sooner. */
   wakeSlackMs?: number;
+  /** The least time between two whole reads a vector's arrival brings forward, in ms, in place of VECTOR_FLOOR_S, when a test reaches it sooner (SMD-3379 PR 1d). */
+  vectorFloorMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -508,9 +524,13 @@ export function budgetMemory(n: Pick<Numbers, "workMem" | "maintenanceWorkMem">)
  * The scheduler's own two connections: the memory settings, and
  * statement_timeout 0 — a startup setting beats the role's and the database's
  * own, which there would end the scheduler on its poll's scan (review pass 2).
+ * Each statement planned for its values (plan_cache_mode): a prepared range
+ * read of thought_audit — vectorCome's, each idle poll — went generic from its
+ * sixth call after a burst the statistics saw, a scan of every audit row from
+ * then on (SMD-3379 PR 1d, review pass 1). A caller's own `sql` sets its own.
  */
 export function schedulerSession(n: Pick<Numbers, "workMem" | "maintenanceWorkMem">): SessionSettings {
-  return { statement_timeout: "0", ...budgetMemory(n), application_name: SCHEDULER_TAG };
+  return { statement_timeout: "0", ...budgetMemory(n), application_name: SCHEDULER_TAG, plan_cache_mode: "force_custom_plan" };
 }
 
 /**
@@ -739,6 +759,53 @@ export async function newestLive(sql: SQL, after: { us: number } | { secondsAgo:
 }
 
 /**
+ * Where a whole read of the work stood on the vectors come (SMD-3379 PR 1d):
+ * a thought_audit row whose diff says embedding_present true — a vector
+ * arriving for a row that had none, whoever wrote it (the vector mender, a
+ * re-embed, an edit). `fromUs` is `slackS` before the database's now(), and
+ * `seen` the rows already visible after it, which the read that follows saw.
+ * A later row needs that read again: consolidation judges only a thought with
+ * a vector (029's consolidation_pool), and its arrival queues no claim.
+ * `atMs`, this process's clock as the read it marks ended — its caller sets
+ * it — which VECTOR_FLOOR_S counts from. A row carries its transaction's
+ * start: one begun more than the slack before the mark and committed after it
+ * is not read — WAKE_SLACK_S's trade; the mender and reembed.ts commit each
+ * row on its own — and waits for the rescan.
+ */
+export type VectorMark = { fromUs: number; seen: string[]; atMs: number };
+
+/** The mark a whole read takes before it reads (PR 1d): a row committed after it is read again; one committed before, the read sees. */
+export async function vectorMark(sql: SQL, slackS: number): Promise<VectorMark> {
+  const [r] = await sql`
+    SELECT ((extract(epoch FROM now()) - ${slackS}::float8) * 1000000)::bigint::text AS from_us,
+           ARRAY(SELECT id::text FROM thought_audit WHERE created_at > now() - make_interval(secs => ${slackS}::float8)
+                    AND action = 'update' AND diff->>'embedding_present' = 'true') AS seen`;
+  return { fromUs: Number(r.from_us), seen: r.seen as string[], atMs: Date.now() };
+}
+
+/**
+ * Whether a vector has come since `mark` was taken (PR 1d): one statement, two
+ * range reads of thought_audit's created_at index — since the mark, and the
+ * slack's rows for the next — an update's diff alone read. With none, the
+ * mark moved on in the same snapshot — every vector visible after it was in
+ * `seen` — so an idle poll reads the slack's rows, not every row since the last
+ * whole read (review pass 1); `atMs`, the floor's, kept. The moved mark's
+ * `seen` is empty past the first miss unless the floor is shorter than the
+ * slack, as test-live's 4 s floor is (review pass 3).
+ */
+export async function vectorCome(sql: SQL, mark: VectorMark, slackS: number): Promise<{ came: boolean; mark: VectorMark }> {
+  // The next mark's rows read only with none come: one come is read whole, which takes its own (review pass 3).
+  const [r] = await sql`
+    SELECT c.came, ((extract(epoch FROM now()) - ${slackS}::float8) * 1000000)::bigint::text AS from_us,
+           CASE WHEN c.came THEN '{}'::text[] ELSE ARRAY(SELECT id::text FROM thought_audit WHERE created_at > now() - make_interval(secs => ${slackS}::float8)
+                                                     AND action = 'update' AND diff->>'embedding_present' = 'true') END AS seen
+      FROM (SELECT EXISTS (SELECT 1 FROM thought_audit WHERE created_at > ${usText(mark.fromUs)}::timestamptz
+                             AND action = 'update' AND diff->>'embedding_present' = 'true' AND NOT (id::text = ANY(${sql.array(mark.seen, "TEXT")}::text[]))) AS came) c`;
+  const came = r.came as boolean;
+  return { came, mark: came ? mark : { fromUs: Math.max(mark.fromUs, Number(r.from_us)), seen: r.seen as string[], atMs: mark.atMs } };
+}
+
+/**
  * A claim follower's heartbeat key as pass-stamp.ts writes one (brain-info.ts's
  * alphabet): any other row under the prefix is not counted, and is never
  * pasted into the DELETE the refusal prints (review pass 1). Matched in the
@@ -953,6 +1020,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const CONSOLIDATE_CAP = opts.consolidateAborts ?? CONSOLIDATE_ABORTS;
   /** How far before a read the next reads back (WAKE_SLACK_S). */
   const WAKE_SLACK = opts.wakeSlackMs !== undefined ? opts.wakeSlackMs / 1000 : WAKE_SLACK_S;
+  /** The least time between two whole reads a vector brings forward, in ms (PR 1d). */
+  const VECTOR_FLOOR_MS = opts.vectorFloorMs ?? VECTOR_FLOOR_S * 1000;
   /**
    * The admit gate every pass of the current period waits at (SMD-3379 PR
    * 1c-3b, lease.ts' liveGate): closed by a live write, open again after
@@ -1018,7 +1087,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The database's clock as this run began: a claim older than it is no pass of this run's (poolOf's `mineSince`). */
   const startedAt = await atStart(async () => new Date((await sql`SELECT now() AS now`)[0].now));
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
-  out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
+  out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s and once a vector comes — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
   out(`  pause:  in a period, a live write pauses the passes between thoughts, windows and pairs until ${CAPTURE} s with none, a call in hand past ${ABORT_AFTER_MS / 1000} s aborted meanwhile; the period ends once its pools drain`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
@@ -1612,8 +1681,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     return foreign.length > 0;
   };
 
-  /** When the idle scheduler last read its work whole (Date.now()), 0 for never: the rescan counts from it (PR 1c-4b). */
+  /** When the idle scheduler last read its work whole on the rescan's clock (Date.now()), 0 for never: the rescan counts from it (PR 1c-4b); a read a vector brought forward is not counted (PR 1d). */
   let lastWhole = 0;
+  /**
+   * Where the last whole read stood on the vectors come (PR 1d), null before
+   * the first: an idle poll with one come since reads the work whole, at most
+   * once a VECTOR_FLOOR_MS after the end of the last whole read or a period's
+   * end read — a vector arriving queues no claim, and it may give
+   * consolidation a thought to judge.
+   */
+  let vectorsAt: VectorMark | null = null;
   /**
    * Whether a pass's claims hold work — a row pending or in hand under its
    * key, one index read (SMD-3379 PR 1c-4b): what an idle poll reads, a scan
@@ -1634,9 +1711,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * The work a period's start would read, whole (PR 1c-4b): each pass's pool
    * — re-embed's backlog, extraction's claims and the thoughts not yet in its
    * pool, consolidation's — and the sweep's orphans. At the process's start,
-   * the baseline, and every RESCAN after: what no claim row shows, a vector
-   * come for a thought extracted already, a delete's orphans, a hand run
-   * between two polls.
+   * the baseline, every RESCAN after, and as a vector come brings it forward
+   * (PR 1d): what no claim row shows, a vector come for a thought extracted
+   * already, the orphans a raw delete of a window or a replay leaves, a hand
+   * run between two polls.
    */
   const workWhole = async (): Promise<boolean> => {
     // A one-shot run walks the census first, whatever else has work: it has no later read to walk on to, and its
@@ -1698,7 +1776,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * work and no live write has landed for CAPTURE seconds, re-stamping at
    * least every minute. The work is read whole at the first poll — the
    * process's baseline — and every RESCAN after, and as the passes' claims
-   * between: what a whole read found holds until the next, so work no claim
+   * between, a vector come bringing a whole read forward past the floor (PR
+   * 1d): what a whole read found holds until the next, so work no claim
    * row shows is not forgotten while a live write holds the gate. With work
    * and the gate closed the row reads paused, since the closure began. The
    * database's now() as the period begins; null on a stop or followers found
@@ -1733,16 +1812,35 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           sayAside();
         }
       }
-      const whole = Date.now() - lastWhole >= RESCAN * 1000;
-      if (whole && reembedDown !== null && !statementHeld.has("reembed")) {
+      const due = Date.now() - lastWhole >= RESCAN * 1000;
+      if (due && reembedDown !== null && !statementHeld.has("reembed")) {
         // The rescan re-arms a set-down re-embed — not one a statement holds until a restart (N9).
         reembedDown = null;
         sayAside();
       }
-      const read = await reading(whole ? workWhole : workClaimed);
+      // A vector come since the last whole read brings the next forward (SMD-3379 PR 1d): what it gives
+      // consolidation shows in no claim, and would wait for the rescan. Not read once a whole read found work, which
+      // holds until the period, nor while consolidation may begin none, nor within VECTOR_FLOOR_MS of the last read
+      // whole, idle or at a period's end.
+      const mark = vectorsAt;
+      const come: { came: boolean; mark: VectorMark | null } | null = !due && !wholeWork && mark !== null && mayBegin("consolidate") && Date.now() - mark.atMs >= VECTOR_FLOOR_MS
+        ? await reading(() => vectorCome(sql, mark, WAKE_SLACK)) : { came: false, mark };
+      if (come === null) return null;
+      vectorsAt = come.mark;
+      const whole: boolean = due || come.came;
+      // The mark taken before the whole read, so a vector committed during it is read again at the next poll.
+      const read: boolean | null = await reading(whole ? async () => {
+        const at = await vectorMark(sql, WAKE_SLACK);
+        const found = await workWhole();
+        // The floor from the read's end: a whole read longer than it would otherwise follow one another (review pass 2 of PR 1d).
+        vectorsAt = { ...at, atMs: Date.now() };
+        return found;
+      } : workClaimed);
       if (read === null) return null;
       if (whole) {
-        lastWhole = Date.now();
+        // The rescan's clock: a read a vector brought forward moves it not, so the rescan — and the re-arm of a
+        // set-down re-embed it carries — keeps its hour through a stream of vectors (review pass 1 of PR 1d).
+        if (due) lastWhole = Date.now();
         wholeWork = read;
       }
       const work = read || wholeWork;
@@ -2538,9 +2636,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         const busy = await reading(async () => (!exHeld && (await claimsBusy("extract"))) || (!coHeld && (await claimsBusy("consolidate"))));
         if (busy === null) return stopped();
         if (!busy) {
+          // The vectors' mark taken first: the pools read whole after it, the vectors come in the period are read
+          // (PR 1d) — those since, the next idle poll's.
+          const at = await reading(() => vectorMark(sql, WAKE_SLACK));
+          if (at === null) return stopped();
           const empty = await reading(async () => (exHeld || drained(await extractPool())) && (coHeld || drained(await poolOf(sql, "consolidate", JOBS.consolidate))));
           if (empty === null) return stopped();
           if (empty) {
+            vectorsAt = { ...at, atMs: Date.now() };
             out("  the pools drained — the period ends");
             await stopPasses(false);
             return "done";

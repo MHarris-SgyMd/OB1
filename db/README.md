@@ -4586,19 +4586,26 @@ work is read whole at the scheduler's start — each pass's pool, re-embed's
 backlog among them, and the sweep's orphans — and every `--rescan` seconds
 after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
-lands. So what no claim row shows — a vector come for a thought extracted
-already, a delete's orphans, re-embed's backlog — waits for the rescan, or
-goes with a period other work begins; the next poll reads it whole after a
+lands. A vector arriving queues no claim, yet consolidation judges only a
+thought with one: so a vector come since the last whole read — an audited
+update whose diff says `embedding_present` true, the vector mender's or a
+re-embed's — brings the next whole read forward, at most once a minute after
+the end of the last whole read or a period's end read (so within that and a
+`--poll`), and a vector read once is not read again; the rescan keeps its own
+clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+delete of a window or a replay leaves, re-embed's backlog — waits for the
+rescan, or goes with a period other work begins (deleting a thought leaves
+none: its lineage rows go with it); the next poll reads it whole after a
 live write or its limit cut the sweep, a retried start refusal's wait, or a
 re-embed set-aside cleared. The sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
-an orphan far into a large table is found one rescan a window later — a
+an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
-pass held begins none: one a statement held
-(**Its budget**, below), re-embed set aside or set down (a set-down is tried
-again at the next period's start, or by the next rescan). A one-shot run
-exits 0 once a read finds no work — at once, or when what it found has been
-done elsewhere; `--dry-run` says whether a period would begin, and when.
+pass held begins none: one a statement held (**Its budget**, below), re-embed
+set aside or set down (a set-down is tried again at the next period's start, or
+by the next rescan). A one-shot run exits 0 once a read finds no work — at
+once, or when what it found has been done elsewhere; `--dry-run` says whether a
+period would begin, and when.
 
 **What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -4754,10 +4761,12 @@ beat the role's and the database's own: a timeout of 0 is left out, so theirs
 stands); the start's check runs under them. The scheduler's own two
 connections take the memory settings and statement_timeout 0, beating a
 role's or database's own — its poll reads the pools, a scan of every thought,
-and a timeout there would end the scheduler. The settings go out as startup
-parameters, which a transaction pooler (PgBouncer, a managed host's pooled
-endpoint) refuses: connect the scheduler to Postgres directly, as the compose
-stack does.
+and a timeout there would end the scheduler — and `plan_cache_mode =
+force_custom_plan`, so a prepared read of `thought_audit` each poll is planned
+for its values, not by a generic plan that scans the table (SMD-3379 PR 1d).
+The settings go out as startup parameters, which a transaction pooler
+(PgBouncer, a managed host's pooled endpoint) refuses: connect the scheduler
+to Postgres directly, as the compose stack does.
 A statement past its timeout — a start-of-pass scan the brain has outgrown,
 most likely — holds its pass until a restart (N9, SMD-3379 PR 1c-4b): said,
 with `OB1_SLEEP_STATEMENT_TIMEOUT` to raise and the coordinator to recreate;
@@ -4783,8 +4792,9 @@ its pools drain, where the clock stopped it after `OB1_SLEEP_BUDGET` minutes,
 so a backlog drains in one period, paused by each live write. A statement
 past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
-whole. A row a scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
-`resting` — is still read, for a rollback.
+whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
+scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
+still read, for a rollback.
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
