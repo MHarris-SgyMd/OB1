@@ -87,7 +87,7 @@ export class ItemRefused extends Error {
     this.name = "ItemRefused";
   }
 }
-export type ItemProblem = "id" | "text" | "owner" | "due_at" | "status" | "label" | "plugin_row" | "changes" | "reason" | "key_name" | "other";
+export type ItemProblem = "id" | "text" | "owner" | "due_at" | "status" | "label" | "plugin_row" | "changes" | "reason" | "other";
 
 /** Which argument a 22023 from 117 names, by its message's opening words (117's and 115's own wording, one rule each) — review pass 1: a client reading values had none. */
 export function itemProblemOf(message: string): ItemProblem {
@@ -100,7 +100,6 @@ export function itemProblemOf(message: string): ItemProblem {
   if (/a plugin row\b/.test(message)) return "plugin_row";
   if (/^update_item (?:takes|changes)\b/.test(message)) return "changes";
   if (/^a reason is at most\b/.test(message)) return "reason";
-  if (/a maker's key name is at most\b|p_actor must be a JSON object|the envelope's plugin\b/.test(message)) return "key_name";
   return "other";
 }
 

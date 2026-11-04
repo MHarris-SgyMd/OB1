@@ -39,7 +39,7 @@ const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL
 const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL character");
 // A thought's id as Postgres reads a uuid — any 8-4-4-4-12 of hex digits, not RFC 9562's version and variant alone
 // (review pass 1: an imported thought's id was refused before the brain was asked).
-const THOUGHT_ID = z.string().regex(/^\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*$/, "a thought's id: a uuid");
+const THOUGHT_ID = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a thought's id: a uuid");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */

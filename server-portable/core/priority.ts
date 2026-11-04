@@ -92,6 +92,11 @@ async function refusedBy(ctx: Ctx, a: PriorityAnswer, principal: Principal, inpu
       return dueRef && !dueRef.exists && item.exists ? notFound("due_ref", dueRef.item) : notFound("item", item.item);
     }
     case "ITEM_NOT_YOURS": {
+      // A capture-only key whose agent id the registry did not give is told so, after 116/117 answered, never a final
+      // "not yours" (SMD-3664 review pass 1). Decided after the call (SMD-3665 PR 2 review pass 2): before it, a
+      // plugin's call was refused, which 117 grants for a plugin row's item without an agent id.
+      const away = unattributed(principal);
+      if (away) return away;
       const [item, dueRef] = await keyed(ctx, input);
       return refuse({ code: "ITEM_NOT_YOURS", retryable: false, item: item.item, dueRef: dueRef?.item ?? null });
     }
@@ -117,8 +122,6 @@ async function argumentRefused(ctx: Ctx, e: PriorityRefused, input: Input<"set_p
 export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"set_priority">, opts: { plugin?: string } = {}): Promise<Outcome<SetPriorityResult, SetPriorityCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
-  if (away) return away;
   const a = await asked(async () => (await ctx.store()).assertPriority({
     kind: input.kind, key: input.key, level: input.level, dueAt: instant(input.due_at), notBefore: instant(input.not_before),
     dueRef: input.due_ref, reason: input.reason, inferred: input.inferred, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,

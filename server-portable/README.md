@@ -1112,7 +1112,8 @@ it, each over REST and MCP alike:
 | `PROPOSAL_DECIDED` | 409 | The proposal was decided, or is moot, already. |
 | `PROPOSAL_YOURS` | 403 | A proposer accepting its own proposal. |
 | `REFUSED_ITEM_INPUT` | 400 | An argument 117 refuses: a malformed id, a due time that is no ISO date, a text past its length, a plugin row with no plugin. |
-| `ITEM_UNATTRIBUTED` | 503 | A capture-only key whose agent id, which proves its own items, the registry was asked for and did not give (`registry_away` retryable, with `Retry-After`), or a caller with no agent id at all opening an item for no plugin row (`no_agent_id`). |
+| `ITEM_UNATTRIBUTED` | 503 | A capture-only key whose agent id, which proves its own items, the registry was asked for and did not give: `registry_away` retryable, with `Retry-After`; `registry_misconfigured` and `registry_refused` wait on an operator. Said after 117 answers, so a plugin's call 117 grants is not refused. |
+| `ITEM_UNOWNABLE` | 403 | A caller with no agent id at all (a plugin hook's) opening an item for no plugin row: it could never be shown its own. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own. |
 
 Each writer is one statement in its own READ COMMITTED transaction holding the item's

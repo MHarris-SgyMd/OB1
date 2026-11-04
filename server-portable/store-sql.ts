@@ -124,6 +124,9 @@ const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plug
 function itemRefusedOr(e: unknown): unknown {
   const errno = String((e as { errno?: unknown }).errno ?? "");
   const message = String((e as Error)?.message ?? "");
+  // 117's raises about the server's own envelope or a raw write's state are the store's faults, not the caller's
+  // argument (review pass 2: a malformed envelope or a pending proposal on a settled item answered 400).
+  if (/p_actor must be a JSON object|needs a maker|a maker's key name|the envelope's plugin .* is not a plugin's name|was pending on an item/.test(message)) return e;
   return errno === "22023" || errno === "22P02" ? new ItemRefused(errno === "22P02" ? "id" : itemProblemOf(message), message) : e;
 }
 

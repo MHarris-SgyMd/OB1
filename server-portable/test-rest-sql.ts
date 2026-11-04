@@ -1652,6 +1652,14 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   assert(lateProposed.status === 200 && inOverdue && nonRfc.status === 404 && nonRfc.body.code === "ORIGIN_NOT_FOUND" && nulLabel.status === 400,
     `overdue with no status lists a proposed item due yesterday; a non-RFC uuid is the brain's ORIGIN_NOT_FOUND, not the schema's; a NUL in a label is a 400 (${inOverdue} | ${nonRfc.status} ${nonRfc.body.code} | ${nulLabel.status} ${nulLabel.body.code})`);
 
+  // Review pass 2: another key's thought as a capture key's evidence is named as the thought; a padded thought id is trimmed.
+  const hookItem = await rest("POST", "/v1/items", { text: "omicron: the hook's item, to propose closing" }, KEYS.hook);
+  const otherEvidence = await rest("POST", `/v1/items/${(hookItem.body.item as I | undefined)?.id}/proposals`, { evidence_thought: later }, KEYS.hook);
+  const padded = await rest("POST", "/v1/items", { text: "call the dentist", origin_thought: `  ${origin}  ` });
+  assert(otherEvidence.status === 403 && otherEvidence.body.code === "ITEM_NOT_YOURS" && (otherEvidence.body.item as { kind: string; key: string } | undefined)?.kind === "thought"
+      && (otherEvidence.body.item as { key: string } | undefined)?.key === later && padded.status === 200 && padded.body.outcome === "unchanged",
+    `a capture key's proposal citing another key's thought is ITEM_NOT_YOURS naming the thought, not its own item; a padded origin thought is trimmed, the same item again (${JSON.stringify(otherEvidence.body.item)} | ${padded.status} ${padded.body.outcome})`);
+
   // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
   // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority
   // on it; another plugin's hook may not touch it; with no row it opens nothing (ITEM_UNATTRIBUTED, no agent id).
@@ -1671,11 +1679,17 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   const away = { name: "cap-away", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
   const awayDirect = await direct.openItem(away, { text: "omicron: while the registry is away" } as never);
   const awayPlugin = await contextFor("home-maintenance", { core: direct, principal: away }).call("open_item", { text: "omicron: a plugin row while the registry is away", plugin_row: "task-8" }) as Out;
+  // Review pass 2: decided after 117 answers. The hook key, its id not given, through a plugin on an item it opened
+  // (no plugin row): told to retry, never a final "not yours"; through the plugin on its row's item, set_priority goes.
+  const hookAway = { name: "hook", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
+  const ownAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("update_item", { id: hookId, owner: "while away" }) as Out;
+  const prioAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("set_priority", { kind: "item", key: rowId, level: 2 }) as Out;
   const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
   assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
       && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
       && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNOWNABLE"
-      && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true,
+      && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true
+      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true,
     `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
 }
 
