@@ -19307,9 +19307,9 @@ if (want("38")) {
   /**
    * A one-shot sleep's quiet and poll (SMD-3733): a sleep without --follow
    * whose case asserts its end state alone (rows swept, settings seen, the
-   * order of calls, a start line, its exit) waits 300 ms of each, not a
-   * second. No line's regex names them, and drained() counts what isn't
-   * pooled yet, so a faster poll ends no sleep early.
+   * order of calls, a start line, its exit) waits 300 ms of each, not the
+   * section's second. No line's regex names them, and drained() counts what
+   * isn't pooled yet, so a faster poll ends no sleep early.
    */
   const ONE_SHOT = { quietMs: 300, pollMs: 300 };
   try {
@@ -19652,9 +19652,10 @@ if (want("38")) {
     // The backlog drained first, by a one-shot sleep: the note in hand is then the only work.
     // N12's bound from --abort-after, said at the start (SMD-3379 PR 1c-4a): the setting reaches the run, not the hook alone.
     const abortFrom = lines.length;
-    const drainedFirst = await sleepRun({ ...ONE_SHOT, abortAfter: 90 });
-    assert(lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
-      `--abort-after sets N12's bound, said at the start (${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
+    const acDrainedFirst = new AbortController();
+    const drainedFirst = await bounded(sleepRun({ ...ONE_SHOT, abortAfter: 90, signal: acDrainedFirst.signal }), acDrainedFirst);
+    assert(drainedFirst === 0 && lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
+      `--abort-after sets N12's bound, said at the start, and the backlog drains (exit ${drainedFirst}; ${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     lines.length = 0;
     const inHandNote = await capture("A note whose call is in hand when a live write touches it.", "sync-sleep", 0, 44);
     sw.slow = scaled(5000);
@@ -20491,10 +20492,17 @@ if (want("38")) {
       return judgedInHand !== undefined;
     }, 40_000);
     await capture("A note that pauses it with a judgement in hand.", "op-sleep", 0, 5);
-    // The line comes as the call is aborted, the set-back after it: polled together (review pass 1).
-    const judgeAborted = await pollUntil(async () => lines.some((l) => /^  paused: 1 call\(s\) in hand past 1 s aborted/.test(l)) && ((await claims(CO)).claimed ?? 0) === 0, 10_000);
-    const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
-    const coClaimed = (await claims(CO)).claimed ?? 0;
+    // The line comes as the call is aborted, the set-back after it: polled together (review pass 1), the queue and
+    // the claims read in one statement in that poll, so the pause's resume can't fall between reads (SMD-3733).
+    let coOrder: string[] = [];
+    let coClaimed = -1;
+    const judgeAborted = await pollUntil(async () => {
+      if (!lines.some((l) => /^  paused: 1 call\(s\) in hand past 1 s aborted/.test(l))) return false;
+      const rows = (await sql`SELECT thought_id::text AS id, status FROM thought_work_claims WHERE work_type = ${CO} AND status IN ('pending', 'claimed') ORDER BY enqueued_at, thought_id`) as { id: string; status: string }[];
+      coOrder = rows.filter((r) => r.status === "pending").map((r) => r.id);
+      coClaimed = rows.filter((r) => r.status === "claimed").length;
+      return coClaimed === 0;
+    }, 10_000);
     assert(judgeAborted && judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && coClaimed === 0,
       `paused with a judgement in hand past N12's bound, the call is aborted and the thought set back behind consolidation's queue (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}; ${coClaimed} claimed${held ? "" : "; no judge call was held within 40 s"})`);
     // At its cap, said once in the pause that reached it, the next pause
