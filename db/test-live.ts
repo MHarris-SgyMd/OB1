@@ -19400,11 +19400,12 @@ async function sleepScaffold(sql: SQL) {
   /**
    * A one-shot run's capture and poll (SMD-3733): a run without --follow
    * whose case asserts end states (rows swept, settings seen, the order of
-   * calls, a start line, its exit), or a line a faster poll only makes
-   * likelier ([38r]'s record put right mid-run), waits 300 ms of each, not
-   * the scaffold's second. No line's regex names them, and drained() counts
-   * what isn't pooled yet, so a faster poll ends no period early. [38]'s
-   * fifteen (SMD-3733, SMD-3783) and [38r]'s eight (SMD-3734).
+   * calls, a start line, its exit), drains for the case after it, or a line
+   * a faster poll only makes likelier ([38r]'s record put right mid-run),
+   * waits 300 ms of each, not the scaffold's second. No line's regex names
+   * them, and drained() counts what isn't pooled yet, so a faster poll ends
+   * no period early. [38]'s fifteen (SMD-3733, SMD-3783) and [38r]'s eight
+   * (SMD-3734).
    */
   const ONE_SHOT = { captureMs: 300, pollMs: 300 };
   // The passes look for new work every second, not every 15 s (SMD-3048);
@@ -19995,7 +19996,9 @@ if (want("38")) {
     // drained first.
     const limitOrphans = wakeOrphans;
     const acLimitDrain = new AbortController();
-    await bounded(sleepRun({ ...ONE_SHOT, signal: acLimitDrain.signal }), acLimitDrain);
+    const limitDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acLimitDrain.signal }), acLimitDrain);
+    // Each drain's exit asserted: one that ran out its bound would leave work for the case after it (SMD-3783 review pass 1).
+    assert(limitDrained === 0, `the drain before the limit case exits 0 (exit ${limitDrained})`);
     for (const id of limitOrphans) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
       await orphanRow(id, "zz-limit");
@@ -20021,7 +20024,8 @@ if (want("38")) {
     const cutOrphans: string[] = [];
     for (const text of ["An orphan a cut sweep reaches first.", "An orphan a cut sweep leaves."]) cutOrphans.push(await capture(text, "op-sleep", 0, 10));
     const acCutDrain = new AbortController();
-    await bounded(sleepRun({ ...ONE_SHOT, signal: acCutDrain.signal }), acCutDrain);
+    const cutDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acCutDrain.signal }), acCutDrain);
+    assert(cutDrained === 0, `the drain before the cut case exits 0 (exit ${cutDrained})`);
     for (const id of cutOrphans) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
       await orphanRow(id, "zz-cut");
@@ -20236,7 +20240,8 @@ if (want("38")) {
       // again at the id that sorts last, no capture beside it, under a 2 s rescan; the captures' work drained
       // first by a one-shot run, whose place in the table is its own process's.
       const acDeepDrain = new AbortController();
-      await bounded(sleepRun({ ...ONE_SHOT, signal: acDeepDrain.signal }), acDeepDrain);
+      const deepDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acDeepDrain.signal }), acDeepDrain);
+      assert(deepDrained === 0, `the drain before the deep one-shot exits 0 (exit ${deepDrained})`);
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
       // A one-shot run walks every window, having no later read: it finds the orphan, and so does its dry run
@@ -20269,16 +20274,22 @@ if (want("38")) {
     // The work read whole (SMD-3379 PR 1c-4b): at the start — the baseline —
     // and every --rescan after; between, each poll reads the claims alone.
     // Drained first, a one-shot run with no work at all exits 0 at once, no
-    // period begun.
+    // period begun: at its first read, before any live read (SMD-3783 review
+    // pass 1, mutant: under 10 s let a run that waited 33 polls of 300 ms by).
     const acWholeDrain = new AbortController();
     const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
     lines.length = 0;
+    let noneReads = 0;
+    const counting = intercept((text, run) => {
+      if (text.includes("FROM thought_audit WHERE created_at >")) noneReads++;
+      return run();
+    });
     const acNone = new AbortController();
     const noneAt = Date.now();
-    const noneCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acNone.signal }), acNone);
+    const noneCode = await bounded(sleepRun({ ...ONE_SHOT, sql: counting, signal: acNone.signal }), acNone);
     const noneMs = Date.now() - noneAt;
-    assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneMs < 10_000,
-      `a one-shot run that finds no work exits 0 at once, no period begun (exit ${noneCode} in ${noneMs} ms; ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
+    assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneReads === 0,
+      `a one-shot run that finds no work exits 0 at its first read, no live read made, no period begun (exit ${noneCode} in ${noneMs} ms; ${noneReads} live read(s); ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
     // A one-shot run whose work goes while the gate holds it — the claim another
     // process finishes — ends with 0 once a read finds none, the rescan's
     // included (review pass 1: past its first read, it idled on for ever).
@@ -20303,7 +20314,8 @@ if (want("38")) {
     // shard).
     const wholeOrphan = await capture("An orphan only a whole read finds.", "op-sleep", 0, 19);
     const acWholeNote = new AbortController();
-    await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeNote.signal }), acWholeNote);
+    const noteDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeNote.signal }), acWholeNote);
+    assert(noteDrained === 0, `the drain before the baseline's orphan exits 0 (exit ${noteDrained})`);
     await sql`DELETE FROM thought_chunks WHERE thought_id = ${wholeOrphan}::uuid`;
     await orphanRow(wholeOrphan, "zz-baseline");
     // The dry run counts the orphan as work, as the run's whole read does (review pass 1: it said "no work").
