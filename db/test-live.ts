@@ -19307,9 +19307,9 @@ if (want("38")) {
   /**
    * A one-shot sleep's quiet and poll (SMD-3733): a sleep without --follow
    * whose case asserts its end state alone (rows swept, settings seen, the
-   * order of calls, its exit) waits 300 ms of each, not a second. No line's
-   * regex names them, and drained() counts what isn't pooled yet, so a
-   * faster poll ends no sleep early.
+   * order of calls, a start line, its exit) waits 300 ms of each, not a
+   * second. No line's regex names them, and drained() counts what isn't
+   * pooled yet, so a faster poll ends no sleep early.
    */
   const ONE_SHOT = { quietMs: 300, pollMs: 300 };
   try {
@@ -19652,7 +19652,7 @@ if (want("38")) {
     // The backlog drained first, by a one-shot sleep: the note in hand is then the only work.
     // N12's bound from --abort-after, said at the start (SMD-3379 PR 1c-4a): the setting reaches the run, not the hook alone.
     const abortFrom = lines.length;
-    const drainedFirst = await sleepRun({ quietMs: scaled(1000), pollMs: scaled(1000), abortAfter: 90 });
+    const drainedFirst = await sleepRun({ ...ONE_SHOT, abortAfter: 90 });
     assert(lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
       `--abort-after sets N12's bound, said at the start (${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     lines.length = 0;
@@ -20473,7 +20473,8 @@ if (want("38")) {
     // aborted while the brain is live, and set back; consolidation's cap at one, so the next pause's runs on (SMD-3379
     // PR 1c-3b). The cap's line comes a poll after the abort, which can come a poll after the pause and a second into
     // the call: polled every 500 ms, the pause that reaches the cap says it by about 2 s, a second inside the capture,
-    // as 1 s polls did inside the 4 s capture and 5 s quiet before (SMD-3733).
+    // as 1 s polls did inside the 4 s capture and 5 s quiet before (SMD-3733). The quiet is half a second past the
+    // capture so that the reset case's flip below lands before the next sleep starts.
     const retrying = sleepRun({ follow: true, quietMs: 3500, pollMs: 500, captureMs: 3000, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
@@ -21009,10 +21010,10 @@ if (want("38")) {
       // pulling it again): the check got that pass through its start, so the
       // refusal is retried, as one after a sleep that ran is (item 6).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-      // The stub serves the check's two probes, one for each pass, and answers 404
-      // from the next: the first sleep's start (SMD-3733). Before, the model
-      // went at the first stamp, an 8 s quiet keeping the scheduler awake
-      // past the check however long a loaded runner took over it.
+      // The stub serves the check's two probes, one for each pass, and
+      // answers 404 from the next: the first sleep's start (SMD-3733). Before,
+      // the model went at the first stamp, an 8 s quiet keeping the scheduler
+      // awake past the check however long a loaded runner took over it.
       const probesBefore = sw.probes;
       sw.missingAfterProbes = probesBefore + 2;
       const checkedRun = followRun();
