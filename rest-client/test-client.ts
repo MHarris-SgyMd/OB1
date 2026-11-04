@@ -125,6 +125,14 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     set_priority: { kind: "ticket", key: "smd-3664", level: 4, due_at: "2027-03-01", not_before: "2027-02-01T09:00:00+01:00", due_ref: { kind: "thought", key: ID }, reason: "a reason & more?", inferred: false },
     clear_priority: { kind: "thought", key: ID },
     priority_history: { kind: "entity", key: ID },
+    // Open items (SMD-3665 PR 2): an item's or a proposal's id in the path; a null rides the PATCH body to clear.
+    open_item: { text: "call the dentist & more?", owner: "me", due_at: "2027-03-01", origin_thought: ID, plugin_row: "task-1", proposed: true },
+    update_item: { id: ID, text: "call the dentist", owner: null, due_at: "2027-03-02T09:00:00+01:00" },
+    set_item_status: { id: ID, status: "done", reason: "booked for Tuesday" },
+    propose_item_close: { id: ID, status: "dropped", evidence_thought: ID, label: "resolves", reason: "a reason & more?" },
+    decide_item_close: { id: ID, accept: true, reason: "agreed" },
+    item_history: { id: ID },
+    list_items: { status: "unsettled", overdue: true, origin_thought: ID, plugin: "home-maintenance", limit: 7 },
   } satisfies { [K in ToolName]: InputOf<K> };
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   for (const name of TOOL_NAMES) {

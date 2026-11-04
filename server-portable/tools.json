@@ -70,6 +70,14 @@
       "scope": "read"
     },
     {
+      "name": "item_history",
+      "scope": "read"
+    },
+    {
+      "name": "list_items",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "capture"
     },
@@ -79,6 +87,26 @@
     },
     {
       "name": "clear_priority",
+      "scope": "capture"
+    },
+    {
+      "name": "open_item",
+      "scope": "capture"
+    },
+    {
+      "name": "update_item",
+      "scope": "capture"
+    },
+    {
+      "name": "set_item_status",
+      "scope": "capture"
+    },
+    {
+      "name": "propose_item_close",
+      "scope": "capture"
+    },
+    {
+      "name": "decide_item_close",
       "scope": "capture"
     },
     {
