@@ -21801,13 +21801,13 @@ if (want("38r")) {
     // vector: P1's brings a whole read forward that finds no work; P2's,
     // written by a transaction begun before that read and committed during it
     // once its consolidation pool is read (the mark taken before it, with the
-    // slack, so P2's is read again), waits out the floor from that
-    // read, and then begins a period for consolidation. P3, with no entity,
-    // is mended during that period: its end read takes the mark, so P3's
-    // vector brings no whole read after it. P4's is committed by a
-    // transaction begun before an idle poll's read that finds none, and
-    // committed after it: the read's mark keeps the slack, and the floor,
-    // passed already, so the next poll reads it (review pass 2).
+    // slack, so P2's is read again), waits out the floor from that read, and
+    // then begins a period for consolidation. P3, with no entity, is mended
+    // during that period: its end read takes the mark, so P3's vector brings
+    // no whole read after it. P4's is written by a transaction begun before
+    // an idle poll's read that finds none, and committed after it: the read's
+    // mark keeps the slack, and the floor, passed already, so the next poll
+    // reads it (review pass 2).
     // Re-embed is kept out of sleep (the unfit name above): its backlog — a
     // vectorless row is one — is read whole, so P2 would begin P1's period.
     // When each mark is asked for (vectorMark's statement: a whole read's or an end read's, not vectorCome's), and
@@ -21820,7 +21820,7 @@ if (want("38r")) {
     let poolNext = false;
     let afterCome: (() => Promise<void>) | null = null;
     const counted = intercept((text, run) => {
-      if (/ AS seen$/.test(text.trim()) && !/ AS came\) c/.test(text)) markAt.push(Date.now());
+      if (/ AS seen$/.test(text.trim())) markAt.push(Date.now());
       if (/ AS write_us/.test(text)) liveAt.push(Date.now());
       if (afterCome !== null && / AS came\) c/.test(text)) {
         const then = afterCome;
@@ -21846,9 +21846,10 @@ if (want("38r")) {
         return id;
       });
     };
-    const mend = async (id: string, content: string, axis: number) => {
-      const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${id}::uuid`;
-      await sql`SELECT update_thought(${id}::uuid, ${content}::text, NULL::jsonb, ${unit(axis)}::vector, NULL::jsonb, ${ts}::timestamptz,
+    /** The mender's write, giving `id` its vector: through the suite's client, or a held transaction. */
+    const mend = async (id: string, content: string, axis: number, c: SQL = sql) => {
+      const [{ ts }] = await c`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${id}::uuid`;
+      await c`SELECT update_thought(${id}::uuid, ${content}::text, NULL::jsonb, ${unit(axis)}::vector, NULL::jsonb, ${ts}::timestamptz,
         ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
     };
     const p1Text = "A vectorless note no entity names, which consolidation never judges.";
@@ -21891,10 +21892,8 @@ if (want("38r")) {
       let release2 = () => {};
       const released2 = new Promise<void>((r) => { release2 = r; });
       try {
-        const [{ ts: ts2 }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${p2}::uuid`;
         const held2 = holder2.begin(async (tx) => {
-          await tx`SELECT update_thought(${p2}::uuid, ${p2Text}::text, NULL::jsonb, ${unit(22)}::vector, NULL::jsonb, ${ts2}::timestamptz,
-            ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
+          await mend(p2, p2Text, 22, tx);
           p2Held = true;
           await released2;
         });
@@ -21929,10 +21928,8 @@ if (want("38r")) {
       let release = () => {};
       const released = new Promise<void>((r) => { release = r; });
       try {
-        const [{ ts: ts4 }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${p4}::uuid`;
         const held = holder.begin(async (tx) => {
-          await tx`SELECT update_thought(${p4}::uuid, ${p4Text}::text, NULL::jsonb, ${unit(25)}::vector, NULL::jsonb, ${ts4}::timestamptz,
-            ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
+          await mend(p4, p4Text, 25, tx);
           p4Held = true;
           await released;
         });
@@ -21960,7 +21957,7 @@ if (want("38r")) {
     assert(p4Held && p4Committed > 0 && p4Begun && p4After <= 3500,
       `…and a vector committed after an idle poll's read found none, by a transaction begun before it, is read at the next poll: the mark keeps the slack and the floor (held ${p4Held}; committed ${p4Committed > 0}; its period begun ${p4Begun}, ${p4After} ms after the commit)`);
 
-    // vectorCome's plan stays the custom one (review pass 1 of PR 1d, run-it): a burst of vectors the statistics
+    // vectorCome's plan stays the custom one (review pass 1, run-it): a burst of vectors the statistics
     // see, and a prepared vectorCome went generic from its sixth call — a scan of every audit row, each idle poll,
     // for the connection's life. The scheduler's own connections plan each statement for its values
     // (schedulerSession's plan_cache_mode); a plain connection, under the same burst, is the control.

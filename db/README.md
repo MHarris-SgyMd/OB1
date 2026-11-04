@@ -4499,11 +4499,11 @@ re-embed set-aside cleared. The sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
 an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
-pass held begins none: one a statement held
-(**Its budget**, below), re-embed set aside or set down (a set-down is tried
-again at the next period's start, or by the next rescan). A one-shot run
-exits 0 once a read finds no work — at once, or when what it found has been
-done elsewhere; `--dry-run` says whether a period would begin, and when.
+pass held begins none: one a statement held (**Its budget**, below), re-embed
+set aside or set down (a set-down is tried again at the next period's start, or
+by the next rescan). A one-shot run exits 0 once a read finds no work — at
+once, or when what it found has been done elsewhere; `--dry-run` says whether a
+period would begin, and when.
 
 **What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background

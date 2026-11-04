@@ -25,9 +25,9 @@
  * every --rescan seconds after; between, each poll reads one EXISTS a claim
  * pass, a row pending or in hand under its key, which a capture queues in its
  * own transaction (016). A vector come since the last whole read — an audited
- * update whose diff says embedding_present true, the mender's or a re-embed's —
- * brings the next forward, at most once a VECTOR_FLOOR_S (60) after the end of
- * the last whole read or a period's end read, so within that and a poll; a
+ * update whose diff says embedding_present true, the mender's or a re-embed's
+ * — brings the next forward, at most once a VECTOR_FLOOR_S (60) after the end
+ * of the last whole read or a period's end read, so within that and a poll; a
  * vector read once is not read again, and the rescan keeps its own clock
  * (SMD-3379 PR 1d): consolidation judges only a thought with a vector (029),
  * and its arrival queues no claim. What else no claim row shows — the orphans
@@ -766,10 +766,11 @@ export async function newestLive(sql: SQL, after: { us: number } | { secondsAgo:
  * `seen` the rows already visible after it, which the read that follows saw.
  * A later row needs that read again: consolidation judges only a thought with
  * a vector (029's consolidation_pool), and its arrival queues no claim.
- * `atMs`, this process's clock as it was taken, which VECTOR_FLOOR_S counts from.
- * A row carries its transaction's start: one begun more than the slack before
- * the mark and committed after it is not read — WAKE_SLACK_S's trade; the
- * mender and reembed.ts commit each row on its own — and waits for the rescan.
+ * `atMs`, this process's clock as the read it marks ended — its caller sets
+ * it — which VECTOR_FLOOR_S counts from. A row carries its transaction's
+ * start: one begun more than the slack before the mark and committed after it
+ * is not read — WAKE_SLACK_S's trade; the mender and reembed.ts commit each
+ * row on its own — and waits for the rescan.
  */
 export type VectorMark = { fromUs: number; seen: string[]; atMs: number };
 
@@ -800,7 +801,7 @@ export async function vectorCome(sql: SQL, mark: VectorMark, slackS: number): Pr
                                                      AND action = 'update' AND diff->>'embedding_present' = 'true') END AS seen
       FROM (SELECT EXISTS (SELECT 1 FROM thought_audit WHERE created_at > ${usText(mark.fromUs)}::timestamptz
                              AND action = 'update' AND diff->>'embedding_present' = 'true' AND NOT (id::text = ANY(${sql.array(mark.seen, "TEXT")}::text[]))) AS came) c`;
-  const came = (r as { came: boolean }).came;
+  const came = r.came as boolean;
   return { came, mark: came ? mark : { fromUs: Math.max(mark.fromUs, Number(r.from_us)), seen: r.seen as string[], atMs: mark.atMs } };
 }
 
@@ -1685,9 +1686,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Where the last whole read stood on the vectors come (PR 1d), null before
    * the first: an idle poll with one come since reads the work whole, at most
-   * once a VECTOR_FLOOR_MS after the last whole read or a period's end read —
-   * a vector arriving queues no claim, and it may give consolidation a thought
-   * to judge.
+   * once a VECTOR_FLOOR_MS after the end of the last whole read or a period's
+   * end read — a vector arriving queues no claim, and it may give
+   * consolidation a thought to judge.
    */
   let vectorsAt: VectorMark | null = null;
   /**
@@ -1831,7 +1832,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const read: boolean | null = await reading(whole ? async () => {
         const at = await vectorMark(sql, WAKE_SLACK);
         const found = await workWhole();
-        // The floor from the read's end: a whole read longer than it would otherwise follow one another (review pass 2).
+        // The floor from the read's end: a whole read longer than it would otherwise follow one another (review pass 2 of PR 1d).
         vectorsAt = { ...at, atMs: Date.now() };
         return found;
       } : workClaimed);
