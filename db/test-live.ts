@@ -13122,7 +13122,7 @@ if (want("16")) {
       const hungMs = Date.now() - hungAt;
       const hungRow = await claimOf(hungNewer);
       assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 1 s, and a one-token call got no answer either\)/.test(l)),
-             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged within 14 s once the judge answers, not failed (${hungRow?.status} after ${hungMs} ms: ${hungRow?.last_error?.slice(0, 80)})`);
+             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, within 14 s of the seeds, not failed (${hungRow?.status} after ${hungMs} ms: ${hungRow?.last_error?.slice(0, 80)})`);
     } finally {
       judgeDown = "503";
       judgeOutage.clear();
