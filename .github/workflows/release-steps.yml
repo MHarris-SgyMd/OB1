@@ -1,15 +1,16 @@
-# The release job's steps (SMD-1860), called by .github/workflows/release.yml's
-# two jobs (SMD-2111): its rehearsal on a pull request or a dispatch, with
-# `publish: false` and a token that reads, and its release on a tag push, with
-# `publish: true` and a token that writes. release.yml's header says what a
-# release publishes and what a rehearsal proves.
+# The release workflow's steps (SMD-1860), called by
+# .github/workflows/release.yml's two jobs (SMD-2111): its rehearsal on a pull
+# request or a dispatch, with `publish: false` and a token that reads, and its
+# release on a tag push, with `publish: true` and a token that writes.
+# release.yml's header says what a release publishes and what a rehearsal
+# proves.
 #
 # No `permissions:` here, at the top or on the job: a called workflow's token
 # is its caller's, and a permission declared here could only narrow it. Narrow
 # the release job's, and a tag would fail at its first push to GHCR, which no
-# rehearsal reaches; check 23 refuses one. Nor any trigger other than
-# workflow_call: the runs it started would need a `permissions:` here, which
-# would narrow the callers' tokens too (check 23 refuses that as well).
+# rehearsal reaches. Nor any trigger other than workflow_call: the runs it
+# started would want a `permissions:` here, which would narrow the callers'
+# tokens too.
 #
 # Every `uses:` is a full commit SHA with its tag in a trailing comment, and the
 # runner image is named (check 23, SMD-2093): the release job runs these

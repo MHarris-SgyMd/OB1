@@ -24,35 +24,31 @@
 # and amd64 alone otherwise (SMD-3473, "Whether this rehearsal builds both
 # platforms").
 #
-# scripts/release-artifacts.ts is the reader and renderer; the bash in the
-# steps only runs docker and gh. It refuses a tag that does not name
-# releases.json's last entry, a FORK_VERSION that was not bumped, a migration
-# or a fragment that landed after the cut, a tag off main, and an unpinned
-# Ollama.
+# Two jobs run those steps, which live in .github/workflows/release-steps.yml,
+# and only their token differs (SMD-2111). The REHEARSAL job runs on a pull
+# request and on workflow_dispatch with a token that reads the repository and
+# nothing else; the RELEASE job runs on a tag push alone, and gets contents and
+# packages write, whatever the repository's default workflow permission is.
+# release-steps.yml declares no permissions of its own, so each call runs with
+# its caller's token. A rehearsal publishes nothing, so it needs no write; and a
+# pull request that bumps an action (Dependabot's weekly ones) runs the new
+# action in the rehearsal before anyone has read it, with a token that can push
+# nothing to GHCR and create no release. The release job's token runs every
+# action in release-steps.yml with publish rights, so each `uses:` there is a
+# full commit SHA (the tag in a trailing comment), and its runner image is
+# named; fork-checks.yml's header has the rule and what holds it (SMD-2093).
 #
-# One thing to check after the first tag, outside this file: the visibility of
-# the two GHCR packages. A package a workflow first publishes may be created
+# scripts/release-artifacts.ts is the reader and renderer; the bash in
+# release-steps.yml only runs docker and gh. It refuses a tag that does not
+# name releases.json's last entry, a FORK_VERSION that was not bumped, a
+# migration or a fragment that landed after the cut, a tag off main, and an
+# unpinned Ollama.
+#
+# One thing to check after the first tag, outside these files: the visibility
+# of the two GHCR packages. A package a workflow first publishes may be created
 # private whatever the repository's visibility; a clean machine's `docker
 # compose pull` then wants a login, so flip both to public in the package
 # settings if they are not.
-#
-# Two jobs run it, and their token is all that differs (SMD-2111). The
-# REHEARSAL job runs on a pull request and on workflow_dispatch with a token
-# that reads the repository and nothing else; the RELEASE job runs on a tag
-# push alone, and gets contents and packages write, whatever the repository's
-# default workflow permission is. Both call .github/workflows/release-steps.yml,
-# which holds the steps once and declares no permissions of its own, so each
-# runs with its caller's token. A rehearsal publishes nothing, so it needs no
-# write; and a pull request that bumps an action (Dependabot's weekly ones) runs
-# the new action in the rehearsal before anyone has read it, with a token that
-# can push nothing to GHCR and create no release. Check 23 holds the split: a
-# job that grants a write runs only on a push of a named branch or a tag, and a
-# called workflow has no other trigger and declares no permissions.
-#
-# The release job's token runs every action in release-steps.yml with publish
-# rights, so each `uses:` is a full commit SHA (the tag in a trailing comment),
-# not a tag its owner can move, and the runner image is named; fork-checks.yml's
-# header has the rule and what holds it (SMD-2093).
 name: Release
 
 on:

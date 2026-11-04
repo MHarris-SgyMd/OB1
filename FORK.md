@@ -851,9 +851,8 @@ another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
 CI. Two images the release job's actions start by default, QEMU's binfmt and
 the BuildKit builder that pushes to GHCR, are pinned by digest through their
 inputs in `release-steps.yml`, and nothing moves those but a hand edit; nor
-does anything move the database jobs' pgvector image. The rehearsal's token
-only reads, and check 23 refuses a write a pull request's run could hold
-(SMD-2111).
+does anything move the database jobs' pgvector image. The rehearsal runs as a
+job of its own whose token only reads (SMD-2111).
 
 **"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
 step runs the suite at the default width and at 768 in the background, each to
