@@ -248,10 +248,10 @@ typecheck() {
 }
 
 # The schema lane (SMD-3715): the schema on PGlite, at the default width and
-# at 768, as db-schema runs it, ~170 s of the ~420 the database-free lane took
-# with them in it, when that lane set a run's length. In a lane of their own
-# each of the two ends inside the longest test-live shard; the widths are not
-# split further, since a lane more is more load on every lane's timing rows and
+# at 768, each as CI's db-schema job runs it. They were the database-free
+# lane's longest rows, and that lane set a run's length; apart, this lane and
+# that one each end inside the longest test-live shard. The widths stay one
+# after the other: a lane more is more load on every lane's timing rows, and
 # the run would end no sooner. Like the database-free lane, its FAILED is its
 # own. schema_rows NOWFILE: at_row's file.
 schema_rows() {
@@ -510,10 +510,11 @@ main() {
 
   # Every other lane starts now, beside this one (SMD-3688): the four test-live
   # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
-  # (schema_rows) and the database-free rows (free_rows). Until SMD-3639 the rest shard's [2] appended
-  # a line to the tracked db/migrations/002 for a moment, which the checker
-  # (17c hashes the frozen migrations), test-engines, test-schema, test-upgrade
-  # and test-preflight read, so they waited for it; it edits a copy now.
+  # (schema_rows) and the database-free rows (free_rows). Until SMD-3639 the
+  # rest shard's [2] appended a line to the tracked db/migrations/002 for a
+  # moment, which the checker (17c hashes the frozen migrations), test-engines,
+  # test-schema, test-upgrade and test-preflight read, so they waited for it; it
+  # edits a copy now.
   start_lanes
 
   # Against the shared Postgres, in CI's order: the data-layer job's suites,
