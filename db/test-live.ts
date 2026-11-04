@@ -10405,6 +10405,50 @@ if (want("10h")) {
         `a stop while a lost poll's hand-back waits ends the run there, said so, the claim back as the row is let go (waited ${handWaited}, exit ${handRun?.code ?? "still running at 20 s"}): ${handRun?.stdout.trim().slice(-200)} | ${handRun?.stderr.trim().slice(0, 300)}`);
       await drop([handT]);
 
+      // …and a first stop in before the lost poll's hand-back: the poll's first check passes its own hand-back over for
+      // the stop, so the run's end hand-back, in the loop's finally, returns the claim by itself, and must wait up to
+      // RELEASE_WAIT whatever the budget (SMD-3737: a mutant bounding that hand-back at the budget passed every other
+      // row). The stop is sent once the row is held at the question, so the release waits past the budget with the
+      // stop already in. The release's lost-poll line, read as a hand-back is first seen waiting, makes that hand-back
+      // the end's: a poll that handed back before its stop check has not said it yet, whether its hand-back then lands
+      // or gives up. The row is let go BUDGET_MS + 500 after the wait is seen, which fails a hand-back that gives up at
+      // the budget, or as the run ends or the poll's 20 s do.
+      const [endT] = await seedAll(["Budget note 18: sweep-pass-good work, its release and the run's end hand-back held as the run stops."]);
+      const endLet = Promise.withResolvers<void>();
+      const endFree = holdClaimRow("Budget note 18", endT, endLet.promise);
+      const endHold = onOwn;
+      const endStop = new AbortController();
+      onOwn = (t) => {
+        const held = endHold?.(t);
+        return t.includes("Budget note 18") ? Promise.resolve(held).then(() => endStop.abort()) : held;
+      };
+      /** The run's stderr lines as each is said, so its line's order beside the hand-back's wait can be read. */
+      const endSaid: string[] = [];
+      const endLine = new RegExp(`^ {2}${endT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`);
+      let endRun: SweepRun | null = null;
+      let endWaited = false;
+      let endSaidFirst = false;
+      try {
+        let endDone = false;
+        const endRunning = settled(caught((w) => sweepSubjects({ url: URL_!, env, follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([endStop.signal, backstop()]),
+          writer: { out: w.out, err: (l) => { endSaid.push(l); w.err(l); } } }))).finally(() => { endDone = true; });
+        endWaited = await pollUntil(async () => endDone || await waitingOnLock("release_claims_for_worker("), 20_000) && !endDone;
+        endSaidFirst = endSaid.some((l) => endLine.test(l));
+        if (endWaited) await Bun.sleep(BUDGET_MS + 500);
+        endLet.resolve();
+        endRun = await orHung(endRunning, 20_000);
+      } finally {
+        endStop.abort();
+        endLet.resolve();
+        await endFree();
+      }
+      const endClaim = (await claimOf(endT))?.status;
+      const endFailSaid = /the claims this run holds could not go back to the pool/.test(endRun?.stderr ?? "");
+      assert(endWaited && endSaidFirst && endRun?.code === 0 && endClaim === "pending" && !endFailSaid
+          && /stopped after 1 thought\(s\): what it held is back in the pool/.test(endRun.stderr),
+        `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, the release's lost-poll line said first ${endSaidFirst}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}, the hand-back's failure said ${endFailSaid}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
+      await drop([endT]);
+
       // …and a hard stop while a thought's own write waits past it: the thought unfinished, the stop's to hand back,
       // neither failed nor counted nor said as a write past the budget.
       const [hardT] = await seedAll(["Budget note 11: sweep-pass-good work, its door held as the run stops twice."]);
