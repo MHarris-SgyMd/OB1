@@ -725,7 +725,7 @@ Combine with the [Family Calendar Extension](../../extensions/family-calendar/) 
 
 ### Professional CRM Integration
 
-Combine with the [Professional CRM Extension](../../extensions/professional-crm/) to automatically pull contact history and opportunity status into pre-meeting briefings.
+Combine with the [Professional CRM plugin](../../plugins/professional-crm/) to automatically pull contact history and opportunity status into pre-meeting briefings.
 
 ### Voice Briefings
 

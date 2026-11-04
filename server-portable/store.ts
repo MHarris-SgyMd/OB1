@@ -2053,6 +2053,12 @@ export interface ThoughtStore {
   /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
   listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
   /**
+   * The unreleased claims — live, and lapsed but never released — on the tickets `issues` names, keyed as 115 keys
+   * them (SMD-3599: a read's whole page at once, so a result says who holds a ticket it names, or held it and may
+   * have paused). By ticket, piece and claim time; at most `limit`. Never a token or its hash.
+   */
+  unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]>;
+  /**
    * The lease of the claim a token proves, read before a renewal (SMD-3654): its
    * id, its expiry and whether it was released, by whom and why — never the
    * token or its hash. Given `work` (claim_work's), `ownOnThisWork` says whether
@@ -2367,7 +2373,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
