@@ -21255,7 +21255,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a period re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a live write pauses it, a call past the bound aborted; its provider gone, its key refused or a throw sets it down for the period, a statement timed out holds it until a restart, extraction running on; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot run that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, intercept, nextPeriod, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -21788,6 +21788,93 @@ if (want("38r")) {
       `a one-shot run under that name, the record another model's, prints its --switch-model with the name quoted (exit ${shotCode}; ${shotErrs.join(" | ").slice(0, 300)})`);
     assert(unfitCode === 0 && unfitSaid === 1 && !unfitRan && unfitLeft && unfitBeat && unfitJob === undefined && /does not run in sleep/.test(unfitDry) && !/ reembed \(/.test(unfitDry),
       `a model name no row carries keeps re-embed out of sleep, said once, its row carrying no re-embed key; extraction runs on (exit ${unfitCode}; said ${unfitSaid}; ran ${unfitRan}; left and extracted ${unfitLeft}; row read ${unfitBeat}, its key ${JSON.stringify(unfitJob)}; dry run ${unfitDry.slice(0, 300)})`);
+
+    // ── A vector come (SMD-3379 PR 1d) ──────────────────────────────────────
+    // Consolidation judges only a thought with a vector (029), and a vector
+    // arriving queues no claim: the idle polls read the claims alone, so it
+    // waited for the rescan — 10 min here. Now a vector come since the last
+    // whole read brings the next forward, at most once a floor (4 s here)
+    // after the last whole read or end read, and one read is not read again.
+    // Two thoughts planted extracted and vectorless, out of the claims and the
+    // pools: P1 with no entity, which consolidation never judges, and P2 with
+    // one. The mender's write gives each a vector: P1's brings a whole read
+    // forward that finds no work; P2's, mended just after it, waits out the
+    // floor from that read, and then begins a period for consolidation. P3,
+    // with no entity, is mended during that period: its end read takes the
+    // mark, so P3's vector brings no whole read after it.
+    // Re-embed is kept out of sleep (the unfit name above): its backlog — a
+    // vectorless row is one — is read whole, so P2 would begin P1's period.
+    const markAt: number[] = [];
+    const counted = intercept((text, run) => {
+      if (/ AS seen$/.test(text.trim())) markAt.push(Date.now());
+      return run();
+    });
+    const plant = async (content: string, entity: boolean) => {
+      // One transaction: the extraction claim the insert queues (016) is settled before a poll can read it.
+      return await sql.begin(async (tx) => {
+        const id = ((await tx`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+        if (entity) await tx`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) SELECT ${id}::uuid, id, 0.9, 'zz-vector' FROM ob1_entities ORDER BY id LIMIT 1`;
+        await tx`UPDATE thought_work_claims SET status = 'succeeded' WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+        return id;
+      });
+    };
+    const mend = async (id: string, content: string, axis: number) => {
+      const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${id}::uuid`;
+      await sql`SELECT update_thought(${id}::uuid, ${content}::text, NULL::jsonb, ${unit(axis)}::vector, NULL::jsonb, ${ts}::timestamptz,
+        ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
+    };
+    const p1Text = "A vectorless note no entity names, which consolidation never judges.";
+    const p2Text = "A vectorless note naming an entity, which its vector puts before consolidation.";
+    const p3Text = "A vectorless note no entity names, mended while a period runs.";
+    const working = () => lines.filter((l) => /^ {2}working:/.test(l)).length;
+    /** Whether the last period begun has ended (or none began). */
+    const periodOver = () => {
+      let last = -1;
+      lines.forEach((l, i) => { if (/^ {2}working:/.test(l)) last = i; });
+      return last < 0 || lines.slice(last).some((l) => /— the period ends/.test(l));
+    };
+    await sql`UPDATE ob1_config SET value = 'stub embed' WHERE key = 'embedding_model'`;
+    const vectorRun = follow({ sql: counted, env: unfitEnv, rescanMs: 600_000, vectorFloorMs: 4000 });
+    let idle = false, plantedQuiet = false, p1Read = false, p2Begun = false;
+    let p1ReadAt = 0, p2MendedAt = 0, p2BegunAt = 0, readsAfter = -1, workingAfter = -1, judged = -1, p3During = false;
+    let p1 = "", p2 = "", p3 = "";
+    try {
+      // Idle: the baseline read, and any period it began ended.
+      idle = await pollUntil(async () => markAt.length > 0 && periodOver(), 30_000);
+      p1 = await plant(p1Text, false);
+      p2 = await plant(p2Text, true);
+      p3 = await plant(p3Text, false);
+      const before = working();
+      await Bun.sleep(2500);
+      plantedQuiet = working() === before;
+      // Past the floor from the last read, P1's vector reads the work whole at the next poll, and finds none.
+      await Bun.sleep(Math.max(0, 4000 - (Date.now() - markAt[markAt.length - 1])));
+      const marks = markAt.length;
+      await mend(p1, p1Text, 21);
+      p1Read = await pollUntil(async () => markAt.length > marks, 5000);
+      p1ReadAt = markAt[markAt.length - 1] ?? 0;
+      await mend(p2, p2Text, 22);
+      p2MendedAt = Date.now();
+      p2Begun = await pollUntil(async () => working() > before, 15_000);
+      p2BegunAt = Date.now();
+      // P3 mended in the period; its end read takes the mark, so past the floor no poll reads the work whole again.
+      await mend(p3, p3Text, 23);
+      p3During = !periodOver();
+      await pollUntil(async () => periodOver(), 30_000);
+      const ended = markAt.length;
+      await Bun.sleep(6000);
+      readsAfter = markAt.length - ended;
+      workingAfter = working() - before;
+      judged = ((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = ${p2}::uuid AND work_type <> ${EX}`)[0] as { c: number }).c;
+    } finally {
+      await vectorRun.stop();
+      for (const id of [p1, p2, p3].filter(Boolean)) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    }
+    assert(idle && plantedQuiet && p1Read && p2Begun && p2BegunAt - p1ReadAt >= 3700 && p2BegunAt - p2MendedAt <= 4000 + 4000 && judged > 0,
+      `a vector come brings the whole read forward, not before the floor from the last: the plants begin nothing, P1's vector is read at once and P2's, mended after that read, begins a period for consolidation once the floor has passed (idle ${idle}; planted quiet ${plantedQuiet}; P1 read ${p1Read}; P2 begun ${p2Begun}, ${p2BegunAt - p1ReadAt} ms after P1's read, ${p2BegunAt - p2MendedAt} ms after its mend; ${judged} claim(s) on P2 beyond extraction's)`);
+    assert(p3During && readsAfter === 0 && workingAfter === 1,
+      `…and a vector read once is not read again, a period's end read reading those come in it: no whole read in the 6 s after the period's end, past the floor (P3 mended in the period ${p3During}; ${readsAfter} read(s); ${workingAfter} period(s) begun)`);
 
     // A re-embed follower running outside sleep does not yield to a live call: the scheduler refuses (2), as for the others.
     const outsideKey = `heartbeat:${EMBED_JOB}`;
