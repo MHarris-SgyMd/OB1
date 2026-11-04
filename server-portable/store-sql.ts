@@ -643,11 +643,13 @@ export class SqlStore implements ThoughtStore {
     // db/*.ts --retry-failed path (extract-entities.ts:413-420) as one statement.
     // Scoped to the one pool — WHERE work_type = $1 AND status = 'failed' — so a
     // sibling pool's failures are untouched; a fresh attempt clears the recorded
-    // error, the finish time and the count (015's REQUEUE_SET_SQL shape). The
-    // caller has already gated the write scope. RETURNING the ids feeds the audit.
+    // error, the finish time and the count (015's REQUEUE_SET_SQL shape), and a
+    // forward date a set-back gave is dropped (no later than now: SMD-3306 PR
+    // 6b-1's subject sweep, as db/sleep.ts re-dates extraction's stopped thoughts).
+    // The caller has already gated the write scope. RETURNING the ids feeds the audit.
     const rows = await this.sql`
       UPDATE thought_work_claims
-         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, enqueued_at = LEAST(enqueued_at, now())
        WHERE work_type = ${workType} AND status = 'failed'
       RETURNING thought_id`;
     const ids = rows.map((r: { thought_id: string }) => String(r.thought_id));

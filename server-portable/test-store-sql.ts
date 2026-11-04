@@ -579,10 +579,11 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     const A = "extract:action-model@p2";
     const B = "extract:action-model@p1";
 
-    // ── retryFailed: pool A has 2 failed + 1 succeeded + 1 pending; pool B has 1 failed.
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES
-      (${ids[0]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3),
-      (${ids[1]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3)`;
+    // ── retryFailed: pool A has 2 failed + 1 succeeded + 1 pending; pool B has 1 failed. A's first failed row dated 30
+    // days ahead, as the subject sweep's set-back after an outage dates one (SMD-3306 PR 6b-1), its second in the past.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count, enqueued_at) VALUES
+      (${ids[0]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days'),
+      (${ids[1]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3, '2000-01-01 00:00:00+00')`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[2]}::uuid, ${A}, 'succeeded', 'w1', now())`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[3]}::uuid, ${A}, 'pending')`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES (${ids[4]}::uuid, ${B}, 'failed', 'w1', now(), 'boom', 3)`;
@@ -593,6 +594,9 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     const aRows = await raw`SELECT thought_id::text AS id, status, last_error, finished_at, attempt_count FROM thought_work_claims WHERE work_type = ${A}`;
     const aReset = (aRows as Record<string, unknown>[]).filter((r) => r.id === ids[0] || r.id === ids[1]);
     assert(aReset.length === 2 && aReset.every((r) => r.status === "pending" && r.last_error === null && r.finished_at === null && Number(r.attempt_count) === 0), `A's failed rows are pending with error/finish/attempt reset (${JSON.stringify(aReset)})`);
+    const aDated = (await raw`SELECT thought_id::text AS id, enqueued_at <= now() AS due, enqueued_at = '2000-01-01 00:00:00+00'::timestamptz AS kept FROM thought_work_claims WHERE work_type = ${A}`) as { id: string; due: boolean; kept: boolean }[];
+    assert(aDated.find((r) => r.id === ids[0])?.due === true && aDated.find((r) => r.id === ids[1])?.kept === true,
+      `a forward date is dropped, the row no later than now, and an earlier date kept (SMD-3306 PR 6b-1: ${JSON.stringify(aDated)})`);
     const bStill = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${B} AND thought_id = ${ids[4]}::uuid`;
     assert(bStill.length === 1 && bStill[0].status === "failed", "a sibling pool's failed row is untouched — retryFailed is scoped to its work_type");
     const aSucc = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[2]}::uuid`;
