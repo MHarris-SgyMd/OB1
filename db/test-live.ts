@@ -13109,14 +13109,19 @@ if (want("16")) {
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
       // Two probes hang, as [10]'s: the one after the timeout, and the outage's first.
+      // Judged within 14 s, ~8 s locally: a probe waiting ten times --timeout takes
+      // ~18 s, which the 25 s budget held at main's 2 s timeout, not at 1 s (SMD-3734
+      // review pass 1, mutant).
       judgeDown = "hang";
       judgeOutage.arm(2);
+      const hungAt = Date.now();
       await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
       const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
-      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
+      const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 14_000);
+      const hungMs = Date.now() - hungAt;
       const hungRow = await claimOf(hungNewer);
       assert(hungJudged && !settled && lines.some((l) => /the provider is not answering \(the judge call timed out after 1 s, and a one-token call got no answer either\)/.test(l)),
-             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, not failed (${hungRow?.status}: ${hungRow?.last_error?.slice(0, 80)})`);
+             `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged within 14 s once the judge answers, not failed (${hungRow?.status} after ${hungMs} ms: ${hungRow?.last_error?.slice(0, 80)})`);
     } finally {
       judgeDown = "503";
       judgeOutage.clear();
@@ -21313,7 +21318,11 @@ if (want("38r")) {
       const run = sleepRun({ follow: true, minStampEveryS: 1, ...o, signal: ac.signal });
       return { stop: () => { ac.abort(); return bounded(run, ac); }, settle: () => bounded(run, ac) };
     };
-    /** A one-shot run at ONE_SHOT's capture and poll: each case after one asserts its end state alone (SMD-3734). */
+    /**
+     * A one-shot run at ONE_SHOT's capture and poll (SMD-3734): its cases
+     * assert end states, and the one whose record is put right mid-run gets
+     * more polls in its 1.5 s extraction, not fewer.
+     */
     const oneSleep = async () => {
       lines.length = 0;
       const ac = new AbortController();
@@ -21413,8 +21422,9 @@ if (want("38r")) {
       await sleepRun({ capture: 300, dryRun: true });
       dryAside = lines.some((l) => /re-embed set aside: the brain records other-embed, this stack is configured for stub-embed/.test(l));
       const asideNote = await capture("A note extracted while re-embed is set aside.", "sync-sleep", 0, 21);
-      // The scaffold's 1 s capture (SMD-3734; 3 s before, the quiet's gap for the old note, which is written within
-      // the period since PR 1c-4b): the previous case's delete is a live write, so the first period waits it out.
+      // The scaffold's 1 s capture (SMD-3734; 3 s before, the quiet's gap for the old note, which the capture no
+      // longer gates: the period's end and the next idle poll's whole read take it up either way, since PR 1c-4b).
+      // The previous case's delete is a live write, so the first period waits it out.
       const aside = follow();
       try {
         extracted = await pollUntil(async () => (await exStatus(asideNote)) === "succeeded", 15_000);
@@ -21476,8 +21486,10 @@ if (want("38r")) {
       `a record put right while idle is read at the next poll: the set-aside cleared, and the next period, begun on re-embed's backlog alone, re-embeds (said ${startCleared}; re-embedded ${awakeReembedded}; exit ${awakeCode})`);
 
     // The record moving under a running re-embed: the follower exits 2, and the scheduler sets the pass aside and
-    // goes on, where it read a refusal and ended. A slow scheduler poll, so the follower's own poll meets the switch first:
-    // within ~1.5 s, the call in hand, against a 6 s poll, which the period's start waits out too (SMD-3734; 15 s before).
+    // goes on, where it read a refusal and ended. A slow scheduler poll, so the follower meets the switch first, at its
+    // read before the next batch once the call in hand ends (~1.5 s), against a 6 s poll the period's start waits out
+    // too (SMD-3734; 15 s before). A scheduler poll that came first would find the pool claimed, not drained; one that
+    // met the follower's exit as the pool drained reads its 2 as the switch all the same (endReembed).
     const mids = [await reCapture("A mid-switch old note, one.", 23), await reCapture("A mid-switch old note, two.", 24)];
     const afterSwitch = await capture("A note extracted after the switch.", "sync-sleep", 0, 25);
     sw.embedSlowMs = 1500;
