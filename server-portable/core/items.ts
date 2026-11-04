@@ -32,7 +32,7 @@ export type SetItemStatusCode = WriteCode | "CONFIRM_NOT_YOURS";
 export type ProposeItemCloseResult = { outcome: "proposed" | "unchanged"; proposal: ItemProposal; replaced: ItemProposal | null; item: OpenItem };
 export type ProposeItemCloseCode = WriteCode | "EVIDENCE_NOT_FOUND" | "ITEM_SETTLED";
 export type DecideItemCloseResult = { outcome: "accepted" | "rejected"; proposal: ItemProposal; item: OpenItem; event: OpenItemEvent | null };
-export type DecideItemCloseCode = Exclude<WriteCode, "ITEM_NOT_FOUND"> | "PROPOSAL_NOT_FOUND" | "PROPOSAL_DECIDED" | "PROPOSAL_YOURS" | "ITEM_NOT_FOUND";
+export type DecideItemCloseCode = Exclude<WriteCode, "ITEM_NOT_FOUND"> | "PROPOSAL_NOT_FOUND" | "PROPOSAL_DECIDED" | "PROPOSAL_YOURS";
 /** item_history's value: the item as it stands, every event and every proposed close, in the order written. */
 export type ItemHistoryResult = ItemRecord & { item: OpenItem };
 export type ItemHistoryCode = "ITEM_NOT_FOUND" | "REFUSED_ITEM_INPUT";
@@ -152,10 +152,10 @@ export async function proposeItemClose(ctx: Ctx, principal: Principal, input: In
 export async function decideItemClose(ctx: Ctx, principal: Principal, input: Input<"decide_item_close">, opts: ItemCallOptions = {}): Promise<Outcome<DecideItemCloseResult, DecideItemCloseCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const a = await asked(async () => (await ctx.store()).decideItemClose({ proposal: input.id.trim(), accept: input.accept, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin }));
+  const a = await asked(async () => (await ctx.store()).decideItemClose({ proposal: input.id, accept: input.accept, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin }));
   if (a instanceof ItemRefused) return inputRefused(a);
   if ((a.outcome === "accepted" || a.outcome === "rejected") && a.proposal && a.item) return ok({ outcome: a.outcome, proposal: a.proposal, item: a.item, event: a.event });
-  if (a.outcome === "refused") return refusedBy(a, principal, null, { proposal: input.id.trim().toLowerCase() }) as Outcome<DecideItemCloseResult, DecideItemCloseCode>;
+  if (a.outcome === "refused") return refusedBy(a, principal, null, { proposal: input.id.toLowerCase() }) as Outcome<DecideItemCloseResult, DecideItemCloseCode>;
   throw new Error("decide_item_close answered an outcome this server does not read");
 }
 

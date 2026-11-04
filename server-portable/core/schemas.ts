@@ -35,8 +35,12 @@ const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a N
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
 // Open items (SMD-3665 PR 2): an id 117 reads (a uuid, in any case, white space around it), a short free text, a reason.
 const ITEM_ID = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
-// Not blank: 117 cleans white space to nothing, which would clear an owner silently (review pass 4).
-const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim().length > 0, "may not be blank");
+// Not blank as 117 reads it (115's ob1_work_claim_text: control characters made spaces, the soft hyphen, zero-width
+// space, word joiner and byte-order mark deleted, white space trimmed), so nothing 117 cleans to nothing clears an
+// owner or unhooks a plugin row silently (review passes 4 and 5).
+const CLEANED_AWAY = new RegExp(`[${String.fromCharCode(0xad, 0x200b, 0x2060, 0xfeff)}]`, "g");
+const blankWhenCleaned = (s: string) => s.replace(/[\p{Cc}]/gu, " ").replace(CLEANED_AWAY, "").trim().length === 0;
+const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character").refine((s) => !blankWhenCleaned(s), "may not be blank");
 const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL character");
 // A thought's id as Postgres reads a uuid — any 8-4-4-4-12 of hex digits, not RFC 9562's version and variant alone
 // (review pass 1: an imported thought's id was refused before the brain was asked).

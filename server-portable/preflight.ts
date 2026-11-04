@@ -3119,7 +3119,7 @@ if (configFailed) {
             // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
             // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
             const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
-            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool"
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, and set_priority on an open item"
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";

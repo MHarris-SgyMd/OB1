@@ -1668,8 +1668,10 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   const unresolvedOpen = await direct.openItem(unresolved, { text: "omicron: a key the registry never resolved" } as never);
   // Review pass 4: a blank owner is refused, not a silent clear; a proposal's id is a hyphenated uuid, as an item's.
   const blankOwner = await rest("PATCH", `/v1/items/${id}`, { owner: "   " });
+  // Review pass 5: blank as 117 cleans it — a zero-width space and a control character are nothing to it.
+  const zeroWidthOwner = await rest("PATCH", `/v1/items/${id}`, { owner: String.fromCharCode(0x200b, 1) + " " });
   const bracedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(`{${pid}}`)}/decision`, { accept: false });
-  assert(blankOwner.status === 400 && blankOwner.body.code === "REFUSED_INPUT" && bracedDecide.status === 400 && bracedDecide.body.code === "REFUSED_INPUT"
+  assert(blankOwner.status === 400 && blankOwner.body.code === "REFUSED_INPUT" && zeroWidthOwner.status === 400 && zeroWidthOwner.body.code === "REFUSED_INPUT" && bracedDecide.status === 400 && bracedDecide.body.code === "REFUSED_INPUT"
       && fauxRaise.status === 400 && fauxRaise.body.code === "REFUSED_ITEM_INPUT" && fauxRaise.body.problem === "id"
       && paddedDecide.status === 409 && paddedDecide.body.proposal === pid
       && unresolvedOpen.ok === false && (unresolvedOpen.refusal as { code: string }).code === "ITEM_UNATTRIBUTED" && (unresolvedOpen.refusal as { cause?: string }).cause === "registry_unknown",
