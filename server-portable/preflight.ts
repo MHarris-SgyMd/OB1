@@ -5231,7 +5231,8 @@ if (configFailed) {
             const othersHeld = h.holds?.some((x) => x.pass !== "subjects") ?? false;
             // Whether a line here said a failed pass's cause, so the judge hold's fix names another pass's failure
             // where none did (SMD-3306 PR 6b-1's review pass 6, cold read: a pass waiting on its provider took the
-            // line, and the failure went unsaid).
+            // line, and the failure went unsaid): the generic cause's line or a statement hold's; nor where a line
+            // ends in that sentence already, re-embed's (review pass 7, cold read: said twice).
             let causeSaid = false;
             if (down && handFollowers.length && !followers.length && !refusedBy) {
               fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
@@ -5280,7 +5281,13 @@ if (configFailed) {
               causeSaid = true;
             }
             // A held claim pass's fix stands beside any other: a provider wait's said above does not mend it (review pass 2 of PR 1c-4b).
-            if (!down && stmtHeld.length) fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}; the other passes run on meanwhile.`);
+            // It says the failed pass's cause, and beside the subject sweep's judge hold not that the other passes
+            // run on, the hold's fix saying the sweep is held (SMD-3306 PR 6b-1's review pass 7, cold read and claims
+            // audit).
+            if (!down && stmtHeld.length) {
+              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}${subjectsJudgeHeld ? "." : "; the other passes run on meanwhile."}`);
+              causeSaid = true;
+            }
             if (setFix !== null && !(down && set && set.kind !== "model-switch")) fixes.push(setFix);
             // Running, it refuses beside a hand re-embed follower at its next
             // poll and ends, every pass with it (review pass 1: all three rows
@@ -5296,7 +5303,7 @@ if (configFailed) {
             // coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the lift
             // took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
             if (subjectsJudgeHeld) {
-              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid ? "" : otherPass}`);
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid || (otherPass !== "" && fixes.some((x) => x.endsWith(otherPass))) ? "" : otherPass}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

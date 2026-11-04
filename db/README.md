@@ -3129,7 +3129,7 @@ bun extract-entities.ts --url … --switch-key           # required when the mod
 bun extract-entities.ts --url … --subjects              # each thought in the subject pool its own subject (113: new and edited thoughts, and at a rule's, the question's or the reasoning's change every one with no current subject): the rules, then the judge model for the rest (SMD-3306)
 bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model, from a pool of their own
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
-bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first, none dated past now
+bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first, one dated past now at the pool's head
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
 bun extract-entities.ts --url … --subjects --judge-checked # the garbage-judge alarm off, for a judge model checked and found right; lifts a trip's hold on a scheduler's runs of that model (--limit 1: one thought asked)
 #   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, a following run's thought the provider erred on again right after answering a probe, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, the provider stopped answering a run by hand, or the database a run by hand or a following run past its start · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants, or the provider's refusal, a following run's start probe of its judge model among them (PR 6b-1) · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a scheduler's following run a trip holds, or a --judge-checked run whose model a trip named after it began, before its lift (PR 6a) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits or at the admit gate; a scheduler's following run stopped by its first exits 0, unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
@@ -3631,10 +3631,11 @@ within 15 minutes past its next streak at the run's limit, is its own, its claim
 failed, said once with the error that made it the suspect, for `--retry-failed`
 (worker-bootstrap.ts's ProviderOutage), a suspect when its streak's first error
 could be its own — a 5xx but 503, a lost connection — or its call hung, a hung
-thought's hang kept for the run, so its next hang in the run is its own,
-whatever outages came between and however long after (the maintainer's choice),
-the run waiting the provider out before its next claim then, so the next thought
-is not asked into the call it abandoned; a 429 or 503, the
+thought's hang marked on its claim (its `last_error`, `HUNG_MARK`), so its next
+hang in any run is its own, whatever outages came between and however long
+after, until an answer, an edit or `--retry-failed` clears it (the maintainer's
+choices), the run waiting the provider out before its next claim then, so the
+next thought is not asked into the call it abandoned; a 429 or 503, the
 provider holding calls back, waited out past the pauses, and a model being
 pulled, waited out at once, make none. A thought goes back first at each pause,
 and after the wait if its streak made it the suspect, so, while the run is alone
@@ -3643,14 +3644,17 @@ as a claim pass's retries in place are, and one another thought takes the claim
 after its wait from — edited in the wait, taken by another run — a suspect no
 longer; after the wait a thought that made none, or hung, goes behind the rest,
 30 days ahead, an order, not a delay, as `db/sleep.ts` dates its stopped
-extraction thoughts, so a scheduler's next period asks the thoughts pooled since
-first (the maintainer's choice), though one holding a one-slot provider for many
-limits holds up the period it hangs in, the next period's start waiting behind
-its abandoned call, and at the stack's defaults, a 900 s limit and a
-60-minute budget, its second hang lands past a scheduler's run, never failed as
-its own there; a thought answered is a suspect no longer; a stopping run's
-timeout is the thought's, unprobed, and one whose probe a stop cuts goes back 30
-days ahead too; and a probe that answers ends the provider's
+extraction thoughts, so the thoughts pooled since are asked first (the
+maintainer's choice), though one holding a one-slot provider for many limits
+holds up the period it hangs in; SMD-3379's drain counts a claim at any date as
+work, so a set-back is asked again in its period, a hung thought failed as its
+own at its second hang there, and a pool of thoughts whose own errors make no
+suspect would keep the period open for good, which PR 6b-2 is to count drained,
+a claim dated past now no work, the claim's mark carrying a hang to a later
+period (the maintainer's choice); a thought answered is a suspect no longer; a
+stopping run's timeout is the thought's, unprobed, and one whose probe a stop
+or a kill cuts is left 30 days ahead too, its claim dated so as the probe
+begins; and a probe that answers ends the provider's
 streak. The database lost past its start ends a following run as it ends any,
 exit 1, for its caller to start it again. `admit`, SMD-3379 PR 1b's gate, is
 awaited before the pool's lock and naming, with the caller's `signal`, which it
@@ -3667,15 +3671,20 @@ after the stop, ends the run, nothing more named, pooled or claimed; a run the
 trip's hold keeps from starting is refused before any gate. Beside the stop,
 `onPass` hands its caller the call's own abort (`abortInHand`, PR 1b-2's): the
 judge's call in hand, once it has run that long, each call's age from its own
-start, goes back behind the pool, unanswered and so unjudged, its attempt not
-counted and, when it went back, its place under `--limit` given back, and the
-run goes on, a following run's past its gate after a one-token call, given the
-call's own limit, a provider not answering it waited out as after an outage,
-none begun nor any suspect made, so the next thought is not asked into the
-abandoned call (the maintainer's choice); a thought the rules key, a provider
-pause and the writes after an
-answer hold no call to abort. A caller's `stamper` hears a following run's word,
-`ok` at each poll that finds the pool empty and, as it ends, `failed` for an end
+start, goes back to the pool, dated now or the later date a set-back gave it,
+unanswered and so unjudged, its attempt not counted and, when it went back, its
+place under `--limit` given back, and the run goes on, a following run's after a
+one-token call, given the call's own limit and sent past its gate (it may still
+be in flight as a live write begins, and the wait after it probes as an outage's
+does), the claim after an answer passing the gate again, a provider not
+answering it waited out as after an outage, none begun nor any suspect made, so
+the next thought is not asked into the abandoned call (the maintainer's choice)
+— out past it, not holding calls back nor its model missing, the abandoned call
+held it past a limit, a hang: the thought marked hung, 30 days ahead, or, marked
+already, failed as its own (the maintainer's choice); a thought the rules key, a
+provider pause and the writes after an answer hold no call to abort. A caller's
+`stamper` hears a following run's word, `ok` at each poll that finds the pool
+empty and, as it ends, `failed` for an end
 of its own (a refusal, its own options' among them, its naming or pooling broken
 off, the pool named away, the provider's refusal, the database lost past its
 start, the alarm, a throw) or `stopped`; it beats no row while it works through
@@ -3692,7 +3701,7 @@ start is thrown, as a claim pass's start-of-pass scan's is, for the scheduler to
 read as its budget's, the naming's write among them, whose wait has no other
 end; the pooling, a scan of every thought with no current subject, runs exempt
 while watched (PR 6b-1, the maintainer's choice: on a large brain it can outlast
-the budget, the pool then never filled and every period ending on it), its waits
+the budget, the pool then never filled), its waits
 said and a stop cancelling it, the budget set back as it ends, for the mark
 after it and the claims; unwatched (its watching connection refused, as at a
 role's connection limit) it keeps the budget, and a session with no

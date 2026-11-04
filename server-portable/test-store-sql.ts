@@ -597,6 +597,10 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     const aDated = (await raw`SELECT thought_id::text AS id, enqueued_at <= now() AS due, enqueued_at = '2000-01-01 00:00:00+00'::timestamptz AS kept FROM thought_work_claims WHERE work_type = ${A}`) as { id: string; due: boolean; kept: boolean }[];
     assert(aDated.find((r) => r.id === ids[0])?.due === true && aDated.find((r) => r.id === ids[1])?.kept === true,
       `a forward date is dropped, the row no later than now, and an earlier date kept (SMD-3306 PR 6b-1: ${JSON.stringify(aDated)})`);
+    // …ahead of the claim pending, the pool's head, so a capture pooled before the retry comes after it (SMD-3306 PR
+    // 6b-1's review pass 7, run-it: dated now, it came after one, asked in its place).
+    const [{ first: aHead }] = (await raw`SELECT (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[0]}::uuid) < (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[3]}::uuid) AS first`) as { first: boolean }[];
+    assert(aHead === true, "a forward date is made the pool's head, ahead of its claim pending");
     const bStill = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${B} AND thought_id = ${ids[4]}::uuid`;
     assert(bStill.length === 1 && bStill[0].status === "failed", "a sibling pool's failed row is untouched — retryFailed is scoped to its work_type");
     const aSucc = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[2]}::uuid`;

@@ -4621,7 +4621,7 @@ else {
              && /held out: subjects \(judge\)/.test(row(subjectsHeld.out, "sleep"))
              && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked\. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy\/\.env reaches the scheduler once the coordinator is recreated \(up -d coordinator\), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's\. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with \(docker compose alike\) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone\. The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
              && /at its last word, held out: subjects \(judge\)/.test(row(subjectsHeldDown.out, "sleep")) && /The subject sweep is held: .*--judge-checked --limit 1/.test(fix(subjectsHeldDown.out, "sleep"))
-             && !/The other passes run on meanwhile/.test(fix(subjectsHeldDown.out, "sleep"))
+             && !/the other passes run on meanwhile/i.test(fix(subjectsHeldDown.out, "sleep"))
              && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep"))
              && /held out: extract \(judge\)/.test(row(extractJudgeHold.out, "sleep")) && !/The subject sweep is held/.test(fix(extractJudgeHold.out, "sleep")),
         `the subject sweep's wait and judge hold are said by its name, the hold's fix the hand run that lifts it, a stopped row's too (${row(subjectsWait.out, "sleep")} | ${fix(subjectsHeld.out, "sleep")} | ${fix(subjectsHeldDown.out, "sleep")})`);
@@ -4630,7 +4630,7 @@ else {
              && !/Another pass's failure/.test(fix(subjectsHeld.out, "sleep")),
         `a row the sweep's alarm ended failed says the hold, another pass's failure its log's, not a failed pass's generic cause (${fix(subjectsHeldFailed.out, "sleep")})`);
       assert(/→ Its last pass failed — a pass refused at its start/.test(fix(subjectsHeldBeside.out, "sleep")) && /The subject sweep is held:/.test(fix(subjectsHeldBeside.out, "sleep"))
-             && !/The other passes run on meanwhile/.test(fix(subjectsHeldBeside.out, "sleep")) && !/Another pass's failure/.test(fix(subjectsHeldBeside.out, "sleep")),
+             && !/the other passes run on meanwhile/i.test(fix(subjectsHeldBeside.out, "sleep")) && !/Another pass's failure/.test(fix(subjectsHeldBeside.out, "sleep")),
         `beside another pass's hold a failed row says the failed pass's cause, the hold's fix not that the other passes run on (${fix(subjectsHeldBeside.out, "sleep")})`);
       assert(/Its last pass failed/.test(fix(subjectsOtherFailed.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherFailed.out, "sleep")),
         `a failed row held for another reason of the sweep's keeps the generic cause (${fix(subjectsOtherFailed.out, "sleep")})`);
@@ -4647,14 +4647,35 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waiting: ["consolidate"], holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
       const waitingHeld = fix((await run(LOG_ON)).out, "sleep");
       assert(/→ Its last pass failed — a pass refused at its start/.test(besideConsolidate) && /The subject sweep is held:/.test(besideConsolidate)
-             && !/The other passes run on meanwhile/.test(besideConsolidate) && !/Another pass's failure/.test(besideConsolidate),
+             && !/the other passes run on meanwhile/i.test(besideConsolidate) && !/Another pass's failure/.test(besideConsolidate),
         `beside consolidation's hold a failed row says the failed pass's cause, the hold's fix not that the other passes run on (${besideConsolidate})`);
-      assert(/The subject sweep is held:/.test(heldDownFailed) && /Another pass's failure, if any, its log says\./.test(heldDownFailed) && !/The other passes run on meanwhile/.test(heldDownFailed),
+      assert(/The subject sweep is held:/.test(heldDownFailed) && /Another pass's failure, if any, its log says\./.test(heldDownFailed) && !/the other passes run on meanwhile/i.test(heldDownFailed),
         `a stopped row ended failed under the judge hold names another pass's failure, not that the passes run on (${heldDownFailed})`);
       for (const [what, said] of [["beside extraction's hold", waitingBeside], ["under the judge hold alone", waitingHeld]] as const)
         assert(/Consolidate waiting for the provider at its start: the provider does not answer a one-token call/.test(said) && /The subject sweep is held:/.test(said)
-               && /Another pass's failure, if any, its log says\./.test(said) && !/The other passes run on meanwhile/.test(said) && !/Its last pass failed/.test(said),
+               && /Another pass's failure, if any, its log says\./.test(said) && !/the other passes run on meanwhile/i.test(said) && !/Its last pass failed/.test(said),
           `a failed row whose pass waits on its provider ${what} names another pass's failure, not that the passes run on (${said})`);
+      // …and a pass waiting mid-pass alike (review pass 7, mutant: the mid-pass wait dropped from the clause lived,
+      // the hold's fix saying the other passes ran on while consolidation waited on its provider mid-pass).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waitingMidPass: ["consolidate"], holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const midWaitingHeld = fix((await run(LOG_ON)).out, "sleep");
+      assert(/Consolidate waiting for the provider mid-pass: the provider stopped answering/.test(midWaitingHeld) && /The subject sweep is held:/.test(midWaitingHeld)
+             && /Another pass's failure, if any, its log says\./.test(midWaitingHeld) && !/The other passes run on meanwhile/.test(midWaitingHeld) && !/Its last pass failed/.test(midWaitingHeld),
+        `a failed row whose pass waits on its provider mid-pass under the judge hold names another pass's failure, not that the passes run on (${midWaitingHeld})`);
+      // …and beside main's held statement (SMD-3379 PR 1c-4b), whose fix says the failed pass's cause: another pass's
+      // failure not named again, nor the other passes said to run on, the sweep held; beside re-embed set down, whose
+      // fix names another pass's failure already, that sentence once (SMD-3306 PR 6b-1's review pass 7, cold read and
+      // claims audit).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "statement", until: null }, { pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const besideStatement = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "provider" } }, holds: [{ pass: "reembed", why: "provider", until: null }, { pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const besideSetDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/extract held until a restart: a statement passed its statement_timeout/.test(besideStatement) && /The subject sweep is held:/.test(besideStatement)
+             && !/the other passes run on meanwhile/i.test(besideStatement) && !/Another pass's failure/.test(besideStatement),
+        `beside a held statement under the judge hold, the statement's fix says the cause, not that the other passes run on, another pass's failure not named again (${besideStatement})`);
+      assert(/Re-embed was set down for this period/.test(besideSetDown) && /The subject sweep is held:/.test(besideSetDown)
+             && (besideSetDown.match(/Another pass's failure, if any, its log says\./g) ?? []).length === 1,
+        `beside re-embed set down under the judge hold, another pass's failure is named once (${besideSetDown})`);
       // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
       // The brain recording the switch's model, as the scheduler read it.
