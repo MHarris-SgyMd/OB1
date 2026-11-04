@@ -123,23 +123,22 @@ if (!URL_) {
  * 309 before. [5d] waits on the CPU, so it left the rest, which took [9f]'s
  * timers instead. The rest's other sections wait on the CPU, so its time
  * moves most with the runner's speed: its slow runs are its median, its fast
- * run ~50 s under. SMD-3306 PR 6b-1's sweep cases took [10h] from ~97 s to
- * ~242 s on CI, and SMD-3379 PR 1c-4b grew [38] by about a minute, so [38]
- * stays in sleep, alone, [10g] not beside it, the floor, [9f] went to long,
- * [10e], [17] and [37] to extract, and [10] and [10g] to the rest: ci-parity's
- * cells on that PR's merge with main 0a200f80, sleep 292 s, long 293, extract
- * 298 and the rest 294, against ~389 projected on CI for extract with the
- * cells as they were. A cell's job runs ~15-25 s past its live step, so a
- * section added to a cell adds to the run's length once that cell's job is
- * the run's longest.
+ * run ~50 s under. SMD-3306 PR 6b-1's sweep cases took [10h] from ~96 s to
+ * ~265 s projected on CI, and SMD-3733 took [38] back to ~262 s, so sleep
+ * takes [5d] and [10g] beside [38], long [9f] and [17], extract [10e] and
+ * [37b] beside [10f], [10h], [39] and [41], and the rest [10] and [37]: on
+ * main 46da8d31's CI section times, sleep ~300 s, long ~295, extract ~289 and
+ * the rest ~295, against ~402 for extract with main's cells. A cell's job runs
+ * ~15-25 s past its live step, so a section added to a cell adds to the run's
+ * length once that cell's job is the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["38"],
-  long: ["9", "9f", "38r", "38b"],
-  extract: ["5d", "10e", "10f", "10h", "17", "37", "37b", "39", "41"],
+  sleep: ["5d", "10g", "38"],
+  long: ["9", "9f", "17", "38r", "38b"],
+  extract: ["10e", "10f", "10h", "37b", "39", "41"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
