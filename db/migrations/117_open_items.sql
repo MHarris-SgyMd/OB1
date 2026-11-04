@@ -42,9 +42,9 @@
 --      event's fixed fields, and a reader needs no fold. Each names its maker,
 --      stamped from the call's actor envelope as 116 stamps a priority's (the
 --      key's name, agent id, the registry's kind and its trust ceiling, the
---      envelope's scope: ob1_item_actor, 116's ob1_priority_actor without the
---      priority source it reads), and a reason. A status event
---      that accepted a proposal names it. Events never change: a trigger
+--      envelope's scope: ob1_item_actor, on ob1_actor_maker, the reader 116's
+--      ob1_priority_actor now shares), and a reason. A status event that
+--      accepted a proposal names it. Events never change: a trigger
 --      refuses every UPDATE, DELETE and TRUNCATE, for the owner too (046's
 --      rule for thought_audit).
 --
@@ -72,7 +72,9 @@
 --        has written an event on since (082's "taken", for items), or one
 --        that stands for a row of the plugin its call came through (a plugin
 --        hook's principal, hook:<plugin>, has no agent id by design: the row
---        is the plugin's) — ob1_item_owns. Asked before any existence answer,
+--        is the plugin's, and a write key changes such an item through the
+--        plugin's row: the maintainer, 2026-11-03) — ob1_item_owns. Asked
+--        before any existence answer,
 --        and refused alike for an item that is not there (ITEM_NOT_YOURS). One
 --        whose envelope carries no agent id of its own opens no item but a
 --        plugin row's (ITEM_UNATTRIBUTED): it could never prove one its own;
@@ -92,27 +94,32 @@
 --   5. THE SAME ITEM AGAIN. An open naming a plugin row an item already stands
 --      for, or (for an item that stands for no row) a thought and text an item
 --      was already opened with (origin_key: the thought and the text
---      lower-cased), is answered `unchanged`
---      with the item that is there, and writes nothing: the extractor's pass,
---      the backfill re-run and a plugin's re-sync add no items. A capture key
---      is shown such an item only if it is its own. Every write that changes
---      nothing is `unchanged`.
+--      lower-cased), is answered `unchanged` with the item that is there, and
+--      writes nothing: the extractor's pass, the backfill re-run and a
+--      plugin's re-sync add no items. A capture key is shown such an item only
+--      if it is its own; a call whose owner or due time (or, for a plugin row,
+--      text) differ is told the item stands as it was. Every write that
+--      changes nothing is `unchanged`.
 --
 --   6. THE FUNCTIONS (SECURITY INVOKER, PUBLIC's EXECUTE as every core
 --      function), each jsonb {outcome, code, message, …}:
 --      * open_item(p_text, p_owner, p_due_at, p_origin_thought, p_plugin_row,
 --        p_proposed, p_actor): {outcome: opened | unchanged | refused, item,
---        event}.
+--        event}. Refused ITEM_UNATTRIBUTED, ITEM_NOT_YOURS, ORIGIN_NOT_FOUND.
 --      * update_item(p_item, p_changes, p_actor): text, owner and due_at from
 --        a JSON object, a JSON null clearing owner or due_at: {outcome:
---        updated | unchanged | refused, item, event}.
+--        updated | unchanged | refused, item, event}. A due time, here and in
+--        open_item, is ISO 8601 text, UTC without an offset (ob1_item_due).
 --      * set_item_status(p_item, p_status, p_reason, p_actor): open (confirm a
 --        proposed item, which a capture-only key may not, or reopen a settled
---        one), done or dropped — never back to proposed: {outcome: changed | unchanged | refused, item, event,
---        mooted}. Settling an item moots its pending proposals.
+--        one), done or dropped — never back to proposed: {outcome: changed |
+--        unchanged | refused, item, event, mooted}. Settling an item moots its
+--        pending proposals. Refused CONFIRM_NOT_YOURS.
 --      * propose_item_close(p_item, p_status, p_evidence_thought, p_label,
 --        p_reason, p_actor): {outcome: proposed | unchanged | refused,
---        proposal, item}. Refused ITEM_SETTLED on a done or dropped item.
+--        proposal, replaced, item}. A proposer's correction withdraws its
+--        pending proposal on the same evidence. Refused EVIDENCE_NOT_FOUND and
+--        ITEM_SETTLED (a done or dropped item).
 --      * decide_item_close(p_proposal, p_accept, p_reason, p_actor): {outcome:
 --        accepted | rejected | refused, proposal, item, event}. Refused
 --        PROPOSAL_YOURS for the proposer accepting its own, PROPOSAL_DECIDED
@@ -140,9 +147,8 @@
 --      lock, by the writers and assert_priority alike. open_item takes its
 --      origin thought's share lock (a capture key's ownership check), then the
 --      plugin-row or thought-and-text key it would be unique by, then the new
---      item's. One item per transaction, or take items
---      in id order: two transactions locking two items in opposite orders
---      deadlock (40P01).
+--      item's. One item per transaction, or take items in id order: two
+--      transactions locking two items in opposite orders deadlock (40P01).
 --
 --   9. NOT THE EVENT LOG, DELETING AND FORGETTING. An item is not a thought:
 --      thought_audit is the thoughts' log, and the table keeps its own
@@ -165,7 +171,8 @@
 --   other). The thoughts' existence and capturer are the capture group's
 --   SELECT. The `priority` group gains SELECT on open_items and
 --   open_item_events: assert_priority now checks an open item exists and whose
---   it is. Soft: a role without the group gets a permission error (42501)
+--   it is, and only for an item of kind item, so a role granted the group at
+--   116 keeps every other priority call. Soft: a role without the group gets a permission error (42501)
 --   naming the table on the item calls, and nothing else; the server first
 --   calls them in SMD-3665's PR 2, whose preflight checks the group.
 --
@@ -237,7 +244,6 @@ CREATE TABLE IF NOT EXISTS open_item_events (
   proposal_id       uuid,
   actor_name        text        NOT NULL,
   actor_agent_id    uuid,
-  actor_key         text        GENERATED ALWAYS AS (COALESCE(actor_agent_id::text, 'name:' || actor_name)) STORED,
   actor_proved      boolean     NOT NULL,
   actor_kind        text,
   actor_trust       text,
