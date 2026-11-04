@@ -84,7 +84,9 @@ function refusedBy(a: ItemAnswer, principal: Principal, named: { kind: "item" | 
     // not found by its own id (review pass 1: it named an empty key).
     case "ITEM_NOT_FOUND": return ids.item ? refuse({ code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: itemRef(ids.item) }) : refuse({ code: "PROPOSAL_NOT_FOUND", retryable: false, proposal: ids.proposal ?? "" });
     // A caller with no agent id by design is told so as final (403), not as a registry's outage (review pass 1).
-    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? refuse({ code: "ITEM_UNOWNABLE", retryable: false });
+    // A plugin hook's principal (`hook:<plugin>`) has no agent id by design; any other caller with none is the
+    // registry's to answer (review pass 3: a key the registry never resolved was told to open a plugin row).
+    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? (principal.name.startsWith("hook:") ? refuse({ code: "ITEM_UNOWNABLE", retryable: false }) : refuse({ code: "ITEM_UNATTRIBUTED", retryable: false, cause: "registry_refused" }));
     case "ORIGIN_NOT_FOUND": return refuse({ code: "ORIGIN_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "EVIDENCE_NOT_FOUND": return refuse({ code: "EVIDENCE_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "ITEM_SETTLED": return refuse({ code: "ITEM_SETTLED", retryable: false, item: a.item?.id ?? ids.item ?? "", status: a.item?.status === "dropped" ? "dropped" : "done" });
@@ -141,7 +143,8 @@ export async function proposeItemClose(ctx: Ctx, principal: Principal, input: In
   if ((a.outcome === "proposed" || a.outcome === "unchanged") && a.proposal && a.item) return ok({ outcome: a.outcome, proposal: a.proposal, replaced: a.replaced, item: a.item });
   // 117 refuses another key's evidence with the code it refuses another key's item with; its words tell them apart
   // (review pass 2: the item was named when the evidence was the key's to mend).
-  const evidenceRefused = a.code === "ITEM_NOT_YOURS" && input.evidence_thought !== undefined && /\bits evidence\b/.test(a.message ?? "");
+  // Read off the message's end: it begins with the key's own name, which the server does not choose (review pass 3).
+  const evidenceRefused = a.code === "ITEM_NOT_YOURS" && input.evidence_thought !== undefined && /: its evidence may be only a thought it captured$/.test(a.message ?? "");
   if (a.outcome === "refused") return refusedBy(a, principal, evidenceRefused ? { kind: "thought", key: (input.evidence_thought as string).toLowerCase() } : itemRef(input.id), { item: input.id, thought: input.evidence_thought }) as Outcome<ProposeItemCloseResult, ProposeItemCloseCode>;
   throw new Error("propose_item_close answered an outcome this server does not read");
 }
@@ -152,7 +155,7 @@ export async function decideItemClose(ctx: Ctx, principal: Principal, input: Inp
   const a = await asked(async () => (await ctx.store()).decideItemClose({ proposal: input.id.trim(), accept: input.accept, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin }));
   if (a instanceof ItemRefused) return inputRefused(a);
   if ((a.outcome === "accepted" || a.outcome === "rejected") && a.proposal && a.item) return ok({ outcome: a.outcome, proposal: a.proposal, item: a.item, event: a.event });
-  if (a.outcome === "refused") return refusedBy(a, principal, null, { proposal: input.id }) as Outcome<DecideItemCloseResult, DecideItemCloseCode>;
+  if (a.outcome === "refused") return refusedBy(a, principal, null, { proposal: input.id.trim().toLowerCase() }) as Outcome<DecideItemCloseResult, DecideItemCloseCode>;
   throw new Error("decide_item_close answered an outcome this server does not read");
 }
 

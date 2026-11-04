@@ -59,8 +59,9 @@ const notFound = (which: "item" | "due_ref", item: PriorityItem) => refuse({ cod
 /**
  * A capture-only key's own thought is proved by the agent id its envelope carries (082, by id alone): with that id
  * not to hand because the registry did not give it, 116 would refuse the key's own thought as another's. Said as
- * that, before the call, never as ITEM_NOT_YOURS: a key told its own thought is not its own does not retry (review
- * pass 1). Asked of no item, so it tells the key nothing about what exists. Only when the registry was asked and
+ * that, never as ITEM_NOT_YOURS: a key told its own thought is not its own does not retry (review pass 1). Said after
+ * 116/117 answer (SMD-3665 PR 2 review pass 2): a plugin's call 117 grants goes through. Asked of no item: 116 answers
+ * ITEM_NOT_YOURS alike whether one exists, so it tells the key nothing about what exists. Only when the registry was asked and
  * failed (`agentUnresolved`): a principal that has no agent id by design — a plugin hook's, `hook:<plugin>` — is
  * 116's to answer, and its words are not "an operator must act" (review pass 2).
  */

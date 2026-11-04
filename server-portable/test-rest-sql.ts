@@ -1660,6 +1660,17 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
       && (otherEvidence.body.item as { key: string } | undefined)?.key === later && padded.status === 200 && padded.body.outcome === "unchanged",
     `a capture key's proposal citing another key's thought is ITEM_NOT_YOURS naming the thought, not its own item; a padded origin thought is trimmed, the same item again (${JSON.stringify(otherEvidence.body.item)} | ${padded.status} ${padded.body.outcome})`);
 
+  // Review pass 3: an id whose words read like a server's raise is still the caller's 400; a padded, upper-cased
+  // proposal id is named back as the proposal's; a key the registry never resolved, not a hook, is told unattributed.
+  const fauxRaise = await rest("GET", `/v1/items/${encodeURIComponent("needs a maker")}`);
+  const paddedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(` ${pid.toUpperCase()} `)}/decision`, { accept: false });
+  const unresolved = { name: "cap-unresolved", scope: "capture", keyHash: "" } as unknown as Parameters<typeof direct.openItem>[0];
+  const unresolvedOpen = await direct.openItem(unresolved, { text: "omicron: a key the registry never resolved" } as never);
+  assert(fauxRaise.status === 400 && fauxRaise.body.code === "REFUSED_ITEM_INPUT" && fauxRaise.body.problem === "id"
+      && paddedDecide.status === 409 && paddedDecide.body.proposal === pid
+      && unresolvedOpen.ok === false && (unresolvedOpen.refusal as { code: string }).code === "ITEM_UNATTRIBUTED" && (unresolvedOpen.refusal as { cause?: string }).cause === "registry_refused",
+    `an id reading "needs a maker" is 400 REFUSED_ITEM_INPUT (problem id), never a 500; a padded, upper-cased proposal id is named back as the proposal's own; a key with no agent id that is no hook is ITEM_UNATTRIBUTED, not ITEM_UNOWNABLE (${fauxRaise.status} ${fauxRaise.body.code} | ${paddedDecide.status} ${paddedDecide.body.proposal === pid} | ${JSON.stringify(unresolvedOpen.ok ? null : unresolvedOpen.refusal)})`);
+
   // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
   // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority
   // on it; another plugin's hook may not touch it; with no row it opens nothing (ITEM_UNATTRIBUTED, no agent id).

@@ -3116,7 +3116,13 @@ if (configFailed) {
                 ledgerRemedy("117", "Apply db/migrations/117_open_items.sql."));
           } else if (it.ungranted?.length) {
             // The reads (item_history, list_items) need SELECT on the three tables; the writers need every grant.
-            const failing = it.ungranted.some((g) => g.endsWith(" SELECT")) ? "every open-item tool" : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
+            // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
+            // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
+            const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool"
+              : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
+              : reads.length ? "item_history and the open-item writers"
+              : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
             add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
                 "Grant the items group (SMD-3665): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups items (db/README.md, Grants for a capturing role).");
           } else {
