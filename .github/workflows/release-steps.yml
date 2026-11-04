@@ -7,8 +7,9 @@
 # No `permissions:` here, at the top or on the job: a called workflow's token
 # is its caller's, and a permission declared here could only narrow it. Narrow
 # the release job's, and a tag would fail at its first push to GHCR, which no
-# rehearsal reaches; check 23 refuses one. Nor a trigger but workflow_call,
-# whose own runs would want a `permissions:` here (check 23 refuses that too).
+# rehearsal reaches; check 23 refuses one. Nor any trigger other than
+# workflow_call: the runs it started would need a `permissions:` here, which
+# would narrow the callers' tokens too (check 23 refuses that as well).
 #
 # Every `uses:` is a full commit SHA with its tag in a trailing comment, and the
 # runner image is named (check 23, SMD-2093): the release job runs these
@@ -36,7 +37,8 @@ jobs:
     timeout-minutes: 60
     env:
       # The caller's input: true from release.yml's release job alone, which
-      # runs on a tag push; the facts below refuse a ref that names no tag.
+      # runs on a tag push; the facts below refuse a ref name that isn't the
+      # last release's v<X.Y.Z>.
       PUBLISH: ${{ inputs.publish }}
       # No build-record artifacts from build-push-action: four `.dockerbuild`
       # uploads per run beside the one artifact this job means to keep.

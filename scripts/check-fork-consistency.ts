@@ -282,7 +282,7 @@
  *      other workflow sets a top-level `permissions:` granting no write; a
  *      job that grants a write has an `if:` whose top-level `&&` terms
  *      include `github.event_name == 'push'` and a named branch or tag, so
- *      no pull request's run or bot's branch push holds it
+ *      no pull request's run or Dependabot branch push holds it
  *      (workflowPermissionProblems)
  *  24. no vendored script speaks PostgREST — a `rest/v1` path in any string,
  *      a supabase-py import or `create_client(` (Python and shell), or a
@@ -6130,8 +6130,9 @@ checkComposeOnly();
  *
  * And what those actions run with (SMD-2111). The release job was one job with
  * `contents: write` and `packages: write` that ran as a rehearsal on any pull
- * request touching release.yml, so a Dependabot bump ran the new action with a
- * token that could push to GHCR before anyone had read the PR. So:
+ * request touching what it builds from, so a Dependabot bump of one of its
+ * actions ran the new action with a token that could push to GHCR before
+ * anyone had read the PR. So:
  * - a workflow with a workflow_call trigger has no other, and declares no
  *   `permissions:`, top-level or on a job. Its token is its caller's, and one
  *   declared there can only narrow it: a narrowed release job would fail at a
@@ -6143,20 +6144,27 @@ checkComposeOnly();
  *   default token, which an owner can set to write;
  * - a job that grants a write (`write-all`, or `write` on any scope) has an
  *   `if:` whose top-level `&&` terms include `github.event_name == 'push'` and
- *   a ref no bot's push meets: `github.ref == 'refs/heads/<branch>'` for a
- *   branch other than `dependabot/…`, `github.ref == 'refs/tags/<tag>'`, or
- *   `startsWith(github.ref, 'refs/tags/…')`. A push term alone is not enough:
- *   Dependabot pushes its own branch, and a `permissions:` key raises the
- *   read-only token GitHub gives that run.
- * The condition is read as text, in the house form: a `${{ }}` around all of
- * it and parentheses around it or a term are taken off, quoted strings are
- * skipped, and a top-level `||`, or a `${{` or `}}` left inside (which makes
- * the condition a string template GitHub reads as true), refuses it. GitHub
- * compares strings and names case-blind, so `'PUSH'` or
- * `'push' == github.event_name` would hold too; check 23 refuses them, and the
- * house form is lower case, the context on the left. This holds who gets a
- * write, not what the job does with it. workflowPermissionProblems is pure,
- * and its probes run on in-memory text.
+ *   a ref Dependabot's push can't meet: `github.ref == 'refs/heads/<branch>'`
+ *   for a branch not Dependabot's (`dependabot/…`, or `dependabot-…` and
+ *   `dependabot_…` under its separator option, in any case),
+ *   `github.ref == 'refs/tags/<tag>'`, or `startsWith(github.ref,
+ *   'refs/tags/…')`. A push term alone is not enough: Dependabot pushes its
+ *   own branch, and a `permissions:` key raises the read-only token GitHub
+ *   gives that run. Another bot's branch, or one holding a token that can
+ *   push main or a tag, is not this check's to tell.
+ * The condition is read as text, in the house form. A `${{ }}` around all of
+ * it and parentheses around it or a term are taken off, and inside that wrap a
+ * quoted string is skipped. GitHub reads a condition as a string template,
+ * always true, when it holds a `${{` anywhere else (unwrapped, it reads quotes
+ * only inside a `${{ }}`, so a `${{` in a quoted string counts) or a `}}`
+ * outside a string; either refuses it, as does a top-level `||`. GitHub
+ * compares strings case-blind and reads `==` either way round, so `'PUSH'` or
+ * `'push' == github.event_name` would hold too; check 23 refuses both, and the
+ * house form is lower case, the context on the left. So is an `||` group of
+ * safe refs (`main` or a tag): write the one ref the job needs. This holds who
+ * gets a write, not what the job does with it. workflowPermissionProblems is
+ * pure, and its probes run on in-memory text, beside one control on the real
+ * release.yml.
  */
 const WORKFLOWS_DIR = ".github/workflows";
 const DEPENDABOT = ".github/dependabot.yml";
@@ -6308,23 +6316,28 @@ function unwrapParens(expr: string): string {
   while (e.startsWith("(") && e.endsWith(")") && balanced(e.slice(1, -1))) e = e.slice(1, -1).trim();
   return e;
 }
-/** A ref term no bot's push can meet: one named branch other than Dependabot's, or a tag. */
-const NAMED_PUSH_REF = /^(?:github\.ref\s*==\s*'refs\/heads\/(?!dependabot\/)[^']+'|github\.ref\s*==\s*'refs\/tags\/[^']+'|startsWith\(\s*github\.ref\s*,\s*'refs\/tags\/[^']*'\s*\))$/;
+/** A ref term naming one branch or a tag: `github.ref == 'refs/heads/<branch>'`, `github.ref == 'refs/tags/<tag>'`, or `startsWith(github.ref, 'refs/tags/…')`. */
+const NAMED_PUSH_REF = /^(?:github\.ref\s*==\s*'refs\/(?:heads|tags)\/[^']+'|startsWith\(\s*github\.ref\s*,\s*'refs\/tags\/[^']*'\s*\))$/;
+/** A branch term Dependabot's own push meets: its `dependabot/…` branches, or `dependabot-…` and `dependabot_…` under its separator option, in any case, since GitHub compares strings case-blind. */
+const DEPENDABOT_BRANCH = /^github\.ref\s*==\s*'refs\/heads\/dependabot[/_-]/i;
 /**
  * Whether a job's `if:` holds it to a push of a named branch or a tag: among its top-level `&&` terms are
- * `github.event_name == 'push'` and a NAMED_PUSH_REF term, and it has no top-level `||`. A `${{` or `}}` left once a
- * whole wrap is off makes the condition a string template, which GitHub reads as true, so it holds nothing.
+ * `github.event_name == 'push'` and a NAMED_PUSH_REF term that is not DEPENDABOT_BRANCH, and it has no top-level `||`.
+ * A condition GitHub reads as a string template, always true, holds nothing: one with a `${{` anywhere but a single
+ * `${{ … }}` around all of it (where a string inside is a string, and is skipped), or a `}}` outside a string.
  */
 function holdsToNamedPush(cond: unknown): boolean {
   if (typeof cond !== "string") return false;
   let e = cond.trim();
   const wrapped = e.match(/^\$\{\{([\s\S]*)\}\}$/);
   if (wrapped) e = wrapped[1];
-  if (/\$\{\{|\}\}/.test(e.replace(/'[^']*'/g, "''"))) return false;
+  // Unwrapped, GitHub reads quotes only inside a `${{ }}`, so a `${{` in a quoted string starts a template as well.
+  const bare = e.replace(/'[^']*'/g, "''");
+  if ((wrapped ? bare : e).includes("${{") || bare.includes("}}")) return false;
   e = unwrapParens(e);
   if (splitTopLevel(e, "||")?.length !== 1) return false;
   const terms = (splitTopLevel(e, "&&") ?? []).map(unwrapParens);
-  return terms.some((t) => /^github\.event_name\s*==\s*'push'$/.test(t)) && terms.some((t) => NAMED_PUSH_REF.test(t));
+  return terms.some((t) => /^github\.event_name\s*==\s*'push'$/.test(t)) && terms.some((t) => NAMED_PUSH_REF.test(t) && !DEPENDABOT_BRANCH.test(t));
 }
 /** The write a `permissions:` value grants, as a message names it, or null: `write-all`, or each scope set to `write`. */
 function writeGranted(perms: unknown): string | null {
@@ -6360,7 +6373,7 @@ function workflowPermissionProblems(file: string, text: string): [string, string
     if (!job || typeof job !== "object") continue;
     const j = job as { permissions?: unknown; if?: unknown };
     const granted = writeGranted(j.permissions);
-    if (granted && !holdsToNamedPush(j.if)) problems.push([file, `job ${key} grants ${granted}, and its \`if:\` (${j.if === undefined ? "none" : JSON.stringify(j.if)}) does not hold it to a push of a named branch or a tag — a pull request's run, or a bot's push of its own branch, would hand that token to every action the job runs, a bumped one before review; give it an \`if:\` whose top-level \`&&\` terms include \`github.event_name == 'push'\` and \`github.ref == 'refs/heads/main'\` or \`startsWith(github.ref, 'refs/tags/v')\`, and split what a pull request runs into a job that only reads (SMD-2111)`]);
+    if (granted && !holdsToNamedPush(j.if)) problems.push([file, `job ${key} grants ${granted}, and its \`if:\` (${j.if === undefined ? "none" : JSON.stringify(j.if)}) does not hold it to a push of a named branch or a tag — a pull request's run, or Dependabot's push of its own branch, would hand that token to every action the job runs, a bumped one before review; give it an \`if:\` whose top-level \`&&\` terms include \`github.event_name == 'push'\` and \`github.ref == 'refs/heads/main'\` or \`startsWith(github.ref, 'refs/tags/v')\`, and split what a pull request runs into a job that only reads (SMD-2111)`]);
   }
   return problems;
 }
@@ -6380,6 +6393,9 @@ const PERM_ACCEPTED: [string, string][] = [
   ["a whole `${{ }}` around the two terms alone", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "${{ github.event_name == 'push' && github.ref == 'refs/tags/v1.0.0' }}"))],
   ["terms in parentheses, beside an `||` inside parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(github.event_name == 'push') && (${MAIN}) && (a || b)`))],
   ["a whole condition in parentheses", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(github.event_name == 'push' && ${MAIN})`))],
+  ["a condition in two pairs of parentheses, and a term in two", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `((github.event_name == 'push' && ((${MAIN}))))`))],
+  ["parentheses inside a whole `${{ }}`", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ (github.event_name == 'push' && ${MAIN}) }}`))],
+  ["a `${{` inside a string within a whole `${{ }}`, where it is text", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ github.event_name == 'push' && ${MAIN} && github.actor != '\${{ x' }}`))],
   ["a string holding `||`, a parenthesis and `}}` beside the terms", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && github.actor != 'a || (b''s }}'`))],
   ["`read-all` at the top", PERM_PROBE("permissions: read-all\n", PERM_JOB("a", "      contents: read\n"))],
   ["`{}` at the top and no job permissions", PERM_PROBE("permissions: {}\n", "  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    steps:\n      - run: echo hi\n")],
@@ -6392,6 +6408,14 @@ const PERM_MUTANTS: [string, string, string][] = [
   ["a write held to a named ref alone, which a dispatch from that branch meets", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, MAIN)), "named branch or a tag"],
   ["a push of any branch", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')")), "named branch or a tag"],
   ["a push of Dependabot's branch", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref == 'refs/heads/dependabot/github_actions/x'")), "named branch or a tag"],
+  ["Dependabot's branch in another case, which GitHub's case-blind == still meets", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref == 'refs/heads/Dependabot/github_actions/x'")), "named branch or a tag"],
+  ["Dependabot's branch under its `-` separator", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref == 'refs/heads/dependabot-github_actions-x'")), "named branch or a tag"],
+  ["another event whose ref is the default branch", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'pull_request_target' && ${MAIN}`)), "named branch or a tag"],
+  ["a ref test by !=", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.ref != 'refs/heads/main'")), "named branch or a tag"],
+  ["a ref read from another context", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, "github.event_name == 'push' && github.event.base_ref == 'refs/heads/main'")), "named branch or a tag"],
+  ["a ref term inside an `||` group, which its tail would match unanchored", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && (a || ${MAIN})`)), "named branch or a tag"],
+  ["a push term at the tail of an `||` group", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `(a || github.event_name == 'push') && ${MAIN}`)), "named branch or a tag"],
+  ["an unterminated quote", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && github.actor != 'x`)), "named branch or a tag"],
   ["a write held to anything but a push", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name != 'push' && ${MAIN}`)), "named branch or a tag"],
   ["terms beside a top-level `||`", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} || github.event_name == 'pull_request'`)), "named branch or a tag"],
   ["both terms and-ed, then or-ed: `&&` binds first, so the `|| b` is top-level", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && a || b`)), "named branch or a tag"],
@@ -6400,14 +6424,19 @@ const PERM_MUTANTS: [string, string, string][] = [
   ["a push test inside a string", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `"'github.event_name == ''push''' && ${MAIN}"`)), "named branch or a tag"],
   ["a push test by contains()", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `contains(github.event_name, 'push') && ${MAIN}`)), "named branch or a tag"],
   ["an unclosed parenthesis", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && (a`)), "named branch or a tag"],
-  ["a `${{ }}` around one term, which makes the whole a string template", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && \${{ ${MAIN} }}`)), "named branch or a tag"],
+  ["a `${{ }}` around a third term, which makes the whole a string template", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && \${{ true }}`)), "named branch or a tag"],
+  ["a `${{` in a quoted string with no whole wrap, which GitHub still reads as a template", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `github.event_name == 'push' && ${MAIN} && github.actor != '\${{ github.repository_owner }}'`)), "named branch or a tag"],
+  ["a `${{ }}` that closes early, its `}}` left at the end: the whole-wrap test matches, and the two terms after it read as held", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ always() }} && github.event_name == 'push' && ${MAIN} }}`)), "named branch or a tag"],
+  ["text after a whole `${{ }}`", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ github.event_name == 'push' && ${MAIN} }} && x`)), "named branch or a tag"],
   ["two `${{ }}`s that open and close the condition", PERM_PROBE(PERM_READ, PERM_JOB("a", PERM_WRITE, `\${{ inputs.x }} && github.event_name == 'push' && ${MAIN} && \${{ true }}`)), "named branch or a tag"],
   ["a job's write-all", PERM_PROBE(PERM_READ, "  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: write-all\n    steps:\n      - run: echo hi\n"), "grants write-all"],
   ["one write scope among reads", PERM_PROBE(PERM_READ, PERM_JOB("a", "      contents: read\n      pull-requests: write\n")), "grants pull-requests: write"],
   ["no top-level permissions", PERM_PROBE("", PERM_JOB("a", "      contents: read\n")), "sets no top-level"],
   ["a top-level `permissions:` with no value", PERM_PROBE("permissions:\n", PERM_JOB("a", "      contents: read\n")), "cannot read as a grant"],
   ["a write at the top", PERM_PROBE("permissions:\n  contents: write\n", PERM_JOB("a", "      contents: read\n")), "at the top"],
+  ["`write-all` at the top", PERM_PROBE("permissions: write-all\n", PERM_JOB("a", "      contents: read\n")), "grants write-all at the top"],
   ["a called workflow's top-level permissions", PERM_CALLED(PERM_READ, ""), "sets a top-level"],
+  ["a called workflow's top-level permissions, `on` written as a string", PERM_CALLED(PERM_READ, "", " workflow_call"), "sets a top-level"],
   ["a called workflow's job permissions", PERM_CALLED("", "    permissions:\n      packages: write\n"), "its job a sets"],
   ["a workflow called and dispatched", PERM_CALLED("", "", " [workflow_call, workflow_dispatch]"), "also runs on workflow_dispatch"],
 ];
@@ -6530,11 +6559,15 @@ function checkWorkflowPins() {
   }
   const files = readdirSync(join(ROOT, WORKFLOWS_DIR)).filter((n) => /\.ya?ml$/.test(n)).sort();
   if (files.length === 0) fail(WORKFLOWS_DIR, "holds no workflow — the listing is broken, not the tree clean (check 23)");
+  // The token rules read the real files: release.yml with its release job's tag term cut away is refused (SMD-2111).
+  let releaseRead: [string, string][] | null = null;
   for (const name of files) {
     const rel = `${WORKFLOWS_DIR}/${name}`;
     const text = readFileSync(join(ROOT, rel), "utf8");
     for (const [where, msg] of [...workflowPinProblems(rel, text), ...workflowPermissionProblems(rel, text)]) fail(where, msg);
+    if (name === "release.yml") releaseRead = workflowPermissionProblems(rel, text.replace(/^( +)if: .*startsWith\(github\.ref, 'refs\/tags\/v'\)\s*$/m, "$1if: github.event_name == 'push'"));
   }
+  if (!releaseRead?.some(([, msg]) => msg.startsWith("job release grants"))) fail(SELF, `check 23's token rules no longer refuse release.yml with its release job held by a push term alone (reported ${JSON.stringify(releaseRead)}) — the real files are not read, or release.yml's release job changed shape (SMD-2111)`);
   const depPath = join(ROOT, DEPENDABOT);
   for (const [where, msg] of dependabotProblems(existsSync(depPath) ? readFileSync(depPath, "utf8") : null)) fail(where, msg);
 }
@@ -10006,8 +10039,9 @@ checkBunPins();
 // the step's working-directory, the job's or the workflow's, or a directory a
 // `cd` in the same step names (which of those applies is the shell's to say, so
 // each is taken). release.yml (and release-steps.yml, which it calls) is not
-// read: it runs on a tag, and on a pull request only when its own paths change. A run counts only if the suite's
-// failure fails the job, so nothing counts from a step or job with
+// read: it runs on a tag, and on a pull request only when its own paths
+// change. A run counts only if the suite's failure fails the job, so nothing
+// counts from a step or job with
 // `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
 // followed by `|| true` or `|| :`, a continued line read as one. A matrix job
 // is read once a cell, GitHub's way (matrixCells), its `${{ matrix.* }}` in env

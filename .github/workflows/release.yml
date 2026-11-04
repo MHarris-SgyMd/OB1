@@ -25,9 +25,10 @@
 # platforms").
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash in the
-# steps only runs docker and gh. It refuses a tag that does not name releases.json's last
-# entry, a FORK_VERSION that was not bumped, a migration or a fragment that
-# landed after the cut, a tag off main, and an unpinned Ollama.
+# steps only runs docker and gh. It refuses a tag that does not name
+# releases.json's last entry, a FORK_VERSION that was not bumped, a migration
+# or a fragment that landed after the cut, a tag off main, and an unpinned
+# Ollama.
 #
 # One thing to check after the first tag, outside this file: the visibility of
 # the two GHCR packages. A package a workflow first publishes may be created
@@ -42,7 +43,7 @@
 # default workflow permission is. Both call .github/workflows/release-steps.yml,
 # which holds the steps once and declares no permissions of its own, so each
 # runs with its caller's token. A rehearsal publishes nothing, so it needs no
-# write; and a pull request that bumps an action (Dependabot's, every week) runs
+# write; and a pull request that bumps an action (Dependabot's weekly ones) runs
 # the new action in the rehearsal before anyone has read it, with a token that
 # can push nothing to GHCR and create no release. Check 23 holds the split: a
 # job that grants a write runs only on a push of a named branch or a tag, and a
