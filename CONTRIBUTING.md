@@ -301,8 +301,8 @@ than by editing a hand-numbered FORK.md section:
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
   own, which the release step assigns. A fragment needs no edit to the index in
-  `changes/README.md`, which lists numbered changes alone (SMD-2084). CI holds this: the
-  `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
+  `changes/README.md`, which lists numbered changes alone (SMD-2084). CI holds
+  this: the `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
   PR whose change in those directories, test files (`test-*.ts`, `*.test.ts`)
   and Markdown aside, comes with no fragment added or modified; the refusal
   names the files that asked (SMD-1857). The one landing that passes without a fragment is a release

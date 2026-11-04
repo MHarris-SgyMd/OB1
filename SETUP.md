@@ -12,7 +12,8 @@ where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started
 walks the same stack at a beginner's pace, one verified step at a time, and
 connects each AI client. The compose stack is the brain's one deployment
 (SMD-2282's decision 6, SMD-2288): there is no single-process, Workers or
-Kubernetes build of it, and no Edge Function build (`MAINTAINING.md`, "Deploying").
+Kubernetes build of it, and no Edge Function build (`MAINTAINING.md`,
+"Deploying").
 
 ## Two decisions to make first
 
@@ -409,8 +410,8 @@ records it as who carried the request (SMD-2284), continuing that request's
 `traceparent` (SMD-2287). Give it to no client.
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
-custom connectors are URL-only, so Daemonic Brain keeps that form — but query strings
-reach access logs, browser history and shell history. A read-only key limits what
+custom connectors are URL-only, so Daemonic Brain keeps that form — but query
+strings reach access logs, browser history and shell history. A read-only key limits what
 a leak is worth. See [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 
 ## Prerequisites

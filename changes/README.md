@@ -52,9 +52,9 @@ its own number or heading — the release step does.
 **A removal names its side of the version contract** (SMD-2687). This applies to
 a fragment that removes or renames a URL, route, port or setting in a file a
 release ships, a flag or named value of a command a shipped image runs, or that
-deletes vendored code. One sentence of its FORK body says
-which side of the contract the change falls on (MAINTAINING.md, "Versioning"). Inside
-the contract it is a `major`. Maintainer tooling and vendored code are outside
+deletes vendored code. One sentence of its FORK body says which side of the
+contract the change falls on (MAINTAINING.md, "Versioning"). Inside the contract
+it is a `major`. Maintainer tooling and vendored code are outside
 it, so there it is a `minor`, and its Changelog body carries an **Upgrading:**
 line. SMD-2878's record is the example: the three-brain stack's file was
 tooling.

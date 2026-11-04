@@ -28,9 +28,9 @@ MAJOR.MINOR.PATCH
 
 Plain SemVer from 2.0.0 (SMD-3317). The releases before it, 1.0.0 to 1.9.0,
 carried the upstream pin as build metadata (`1.0.0+upstream.9543c29`). The pin is
-frozen now (SMD-1256), so the version no longer spells it: FORK.md's "The pin" names
-it once, and each release goes on recording it as data, in `releases.json`'s
-`upstream` key and the release notes' "upstream pin" line. The two forms order by
+frozen now (SMD-1256), so the version no longer spells it: FORK.md's "The pin"
+names it once, and each release goes on recording it as data, in
+`releases.json`'s `upstream` key and the release notes' "upstream pin" line. The two forms order by
 their cores (build metadata takes no part). The bump is chosen by the
 contracts the project already enforces — the rules are here, and checked, not
 remembered:
@@ -144,8 +144,8 @@ table and the files they are.
 
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside the
 record in `changes/`: `## [Unreleased]` first, one dated section per release with
-entries under the six headings, each entry ending in its ticket and migration numbers. The
-release step writes it and the change files from the same fragments in one commit,
+entries under the six headings, each entry ending in its ticket and migration
+numbers. The release step writes it and the change files from the same fragments in one commit,
 and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
 adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
 and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an

@@ -4106,7 +4106,7 @@ function checkForkLayout() {
   // Each text is the file it is passed as: the layout decision is pure, so a swap or a dropped argument
   // here would leave both files unchecked with every probe still passing.
   for (const [rel, text, title] of [[INDEX_FILE, indexText, `# ${CHANGES_DIR}/`], [FRONT_DOOR, frontText, `# ${FRONT_DOOR}`], [FORK_RECORD, forkText, `# ${FORK_RECORD}`]] as const) {
-    if (!text.startsWith(title)) fail(SELF, `check 15 read ${rel} without its \`${title}\` title — the file was retitled, or the read was miswired`);
+    if (!text.startsWith(title)) fail(rel, `does not open with its \`${title}\` title (it opens ${JSON.stringify(text.slice(0, 24)).replace(/\uFEFF/g, "\\uFEFF")}) — a byte-order mark, a blank first line or a retitle, or check 15's read was miswired (SMD-3765)`);
   }
   const entries = changesOnDisk().entries; // every entry, any extension — a stray is a finding
   const citations: LayoutCitation[] = [];
