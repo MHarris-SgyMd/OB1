@@ -27,19 +27,23 @@ export async function asked<T, E extends Error>(Refused: abstract new (...args: 
 }
 
 type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED";
-/** What a code's refusal names beyond its cause: a claim's id and whether a force was asked; nothing for the others. */
-type UnattributedFacts<C extends UnattributedCode> = Omit<Extract<Refusal, { code: C }>, "code" | "retryable" | "cause">;
+/** What a claim's refusal names beyond its cause: its id and whether a force was asked. The other two name nothing more. */
+type ClaimFacts = { id: string; forced: boolean };
 
 /**
  * The registry's failure to give the caller's agent id (`agentUnresolved`) as `code`'s refusal: retryable while it
  * may answer (unreachable), final until an operator acts (misconfigured, refused). Null when there is no such
  * failure: the caller has its agent id, or no registry was asked for one — a plugin hook's principal, `hook:<plugin>`,
- * has none by design — and what to say then is the caller's (the database's answer, or registry_unknown).
+ * has none by design — and what to say then is the caller's (the database's answer, or registry_unknown). One
+ * signature per code, so a code widened to a union matches none and a claim's facts can't be left off (review pass 1).
  */
-export function unattributedAs<C extends UnattributedCode>(code: C, principal: Principal, ...facts: {} extends UnattributedFacts<C> ? [] : [UnattributedFacts<C>]): Outcome<never, C> | null {
+export function unattributedAs(code: "CLAIM_UNATTRIBUTED", principal: Principal, facts: ClaimFacts): Outcome<never, "CLAIM_UNATTRIBUTED"> | null;
+export function unattributedAs(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED"> | null;
+export function unattributedAs(code: "ITEM_UNATTRIBUTED", principal: Principal): Outcome<never, "ITEM_UNATTRIBUTED"> | null;
+export function unattributedAs(code: UnattributedCode, principal: Principal, facts?: ClaimFacts): Outcome<never, UnattributedCode> | null {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
   const refusal = principal.agentUnresolved === "unreachable"
-    ? { code, retryable: true, cause: "registry_away", ...facts[0] }
-    : { code, retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused", ...facts[0] };
-  return refuse<never, C>(refusal as unknown as Extract<Refusal, { code: C }> & { code: C });
+    ? { code, retryable: true, cause: "registry_away", ...facts }
+    : { code, retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused", ...facts };
+  return refuse<never, UnattributedCode>(refusal as unknown as Extract<Refusal, { code: UnattributedCode }>);
 }
