@@ -1099,7 +1099,7 @@ it, each over REST and MCP alike:
   `proposed` item for each distinct non-blank action item the extractor reads from it, at
   most 20, from that thought and by the capturing key; a re-capture proposes none, and the
   capture never fails for it. `db/backfill-open-items.ts` does the same for thoughts
-  captured before.
+  captured before, and for a capture whose items were not proposed.
 - **Opening.** An item read from a thought (`origin_thought`) is noted at that thought's
   capture time, so an old to-do reads as old. The same thought and text again is the item
   already there (`unchanged`, nothing written), and so is a plugin's row. `proposed: true`

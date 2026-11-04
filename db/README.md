@@ -2487,18 +2487,20 @@ server-portable/README.md, Open items); node_state's open-item kind is SMD-3667'
 `backfill-open-items.ts` (SMD-3665 PR 3a) opens a proposed item, through 117's
 `open_item`, for each distinct non-blank string in a thought's
 `metadata.action_items`, from that thought (so it is noted at the thought's capture
-time) and by the key `--as` names (default `backfill-open-items`, classified an
-agent in the registry when it has no kind yet):
+time) and by the key `--as` names (default `backfill-open-items`; a name the
+registry has never seen is classified an agent, a key it knows is left as it is):
 
 ```bash
 bun backfill-open-items.ts --url … --dry-run     # counts what it would open; writes nothing
 bun backfill-open-items.ts --url …               # opens them
 ```
 
-117's identity (the thought and the text) makes a second run open nothing, so it is
-safe to run again — and running it again is how board-sync's thoughts, written
-through `db/` and not the core's capture, gain their items. No thought's row is
-written. A capture through the server proposes its own items as it lands.
+It takes a thought only while no item is read from it, as a capture proposes once,
+so a second run opens nothing twice and `--limit` works through the rest batch by
+batch. Running it again is how board-sync's thoughts, written through `db/` and not
+the core's capture, gain their items, and how a capture whose items were not proposed
+(the registry away) gains them. No thought's row is written. A capture through the
+server proposes its own items as it lands.
 
 Migration 118 releases a closed ticket's claims (SMD-3600). Without it, a claim
 whose holder merged and never released stayed on every read naming the ticket

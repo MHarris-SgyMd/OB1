@@ -7,7 +7,7 @@
 
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
-import { proposeActionItems } from "./items.ts";
+import { ItemRefused } from "../open-items.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
@@ -935,4 +935,52 @@ export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal,
     reviewer: r.reviewer === "no-114" ? null : r.reviewer ?? null, reviewerRecorded: r.reviewer !== "no-114",
     writersUnread: r.writers === "no-094", caller: principal.name,
   });
+}
+
+/** At most this many items are proposed from one capture: an extraction listing more is reading a list, not to-dos. */
+export const MAX_PROPOSED_PER_CAPTURE = 20;
+
+/** An action item as 117 will read it (115's ob1_work_claim_text: control characters made spaces, the soft hyphen,
+ * zero-width space, word joiner and byte-order mark deleted, white space collapsed, trimmed). */
+const CLEANED_AWAY = new RegExp(`[${String.fromCharCode(0xad, 0x200b, 0x2060, 0xfeff)}]`, "g");
+export const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(CLEANED_AWAY, "").replace(/\s+/gu, " ").trim();
+
+/**
+ * The extractor's action items as proposed open items (SMD-3665 PR 3a): one per distinct string as 117 reads it
+ * (cleaned, case aside: its identity), non-blank and within its 1000 characters, at most 20, read from the captured
+ * thought and opened by the capturing key, `proposed` (a write key confirms one; the maintainer, 2026-11-03).
+ * Proposed once, for the thought this capture wrote: a re-capture's extraction may word them otherwise. Never fails
+ * the capture: a refusal stops the rest (117's refusals of open_item — a key the registry did not attribute, a thought
+ * not the key's — are the call's, not one text's), and a store that cannot open items (a brain before 117) is logged.
+ * An item not proposed here is the backfill's (db/backfill-open-items.ts), which takes a thought holding none.
+ * Review pass 1: moved here from core/items.ts (an import cycle), deduplicated and capped as 117 reads the texts.
+ */
+async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<number> {
+  const scope = principal.scope === "write" ? "write" : principal.scope === "capture" ? "capture" : undefined;
+  const raw = metadata.action_items;
+  if (!scope || !Array.isArray(raw)) return 0;
+  const seen = new Set<string>();
+  const texts: string[] = [];
+  for (const t of raw) {
+    if (typeof t !== "string" || t.length > 4000) continue;
+    const text = cleanedAsItem(t);
+    if (!text || text.length > 1000 || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    texts.push(text);
+    if (texts.length === MAX_PROPOSED_PER_CAPTURE) break;
+  }
+  let opened = 0;
+  const store = await ctx.store();
+  for (const text of texts) {
+    try {
+      const a = await store.openItem({ text, originThought: thoughtId, proposed: true, actor: actorOf(ctx, principal), scope });
+      if (a.outcome === "opened") opened++;
+      else if (a.outcome === "refused") break;
+    } catch (e) {
+      if (e instanceof ItemRefused) continue;
+      console.error(`capture: the action items of thought ${thoughtId} were not proposed as open items: ${(e as Error)?.message ?? e}`);
+      break;
+    }
+  }
+  return opened;
 }
