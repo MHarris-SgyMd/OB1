@@ -4488,16 +4488,16 @@ lands. A vector arriving queues no claim, yet consolidation judges only a
 thought with one: so a vector come since the last whole read — an audited
 update whose diff says `embedding_present` true, the vector mender's or a
 re-embed's — brings the next whole read forward, at most once a minute after
-the last whole read or a period's end read (so within that and a `--poll`),
-and a vector read once is not read again; the rescan keeps its own clock
-(SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+the end of the last whole read or a period's end read (so within that and a
+`--poll`), and a vector read once is not read again; the rescan keeps its own
+clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
 delete of a window or a replay leaves, re-embed's backlog — waits for the
 rescan, or goes with a period other work begins (deleting a thought leaves
 none: its lineage rows go with it); the next poll reads it whole after a
 live write or its limit cut the sweep, a retried start refusal's wait, or a
 re-embed set-aside cleared. The sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
-an orphan far into a large table is found one rescan a window later — a
+an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
 pass held begins none: one a statement held
 (**Its budget**, below), re-embed set aside or set down (a set-down is tried
@@ -4689,8 +4689,8 @@ so a backlog drains in one period, paused by each live write. A statement
 past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
 whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
-scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
-`resting` — is still read, for a rollback.
+scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
+still read, for a rollback.
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,

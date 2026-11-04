@@ -26,9 +26,10 @@
  * pass, a row pending or in hand under its key, which a capture queues in its
  * own transaction (016). A vector come since the last whole read — an audited
  * update whose diff says embedding_present true, the mender's or a re-embed's —
- * brings the next forward, at most once a VECTOR_FLOOR_S (60) after the last
- * whole read or a period's end read, so within that and a poll; a vector read
- * once is not read again, and the rescan keeps its own clock (SMD-3379 PR 1d): consolidation judges only a thought with a vector (029),
+ * brings the next forward, at most once a VECTOR_FLOOR_S (60) after the end of
+ * the last whole read or a period's end read, so within that and a poll; a
+ * vector read once is not read again, and the rescan keeps its own clock
+ * (SMD-3379 PR 1d): consolidation judges only a thought with a vector (029),
  * and its arrival queues no claim. What else no claim row shows — the orphans
  * a raw delete of a window or a replay leaves, re-embed's backlog — waits for
  * the rescan, or goes with a period other work begins (a thought's delete
@@ -38,8 +39,7 @@
  * reads one window of 10,001 lineage rows a whole read, an empty one moving
  * the place on, so on an idle brain an orphan k windows in is found at the
  * k-th whole read; a one-shot run, and the dry run, walk up to 100 windows,
- * having no later read. A
- * pass held begins none: one a statement held
+ * having no later read. A pass held begins none: one a statement held
  * (Budget), re-embed set aside or down (Working) — a set-down re-armed at the
  * next period's start, or by the next rescan, so one refused again begins no
  * period every poll. Without --follow, a read that finds no work exits 0 —
@@ -783,8 +783,9 @@ export async function vectorMark(sql: SQL, slackS: number): Promise<VectorMark> 
 }
 
 /**
- * Whether a vector has come since `mark` was taken (PR 1d): one range read of
- * thought_audit's created_at index, an update's diff alone read. With none, the
+ * Whether a vector has come since `mark` was taken (PR 1d): one statement, two
+ * range reads of thought_audit's created_at index — since the mark, and the
+ * slack's rows for the next — an update's diff alone read. With none, the
  * mark moved on in the same snapshot — every vector visible after it was in
  * `seen` — so an idle poll reads the slack's rows, not every row since the last
  * whole read (review pass 1); `atMs`, the floor's, kept.
@@ -1827,7 +1828,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const read: boolean | null = await reading(whole ? async () => {
         const at = await vectorMark(sql, WAKE_SLACK);
         const found = await workWhole();
-        vectorsAt = at;
+        // The floor from the read's end: a whole read longer than it would otherwise follow one another (review pass 2).
+        vectorsAt = { ...at, atMs: Date.now() };
         return found;
       } : workClaimed);
       if (read === null) return null;
@@ -2637,7 +2639,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           const empty = await reading(async () => (exHeld || drained(await extractPool())) && (coHeld || drained(await poolOf(sql, "consolidate", JOBS.consolidate))));
           if (empty === null) return stopped();
           if (empty) {
-            vectorsAt = at;
+            vectorsAt = { ...at, atMs: Date.now() };
             out("  the pools drained — the period ends");
             await stopPasses(false);
             return "done";

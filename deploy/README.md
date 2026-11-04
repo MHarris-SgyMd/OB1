@@ -2249,8 +2249,8 @@ once there is work again: a capture's claim, read each poll, or what the
 idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
 (unset, 3600), and within about a minute of a vector arriving — the vector
 mender's, say, which gives consolidation a thought to judge (SMD-3379 PR 1d).
-Each pass's cost is the same as under `workers`, spent
-only while nobody is writing to the brain.
+Each pass's cost is the same as under `workers`, spent only while nobody is
+writing to the brain.
 `db/README.md`, "Sleep", has the full rules.
 
 **What pauses it.** A live write: one through a key that is not classified
