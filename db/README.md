@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and seventeen (117) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and eighteen (118) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2482,6 +2482,36 @@ grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
 and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
 REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
 
+Migration 118 releases a closed ticket's claims (SMD-3600). Without it, a claim
+whose holder merged and never released stayed on every read naming the ticket
+(SMD-3599's `claimed` label shows lapsed claims never released).
+`release_closed_ticket_claims(p_run, p_dry_run, p_actor)` ends every unreleased
+claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose
+head in `ob1_ticket_head` has a settled status type (`node_settled_types()`:
+completed, canceled, duplicate) and is an importer's row (`metadata.source` is
+`linear`, which the server refuses to every key: capture_thought and
+update_thought's patch answer `REFUSED_SOURCE_RESERVED`, so a key's own thought
+with an `issue` and a `status_type` releases nothing). A write key can still
+make a ticket read closed by editing the board's own rows (patching one's
+ticket keys, or retiring an open head over an older closed board row: a delete,
+or a `supersedes` pointing at it), as it
+can already mislabel `moved`; board-sync writes the board's status back when
+the ticket next moves. A claim made after the ticket closed is
+released too, and a ticket that reopens brings none back. Each release is stamped
+from the call's envelope, with the reason `<issue> closed: <status>
+(<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
+It takes each ticket's lock in key order under READ COMMITTED (0A000 above it),
+as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run` and
+`--only` included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
+function so held, and granted by the **closedclaims** group (EXECUTE on the
+function, SELECT and UPDATE on `work_claims`); the server never calls it. A
+plain `migrate.ts --grant <role>` issues every group, this one included: grant a
+server's role by `--groups` to keep it out. Soft: board-sync without the group
+says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
+`duplicate`), 068 and 115; a re-apply is a no-op. test-schema [106] (the tickets released and
+left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
+(onto a populated brain at 117).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2528,7 +2558,11 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups
-capture,worker,…` those alone (SMD-2289). `--groups` revokes nothing; `--exact` adds the
+capture,worker,…` those alone (SMD-2289). The full set a plain `--grant` issues
+includes **closedclaims**, the release of a closed ticket's claims that board-sync
+alone calls (118): a role granted by `--groups` without it cannot call that
+release, and one granted by a plain `--grant` can.
+`--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
@@ -2600,7 +2634,9 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
+| | `work_claims` (115) | `SELECT, UPDATE` |
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
@@ -6152,6 +6188,16 @@ the same rule). Comments are the corpus builder's for the retrieval eval; the bo
 mirror keeps the hand captures' shape, which had none. A Linear webhook would be
 exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
 which would call this tool's `syncIssue` with the one identifier it was told.
+
+**A closed ticket's claims (SMD-3600).** After each pass, `--dry-run` and `--only`
+included and `--audit` not, one call to migration 118's
+`release_closed_ticket_claims` ends every unreleased claim (live or lapsed) on a
+ticket whose head is this tool's row and says Done, Canceled or a Duplicate,
+and the pass prints `claims on closed tickets: released N — …`, ten named. A dry
+run's `would release` reads the brain as it stands, so a ticket the pass would
+close is not in it. A failed call fails the pass, as a failed findings post does. Asked once at start: a
+brain before 118, or a role without the **closedclaims** group, is said once, and
+the claims stay until their holders release them.
 
 **What it tells the board (SMD-2681).** The board comes in; consolidation's
 findings about it went nowhere until someone read the queue. With

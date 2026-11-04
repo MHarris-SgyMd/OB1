@@ -25,7 +25,7 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1000,6 +1000,18 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
   }
 
+  async closedTicket(issue: string): Promise<ClosedTicket | null> {
+    // SMD-3600: 118's own test of a closed ticket, the one board-sync's release reads, so a claim's reply and the
+    // release agree. Its EXECUTE is PUBLIC's (the release's alone is held). A brain before 118 has none: open, as far as it says.
+    try {
+      const [r] = await this.sql`SELECT status, status_type FROM ob1_work_claim_closed_head(${issue}::text)` as { status: unknown; status_type: unknown }[];
+      return r && typeof r.status_type === "string" ? { status: typeof r.status === "string" ? r.status : null, statusType: r.status_type } : null;
+    } catch (e) {
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /ob1_work_claim_closed_head\(/.test(String((e as Error).message))) return null;
+      throw e;
+    }
+  }
+
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
   // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
   async claimLease(token: string, id?: string, work?: ClaimLeaseWork): Promise<ClaimLease | null> {
@@ -1010,11 +1022,11 @@ export class SqlStore implements ThoughtStore {
     // test, or — the registry away, so no agent id — a claim made with an id under the caller's name, as ownWhileAway
     // reads it for renew_claim (review pass 5: such a call made a new claim again).
     const rows = (id !== undefined
-      ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
+      ? await this.sql`SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
       : work === undefined
-        ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
+        ? await this.sql`SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
         : await this.sql`
-            SELECT id, expires_at, released_at, released_by, release_reason,
+            SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason,
                    (c.issue = ob1_work_claim_issue(${work.ticket}::text)
                     AND NOT (${work.piece ?? null}::text IS NOT NULL AND ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece') IS NULL)
                     AND c.piece_key = COALESCE(lower(ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece')), '')
@@ -1026,6 +1038,7 @@ export class SqlStore implements ThoughtStore {
     return {
       id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
       releasedBy: typeof r.released_by === "string" ? r.released_by : null, releaseReason: typeof r.release_reason === "string" ? r.release_reason : null,
+      ...(typeof r.issue === "string" ? { issue: r.issue } : {}), releasedByKind: typeof r.released_by_kind === "string" ? r.released_by_kind : null,
       ...(work !== undefined ? { ownOnThisWork: r.own_on_this_work === true } : {}),
     };
   }

@@ -457,6 +457,9 @@ const FUNCTIONS = [
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",
+  // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
+  "release_closed_ticket_claims(text, boolean, jsonb)",
+  "ob1_work_claim_closed_head(text)",
 ];
 
 /**

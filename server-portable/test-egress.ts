@@ -415,20 +415,24 @@ console.log("\n[7] capture_thought keeps its caller-CLAIMED source OFF the egres
          `…and the row RECORDS source:claude-code all the same — the label is stored, it just does not open the gate (${JSON.stringify(crow.metadata)})`);
 }
 
-console.log("\n[8] capture_thought stamps the classifier's genre on the row (SMD-2323): a claimed source:linear pre-signals project-issue, stamped even under deny");
+console.log("\n[8] capture_thought stamps the classifier's genre on the row (SMD-2323): an arxiv_id pre-signals research-paper, stamped even under deny; source:linear, the board's label, is refused to every key (SMD-3600)");
 {
   // The genre facet is derived at capture and folded into the stored metadata.
-  // Its pre-signal reads the metadata, not the wire, so it runs under deny; a
-  // claimed source:linear is a project-issue by rule (the tier, unset here, is
-  // never reached). A mutant that drops the payload fold (genre undefined) or
-  // hardcodes it (the tier-unset fallback is `other`, not project-issue) fails
+  // Its pre-signal reads the metadata, not the wire, so it runs under deny; an
+  // arxiv_id is a research-paper by rule (the tier, unset here, is never
+  // reached). source:linear's project-issue is the board importers' alone
+  // since SMD-3600, which write through the store, not this door.
+  // A mutant that drops the payload fold (genre undefined) or
+  // hardcodes it (the tier-unset fallback is `other`, not research-paper) fails
   // here — the CLASSIFIER's value, not a constant, must reach the row.
-  const lin = await call(GATED_KEY, "capture_thought", { content: "claims-linear: a gated note naming source linear", source: "linear" });
+  const lin = await call(GATED_KEY, "capture_thought", { content: "claims-paper: a gated note naming an arxiv id", metadata: { arxiv_id: "2401.00001" } });
   assert(!lin.isError && /Captured as thought/.test(lin.text), `the capture succeeds (${lin.text.split("\n")[0]})`);
   const lid = /id ([0-9a-f-]{36})/.exec(lin.text)![1];
   const [lrow] = await sql`SELECT metadata FROM thoughts WHERE id = ${lid}::uuid`;
-  assert(lrow.metadata.source === "linear" && lrow.metadata.genre === "project-issue",
-         `the row carries the classifier's genre from the source:linear pre-signal, not undefined and not the other fallback (${JSON.stringify(lrow.metadata)})`);
+  assert(lrow.metadata.arxiv_id === "2401.00001" && lrow.metadata.genre === "research-paper",
+         `the row carries the classifier's genre from the arxiv_id pre-signal, not undefined and not the other fallback (${JSON.stringify(lrow.metadata)})`);
+  const board = await call(GATED_KEY, "capture_thought", { content: "claims-linear: a gated note naming source linear", source: "linear" });
+  assert(board.isError && /^Refused: `source: "linear"` is the board's own label/.test(board.text), `source:linear is refused through the door (${board.text.split("\n")[0]})`);
 }
 
 console.log("\n[9] The provider away, a capture the gate allows is saved without its vector all the same; the audit row says both what the gate decided and why no vector came; the provider back, the same text takes its vector (SMD-2888)");
