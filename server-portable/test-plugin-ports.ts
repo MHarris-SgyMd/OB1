@@ -2152,8 +2152,11 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   await c("update_interview", { interview_id: e1, status: "cancelled" });
   const e1Moved = await c("update_interview", { interview_id: e1, scheduled_at: hours(50) });
   const e1Back = await c("update_interview", { interview_id: e1, status: "scheduled" });
-  assert(e1Moved.status === 200 && e1Moved.body.interview?.status === "cancelled" && e1Back.status === 422 && e1Back.body.code === "APPLICATION_ENDED",
-    `update_interview: a new time leaves a rejected application's cancelled interview cancelled, and status scheduled for it is 422 APPLICATION_ENDED (${e1Moved.body.interview?.status}, ${e1Back.status})`);
+  const e1Logged = await c("log_interview_notes", { interview_id: e1, status: "scheduled" });
+  const e1Noted = await c("log_interview_notes", { interview_id: e1, feedback: "They called it off" });
+  assert(e1Moved.status === 200 && e1Moved.body.interview?.status === "cancelled" && e1Back.status === 422 && e1Back.body.code === "APPLICATION_ENDED"
+         && e1Logged.status === 422 && e1Logged.body.code === "APPLICATION_ENDED" && e1Noted.status === 200 && e1Noted.body.interview?.status === "cancelled",
+    `a new time leaves a rejected application's cancelled interview cancelled, and status scheduled for it is 422 APPLICATION_ENDED from update_interview and log_interview_notes alike; notes on it are taken (${e1Moved.body.interview?.status}, ${e1Back.status}, ${e1Logged.status})`);
   // A withdrawal and a schedule of one application at once, forced to race: the schedule reads the status under its lock,
   // so it either comes first or sees the withdrawal; without the lock it would not wait at all.
   const raceSchedApp = String((await c("submit_application", { job_posting_id: await datePost("D7") })).body.application?.id);
@@ -2166,8 +2169,15 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
   const ivRace = await race(`SELECT 1 FROM plugin_job_hunt.applications WHERE id = '${raceIvApp}' FOR NO KEY UPDATE`, () => [
     c("update_application", { application_id: raceIvApp, status: "withdrawn" }), c("update_interview", { interview_id: raceIv, status: "scheduled" }),
   ]);
-  assert(schedRace.bothWait && ["200,200", "200,422"].includes(schedRace.results) && ivRace.bothWait && ["200,200", "200,422"].includes(ivRace.results),
-    `a withdrawal and a schedule of one application at once, and a withdrawal and its interview scheduled again, both wait on its row and decide in turn (${JSON.stringify([schedRace, ivRace])})`);
+  const raceLogApp = String((await c("submit_application", { job_posting_id: await datePost("D9") })).body.application?.id);
+  const raceLogIv = String((await c("schedule_interview", { application_id: raceLogApp, interview_type: "final", scheduled_at: hours(40) })).body.interview?.id);
+  await c("update_interview", { interview_id: raceLogIv, status: "cancelled" });
+  const logRace = await race(`SELECT 1 FROM plugin_job_hunt.applications WHERE id = '${raceLogApp}' FOR NO KEY UPDATE`, () => [
+    c("update_application", { application_id: raceLogApp, status: "withdrawn" }), c("log_interview_notes", { interview_id: raceLogIv, status: "scheduled" }),
+  ]);
+  assert(schedRace.bothWait && ["200,200", "200,422"].includes(schedRace.results) && ivRace.bothWait && ["200,200", "200,422"].includes(ivRace.results)
+         && logRace.bothWait && ["200,200", "200,422"].includes(logRace.results),
+    `a withdrawal racing a schedule, or its interview scheduled again by update_interview or by the log: both wait on the application's row and decide in turn (${JSON.stringify([schedRace, ivRace, logRace])})`);
   // update_interview: completed is the log's; a new time brings back a cancelled one, not a completed one.
   const openApp = String((await c("submit_application", { job_posting_id: await datePost("D6") })).body.application?.id);
   const iv = String((await c("schedule_interview", { application_id: openApp, interview_type: "final", scheduled_at: hours(-2) })).body.interview?.id);
@@ -2208,14 +2218,19 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
     ["a duration of 1", "schedule_interview", { application_id: edgeApp, interview_type: "final", duration_minutes: 1 }], ["a duration of 1440", "schedule_interview", { application_id: edgeApp, interview_type: "final", duration_minutes: 1440 }],
     ["a rating of 1", "log_interview_notes", { interview_id: edgeIv, rating: 1 }], ["a rating of 5", "log_interview_notes", { interview_id: edgeIv, rating: 5 }],
     ["days ahead of 365", "get_upcoming_interviews", { days_ahead: 365 }], ["pipeline days ahead of 365", "get_pipeline_overview", { days_ahead: 365 }],
-    ["a limit of 200", "list_applications", { limit: 200 }], ["a company limit of 200", "list_companies", { limit: 200 }], ["a minimum salary of 100,000,000", "add_job_posting", { company_id: vx, title: "Top Minimum", salary_min: 100_000_000 }],
+    ["a limit of 200", "list_applications", { limit: 200 }], ["a company limit of 200", "list_companies", { limit: 200 }],
+    ["an interview limit of 200", "list_interviews", { limit: 200 }], ["a posting limit of 200", "list_job_postings", { limit: 200 }], ["a contact limit of 200", "search_job_contacts", { limit: 200 }],
+    ["an upcoming limit of 200", "get_upcoming_interviews", { limit: 200 }], ["a pipeline limit of 200", "get_pipeline_overview", { limit: 200 }],
+    ["an interviewer of 200 characters", "schedule_interview", { application_id: edgeApp, interview_type: "final", interviewer_name: "i".repeat(200), interviewer_title: "t".repeat(200) }],
+    ["a resume version of 200 characters", "submit_application", { job_posting_id: await datePost("Resume"), status: "rejected", resume_version: "v".repeat(200), referral_contact: "r".repeat(200) }],
+    ["a contact of 200 characters", "add_job_contact", { name: "c".repeat(200), title: "t".repeat(200) }], ["a minimum salary of 100,000,000", "add_job_posting", { company_id: vx, title: "Top Minimum", salary_min: 100_000_000 }],
   ];
   const refusedEdges: string[] = [];
   for (const [label, key, input] of takes) { const r = await c(key, input); if (r.status !== 200) refusedEdges.push(`${label}: ${r.status} ${JSON.stringify(r.body).slice(0, 100)}`); }
   const total = Number((await c("get_pipeline_overview", {})).body.total_applications);
   const listedDefault = ((await c("list_applications", {})).body.applications as unknown[]).length;
   assert(refusedEdges.length === 0 && total > 5 && listedDefault === Math.min(total, 50),
-    `each bound's own edge is taken, and list_applications' default limit is 50 (${refusedEdges.join("; ") || "all taken"}; ${listedDefault} of ${total})`);
+    `each bound's own edge is taken, and list_applications without a limit lists all ${total} (${refusedEdges.join("; ") || "all taken"}; ${listedDefault})`);
   const tableTakes: string[] = [];
   for (const q of [
     "INSERT INTO plugin_job_hunt.companies (name, glassdoor_rating) VALUES (repeat('n', 200), 1.0), ('t', 5.0)",
@@ -2263,6 +2278,13 @@ console.log("\n[job-hunt] its companies, postings, applications, interviews and 
          && recruiterPost.body.job_posting?.salary_currency === "EUR" && otherRole.body.job_contact?.role_in_process === "other"
          && (await c("list_interviews", { application_id: edgeApp, status: "no_show" })).body.interviews?.length === 0,
     `no_show set, kept by a log, and scheduled again by a new time; offer then accepted counted; enterprise, onsite, recruiter, other and system_design stored; a padded currency trimmed (${noShow.body.interview?.status}, ${noShowLogged.body.interview?.status}, ${noShowBack.body.interview?.status})`);
+  const gbp = await c("add_job_posting", { company_id: vx, title: "In Pounds", salary_currency: "gbp" });
+  const atOfferNow = await c("submit_application", { job_posting_id: await datePost("Straight To Offer"), status: "offer" });
+  const unscheduledBefore = Number((await c("get_pipeline_overview", {})).body.unscheduled_count);
+  await c("schedule_interview", { application_id: edgeApp, interview_type: "final", scheduled_at: hours(400 * 24) });
+  const unscheduledAfter = Number((await c("get_pipeline_overview", {})).body.unscheduled_count);
+  assert(gbp.body.job_posting?.salary_currency === "GBP" && atOfferNow.body.application?.applied_date === utcToday && unscheduledAfter === unscheduledBefore,
+    `a currency kept as given (GBP); an application recorded at offer dated today; an interview 400 days ahead is not one with no time (${gbp.body.job_posting?.salary_currency}, ${atOfferNow.body.application?.applied_date}, ${unscheduledBefore}/${unscheduledAfter})`);
   // Search: each separator splits; a backslash matches itself; fields outside the described set are not searched.
   const nbsp = String.fromCharCode(160), backslash = String.fromCharCode(92);
   const urlProbe = await c("add_job_posting", { company_id: vx, title: "Url Probe", url: "https://zzqurl.example/x" });

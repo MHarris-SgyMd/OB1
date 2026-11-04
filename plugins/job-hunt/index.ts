@@ -136,6 +136,16 @@ async function openApplication(sql: PluginSql, postingId: string) {
     message: `this posting has an open application, ${open.id} (${open.status}): update_application moves it on`,
   });
 }
+/** An interview's application status, read under a share lock as schedule_interview reads it, or null for no interview. */
+async function interviewApplicationStatus(sql: PluginSql, interviewId: string): Promise<string | null> {
+  const [held] = await sql<{ application_status: string }>`
+    SELECT a.status AS application_status FROM interviews i JOIN applications a ON a.id = i.application_id WHERE i.id = ${interviewId} FOR SHARE OF a`;
+  return held?.application_status ?? null;
+}
+/** The refusal of scheduling again an interview whose application has ended. */
+const interviewEnded = (interviewId: string, applicationStatus: string) =>
+  refuse(422, "APPLICATION_ENDED", { interview_id: interviewId, application_status: applicationStatus,
+    message: `the interview's application is ${applicationStatus}: update_application reopens it first` });
 const companyOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Company>>>`SELECT answer FROM company_rows WHERE id = ${id}`)[0]?.answer ?? null;
 const postingOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Posting>>>`SELECT answer FROM posting_rows WHERE id = ${id}`)[0]?.answer ?? null;
 const applicationOf = async (sql: PluginSql, id: string) => (await sql<Answer<z.input<typeof Application>>>`SELECT answer FROM application_rows WHERE id = ${id}`)[0]?.answer ?? null;
@@ -728,15 +738,10 @@ export default definePlugin({
         const fields = ["interview_type", "scheduled_at", "duration_minutes", "interviewer_name", "interviewer_title", "notes", "status"] as const;
         if (!fields.some(given)) return nothingToChange("interview_id", u.interview_id);
         return ctx.db.tx(async (sql) => {
-          // The application's status under a share lock, as schedule_interview reads it.
-          const [held] = await sql<{ application_status: string }>`
-            SELECT a.status AS application_status FROM interviews i JOIN applications a ON a.id = i.application_id WHERE i.id = ${u.interview_id} FOR SHARE OF a`;
-          if (!held) return noSuchInterview(u.interview_id);
-          const ended = ENDED.includes(held.application_status);
-          if (ended && u.status === "scheduled") {
-            return refuse(422, "APPLICATION_ENDED", { interview_id: u.interview_id, application_status: held.application_status,
-              message: `the interview's application is ${held.application_status}: update_application reopens it first` });
-          }
+          const applicationStatus = await interviewApplicationStatus(sql, u.interview_id);
+          if (applicationStatus === null) return noSuchInterview(u.interview_id);
+          const ended = ENDED.includes(applicationStatus);
+          if (ended && u.status === "scheduled") return interviewEnded(u.interview_id, applicationStatus);
           await sql`
             UPDATE interviews SET
               interview_type = CASE WHEN ${given("interview_type")} THEN ${u.interview_type ?? null} ELSE interview_type END,
@@ -756,7 +761,7 @@ export default definePlugin({
     }),
     log_interview_notes: operation({
       title: "Log how an interview went",
-      description: "After an interview (interview_id, from get_pipeline_overview's awaiting_notes, list_interviews or get_upcoming_interviews): its feedback and your rating of it, 1 to 5. Only the fields given change: a field given as null is cleared, and one left out is kept. A scheduled interview whose time has come becomes completed unless status says otherwise; one still ahead or with no time stays scheduled, and a cancelled or no-show one stays as it is. Prep notes before it, a new time or a cancellation are update_interview's. Refused: an interview that is not there (NO_SUCH_INTERVIEW), and no field to change (NOTHING_TO_CHANGE).",
+      description: "After an interview (interview_id, from get_pipeline_overview's awaiting_notes, list_interviews or get_upcoming_interviews): its feedback and your rating of it, 1 to 5. Only the fields given change: a field given as null is cleared, and one left out is kept. A scheduled interview whose time has come becomes completed unless status says otherwise; one still ahead or with no time stays scheduled, and a cancelled or no-show one stays as it is. Prep notes before it, a new time or a cancellation are update_interview's. Refused: an interview that is not there (NO_SUCH_INTERVIEW), status scheduled for an interview whose application was rejected or withdrawn (APPLICATION_ENDED), and no field to change (NOTHING_TO_CHANGE).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -765,13 +770,16 @@ export default definePlugin({
         interview_id: z.string().uuid().describe("The interview's id"),
         feedback: text(10000).nullish().describe("How it went, in your words; null clears it"),
         rating: z.number().int().min(1).max(5).nullish().describe("How it went, 1 to 5; null clears it"),
-        status: z.enum(INTERVIEW_STATUSES).optional().describe("Its status, if not the one above: completed, cancelled, no_show or scheduled"),
+        status: z.enum(INTERVIEW_STATUSES).optional().describe("Its status, if not the one above: completed, cancelled, no_show, or scheduled (not for an ended application's)"),
       },
       output: { interview: Interview },
       async handler(ctx, n) {
         if (n.feedback === undefined && n.rating === undefined && n.status === undefined) return nothingToChange("interview_id", n.interview_id);
-        const interview = await ctx.db.tx(async (sql) => {
-          const changed = await sql<{ id: string }>`
+        return ctx.db.tx(async (sql) => {
+          const applicationStatus = await interviewApplicationStatus(sql, n.interview_id);
+          if (applicationStatus === null) return noSuchInterview(n.interview_id);
+          if (n.status === "scheduled" && ENDED.includes(applicationStatus)) return interviewEnded(n.interview_id, applicationStatus);
+          await sql`
             UPDATE interviews SET
               feedback = CASE WHEN ${n.feedback !== undefined} THEN nullif(${n.feedback ?? null}::text, '') ELSE feedback END,
               rating = CASE WHEN ${n.rating !== undefined} THEN ${n.rating ?? null}::int ELSE rating END,
@@ -779,12 +787,9 @@ export default definePlugin({
                             WHEN status = 'scheduled' AND scheduled_at <= now() THEN 'completed'
                             ELSE status END,
               updated_at = now()
-            WHERE id = ${n.interview_id}
-            RETURNING id`;
-          return changed.length === 0 ? null : interviewOf(sql, n.interview_id);
+            WHERE id = ${n.interview_id}`;
+          return ok({ interview: (await interviewOf(sql, n.interview_id))! });
         });
-        if (!interview) return noSuchInterview(n.interview_id);
-        return ok({ interview });
       },
     }),
     get_pipeline_overview: operation({
