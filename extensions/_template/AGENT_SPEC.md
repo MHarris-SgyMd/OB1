@@ -236,7 +236,7 @@ Must follow the template at `extensions/_template/README.md`. Key sections:
 
 ### The Bun Run (CRITICAL)
 
-The README's "Run the MCP Server" step is the run every extension README has (`extensions/job-hunt/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
+The README's "Run the MCP Server" step is the run every extension README had (`extensions/job-hunt/README.md` was the model until SMD-2311 made the six extensions plugins; SMD-3747 rewrites this template): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
 
 ### SQL Setup
 

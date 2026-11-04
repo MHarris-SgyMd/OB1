@@ -96,7 +96,7 @@ PORT=8787 bun extensions/extension-name/index.ts
 http://your-host:8787/mcp?key=your-access-key
 ```
 
-Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database. `extensions/test-auth.ts` starts every extension server this way in CI, and `extensions/test-tools.ts` drives their tools against a real Postgres there.
+Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five such servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database. `extensions/test-auth.ts` starts every vendored recipe and integration server this way in CI.
 
 ## Step 5: Put It Behind HTTPS
 
@@ -138,7 +138,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the extension's `schema.sql` against that database.
 
 **`permission denied for table …`**
-- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **extensions** and **recipes** groups (`db/README.md`, "Grants for a capturing role"). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
+- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **recipes** group (`db/README.md`, "Grants for a capturing role"; **extensions** grants nothing since SMD-2311). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
 
 **The connector in Claude Desktop or ChatGPT cannot reach the server**
 - It dials from the vendor's side: the URL must be HTTPS and reachable from the internet (Step 5). A `127.0.0.1` or LAN address works only for a client on this machine or network.
@@ -150,6 +150,6 @@ One `bun` process per extension, each answering on its own port with the extensi
 
 ## Extensions That Use This
 
-- [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
+None since SMD-2311: the six extensions are plugins, on the brain's own connector with no server of their own. SMD-3747 rewrites this guide for the servers that remain.
 
 The recipe and integration servers under `recipes/` and `integrations/` run the same way; each README's run line names its file, port and environment.

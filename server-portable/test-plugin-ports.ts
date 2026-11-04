@@ -7,7 +7,8 @@
  * client of it), behind its key's scope. A read key sees and calls a
  * plugin's reads and is refused its writes, and a capture key sees none of
  * it. Each plugin's section then drives its operations as
- * extensions/test-tools.ts drove the standalone server's tools: each filter
+ * extensions/test-tools.ts drove the standalone servers' tools (until the
+ * last became a plugin, SMD-2311): each filter
  * on its own, each refusal, what a write stored and what a read chose.
  *
  * The drift guard: every tool a write key's tools/list shows for a ported
@@ -35,7 +36,7 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 /** The ported plugins, as each PR of SMD-2311 adds one: its section below drives it. */
-const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm"] as const;
+const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 
 const { assert, report } = createAssert();
@@ -1681,6 +1682,230 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
     [`INSERT INTO plugin_professional_crm.contact_interactions (contact_id, interaction_type, occurred_at, summary) VALUES ('${ids.ann}', 'call', now(), repeat('s', 5001))`, /summary_check/],
   ]);
   assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all eleven"})`);
+}
+
+// ── plugins/job-hunt ─────────────────────────────────────────────────────────
+
+console.log("\n[job-hunt] its companies, postings, applications, interviews and contacts");
+{
+  const P = "job-hunt";
+  const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
+  const scopes = scopesOf(P);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_company: "write", list_companies: "read", add_job_posting: "write", list_job_postings: "read", add_job_contact: "write",
+    search_job_contacts: "read", link_contact_to_professional_crm: "write", submit_application: "write", list_applications: "read", update_application: "write",
+    schedule_interview: "write", log_interview_notes: "write", get_pipeline_overview: "read", get_upcoming_interviews: "read" }),
+    `its fourteen operations' scopes: the six reads read, the eight writes write (${JSON.stringify(scopes)})`);
+  const routes = Object.fromEntries(Object.entries(REGISTRY.find((p) => p.name === P)!.operations).map(([k, op]) => [k, `${op.method} ${op.path}`]));
+  assert(JSON.stringify(routes) === JSON.stringify({ add_company: "POST /companies", list_companies: "GET /companies", add_job_posting: "POST /job-postings",
+    list_job_postings: "GET /job-postings", add_job_contact: "POST /job-contacts", search_job_contacts: "GET /job-contacts",
+    link_contact_to_professional_crm: "POST /job-contacts/{job_contact_id}/crm-link", submit_application: "POST /applications", list_applications: "GET /applications",
+    update_application: "PATCH /applications/{application_id}", schedule_interview: "POST /interviews", log_interview_notes: "PATCH /interviews/{interview_id}",
+    get_pipeline_overview: "GET /pipeline", get_upcoming_interviews: "GET /upcoming-interviews" }),
+    `…and their routes, as the README's table gives them (${JSON.stringify(routes)})`);
+  const CHANGES_HINT = JSON.stringify({ destructiveHint: true, openWorldHint: false });
+  const hints = await hintsOf(P);
+  const wantHint = (k: string) => (scopes[k] === "read" ? READ_HINT : ["link_contact_to_professional_crm", "update_application", "log_interview_notes"].includes(k) ? CHANGES_HINT : ADDS_HINT);
+  assert(Object.keys(hints).length === 14 && Object.entries(hints).every(([k, h]) => h === wantHint(k)),
+    `its hints, all fourteen: a change that overwrites is destructive, an add is not, a read is read-only (${JSON.stringify(hints).slice(0, 240)})`);
+
+  // Companies.
+  const acme = await c("add_company", { name: " Acme Robotics ", industry: "Robotics", website: "https://acme.example", size: "mid-market", location: "Austin, TX",
+    remote_policy: "hybrid", notes: "Warehouse automation", glassdoor_rating: 4.3 });
+  const { id: acmeId, created_at: acmeCreated, updated_at: _a1, ...acmeRest } = acme.body.company ?? {};
+  assert(acme.status === 200 && UUID.test(acmeId) && ISO.test(String(acmeCreated)) && canon(acmeRest) === canon({ name: "Acme Robotics", industry: "Robotics", website: "https://acme.example",
+    size: "mid-market", location: "Austin, TX", remote_policy: "hybrid", notes: "Warehouse automation", glassdoor_rating: 4.3 }),
+    `add_company stores every field as given, trimmed, no user_id (${String(JSON.stringify(acme.body)).slice(0, 240)})`);
+  const beta = await c("add_company", { name: "beta Labs", notes: "  " }, { door: "mcp" });
+  const zed = await c("add_company", { name: "Zed Systems", industry: "Fintech" });
+  const ids = { acme: String(acmeId), beta: String(beta.body.company?.id), zed: String(zed.body.company?.id) };
+  assert(beta.status === 200 && beta.body.company?.notes === null && beta.body.company?.size === null && zed.status === 200, "…over MCP too, a field not given or blank none");
+  const badSite = await c("add_company", { name: "x", website: "acme.example" });
+  const badRating = await c("add_company", { name: "x", glassdoor_rating: 4.35 });
+  assert(badSite.status === 400 && badRating.status === 400, `a website not a URL, and a rating of more than one decimal, are refused at 400 (${badSite.status}, ${badRating.status})`);
+  const companies = async (input: Body) => (((await c("list_companies", input)).body.companies ?? []) as { name: string }[]).map((x) => x.name).join();
+  assert((await companies({})) === "Acme Robotics,beta Labs,Zed Systems" && (await companies({ query: "robot austin" })) === "Acme Robotics" && (await companies({ query: "fin" })) === "Zed Systems"
+         && (await companies({ query: "robot fin" })) === "" && (await companies({ query: "%" })) === "",
+    "list_companies: by name in any case; a query's words each matched by part, every word needed; % as itself");
+  const companyPage = await c("list_companies", { limit: 2 });
+  assert((companyPage.body.companies as unknown[]).length === 2 && companyPage.body.truncated === true && (await c("list_companies", { limit: 3 })).body.truncated === false, "…limit applies, truncated");
+
+  // Postings.
+  const closing = await dayFromToday(10);
+  const roboPost = await c("add_job_posting", { company_id: ids.acme, title: "Robotics Engineer", url: "https://acme.example/jobs/1", salary_min: 150000, salary_max: 190000, salary_currency: "usd",
+    requirements: ["ROS", "C++", "ROS"], nice_to_haves: ["Rust"], source: "linkedin", posted_date: await dayFromToday(-5), closing_date: closing, notes: "Team of 8" });
+  const { id: roboId, created_at: _p1, ...roboRest } = roboPost.body.job_posting ?? {};
+  assert(roboPost.status === 200 && UUID.test(roboId) && canon(roboRest) === canon({ company_id: ids.acme, company: { id: ids.acme, name: "Acme Robotics" }, title: "Robotics Engineer",
+    url: "https://acme.example/jobs/1", salary_min: 150000, salary_max: 190000, salary_currency: "USD", requirements: ["ROS", "C++"], nice_to_haves: ["Rust"], notes: "Team of 8", source: "linkedin",
+    posted_date: await dayFromToday(-5), closing_date: closing }),
+    `add_job_posting stores it with its company, the currency in capitals, each requirement once (${String(JSON.stringify(roboPost.body.job_posting)).slice(0, 260)})`);
+  const closedPost = await c("add_job_posting", { company_id: ids.zed, title: "Payments Engineer", closing_date: await dayFromToday(-1), posted_date: await dayFromToday(-30) });
+  const openPost = await c("add_job_posting", { company_id: ids.beta, title: "Lab Engineer" }, { door: "mcp" });
+  const noCompany = await c("add_job_posting", { company_id: NO_ROW, title: "x" });
+  const badSalary = await c("add_job_posting", { company_id: ids.acme, title: "x", salary_min: 200, salary_max: 100 });
+  const badDates = await c("add_job_posting", { company_id: ids.acme, title: "x", posted_date: await dayFromToday(0), closing_date: await dayFromToday(-1) });
+  assert(closedPost.status === 200 && openPost.body.job_posting?.salary_currency === "USD" && JSON.stringify(openPost.body.job_posting?.requirements) === "[]"
+         && noCompany.status === 404 && noCompany.body.code === "NO_SUCH_COMPANY" && /list_companies/.test(String(noCompany.body.message))
+         && badSalary.status === 422 && badSalary.body.code === "BAD_SALARY" && badDates.status === 422 && badDates.body.code === "BAD_DATES",
+    `…USD unless given; a company that is not there 404 NO_SUCH_COMPANY; a minimum above the maximum 422 BAD_SALARY; a closing before the posting 422 BAD_DATES (${noCompany.status}, ${badSalary.status}, ${badDates.status})`);
+  const postIds = { robo: String(roboId), closed: String(closedPost.body.job_posting?.id), open: String(openPost.body.job_posting?.id) };
+  const titles = async (input: Body) => (((await c("list_job_postings", input)).body.job_postings ?? []) as { title: string }[]).map((x) => x.title).join();
+  assert((await titles({})) === "Lab Engineer,Payments Engineer,Robotics Engineer" && (await titles({ company_id: ids.acme })) === "Robotics Engineer"
+         && (await titles({ query: "ros acme" })) === "Robotics Engineer" && (await titles({ open: true })) === "Lab Engineer,Robotics Engineer" && (await titles({ open: false })) === "Payments Engineer"
+         && (await titles({ open: true, today: await dayFromToday(1) })) === "Lab Engineer,Robotics Engineer" && (await titles({ query: "engineer", company_id: ids.zed })) === "Payments Engineer",
+    "list_job_postings: newest first; a company's; words across title, company and requirements; open ones (closing today or later, or never) and closed ones; filters together");
+  const postPage = await c("list_job_postings", { limit: 2 });
+  assert((postPage.body.job_postings as unknown[]).length === 2 && postPage.body.truncated === true && (await c("list_job_postings", { limit: 3 })).body.truncated === false, "…limit applies, truncated");
+
+  // Job contacts.
+  const rita = await c("add_job_contact", { company_id: ids.acme, name: "Rita Moreno", title: "Technical Recruiter", email: "rita@acme.example", role_in_process: "recruiter",
+    linkedin_url: "https://www.linkedin.com/in/rita", notes: "Prefers email", last_contacted: new Date(Date.now() - 86_400_000).toISOString() });
+  const { id: ritaId, created_at: _j1, updated_at: _j2, last_contacted: ritaLast, ...ritaRest } = rita.body.job_contact ?? {};
+  assert(rita.status === 200 && UUID.test(ritaId) && ISO.test(String(ritaLast)) && canon(ritaRest) === canon({ company_id: ids.acme, company: { id: ids.acme, name: "Acme Robotics" }, name: "Rita Moreno",
+    title: "Technical Recruiter", email: "rita@acme.example", phone: null, linkedin_url: "https://www.linkedin.com/in/rita", role_in_process: "recruiter", professional_crm_contact_id: null, notes: "Prefers email" }),
+    `add_job_contact stores them with their company, unlinked (${String(JSON.stringify(rita.body.job_contact)).slice(0, 260)})`);
+  const omar = await c("add_job_contact", { name: "Omar Haddad", role_in_process: "referral", notes: "college friend" });
+  const hana = await c("add_job_contact", { company_id: ids.zed, name: "hana Kim", role_in_process: "hiring_manager" });
+  const noContactCompany = await c("add_job_contact", { company_id: NO_ROW, name: "x" });
+  const futureContact = await c("add_job_contact", { name: "x", last_contacted: new Date(Date.now() + 2 * 86_400_000).toISOString() });
+  assert(omar.body.job_contact?.company === null && hana.status === 200 && noContactCompany.status === 404 && noContactCompany.body.code === "NO_SUCH_COMPANY"
+         && futureContact.status === 422 && futureContact.body.code === "FUTURE_DATE",
+    `…with no company, the company null; a company that is not there 404; a last contact two days ahead 422 FUTURE_DATE (${noContactCompany.status}, ${futureContact.status})`);
+  const people = async (input: Body) => (((await c("search_job_contacts", input)).body.contacts ?? []) as { name: string }[]).map((x) => x.name).join();
+  assert((await people({})) === "hana Kim,Omar Haddad,Rita Moreno" && (await people({ query: "acme" })) === "Rita Moreno" && (await people({ query: "college" })) === "Omar Haddad"
+         && (await people({ role_in_process: "hiring_manager" })) === "hana Kim" && (await people({ company_id: ids.zed })) === "hana Kim" && (await people({ query: "recruiter rita" })) === "Rita Moreno",
+    "search_job_contacts: by name in any case; words across name, title, notes, role and the company's name; a role; a company's");
+  const contactPage = await c("search_job_contacts", { limit: 2 });
+  assert((contactPage.body.contacts as unknown[]).length === 2 && contactPage.body.truncated === true && (await c("search_job_contacts", { limit: 3 })).body.truncated === false, "…limit applies, truncated");
+
+  // The link to the professional CRM, in two steps: the CRM's own add, then the id recorded here.
+  const crmRita = await call("professional-crm", "add_contact", { name: "Rita Moreno", company: "Acme Robotics", title: "Technical Recruiter", email: "rita@acme.example",
+    how_we_met: "Job search: recruiter", tags: ["job-hunt", "recruiter"] });
+  const crmId = String(crmRita.body.contact?.id);
+  const linked = await c("link_contact_to_professional_crm", { job_contact_id: String(ritaId), professional_crm_contact_id: crmId });
+  const again = await c("link_contact_to_professional_crm", { job_contact_id: String(ritaId), professional_crm_contact_id: crmId }, { door: "mcp" });
+  const other = await c("link_contact_to_professional_crm", { job_contact_id: String(ritaId), professional_crm_contact_id: NO_ROW });
+  assert(crmRita.status === 200 && linked.status === 200 && linked.body.already_linked === false && linked.body.job_contact?.professional_crm_contact_id === crmId
+         && again.status === 200 && again.body.already_linked === true && other.status === 409 && other.body.code === "ALREADY_LINKED" && other.body.professional_crm_contact_id === crmId,
+    `link_contact_to_professional_crm records the CRM contact's id; the same id again is already_linked; another is refused (409 ALREADY_LINKED, naming the one held) (${linked.status}, ${again.status}, ${other.status})`);
+  assert((await people({ only_unlinked: true })) === "hana Kim,Omar Haddad", "…and search_job_contacts' only_unlinked leaves the linked one out");
+  const unlinked = await c("link_contact_to_professional_crm", { job_contact_id: String(ritaId), professional_crm_contact_id: null });
+  const relinked = await c("link_contact_to_professional_crm", { job_contact_id: String(ritaId), professional_crm_contact_id: NO_ROW });
+  const noJobContact = await c("link_contact_to_professional_crm", { job_contact_id: NO_ROW, professional_crm_contact_id: crmId });
+  assert(unlinked.body.job_contact?.professional_crm_contact_id === null && relinked.body.job_contact?.professional_crm_contact_id === NO_ROW
+         && noJobContact.status === 404 && noJobContact.body.code === "NO_SUCH_JOB_CONTACT",
+    "…null unlinks, after which another id is taken (unchecked: the CRM is another plugin's); a job contact that is not there 404 NO_SUCH_JOB_CONTACT");
+
+  // Applications.
+  const applied = await c("submit_application", { job_posting_id: postIds.robo, resume_version: "v3", referral_contact: "Omar Haddad", notes: "Strong fit" });
+  const { id: appId, created_at: _ap1, updated_at: appUpdated, ...appRest } = applied.body.application ?? {};
+  assert(applied.status === 200 && UUID.test(appId) && canon(appRest) === canon({ job_posting_id: postIds.robo, posting: { id: postIds.robo, title: "Robotics Engineer" }, company: { id: ids.acme, name: "Acme Robotics" },
+    status: "applied", applied_date: utcToday, response_date: null, resume_version: "v3", cover_letter_notes: null, referral_contact: "Omar Haddad", notes: "Strong fit" }),
+    `submit_application stores it, applied and dated today unless given, with its posting and company (${String(JSON.stringify(applied.body.application)).slice(0, 260)})`);
+  const draft = await c("submit_application", { job_posting_id: postIds.open, status: "draft" });
+  const earlier = await c("submit_application", { job_posting_id: postIds.closed, applied_date: await dayFromToday(-20), today: await dayFromToday(1) }, { door: "mcp" });
+  const userDay = await c("submit_application", { job_posting_id: postIds.open, status: "screening", today: await dayFromToday(-1) });
+  const futureApp = await c("submit_application", { job_posting_id: postIds.open, applied_date: await dayFromToday(2) });
+  const noPosting = await c("submit_application", { job_posting_id: NO_ROW });
+  assert(draft.body.application?.applied_date === null && earlier.body.application?.applied_date === (await dayFromToday(-20)) && userDay.body.application?.applied_date === (await dayFromToday(-1))
+         && futureApp.status === 422 && futureApp.body.code === "FUTURE_DATE" && noPosting.status === 404 && noPosting.body.code === "NO_SUCH_POSTING",
+    `…a draft undated; a day given kept; the default the user's today; a day after today 422 FUTURE_DATE; a posting that is not there 404 NO_SUCH_POSTING (${futureApp.status}, ${noPosting.status})`);
+  const appIds = { robo: String(appId), draft: String(draft.body.application?.id), earlier: String(earlier.body.application?.id), user: String(userDay.body.application?.id) };
+  const apps = async (input: Body) => (((await c("list_applications", input)).body.applications ?? []) as { posting: { title: string }; status: string }[]).map((x) => `${x.posting.title}:${x.status}`).join();
+  assert((await apps({})) === "Robotics Engineer:applied,Lab Engineer:screening,Payments Engineer:applied,Lab Engineer:draft" && (await apps({ status: "draft" })) === "Lab Engineer:draft"
+         && (await apps({ company_id: ids.beta })) === "Lab Engineer:screening,Lab Engineer:draft" && (await apps({ job_posting_id: postIds.closed })) === "Payments Engineer:applied",
+    "list_applications: the latest applied first, the undated last; a status; a company's; a posting's");
+  const appPage = await c("list_applications", { limit: 3 });
+  assert((appPage.body.applications as unknown[]).length === 3 && appPage.body.truncated === true && (await c("list_applications", { limit: 4 })).body.truncated === false, "…limit applies, truncated");
+  const moved = await c("update_application", { application_id: appIds.robo, status: "screening", response_date: utcToday });
+  assert(moved.status === 200 && moved.body.application?.status === "screening" && moved.body.application?.response_date === utcToday && moved.body.application?.resume_version === "v3"
+         && moved.body.application?.applied_date === utcToday && String(moved.body.application?.updated_at) > String(appUpdated),
+    `update_application moves it on, leaves the rest, and moves updated_at (${String(JSON.stringify(moved.body.application)).slice(0, 200)})`);
+  const cleared = await c("update_application", { application_id: appIds.robo, referral_contact: null, notes: null });
+  const notesAlone = await c("update_application", { application_id: appIds.draft, notes: "Need a portfolio first" });
+  const futureResponse = await c("update_application", { application_id: appIds.robo, response_date: await dayFromToday(3) });
+  const nothing = await c("update_application", { application_id: appIds.robo });
+  const noApp = await c("update_application", { application_id: NO_ROW, status: "rejected" });
+  assert(cleared.body.application?.referral_contact === null && cleared.body.application?.notes === null && cleared.body.application?.status === "screening" && notesAlone.body.application?.notes === "Need a portfolio first"
+         && futureResponse.status === 422 && futureResponse.body.code === "FUTURE_DATE" && nothing.status === 422 && nothing.body.code === "NOTHING_TO_CHANGE"
+         && noApp.status === 404 && noApp.body.code === "NO_SUCH_APPLICATION",
+    `…null clears; notes alone are a change; a day after today 422 FUTURE_DATE; no field 422 NOTHING_TO_CHANGE; one that is not there 404 NO_SUCH_APPLICATION (${futureResponse.status}, ${nothing.status}, ${noApp.status})`);
+
+  // Interviews.
+  const hours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString();
+  const soon = await c("schedule_interview", { application_id: appIds.robo, interview_type: "phone_screen", scheduled_at: hours(2), duration_minutes: 30, interviewer_name: "Rita Moreno", interviewer_title: "Recruiter", notes: "Ask about the team" });
+  const { id: soonId, created_at: _i1, updated_at: _i2, scheduled_at: soonAt, ...soonRest } = soon.body.interview ?? {};
+  assert(soon.status === 200 && UUID.test(soonId) && ISO.test(String(soonAt)) && canon(soonRest) === canon({ application_id: appIds.robo, application: { id: appIds.robo, status: "screening" },
+    posting: { id: postIds.robo, title: "Robotics Engineer" }, company: { id: ids.acme, name: "Acme Robotics" }, interview_type: "phone_screen", duration_minutes: 30, interviewer_name: "Rita Moreno",
+    interviewer_title: "Recruiter", status: "scheduled", notes: "Ask about the team", feedback: null, rating: null }),
+    `schedule_interview stores it, scheduled, with its application, posting and company (${String(JSON.stringify(soon.body.interview)).slice(0, 260)})`);
+  const later = await c("schedule_interview", { application_id: appIds.robo, interview_type: "technical", scheduled_at: hours(72) });
+  const farOff = await c("schedule_interview", { application_id: appIds.user, interview_type: "team", scheduled_at: hours(24 * 20) });
+  const past = await c("schedule_interview", { application_id: appIds.earlier, interview_type: "behavioral", scheduled_at: hours(-3) }, { door: "mcp" });
+  const undated = await c("schedule_interview", { application_id: appIds.user, interview_type: "final" });
+  const noInterviewApp = await c("schedule_interview", { application_id: NO_ROW, interview_type: "final" });
+  assert(later.status === 200 && farOff.status === 200 && past.status === 200 && undated.body.interview?.scheduled_at === null && noInterviewApp.status === 404 && noInterviewApp.body.code === "NO_SUCH_APPLICATION",
+    `…undated, scheduled_at null; an application that is not there 404 NO_SUCH_APPLICATION (${noInterviewApp.status})`);
+  const ahead = async (input: Body) => (((await c("get_upcoming_interviews", input)).body.interviews ?? []) as { interview_type: string }[]).map((x) => x.interview_type).join();
+  assert((await ahead({})) === "phone_screen,technical" && (await ahead({ days_ahead: 30 })) === "phone_screen,technical,team" && (await ahead({ days_ahead: 0 })) === "",
+    "get_upcoming_interviews: the scheduled ones from now to fourteen days on by default, the soonest first; thirty days takes the one in twenty; 0 days, none (the past and the undated never)");
+  const aheadPage = await c("get_upcoming_interviews", { limit: 1 });
+  assert((aheadPage.body.interviews as unknown[]).length === 1 && aheadPage.body.truncated === true && (await c("get_upcoming_interviews", { limit: 2 })).body.truncated === false, "…limit applies, truncated");
+  const overview = await c("get_pipeline_overview", {});
+  const ob = overview.body;
+  assert(overview.status === 200 && ob.total_applications === 4 && JSON.stringify(ob.status_breakdown) === JSON.stringify({ draft: 1, applied: 1, screening: 2, interviewing: 0, offer: 0, accepted: 0, rejected: 0, withdrawn: 0 })
+         && ((ob.upcoming_interviews ?? []) as { interview_type: string }[]).map((x) => x.interview_type).join() === "phone_screen,technical" && ob.upcoming_count === 2
+         && ((ob.awaiting_notes ?? []) as { interview_type: string }[]).map((x) => x.interview_type).join() === "behavioral" && ob.awaiting_notes_count === 1 && ob.truncated === false,
+    `get_pipeline_overview: every application counted, each status (none as 0), the week's interviews, and the past one awaiting notes (${String(JSON.stringify(ob)).slice(0, 260)})`);
+  const overviewCut = await c("get_pipeline_overview", { days_ahead: 30, limit: 2 });
+  assert(overviewCut.body.upcoming_count === 3 && (overviewCut.body.upcoming_interviews as unknown[]).length === 2 && overviewCut.body.truncated === true, "…the counts all of them, the lists cut at limit, truncated");
+  const logged = await c("log_interview_notes", { interview_id: String(past.body.interview?.id), feedback: "Went well", rating: 4 });
+  const relogged = await c("log_interview_notes", { interview_id: String(past.body.interview?.id), rating: null });
+  const cancelled = await c("log_interview_notes", { interview_id: String(later.body.interview?.id), status: "cancelled" });
+  const noInterview = await c("log_interview_notes", { interview_id: NO_ROW, feedback: "x" });
+  assert(logged.body.interview?.status === "completed" && logged.body.interview?.feedback === "Went well" && logged.body.interview?.rating === 4
+         && relogged.body.interview?.feedback === "Went well" && relogged.body.interview?.rating === null && cancelled.body.interview?.status === "cancelled" && cancelled.body.interview?.feedback === null
+         && noInterview.status === 404 && noInterview.body.code === "NO_SUCH_INTERVIEW",
+    "log_interview_notes: completed unless given, feedback and rating stored; a field left out kept (the old tool wiped them), null cleared; cancelled; one that is not there 404 NO_SUCH_INTERVIEW");
+  const after = (await c("get_pipeline_overview", {})).body;
+  assert(after.awaiting_notes_count === 0 && after.upcoming_count === 1, "…and the pipeline follows: nothing awaiting notes, the cancelled one no longer upcoming");
+
+  const missed = await outOfBounds(c, [
+    ["a company name of 201 characters", "add_company", { name: "x".repeat(201) }], ["an empty company name", "add_company", { name: " " }], ["a NUL in a name", "add_company", { name: "x\u0000" }],
+    ["a size of huge", "add_company", { name: "x", size: "huge" }], ["a remote policy of sometimes", "add_company", { name: "x", remote_policy: "sometimes" }],
+    ["a rating of 5.1", "add_company", { name: "x", glassdoor_rating: 5.1 }], ["a rating of 0.9", "add_company", { name: "x", glassdoor_rating: 0.9 }],
+    ["a javascript: website", "add_company", { name: "x", website: "javascript:alert(1)" }], ["a company limit of 201", "list_companies", { limit: 201 }],
+    ["a company id that is no uuid", "add_job_posting", { company_id: "acme", title: "x" }], ["a salary below nothing", "add_job_posting", { company_id: NO_ROW, title: "x", salary_min: -1 }],
+    ["a currency of four letters", "add_job_posting", { company_id: NO_ROW, title: "x", salary_currency: "USDT" }], ["a source of twitter", "add_job_posting", { company_id: NO_ROW, title: "x", source: "twitter" }],
+    ["51 requirements", "add_job_posting", { company_id: NO_ROW, title: "x", requirements: Array.from({ length: 51 }, (_, i) => `r${i}`) }],
+    ["a closing day of 30 February", "add_job_posting", { company_id: NO_ROW, title: "x", closing_date: "2026-02-30" }],
+    ["a today a week off", "list_job_postings", { today: await dayFromToday(7) }], ["a role of boss", "add_job_contact", { name: "x", role_in_process: "boss" }],
+    ["an email not in its form", "add_job_contact", { name: "x", email: "rita at acme" }], ["a profile not a URL", "add_job_contact", { name: "x", linkedin_url: "linkedin.com/in/x" }],
+    ["a last contact with no offset", "add_job_contact", { name: "x", last_contacted: "2026-01-01T10:00:00" }], ["a CRM id that is no uuid", "link_contact_to_professional_crm", { job_contact_id: NO_ROW, professional_crm_contact_id: "crm" }],
+    ["no CRM id at all", "link_contact_to_professional_crm", { job_contact_id: NO_ROW }], ["a status of ghosted", "submit_application", { job_posting_id: NO_ROW, status: "ghosted" }],
+    ["an application limit of 201", "list_applications", { limit: 201 }], ["an interview type of lunch", "schedule_interview", { application_id: NO_ROW, interview_type: "lunch" }],
+    ["a duration of 1441 minutes", "schedule_interview", { application_id: NO_ROW, interview_type: "final", duration_minutes: 1441 }],
+    ["a rating of 6", "log_interview_notes", { interview_id: NO_ROW, rating: 6 }], ["an interview status of postponed", "log_interview_notes", { interview_id: NO_ROW, status: "postponed" }],
+    ["days ahead of 366", "get_upcoming_interviews", { days_ahead: 366 }], ["a pipeline limit of 201", "get_pipeline_overview", { limit: 201 }],
+  ]);
+  assert(missed.length === 0, `each input out of its bounds is refused at 400, before the database (not: ${missed.join("; ") || "none"})`);
+  const strays = await one<{ n: number }>(sql`SELECT (SELECT count(*) FROM plugin_job_hunt.companies WHERE name = 'x') + (SELECT count(*) FROM plugin_job_hunt.job_postings WHERE title = 'x')
+    + (SELECT count(*) FROM plugin_job_hunt.job_contacts WHERE name = 'x') AS n`);
+  assert(Number(strays.n) === 0, "none of them stored a row");
+  const misses = await tableMisses([
+    ["INSERT INTO plugin_job_hunt.companies (name) VALUES ('')", /name_check/],
+    ["INSERT INTO plugin_job_hunt.companies (name, size) VALUES ('t', 'huge')", /size_check/],
+    ["INSERT INTO plugin_job_hunt.companies (name, glassdoor_rating) VALUES ('t', 5.5)", /glassdoor_rating_check/],
+    [`INSERT INTO plugin_job_hunt.job_postings (company_id, title) VALUES ('${NO_ROW}', 't')`, /foreign key/],
+    [`INSERT INTO plugin_job_hunt.job_postings (company_id, title, salary_min, salary_max) VALUES ('${ids.acme}', 't', 200, 100)`, /job_postings_salary_range/],
+    [`INSERT INTO plugin_job_hunt.job_postings (company_id, title, posted_date, closing_date) VALUES ('${ids.acme}', 't', '2026-02-02', '2026-02-01')`, /job_postings_dates/],
+    [`INSERT INTO plugin_job_hunt.job_postings (company_id, title, salary_currency) VALUES ('${ids.acme}', 't', 'usd')`, /salary_currency_check/],
+    [`INSERT INTO plugin_job_hunt.applications (job_posting_id, status) VALUES ('${postIds.robo}', 'ghosted')`, /status_check/],
+    [`INSERT INTO plugin_job_hunt.interviews (application_id, interview_type) VALUES ('${appIds.robo}', 'lunch')`, /interview_type_check/],
+    [`INSERT INTO plugin_job_hunt.interviews (application_id, interview_type, rating) VALUES ('${appIds.robo}', 'final', 6)`, /rating_check/],
+    [`INSERT INTO plugin_job_hunt.job_contacts (name, role_in_process) VALUES ('t', 'boss')`, /role_in_process_check/],
+    [`INSERT INTO plugin_job_hunt.job_contacts (name, company_id) VALUES ('t', '${NO_ROW}')`, /foreign key/],
+  ]);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all twelve"})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

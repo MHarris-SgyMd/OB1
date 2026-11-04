@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
  * test-auth.ts — every vendored server authenticates through the core server's
- * auth path: the extension servers (SMD-1252, FORK.md change 64; two of the
- * seven, four plugins since SMD-2311 and meal-planning's shared server
- * retired with them) and the
+ * auth path: the extension servers did (SMD-1252, FORK.md change 64) until
+ * SMD-2311 made the six plugins and retired meal-planning's shared server, and
+ * the
  * recipes and integrations that compared a key the same way — six more MCP
  * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
  * change 67).
@@ -69,6 +69,9 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey, listenOn } from "./_shared/auth.ts";
 import { abandonedRequestLine, mcpReply, SSE_KEEPALIVE_MS, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
+import { Hono } from "hono";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPTransport } from "@hono/mcp";
 import { askRaw, createAssert, leaveMidUpload, pendingSettled, secondLoopback, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -139,8 +142,6 @@ type Server = {
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
 const PG_REFUSED = "postgres://ob1:stub@127.0.0.1:1/ob1";
-const ext = (file: string, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
-  ({ file: `extensions/${file}`, kind: "mcp", keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
 const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
   ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
 // To add a server: one entry below — `url` PG_REFUSED when a handler queries
@@ -154,10 +155,9 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
 const SERVERS: Server[] = [
-  // The extension servers (change 64): one of the seven, job-hunt's; five are plugins since SMD-2311, and meal-planning's shared server retired with them.
-  ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
-    ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
-     "log_interview_notes", "link_contact_to_professional_crm"], { health: "/" }),
+  // The extension servers (change 64) are gone: the six are plugins since SMD-2311, served by the brain itself, and
+  // meal-planning's shared server retired with them. No vendored MCP server is left; SMD-3747 retires the mcp kind and
+  // _shared/sse.ts, and settles where this suite belongs.
   // The recipes and integrations (change 67).
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
@@ -205,7 +205,6 @@ for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.
 for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
-process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.MCP_ACCESS_KEYS = KEYS;
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
@@ -514,10 +513,24 @@ console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive 
 // ── mcpReply's edges ─────────────────────────────────────────────────────────
 //
 // What passes untouched, a client gone before the call or mid-upload (at an
-// extension server's real route and transport), the line at the ceiling and
+// MCP server's real route and transport), the line at the ceiling and
 // mcpReply's wiring of it, and the real transport's answer the slow probe's
-// stand-in copies.
-const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/job-hunt/index.ts")!;
+// stand-in copies. The route and transport were the last extension server's,
+// job-hunt's, until it became a plugin (SMD-2311 PR 4b): now they are a minimal
+// MCP server built here of the SDK's own packages from this install, as a
+// vendored server built it — hono, @hono/mcp's transport, the reply through
+// mcpReply — with one tool.
+const realMcp = (req: Request): Response | Promise<Response> => {
+  const app = new Hono();
+  app.post("*", async (c) => {
+    const server = new McpServer({ name: "stand-in", version: "0.0.0" });
+    server.tool("noop", "Answers nothing", {}, async () => ({ content: [] }));
+    const transport = new StreamableHTTPTransport();
+    await server.connect(transport);
+    return mcpReply(c, () => transport.handleRequest(c));
+  });
+  return app.fetch(req);
+};
 {
   // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
   const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
@@ -543,14 +556,12 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/job-hunt/index.ts"
     const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
     assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
       `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
-    // A client that leaves mid-upload (review passes 3 and 4), at job-hunt's real route and
+    // A client that leaves mid-upload (review passes 3 and 4), at a real MCP route and
     // transport: logged once. On Bun 1.4.0 the signal aborts before the body read rejects (20 of 20
     // measured), so the listener registered before the read is what logs it; a read that failed first
     // would reach the transport's 400, which settles the request, and the abort after it would log nothing.
     warned.length = 0;
-    env(MID_UPLOAD, KEYS);
-    const host = handlers[SERVERS.indexOf(MID_UPLOAD)];
-    const upload = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => host(req) });
+    const upload = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => realMcp(req) });
     try {
       await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream", `x-access-key: ${READ_KEY}`], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
       const pending = await pendingSettled(upload);
@@ -574,10 +585,9 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/job-hunt/index.ts"
       "mcpReply hands its stream to withSseKeepalive with the vendored line for the ceiling");
     // The stand-in the slow probe above serves is the real transport's shape (review pass 2): a
     // vendored server's POST is answered on an event stream, which is what mcpReply keeps alive.
-    const real = await handlers[SERVERS.indexOf(MID_UPLOAD)](new Request("http://extension.test/mcp",
-      { method: "POST", headers: { ...RPC, "x-access-key": READ_KEY }, body: JSON.stringify(LIST) }));
+    const real = await realMcp(new Request("http://extension.test/mcp", { method: "POST", headers: RPC, body: JSON.stringify(LIST) }));
     assert(real.status === 200 && /^text\/event-stream\b/.test(real.headers.get("content-type") ?? ""),
-      `${MID_UPLOAD.file} answers a POST on an event stream, as the slow probe's stand-in does (${real.status}, ${real.headers.get("content-type")})`);
+      `the SDK's own transport answers a POST on an event stream, as the slow probe's stand-in does (${real.status}, ${real.headers.get("content-type")})`);
     await real.text();
   } finally {
     console.warn = realWarn;
@@ -842,24 +852,29 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
   }
 }
 {
-  const s = SERVERS[0];
-  env(s, KEYS);
   // Every form presented is tried: a gateway's own token in Authorization, or a
   // stale header a client keeps sending, does not shadow the key the client means.
-  assert(toolsOf(await call(s, READ_KEY, LIST, "query", { bearer: "eyJ.a.gateway-jwt" })).join() === [...s.reads].sort().join(),
-    "a gateway's bearer token beside a right ?key= does not shadow it");
-  assert(toolsOf(await call(s, WRITE_KEY, LIST, "x-access-key", { "x-brain-key": "stale" })).join() === [...s.reads, ...s.writes].sort().join(),
-    "a wrong x-brain-key beside a right x-access-key does not shadow it");
-  assert((await call(s, "wrong-one", LIST, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
+  // Asked of the first HTTP API, at its read probe and its first write route: the
+  // checks were the last extension server's, an MCP one, until it became a plugin
+  // (SMD-2311 PR 4b), and the auth module is the same byte copy behind every
+  // vendored server. Past the gate is the assertion: the handler's own answer
+  // after it (a refused database here) is no refusal of the key.
+  const s = SERVERS.find((x) => x.kind === "rest")!;
+  env(s, KEYS);
+  const at = (route: string, key: string | null, via: Via, also: Partial<Record<Via, string>>, accept = true) => {
+    const [method, path] = route.split(" ");
+    return request(s, key, via, also, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, accept });
+  };
+  assert(passed(await at(s.readProbe!, READ_KEY, "query", { bearer: "eyJ.a.gateway-jwt" })),
+    `${s.file}: a gateway's bearer token beside a right ?key= does not shadow it`);
+  assert(passed(await at(s.writes[0], WRITE_KEY, "x-access-key", { "x-brain-key": "stale" })),
+    `${s.file}: a wrong x-brain-key beside a right x-access-key does not shadow it (${s.writes[0]}, a write, passes the gate)`);
+  assert((await at(s.readProbe!, "wrong-one", "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
     "three wrong forms are three refusals, not one acceptance");
-  // Claude Desktop's connectors may send no Accept header. Until change 84 the
-  // servers patched one in by replacing c.req.raw before the key was read from
-  // it; now the transport takes none as */* and the key is read from the request
-  // as it came — either way, ?key= on a bare request authenticates.
-  assert(toolsOf(await call(s, READ_KEY, LIST, "query", {}, false)).join() === [...s.reads].sort().join(),
-    "a request without an Accept header still authenticates from ?key=");
-  assert((await call(s, "not-a-key", LIST, "x-access-key", {}, false)).status === 401,
-    "…and is still refused with a wrong key");
+  // Claude Desktop's connectors may send no Accept header (change 84): the key is
+  // read from the request as it came, so ?key= on a bare request authenticates.
+  assert(passed(await at(s.readProbe!, READ_KEY, "query", {}, false)), "a request without an Accept header still authenticates from ?key=");
+  assert((await at(s.readProbe!, "not-a-key", "x-access-key", {}, false)).status === 401, "…and is still refused with a wrong key");
 }
 for (const s of SERVERS.filter((s) => s.health)) {
   const health = await handlers[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));

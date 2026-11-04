@@ -1394,15 +1394,13 @@ export const CONTRIB_DIR = join(HERE, "..");
  * variables), a pg_cron line, two helper functions, a column added to
  * entity-extraction's table and a Neon build of `thoughts` itself, none of
  * which a brain applies as a schema over the migrations; lint-sweep's
- * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` is here ([50]
- * checks), and the order among them is free — no file references another's
+ * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` would be here ([50]
+ * checks; none is left since SMD-2311 made the six plugins), and the order among them is free — no file references another's
  * table — but ops-views.sql reads columns enhanced-thoughts adds to `thoughts`,
  * and its three guarded views exist only over smart-ingest's and
  * entity-extraction's tables, so the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
-  "extensions/job-hunt/schema.sql",
-  "extensions/professional-crm/schema.sql",
   "recipes/adaptive-capture-classification/schema.sql",
   "recipes/brain-health-monitoring/ops-views.sql",
   "recipes/chatgpt-conversation-import/schema.sql",

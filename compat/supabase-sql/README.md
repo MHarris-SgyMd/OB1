@@ -79,9 +79,6 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun --no-install extensions/job-hunt/index.ts                 # an extension
-
-SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
 PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
 ```
 
@@ -118,10 +115,7 @@ cd compat/supabase-sql && bun run test
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page has
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-tools.ts` then drives every tool of the one MCP server with
-a schema of its own — job-hunt, the last extension, ten tools since five
-became plugins (SMD-2311) — against those
-schemas, and `extensions/test-writes.ts` the servers
+`extensions/test-writes.ts` then drives the servers
 that need the model provider stubbed (agent-memory-api's nine routes,
 the two consolidation workers, smart-ingest): the migrated
 files this shim is judged by.
@@ -336,14 +330,13 @@ development — the test caught it.
   need live credentials — Gmail, Slack, Readwise. The shim is tested; each
   migrated file is verified to parse; `extensions/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
-  filters on a JSON path, found the two gaps change 73 closed); and
-  `extensions/test-tools.ts` drives every tool of the one MCP server with a
-  schema of its own — ten tools, since SMD-2920 retired ob-graph's ten and
-  SMD-2311 made five extensions plugins — against those
-  schemas (change 74's review had found seven of the first twenty-nine
-  failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
-  four embedded selects the codemod's blocker regex let through — and driving
-  every argument branch found two more; change 77 closed them all). Exercise
+  filters on a JSON path, found the two gaps change 73 closed). Until the
+  last extension became a plugin (SMD-2311), `extensions/test-tools.ts` drove
+  every extension tool on the shim too (change 74's review had found seven of
+  the first twenty-nine failing on it — no `.not()`, a JavaScript array bound
+  as its `String()`, four embedded selects the codemod's blocker regex let
+  through — and driving every argument branch found two more; change 77
+  closed them all). Exercise
   the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
@@ -357,6 +350,5 @@ development — the test caught it.
 ## Related
 
 - `../../scripts/migrate-to-sql-shim.ts` — the codemod
-- `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against

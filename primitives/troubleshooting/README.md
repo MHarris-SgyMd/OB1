@@ -53,7 +53,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
 **"permission denied"**
-- The role in `SUPABASE_URL` needs grants on the extension's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the extension and recipe tables too — the **extensions** and **recipes** groups (`db/README.md`, "Grants for a capturing role"). The schemas grant nothing themselves; a role that owns the tables needs nothing
+- The role in `SUPABASE_URL` needs grants on the recipe's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the recipe tables too — the **recipes** group (`db/README.md`, "Grants for a capturing role"). An extension's tables are its plugin's since SMD-2311, under the plugin's own role. The schemas grant nothing themselves; a role that owns the tables needs nothing
 - Check that `user_id` values are valid UUIDs
 
 **"Foreign key violation" errors**
@@ -102,4 +102,4 @@ All extensions reference this guide for common issues:
 - [Family Calendar](../../extensions/family-calendar/) (Extension 3, a plugin since SMD-2311)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4, a plugin since SMD-2311)
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5, a plugin since SMD-2311)
-- [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
+- [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6, a plugin since SMD-2311)

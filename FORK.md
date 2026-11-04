@@ -702,7 +702,7 @@ evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
 scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
-<7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
+<7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated); deleted by SMD-2311
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
 extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
@@ -719,7 +719,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim); deleted by SMD-1799 (the servers are Bun-native)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it); the line went with SMD-1799
-extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
+extensions/test-tools.ts         # change 77 (new file — every extension tool on the shim, against Postgres); deleted by SMD-2311
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)

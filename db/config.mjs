@@ -2688,28 +2688,13 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
-  // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): two of the six files, job-hunt's and
-  // professional-crm's, whose tables job-hunt's link writes into until it is a
-  // plugin too (SMD-2311 PR 4b). The professional CRM and the other four are
-  // plugins since SMD-2311, their tables in their own schemas under their own
-  // roles.
-  // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
-  // granted nothing — Supabase's default privileges carried its service role;
-  // the policies are gone, and this group is what a role other than the
-  // tables' owner needs. Every id is a uuid, so no sequence rows; no function
-  // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
-  // both).
-  extensions: Object.freeze([
-    Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "companies",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "job_postings",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "applications",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "interviews",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-    Object.freeze({ table: "job_contacts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
-  ]),
+  // The learning path's extensions/*/schema.sql granted here until SMD-2311
+  // made the six extensions plugins, their tables in their own schemas under
+  // their own roles (the plugin migrator's, not --grant's). The name stays one
+  // --groups accepts, granting nothing, so a script that names it still runs:
+  // dropping a name the ob1-migrate image accepts is a major, so it goes at
+  // the next major after (decided 2026-10-26; FORK.md, "Versioning").
+  extensions: Object.freeze([]),
   // The recipe SQL files a brain applies as a schema — six files creating
   // tables or views, applied by hand as each README says (SMD-1810; the list
   // is test-support's CONTRIB_SCHEMA_FILES). Upstream granted most of these
