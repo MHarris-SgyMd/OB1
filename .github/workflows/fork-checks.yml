@@ -151,8 +151,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40, 44 and 48 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the edge proxy, and the checker's own check numbers
+      # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -606,7 +606,7 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # extensions (change 64; two of the seven servers, four plugins since SMD-2311 and one retired) and the recipes' and integrations' MCP
+      # extensions (change 64; one of the seven servers, five plugins since SMD-2311 and one retired) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. One MCP stack across the
       # tree's installs — the test fails if server-portable's or mcp-server's
@@ -1430,7 +1430,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the two servers on the SQL shim, called through
+      # Every tool of the one server on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this
@@ -1843,7 +1843,7 @@ jobs:
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           # concat_ws skips the null in_s: held for a recreate, no next try.
           [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
-          held_case quiet sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held_case rescan sleep "sleep: OB1_SLEEP_RESCAN ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_RESCAN=--status
           held_case poll sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
           held_case workers sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
           held_case poll61 sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
@@ -1853,11 +1853,12 @@ jobs:
           held_case dumpdir sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-3476: the dump volume is handed to sleep's own user, which can write there.
           held_case dumpvol sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps
-          # SMD-2679: the budget's four settings, each guarded, and the flag
-          # each reaches — a clock past a week refused by the scheduler.
-          held_case budget sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          # SMD-2679: the session settings, each guarded, and a flag each
+          # reaches — a rescan past a day refused by the scheduler (SMD-3379
+          # PR 1c-4b, which removed the clock).
+          held_case stmt sleep "sleep: OB1_SLEEP_STATEMENT_TIMEOUT ('300s') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_STATEMENT_TIMEOUT=300s
           held_case mwm sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
-          held_case budget-max sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_case rescan-max sleep '--rescan must be a decimal integer >= 60 and <= 86400' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_RESCAN=86401
           held_wait
           held_also poll61 'supervise: sleep exited 2'
           held_also dumpvol 'coordinator: runs sleep (uid 1104)'
@@ -1999,7 +2000,7 @@ jobs:
           # command takes no argument: OB1_PASSES says what it runs. The holds
           # themselves are run, by the steps above.
           docker compose -f compose.yaml config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.coordinator | (has("ports") | not) and (has("profiles") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_PASSES") and has("OB1_WORKER_KEY") and has("LINEAR_API_KEY") and has("OB1_EXTRACT_FOLLOW") and has("OB1_CONSOLIDATE_WORKERS") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and ([.volumes[] | "\(.type) \(.source):\(.target)"] == ["volume sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .user == "0:0" and .entrypoint == ["bun", "--no-install", "--no-env-file"] and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .cap_drop == ["ALL"] and (.cap_add | sort) == ["CHOWN", "KILL", "SETGID", "SETUID"] and .security_opt == ["no-new-privileges:true"] and .command == ["db/coordinator.ts"] and .depends_on.api.condition == "service_started" and .healthcheck.test == ["CMD", "pgrep", "-f", "db/coordinator.ts"] and (.healthcheck.disable // false) == false)'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.coordinator | (has("ports") | not) and (has("profiles") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_PASSES") and has("OB1_WORKER_KEY") and has("LINEAR_API_KEY") and has("OB1_EXTRACT_FOLLOW") and has("OB1_CONSOLIDATE_WORKERS") and has("OB1_SLEEP_RESCAN") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and ([.volumes[] | "\(.type) \(.source):\(.target)"] == ["volume sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .user == "0:0" and .entrypoint == ["bun", "--no-install", "--no-env-file"] and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .cap_drop == ["ALL"] and (.cap_add | sort) == ["CHOWN", "KILL", "SETGID", "SETUID"] and .security_opt == ["no-new-privileges:true"] and .command == ["db/coordinator.ts"] and .depends_on.api.condition == "service_started" and .healthcheck.test == ["CMD", "pgrep", "-f", "db/coordinator.ts"] and (.healthcheck.disable // false) == false)'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app coordinator forwarder mcp migrate postgres proxy " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app, .services.coordinator; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
@@ -5167,10 +5168,13 @@ jobs:
   # needs failed too (the page names the jobs that did not succeed), so it is
   # the second job MAY_SKIP always lets skip; its `!cancelled()` keeps a gated
   # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
-  # A pull request, the merge queue and a
-  # push to another branch publish nothing. contents: write, on this job
-  # alone, is what pushes to the wiki's repository; the token stays out of the
-  # clone's config (an extraheader on each git call) and out of the checkout.
+  # Its needs are exactly the jobs that upload a test-counts-* artifact, each
+  # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
+  # job left out is published only if its upload ends first (SMD-3709).
+  # A pull request, the merge queue and a push to another branch publish
+  # nothing. contents: write, on this job alone, is what pushes to the wiki's
+  # repository; the token stays out of the clone's config (an extraheader on
+  # each git call) and out of the checkout.
   publish-test-counts:
     name: Publish the suites' counts to the wiki
     runs-on: ubuntu-24.04

@@ -698,8 +698,8 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
 }
 
 // ---------------------------------------------------------------------------
-// sleep.ts's budget (SMD-2679): the four flags refused by run() in the CLI's
-// words before connecting, and the session settings they make.
+// sleep.ts's settings (SMD-2679; SMD-3379 PR 1c-4b): the flags refused by
+// run() in the CLI's words before connecting, and the session settings they make.
 // ---------------------------------------------------------------------------
 {
   const { run, budgetSession, budgetMemory, schedulerSession, SCHEDULER_TAG, statementTimedOut } = await import("./sleep.ts");
@@ -712,7 +712,12 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     return { code, out: lines(w.outs), err: lines(w.errs), seen };
   };
   const cases: [string, Record<string, unknown>, string[], string][] = [
-    ["--budget past a week", { url: AT, budget: 10081 }, ["--url", AT, "--budget", "10081"], "--budget must be a decimal integer >= 0 and <= 10080"],
+    // The flags v2.0.0 removed (SMD-3379 PR 1c-4b): refused, naming what replaced each, not taken for unknown.
+    ["--quiet, removed", { url: AT, quiet: 300 }, ["--url", AT, "--quiet", "300"], "--quiet (OB1_SLEEP_QUIET) was removed in v2.0.0: a work period begins once a pass has work"],
+    ["--budget, removed", { url: AT, budget: 60 }, ["--url", AT, "--budget=60"], "--budget (OB1_SLEEP_BUDGET) was removed in v2.0.0: a work period runs until its pools drain"],
+    // The idle scheduler's rescan (PR 1c-4b): a minute at least, a day at most.
+    ["--rescan under a minute", { url: AT, rescan: 59 }, ["--url", AT, "--rescan", "59"], "--rescan must be a decimal integer >= 60 and <= 86400"],
+    ["--rescan past a day", { url: AT, rescan: 86401 }, ["--url", AT, "--rescan", "86401"], "--rescan must be a decimal integer >= 60 and <= 86400"],
     // The pause's quiet (SMD-3379 PR 1c-3b): a second at least, a day at most.
     ["--capture 0", { url: AT, capture: 0 }, ["--url", AT, "--capture", "0"], "--capture must be a decimal integer >= 1 and <= 86400"],
     ["--capture past a day", { url: AT, capture: 86401 }, ["--url", AT, "--capture", "86401"], "--capture must be a decimal integer >= 1 and <= 86400"],
@@ -722,9 +727,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["--statement-timeout past a day", { url: AT, statementTimeout: 86401 }, ["--url", AT, "--statement-timeout", "86401"], "--statement-timeout must be a decimal integer >= 0 and <= 86400"],
     ["--work-mem 0", { url: AT, workMem: 0 }, ["--url", AT, "--work-mem", "0"], "--work-mem must be a decimal integer >= 1 and <= 2097151"],
     ["--maintenance-work-mem past Postgres's bound", { url: AT, maintenanceWorkMem: 2097152 }, ["--url", AT, "--maintenance-work-mem", "2097152"], "--maintenance-work-mem must be a decimal integer >= 1 and <= 2097151"],
-    // In the CLI's order: --workers before the budget, the budget before the session settings.
-    ["--workers 0 and --budget past a week", { url: AT, workers: 0, budget: 10081 }, ["--url", AT, "--workers", "0", "--budget", "10081"], "--workers must be a decimal integer >= 1"],
-    ["--budget past a week and --work-mem 0", { url: AT, budget: 10081, workMem: 0 }, ["--url", AT, "--budget", "10081", "--work-mem", "0"], "--budget must be a decimal integer >= 0 and <= 10080"],
+    // In the CLI's order: --rescan before --workers, --workers before the session settings.
+    ["--rescan past a day and --workers 0", { url: AT, rescan: 86401, workers: 0 }, ["--url", AT, "--workers", "0", "--rescan", "86401"], "--rescan must be a decimal integer >= 60 and <= 86400"],
+    ["--workers 0 and --work-mem 0", { url: AT, workers: 0, workMem: 0 }, ["--url", AT, "--work-mem", "0", "--workers", "0"], "--workers must be a decimal integer >= 1"],
   ];
   for (const [what, opts, argv, first] of cases) {
     const r = await inProcess(opts);
@@ -759,11 +764,10 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     run({ url: AT, ...o, writer: capture() } as never).then((c) => String(c), (e: Error) => `${e.name}: ${e.message}`),
     Bun.sleep(5000).then(() => "still running after 5 s"),
   ]);
-  const hook = await thrown({ budgetMs: -1 });
-  // quietMs and pollMs too, positive (0) and whole (700.5) milliseconds (SMD-3196).
-  const [quietHook, pollHook, partHook] = [await thrown({ quietMs: 0 }), await thrown({ pollMs: 0.5 }), await thrown({ pollMs: 700.5 })];
-  ok(/^RangeError: budgetMs must be/.test(hook) && /^RangeError: quietMs must be/.test(quietHook) && /^RangeError: pollMs must be/.test(pollHook) && /^RangeError: pollMs must be/.test(partHook),
-     `…and a negative budgetMs, a quietMs of 0 and a pollMs of half a millisecond or of 700.5 are thrown, not run (${[hook, quietHook, pollHook, partHook].map((h) => h.slice(0, 40)).join(" | ")})`);
+  // rescanMs and pollMs, positive (0) and whole (700.5) milliseconds (SMD-3196; PR 1c-4b).
+  const [rescanHook, pollHook, partHook] = [await thrown({ rescanMs: 0 }), await thrown({ pollMs: 0.5 }), await thrown({ pollMs: 700.5 })];
+  ok(/^RangeError: rescanMs must be/.test(rescanHook) && /^RangeError: pollMs must be/.test(pollHook) && /^RangeError: pollMs must be/.test(partHook),
+     `…and a rescanMs of 0 and a pollMs of half a millisecond or of 700.5 are thrown, not run (${[rescanHook, pollHook, partHook].map((h) => h.slice(0, 40)).join(" | ")})`);
   // The pause's hooks (SMD-3379 PR 1c-3b): a capture of 0 ms, and N12's bound below the stall floor — the
   // shipped minute, or a test's own — where an abort would be a short stop and a thought never stall.
   const [captureHook, belowFloor, belowOwnFloor] = [await thrown({ captureMs: 0 }), await thrown({ abortAfterMs: 59_999 }), await thrown({ abortAfterMs: 999, stallFloorMs: 1000 })];

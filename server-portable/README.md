@@ -468,6 +468,44 @@ head — and board-sync's own row is read again. A list step can read a count as
 (`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
 exists and moved.
 
+### Tickets someone holds (migration 115)
+
+Every read that returns a thought — `search`, `search_thoughts`,
+`search_thoughts_keyword`, `list_thoughts` and `fetch` — says who holds a
+ticket it names (SMD-3599), so an answer to "what should we work on next"
+sees held work before it calls `list_claims`. It is a prompt, not the check:
+a released claim, a branch or PR with no claim, and a claim whose PR merged
+are still AGENTS.md's to find ("Claim your work", step 1).
+
+A result's `claimed` lists the unreleased work claims — live, and lapsed but
+never released, which AGENTS.md reads as work that may be paused — on the
+tickets its metadata files it under (a ticket row's `issue`, a note's
+`ticket`) and the first 50 others its text mentions (the rest counted in
+`claimedNotRead`): each claim's id, ticket, piece, holder, `ownKey` when the
+holder is the caller's own key, label, times and `state`, the first ten
+(`claimedMore` the rest). Over MCP `search_thoughts`, `search_thoughts_keyword`
+and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
+…, until … (claim …, label "…")` — `lapsed at …, never released` for a lapsed
+one — the piece and label quoted on one line as the holder's own words, and
+once per reply that shows one, the same fixed key to reading it: yours when its
+id is in your `.work-claims/` or your task names it (a subagent tells its caller
+rather than renew it), any other live claim holds its work, any other lapsed one
+may be paused unless its PR merged or closed; their structured values keep ids,
+tickets, holders, states and times. `search` and
+`fetch` start the title `[claimed: SMD-3379 (a piece) by codex, since …]`
+after any moved prefix — the first two, never the piece or the label — and
+their JSON, the ChatGPT shape, carries the fields only beside a claimed ticket
+(the tickets not read with them, as `movedNotRead` rides beside a move), label
+included, and `claimed: null` on every result when the read failed. Unlike
+`moved`, a ticket row and a superseded thought are labelled too: who holds a
+ticket is a fact about now. The claims are one read of `work_claims`'
+unreleased rows (115's partial index) per page, made only when a result names
+a ticket; a brain before 115, a server role without the claims grant, or a
+read that fails, gives `claimed: null`, which the text tools say in a line and
+`search`'s and `fetch`'s titles mark `[claims not read]` beside a
+`claimsNote`, and the read goes on.
+Like `moved`, it never moves a rank.
+
 ## Steps
 
 ### 1. Install
