@@ -1666,10 +1666,14 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   const paddedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(` ${pid.toUpperCase()} `)}/decision`, { accept: false });
   const unresolved = { name: "cap-unresolved", scope: "capture", keyHash: "" } as unknown as Parameters<typeof direct.openItem>[0];
   const unresolvedOpen = await direct.openItem(unresolved, { text: "omicron: a key the registry never resolved" } as never);
-  assert(fauxRaise.status === 400 && fauxRaise.body.code === "REFUSED_ITEM_INPUT" && fauxRaise.body.problem === "id"
+  // Review pass 4: a blank owner is refused, not a silent clear; a proposal's id is a hyphenated uuid, as an item's.
+  const blankOwner = await rest("PATCH", `/v1/items/${id}`, { owner: "   " });
+  const bracedDecide = await rest("POST", `/v1/item-proposals/${encodeURIComponent(`{${pid}}`)}/decision`, { accept: false });
+  assert(blankOwner.status === 400 && blankOwner.body.code === "REFUSED_INPUT" && bracedDecide.status === 400 && bracedDecide.body.code === "REFUSED_INPUT"
+      && fauxRaise.status === 400 && fauxRaise.body.code === "REFUSED_ITEM_INPUT" && fauxRaise.body.problem === "id"
       && paddedDecide.status === 409 && paddedDecide.body.proposal === pid
-      && unresolvedOpen.ok === false && (unresolvedOpen.refusal as { code: string }).code === "ITEM_UNATTRIBUTED" && (unresolvedOpen.refusal as { cause?: string }).cause === "registry_refused",
-    `an id reading "needs a maker" is 400 REFUSED_ITEM_INPUT (problem id), never a 500; a padded, upper-cased proposal id is named back as the proposal's own; a key with no agent id that is no hook is ITEM_UNATTRIBUTED, not ITEM_UNOWNABLE (${fauxRaise.status} ${fauxRaise.body.code} | ${paddedDecide.status} ${paddedDecide.body.proposal === pid} | ${JSON.stringify(unresolvedOpen.ok ? null : unresolvedOpen.refusal)})`);
+      && unresolvedOpen.ok === false && (unresolvedOpen.refusal as { code: string }).code === "ITEM_UNATTRIBUTED" && (unresolvedOpen.refusal as { cause?: string }).cause === "registry_unknown",
+    `a blank owner and a braced proposal id are the schema's 400; an id reading "needs a maker" is 400 REFUSED_ITEM_INPUT (problem id), never a 500; a padded, upper-cased proposal id is named back as the proposal's own; a key with no agent id that is no hook is ITEM_UNATTRIBUTED, not ITEM_UNOWNABLE (${fauxRaise.status} ${fauxRaise.body.code} | ${paddedDecide.status} ${paddedDecide.body.proposal === pid} | ${JSON.stringify(unresolvedOpen.ok ? null : unresolvedOpen.refusal)})`);
 
   // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
   // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority

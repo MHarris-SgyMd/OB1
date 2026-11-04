@@ -2006,7 +2006,7 @@ const itemRefusal = (r: Refusal) =>
   : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not open or change an item.`
   : r.code === "ITEM_UNOWNABLE" ? "Refused: this caller carries no agent id, so an item it opened could never be shown to be its own; through a plugin, open the item for the plugin's row."
   : r.code === "ITEM_UNATTRIBUTED"
-    ? `Refused: a capture-only key's own items are known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    ? `Refused: a capture-only key's own items are known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : r.cause === "registry_unknown" ? "this server holds none for this key; ask the operator to check its registry row" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
   : r.code === "ORIGIN_NOT_FOUND" ? `Refused: the brain holds no thought ${r.thought} to read the item from.`
   : r.code === "EVIDENCE_NOT_FOUND" ? `Refused: the brain holds no thought ${r.thought} to cite as evidence.`
   : r.code === "ITEM_SETTLED" ? `Refused: open item ${r.item} is ${r.status} already; reopen it (set_item_status) before proposing its close.`

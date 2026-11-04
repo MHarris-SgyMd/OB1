@@ -35,11 +35,12 @@ const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a N
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
 // Open items (SMD-3665 PR 2): an id 117 reads (a uuid, in any case, white space around it), a short free text, a reason.
 const ITEM_ID = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
-const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character");
+// Not blank: 117 cleans white space to nothing, which would clear an owner silently (review pass 4).
+const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim().length > 0, "may not be blank");
 const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL character");
 // A thought's id as Postgres reads a uuid — any 8-4-4-4-12 of hex digits, not RFC 9562's version and variant alone
 // (review pass 1: an imported thought's id was refused before the brain was asked).
-const THOUGHT_ID = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a thought's id: a uuid");
+const THOUGHT_ID = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a uuid");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
@@ -673,7 +674,8 @@ export const SPECS = {
       "Accept or reject a proposed close (its id, from item_history or the proposal's reply). Accepting closes the item to the proposal's status, with an event naming it, and moots the item's other pending proposals; rejecting leaves the item as it is. A proposal is accepted by a key other than its proposer (PROPOSAL_YOURS); its proposer may withdraw it by rejecting it. Refused: no such proposal (PROPOSAL_NOT_FOUND), one decided or moot already (PROPOSAL_DECIDED), a capture-only key on a proposal for another's item (ITEM_NOT_YOURS, answered alike for one that is not there).",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
-      id: ITEM_ID.describe("The proposed close's id"),
+      // A uuid as 117's item ids are, hyphenated: Postgres's own cast would take braces and none (review pass 4).
+      id: THOUGHT_ID.describe("The proposed close's id"),
       accept: z.boolean().describe("True to accept (close the item), false to reject"),
       reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
     },

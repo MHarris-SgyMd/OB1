@@ -73,7 +73,7 @@ export type Refusal =
   // proposal a capture-only key may not decide, which names no item it may be told of.
   | { code: "REFUSED_ITEM_INPUT"; retryable: false; problem: ItemProblem; message: string } // an argument 117 refused by raising (SQLSTATE 22023): `problem` names which; message: the database's words
   | { code: "ITEM_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own items, is not to hand while the registry may answer
-  | { code: "ITEM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  | { code: "ITEM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown" } // …the registry cannot answer until an operator acts, or the server holds no id for the key and no word why (claims.ts's registry_unknown)
   | { code: "ITEM_UNOWNABLE"; retryable: false } // a caller with no agent id at all (a plugin hook's) opening an item for no plugin row: it could never be shown its own
   | { code: "ORIGIN_NOT_FOUND"; retryable: false; thought: string } // the thought an item was to be read from is not in the brain
   | { code: "EVIDENCE_NOT_FOUND"; retryable: false; thought: string } // the thought a proposed close cites is not in the brain

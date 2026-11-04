@@ -86,7 +86,7 @@ function refusedBy(a: ItemAnswer, principal: Principal, named: { kind: "item" | 
     // A caller with no agent id by design is told so as final (403), not as a registry's outage (review pass 1).
     // A plugin hook's principal (`hook:<plugin>`) has no agent id by design; any other caller with none is the
     // registry's to answer (review pass 3: a key the registry never resolved was told to open a plugin row).
-    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? (principal.name.startsWith("hook:") ? refuse({ code: "ITEM_UNOWNABLE", retryable: false }) : refuse({ code: "ITEM_UNATTRIBUTED", retryable: false, cause: "registry_refused" }));
+    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? (principal.name.startsWith("hook:") ? refuse({ code: "ITEM_UNOWNABLE", retryable: false }) : refuse({ code: "ITEM_UNATTRIBUTED", retryable: false, cause: "registry_unknown" }));
     case "ORIGIN_NOT_FOUND": return refuse({ code: "ORIGIN_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "EVIDENCE_NOT_FOUND": return refuse({ code: "EVIDENCE_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "ITEM_SETTLED": return refuse({ code: "ITEM_SETTLED", retryable: false, item: a.item?.id ?? ids.item ?? "", status: a.item?.status === "dropped" ? "dropped" : "done" });

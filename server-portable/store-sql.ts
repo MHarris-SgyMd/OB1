@@ -90,11 +90,6 @@ async function claimCall(what: string, run: () => Promise<Record<string, unknown
 }
 
 /**
- * A 22023 from 116 as PriorityRefused, by its words; a time the schema took that Postgres cannot cast (22007, 22008,
- * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
- * was, the store's fault.
- */
-/**
  * 116's and 117's raises about the server's own envelope (no maker, a malformed one, a plugin name it stamped) or a
  * raw write's state: the store's faults, not the caller's argument. Each anchored to how the function starts its
  * message — `<the call>: …` or `<the call> needs a maker` — never matched inside it, where the function quotes the
@@ -102,6 +97,11 @@ async function claimCall(what: string, run: () => Promise<Record<string, unknown
  */
 const SERVER_RAISE = /^[a-z_]+(?:\(\))?(?: needs a maker:|: p_actor must be a JSON object|: a maker's key name is at most|: the envelope's plugin .* is not a plugin's name$|: proposal \S+ was pending on an item)/;
 
+/**
+ * A 22023 from 116 as PriorityRefused, by its words; a time the schema took that Postgres cannot cast (22007, 22008,
+ * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
+ * was, the store's fault.
+ */
 function priorityRefusedOr(e: unknown): unknown {
   const message = String((e as Error)?.message ?? "");
   // The server's own envelope refused is its fault, as for the item calls (review pass 3).
