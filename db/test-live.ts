@@ -20472,10 +20472,9 @@ if (want("38")) {
     let retryDone = false;
     // A 3 s capture in a 3.5 s quiet, and N12's bound and the stall floor at 1 s, so the judgement in hand is
     // aborted while the brain is live, and set back; consolidation's cap at one, so the next pause's runs on (SMD-3379
-    // PR 1c-3b). The cap's line comes a poll after the abort, which can come a poll after the pause and a second into
-    // the call: polled every 500 ms, the pause that reaches the cap says it by about 2 s, a second inside the capture,
-    // as 1 s polls did inside the 4 s capture and 5 s quiet before (SMD-3733). The quiet is half a second past the
-    // capture so that the reset case's flip below lands before the next sleep starts.
+    // PR 1c-3b). Polled every 500 ms, the pause that reaches the cap says so within about 2 s of the write, a second
+    // inside the capture; the quiet is half a second past it, so the reset case's flip below lands before the next
+    // sleep starts (SMD-3733).
     const retrying = sleepRun({ follow: true, quietMs: 3500, pollMs: 500, captureMs: 3000, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
