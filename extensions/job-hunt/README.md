@@ -31,7 +31,7 @@ A complete job search management system — companies, postings, applications, i
 ## Prerequisites
 
 - Working Open Brain setup
-- Extension 5 (Professional CRM) strongly recommended — cross-extension linking depends on it
+- Extension 5 (Professional CRM) strongly recommended — cross-extension linking depends on it. The CRM is a plugin since SMD-2311, and this server's link still writes the old `professional_contacts` table of the CRM's `schema.sql`, which the plugin does not read, until job-hunt is a plugin too (SMD-2311 PR 4b)
 - [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
 - **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
 

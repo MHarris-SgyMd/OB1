@@ -8,7 +8,7 @@ Database table extensions and metadata schemas for your Supabase database. Drop 
 | ------ | ------------ |
 | [Agent Memory](agent-memory/) | Sidecar tables that turn existing `thoughts` into governed, provenance-labeled operational memory for agent workflows |
 
-> **Looking for CRM?** See [`extensions/professional-crm`](../extensions/professional-crm/) — it includes schema + a full MCP server.
+> **Looking for CRM?** See [`plugins/professional-crm`](../plugins/professional-crm/) — a plugin with its own tables and operations, served by the brain itself.
 
 ## Ideas
 

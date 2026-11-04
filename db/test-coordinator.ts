@@ -63,20 +63,20 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   const env = {
     PATH: "/usr/bin", DATABASE_URL: "postgres://x", OB1_LLM_BASE_URL: "http://m", OB1_EXTRACT_CHUNK_TOKENS: "900",
     MCP_ACCESS_KEYS: "keys", OB1_WORKER_KEY: "wk", LINEAR_API_KEY: "lin", LINEAR_COMMENT_API_KEY: "linc", OB1_BOARD_SYNC_INTERVAL: "300",
-    OB1_SLEEP_QUIET: "60", OB1_SLEEP_DUMP_DIR: "/d", OB1_EXTRACT_FOLLOW: "30", OB1_CONSOLIDATE_WORKERS: "2",
+    OB1_SLEEP_CAPTURE: "60", OB1_SLEEP_DUMP_DIR: "/d", OB1_EXTRACT_FOLLOW: "30", OB1_CONSOLIDATE_WORKERS: "2",
     OB1_PASSES: "sleep", PORT: "", UNSET: undefined,
   };
   const of = (name: keyof typeof CHILDREN) => childEnv(CHILDREN[name], env);
   const board = of("board-sync");
   ok(board.LINEAR_API_KEY === "lin" && board.LINEAR_COMMENT_API_KEY === "linc" && board.OB1_BOARD_SYNC_INTERVAL === "300"
-      && !("OB1_WORKER_KEY" in board) && !("MCP_ACCESS_KEYS" in board) && !("OB1_SLEEP_QUIET" in board) && !("OB1_EXTRACT_FOLLOW" in board),
+      && !("OB1_WORKER_KEY" in board) && !("MCP_ACCESS_KEYS" in board) && !("OB1_SLEEP_CAPTURE" in board) && !("OB1_EXTRACT_FOLLOW" in board),
     `board-sync: its Linear keys, never the worker key, the key list or another pass's settings (${Object.keys(board).sort().join(",")})`);
   const sleep = of("sleep");
-  ok(sleep.OB1_WORKER_KEY === "wk" && sleep.MCP_ACCESS_KEYS === "keys" && sleep.OB1_SLEEP_QUIET === "60" && sleep.OB1_SLEEP_DUMP_DIR === "/d"
+  ok(sleep.OB1_WORKER_KEY === "wk" && sleep.MCP_ACCESS_KEYS === "keys" && sleep.OB1_SLEEP_CAPTURE === "60" && sleep.OB1_SLEEP_DUMP_DIR === "/d"
       && !("LINEAR_API_KEY" in sleep) && !("LINEAR_COMMENT_API_KEY" in sleep) && !("OB1_EXTRACT_FOLLOW" in sleep) && !("OB1_CONSOLIDATE_WORKERS" in sleep),
     `sleep: the worker key, the key list and its own settings, never Linear's or the followers' (${Object.keys(sleep).sort().join(",")})`);
   const extract = of("extract");
-  ok(extract.OB1_EXTRACT_FOLLOW === "30" && extract.OB1_WORKER_KEY === "wk" && !("OB1_CONSOLIDATE_WORKERS" in extract) && !("OB1_SLEEP_QUIET" in extract) && !("LINEAR_API_KEY" in extract),
+  ok(extract.OB1_EXTRACT_FOLLOW === "30" && extract.OB1_WORKER_KEY === "wk" && !("OB1_CONSOLIDATE_WORKERS" in extract) && !("OB1_SLEEP_CAPTURE" in extract) && !("LINEAR_API_KEY" in extract),
     "extract: its own two settings and the worker's, never consolidate's, sleep's or Linear's");
   for (const name of Object.keys(CHILDREN) as (keyof typeof CHILDREN)[]) {
     const e = of(name);
@@ -105,16 +105,18 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");
-  ok(args("sleep") === "--follow --quiet 300 --capture 20 --abort-after 60 --poll 5 --workers 1 --budget 60 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64"
+  ok(args("sleep") === "--follow --capture 20 --abort-after 60 --rescan 3600 --poll 5 --workers 1 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64"
       && args("sleep", { OB1_SLEEP_CAPTURE: "45" }).includes("--capture 45") && CHILDREN.sleep.digits.includes("OB1_SLEEP_CAPTURE")
-      && args("sleep", { OB1_SLEEP_ABORT_AFTER: "90" }).includes("--abort-after 90") && CHILDREN.sleep.digits.includes("OB1_SLEEP_ABORT_AFTER"),
+      && args("sleep", { OB1_SLEEP_ABORT_AFTER: "90" }).includes("--abort-after 90") && CHILDREN.sleep.digits.includes("OB1_SLEEP_ABORT_AFTER")
+      && args("sleep", { OB1_SLEEP_RESCAN: "600" }).includes("--rescan 600") && CHILDREN.sleep.digits.includes("OB1_SLEEP_RESCAN")
+      && !args("sleep", { OB1_SLEEP_QUIET: "300", OB1_SLEEP_BUDGET: "60" }).includes("--quiet") && !args("sleep", { OB1_SLEEP_BUDGET: "60" }).includes("--budget"),
     `sleep: the service's defaults (${args("sleep")})`);
-  const dumped = CHILDREN.sleep.args({ OB1_SLEEP_DUMP_DIR: "/var/lib/ob1/no such dir", OB1_SLEEP_BUDGET: "0" });
-  ok(dumped.slice(-2).join("|") === "--dump-dir|/var/lib/ob1/no such dir" && dumped[dumped.indexOf("--budget") + 1] === "0",
+  const dumped = CHILDREN.sleep.args({ OB1_SLEEP_DUMP_DIR: "/var/lib/ob1/no such dir", OB1_SLEEP_STATEMENT_TIMEOUT: "0" });
+  ok(dumped.slice(-2).join("|") === "--dump-dir|/var/lib/ob1/no such dir" && dumped[dumped.indexOf("--statement-timeout") + 1] === "0",
     "sleep: --dump-dir only when set, the path one argument with its space; a 0 kept, not the default");
   ok(CHILDREN.sleep.requireKey && CHILDREN.extract.requireKey && CHILDREN.consolidate.requireKey && !CHILDREN["board-sync"].requireKey,
     "the key guard on the three that name themselves by OB1_WORKER_KEY, not on board-sync");
-  ok(CHILDREN.sleep.digits.length === 9 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
+  ok(CHILDREN.sleep.digits.length === 8 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
 }
 
 // ---------------------------------------------------------------------------
