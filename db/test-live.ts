@@ -445,7 +445,7 @@ if (want("4")) {
   // (014/037: at most v_exact = 1,000 matching thoughts are scored by id, no
   // HNSW walk) — the same move [7] makes, and for the same reason. [7]'s
   // found-by reads flaked in CI because a walk over the tied unit-axis corpus
-  // returned live rows short (SMD-1632, FORK.md's known-issues entry); this
+  // returned live rows short (SMD-1632, MAINTAINING.md's known-issues entry); this
   // section's vectors are less degenerate, but it asserts an exact order over
   // three rows, so the walk is not what it means to test — [5b] holds that.
   const S = { s: "04" } as const;
@@ -2579,7 +2579,7 @@ if (want("7")) {
    * and chunk indexes — the same-model assertion below missed in five CI
    * attempts on three trees that touched nothing here and in a local loop,
    * where the dumps showed the thoughts index scan returning one or none of
-   * three live rows: SMD-1632, and FORK.md's known-issues entry for it, hold
+   * three live rows: SMD-1632, and MAINTAINING.md's known-issues entry for it, hold
    * that. This section no longer exercises the walk at all; [5b] holds its
    * recall on random vectors, [5c] its plan, and [4], [15], [11]'s hybrid
    * reads and [5b]'s two walk reads still read it unfiltered.

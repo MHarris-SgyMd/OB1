@@ -1,6 +1,6 @@
-# Build Your Open Brain
+# Build Your Daemonic Brain
 
-This is the core of Open Brain — the foundation everything else builds on. Once this is running, you'll have a personal knowledge system that any AI can read from and write to. Every extension, recipe, and integration in this repo starts here.
+This is the core of Daemonic Brain — the foundation everything else builds on. Once this is running, you'll have a personal knowledge system that any AI can read from and write to. Every extension, recipe, and integration in this repo starts here.
 
 > **Have an AI coding tool?** Copy the [Setup Wizard prompt](04-ai-assisted-setup.md) into Claude Code, Cursor, Codex, or any similar tool. It interviews you, trims this guide down to just your path, runs the terminal steps for you, and verifies each checkpoint as you go.
 
@@ -590,4 +590,4 @@ Browse all recipes in [`/recipes`](../recipes/).
 
 ---
 
-*Open Brain was created by [Nate B. Jones](https://natesnewsletter.substack.com/); this guide is the fork's, for the stack in [`SETUP.md`](../SETUP.md). Follow the [Substack](https://natesnewsletter.substack.com/) for updates and the companion prompt pack.*
+*Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1), created by Nate B. Jones; this guide is Daemonic Brain's, for the stack in [`SETUP.md`](../SETUP.md).*
