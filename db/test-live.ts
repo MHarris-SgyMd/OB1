@@ -19174,6 +19174,12 @@ async function sleepScaffold(sql: SQL) {
     badRequest: false,
     /** Probes the stub answered: a case reads whether a pass got as far as its own (SMD-3106). */
     probes: 0,
+    /**
+     * Every request, probes too, once `probes` reaches this: the model not
+     * served after the start's check had it served (SMD-3733), with no race
+     * against when the check ends.
+     */
+    missingAfterProbes: null as number | null,
     /** Every request naming this model, probes too: not served (a 404 naming it) — the judge's own, say (SMD-2752). */
     missingModel: null as string | null,
     /** The embedding probes the stub answered: re-embed's start check, and any pass it starts. */
@@ -19204,7 +19210,7 @@ async function sleepScaffold(sql: SQL) {
         v[1 + (h % (EMBEDDING_DIM - 1))] = 1;
         return Response.json({ data: [{ embedding: v }] });
       }
-      if (sw.missing || (sw.missingModel !== null && body.model === sw.missingModel)) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      if (sw.missing || (sw.missingAfterProbes !== null && sw.probes >= sw.missingAfterProbes) || (sw.missingModel !== null && body.model === sw.missingModel)) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (sw.unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
         sw.probes++;
@@ -19342,6 +19348,14 @@ if (want("38")) {
   const scaled = (ms: number) => Math.round(ms * SCALE);
   /** A scaled capture as the scheduler prints it, for a line's regex: 6000 ms reads "3.6". */
   const capS = (ms: number) => String(scaled(ms) / 1000).replace(".", "\\.");
+  /**
+   * A one-shot run's capture and poll (SMD-3733): a run without --follow
+   * whose case asserts its end state alone (rows swept, settings seen, the
+   * order of calls, a start line, its exit) waits 300 ms of each, not the
+   * section's second. No line's regex names them, and drained() counts what
+   * isn't pooled yet, so a faster poll ends no period early.
+   */
+  const ONE_SHOT = { captureMs: 300, pollMs: 300 };
   try {
     // The live reads at the database's full precision (SMD-3245, SMD-3379 PR
     // 1c-4a): a live write at an instant with microseconds is outside a read
@@ -19494,7 +19508,7 @@ if (want("38")) {
     const acOnce = new AbortController();
     // With --dump-dir (SMD-3203): the period's consolidation pass writes every verdict there too.
     const onceDumps = mkdtempSync(join(tmpdir(), "ob1-sleep-dump-"));
-    const onceRun = sleepRun({ signal: acOnce.signal, dumpDir: onceDumps });
+    const onceRun = sleepRun({ ...ONE_SHOT, signal: acOnce.signal, dumpDir: onceDumps });
     const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
     // Seen hung once in a full run (SMD-2752 PR 2), one thought of three
     // extracted in 90 s, and not since in 28: read before the stop what the
@@ -19683,9 +19697,10 @@ if (want("38")) {
     // The backlog drained first, by a one-shot run: the note in hand is then the only work.
     // N12's bound from --abort-after, said at the start (SMD-3379 PR 1c-4a): the setting reaches the run, not the hook alone.
     const abortFrom = lines.length;
-    const drainedFirst = await sleepRun({ capture: 1, pollMs: scaled(1000), abortAfter: 90 });
-    assert(lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
-      `--abort-after sets N12's bound, said at the start (${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
+    const acDrainedFirst = new AbortController();
+    const drainedFirst = await bounded(sleepRun({ ...ONE_SHOT, abortAfter: 90, signal: acDrainedFirst.signal }), acDrainedFirst);
+    assert(drainedFirst === 0 && lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
+      `--abort-after sets N12's bound, said at the start, and the backlog drains (exit ${drainedFirst}; ${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     lines.length = 0;
     const inHandNote = await capture("A note whose call is in hand when a live write touches it.", "sync-sleep", 0, 44);
     sw.slow = scaled(5000);
@@ -19773,7 +19788,7 @@ if (want("38")) {
     let atFirstExtract = "(no extraction call)";
     sw.onExtract = async () => { atFirstExtract = await sweepRows(); };
     const acSweep = new AbortController();
-    const sweepCode = await bounded(sleepRun({ signal: acSweep.signal }), acSweep);
+    const sweepCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acSweep.signal }), acSweep);
     sw.onExtract = null;
     const sweptLine = lines.find((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\)/.test(l));
     assert(sweepCode === 0 && atFirstExtract === "vector:standing" && (await sweepRows()) === "vector:standing" && sweptLine !== undefined && lines.indexOf(sweptLine) > lines.findIndex((l) => /^ {2}working:/.test(l)),
@@ -19963,7 +19978,7 @@ if (want("38")) {
       await holdRow`BEGIN`;
       await holdRow`SELECT 1 FROM thoughts WHERE id = ${lockedOrphan}::uuid FOR NO KEY UPDATE`;
       const acLocked = new AbortController();
-      lockedCode = await bounded(sleepRun({ signal: acLocked.signal }), acLocked);
+      lockedCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acLocked.signal }), acLocked);
       lockFreeBehindRow = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
     } finally {
       await holdRow`ROLLBACK`.catch(() => {});
@@ -19997,7 +20012,7 @@ if (want("38")) {
     };
     try {
       const acPoison = new AbortController();
-      const poisonCode = await bounded(sleepRun({ signal: acPoison.signal }), acPoison);
+      const poisonCode = await bounded(sleepRun({ ...ONE_SHOT, signal: acPoison.signal }), acPoison);
       assert(poisonCode === 0 && (await rowsBy("zz-poison")) === 1 && (await rowsBy("zz-after")) === 0 && lines.some((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\); 1 thought\(s\) whose call failed passed over/.test(l) && l.includes(`(${poisonId}: zz: this row will not go)`)),
         `a thought whose call fails is passed over and said, named, the rest of the window swept (exit ${poisonCode}; ${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
       // Only the poisoned orphan left, every call of each period's sweep fails:
@@ -20236,7 +20251,7 @@ if (want("38")) {
       CREATE TRIGGER zz_budget_seen AFTER INSERT OR UPDATE ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_seen()`);
     try {
       const acSet = new AbortController();
-      const setCode = await bounded(sleepRun({ statementTimeout: 7, workMem: 3, maintenanceWorkMem: 70, signal: acSet.signal }), acSet);
+      const setCode = await bounded(sleepRun({ ...ONE_SHOT, statementTimeout: 7, workMem: 3, maintenanceWorkMem: 70, signal: acSet.signal }), acSet);
       // The passes' claim writes, and the scheduler's own (its move of stopped
       // thoughts to the back) on its own connection: the memory settings
       // without the timeout (review pass 1).
@@ -20535,9 +20550,11 @@ if (want("38")) {
     sw.slowJudge = 5000;
     const ac3 = new AbortController();
     let retryDone = false;
-    // A 4 s capture, and N12's bound and the stall floor at 1 s, so the judgement in hand is
-    // aborted while the brain is live, and set back; consolidation's cap at one, so the next pause's runs on (SMD-3379 PR 1c-3b).
-    const retrying = sleepRun({ follow: true, captureMs: 4000, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
+    // A 3 s capture polled every 500 ms (SMD-3733; 4 s at 1 s polls before), and N12's bound and the stall floor at
+    // 1 s, so the judgement in hand is aborted while the brain is live, and set back; consolidation's cap at one, so
+    // the next pause's runs on (SMD-3379 PR 1c-3b). The pause that reaches the cap says so within about 2 s of the
+    // write, a second inside the capture.
+    const retrying = sleepRun({ follow: true, captureMs: 3000, pollMs: 500, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
     // under load that was a thought with no pair (finished at once), or one
@@ -20553,12 +20570,19 @@ if (want("38")) {
       return judgedInHand !== undefined;
     }, 40_000);
     await capture("A note that pauses it with a judgement in hand.", "op-sleep", 0, 5);
-    // The line comes as the call is aborted, the set-back after it: polled together (review pass 1).
-    const judgeAborted = await pollUntil(async () => lines.some((l) => /^  paused: 1 call\(s\) in hand past 1 s aborted/.test(l)) && ((await claims(CO)).claimed ?? 0) === 0, 10_000);
-    const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
-    const coClaimed = (await claims(CO)).claimed ?? 0;
+    // The line comes as the call is aborted, the set-back after it: polled together (review pass 1), the queue and
+    // the claims read in one statement in that poll, so the pause's resume can't fall between reads (SMD-3733).
+    let coOrder: string[] = [];
+    let coClaimed = -1;
+    const judgeAborted = await pollUntil(async () => {
+      if (!lines.some((l) => /^  paused: 1 call\(s\) in hand past 1 s aborted/.test(l))) return false;
+      const rows = (await sql`SELECT thought_id::text AS id, status FROM thought_work_claims WHERE work_type = ${CO} AND status IN ('pending', 'claimed') ORDER BY enqueued_at, thought_id`) as { id: string; status: string }[];
+      coOrder = rows.filter((r) => r.status === "pending").map((r) => r.id);
+      coClaimed = rows.filter((r) => r.status === "claimed").length;
+      return coClaimed === 0;
+    }, 10_000);
     assert(judgeAborted && judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && coClaimed === 0,
-      `paused with a judgement in hand past N12's bound, the call is aborted and the thought set back behind consolidation's queue (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}; ${coClaimed} claimed${held ? "" : "; no judge call was held within 40 s"})`);
+      `paused with a judgement in hand past N12's bound, the call is aborted and the thought set back behind consolidation's queue (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}; ${coClaimed < 0 ? "no abort line within 10 s" : `${coClaimed} claimed`}${held ? "" : "; no judge call was held within 40 s"})`);
     // At its cap, said once in the pause that reached it, the next pause
     // aborts none of consolidation's calls: the judgement in hand answers.
     const abortAt = lines.findIndex((l) => /^  paused: 1 call\(s\) in hand past/.test(l));
@@ -20615,7 +20639,7 @@ if (want("38")) {
     // pools drained, so that period ends as one that ran: flipped before,
     // consolidation joining it could meet the 404 at its own start, a refusal
     // retried on the same schedule — a race this lost under load (SMD-2678's
-    // tidy). The flip lands within the 4 s capture before the next period.
+    // tidy). The flip lands within the 3 s capture before the next period.
     const at2 = lines.length;
     if (await nextPeriod("a live write that ends the recovered sleep")) sw.missing = true;
     const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in [\d.]+ s/.test(l)), 20_000);
@@ -21074,19 +21098,20 @@ if (want("38")) {
       // pulling it again): the check got that pass through its start, so the
       // refusal is retried, as one after a period that ran is (item 6).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-      // A capture now, the period's work: the scheduler stays idle its 8 s
-      // capture time, through the check and stamping as it waits, so the model
-      // goes before the first period however long a loaded runner takes over
-      // the check (review pass 3).
+      // A capture now, the period's work. The stub serves the check's two
+      // probes, one for each pass, and answers 404 from the next: the first
+      // period's start (SMD-3733). Before, the model went at the first stamp,
+      // an 8 s capture time keeping the scheduler idle past the check however
+      // long a loaded runner took over it.
       await capture("A note the first period would extract.", "op-sleep", 0, 12);
-      const checkedRun = followRun({ capture: 8 });
-      await pollUntil(async () => (await beat()) !== null, 10_000);
-      sw.missing = true;
+      const probesBefore = sw.probes;
+      sw.missingAfterProbes = probesBefore + 2;
+      const checkedRun = followRun();
       await pollUntil(async () => count(/tries it again/) >= 1, 30_000);
-      sw.missing = false;
+      sw.missingAfterProbes = null;
       const checkedCode = await checkedRun.stop();
       assert(checkedCode === 0 && count(/extract refused at its start, which it passed earlier in this process, so the next period tries it again/) >= 1,
-        `a model the start's check saw served, missing at the first period's start, is retried rather than ending the service (exit ${checkedCode})`);
+        `a model the start's check saw served, missing at the first period's start, is retried rather than ending the service (exit ${checkedCode}; ${sw.probes - probesBefore} probe(s) served)`);
 
       // A pass waiting at its start for a provider that does not answer says
       // so on heartbeat:sleep (`waiting`), and the word goes once it answers
@@ -21157,6 +21182,7 @@ if (want("38")) {
     } finally {
       sw.missingModel = null;
       sw.missing = false;
+      sw.missingAfterProbes = null;
       sw.slowExtract = 0;
       await setKey(EX);
     }
