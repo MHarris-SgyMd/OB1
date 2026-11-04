@@ -135,7 +135,7 @@ export const LIMITS = {
 };
 
 /** The tools a capture-scoped key is given (server-portable/tools.ts's capture group): --check's word for "a capture key". */
-const CAPTURE_SURFACE = new Set(["capture_thought", "set_priority", "clear_priority"]);
+const CAPTURE_SURFACE = new Set(["capture_thought", "set_priority", "clear_priority", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close"]);
 /**
  * The brain's tool names — only THEIR results are read for thought ids, so a uuid printed by some other tool is never claimed as provenance.
  * Not thought_stats: it prints no thought id, and each row of it starts with a type, topic or person, so a tag reading `ID: <uuid>` would read as one (SMD-2510, review pass 2).

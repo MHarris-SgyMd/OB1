@@ -33,6 +33,10 @@ const NO_NUL = (s: string) => !s.includes(String.fromCharCode(0));
 const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
 /** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
+// Open items (SMD-3665 PR 2): an id 117 reads (a uuid, in any case, white space around it), a short free text, a reason.
+const ITEM_ID = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
+const ITEM_OWNER = z.string().min(1).max(800).refine(NO_NUL, "may not hold a NUL character");
+const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL character");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
@@ -606,6 +610,91 @@ export const SPECS = {
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
       key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
+    },
+  },
+  // Open items (SMD-3665 PR 2, migration 117): a to-do, a commitment or a plugin's task — its id, status and history.
+  open_item: {
+    title: "Open Item",
+    description:
+      "Record something to be done: an open item, with its text, optionally who is to do it (`owner`, free text), when it is due (`due_at`), the thought it was read from (`origin_thought`: its capture time becomes the item's `noted_at`, so an item read from an old thought reads as old), and `proposed: true` for an item inferred rather than stated, which reads as not yet open until a write key confirms it (set_item_status). The item is yours: your key is its opener. The same thought and text again (case aside) is the item already there, answered `unchanged` and nothing written; so is a plugin's row (`plugin_row`, through the plugin alone). A capture-only key opens items, from a thought only if it captured that thought, and is shown an existing item only if it is its own. Refused: an origin thought the brain does not hold (ORIGIN_NOT_FOUND), a capture-only key's thought that is not its own (ITEM_NOT_YOURS), an argument out of its rule (REFUSED_ITEM_INPUT).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      // 117 counts a text's characters once cleaned (at most 1000); the schema's cap only bounds the request (set_priority's reason's rule).
+      text: z.string().min(1).max(4000).refine(NO_NUL, "may not hold a NUL character").describe("What is to be done, at most 1000 characters"),
+      owner: ITEM_OWNER.optional().describe("Who is to do it, at most 200 characters: free text, not a key"),
+      due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
+      origin_thought: z.uuid().optional().describe("The id of the thought the item was read from"),
+      plugin_row: ITEM_OWNER.optional().describe("Through a plugin's ctx.call alone: the plugin's row the item stands for. Refused from any other caller"),
+      proposed: z.boolean().optional().describe("True for an item inferred, not stated (the extractor's): it reads as not yet open until a write key confirms it"),
+    },
+  },
+  update_item: {
+    title: "Update Item",
+    description:
+      "Change an open item's text, owner or due time — any of the three; `null` clears the owner or the due time — whatever its status. The change is an event in its history, made by your key. The same values again write nothing (`unchanged`). A capture-only key changes only an item it opened that no other key has changed since (or one its plugin's row stands for, through the plugin). Refused: an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on another's (ITEM_NOT_YOURS, answered alike whether it exists), an argument out of its rule (REFUSED_ITEM_INPUT).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      id: ITEM_ID.describe("The open item's id"),
+      text: z.string().min(1).max(4000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Its new text, at most 1000 characters"),
+      owner: ITEM_OWNER.nullable().optional().describe("Its new owner, or null to clear it"),
+      due_at: PRIORITY_TIME.nullable().optional().describe("Its new due time (open_item's forms), or null to clear it"),
+    },
+  },
+  set_item_status: {
+    title: "Set Item Status",
+    description:
+      "Settle, reopen or confirm an open item: `done` or `dropped` settles it (and moots any close still proposed on it); `open` reopens a settled item, or confirms a proposed one. Never back to proposed. The change is an event in its history, with your `reason`. The status it has already writes nothing (`unchanged`). A capture-only key may dismiss its own proposed item (dropped) but never confirm one, directly or by reopening it (CONFIRM_NOT_YOURS), and changes only an item it opened that no other key has changed since. Refused: an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on another's (ITEM_NOT_YOURS).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      id: ITEM_ID.describe("The open item's id"),
+      status: z.enum(["open", "done", "dropped"]).describe("open (confirm or reopen), done, or dropped"),
+      reason: ITEM_REASON.optional().describe("Why, at most 1000 characters: shown in the item's history"),
+    },
+  },
+  propose_item_close: {
+    title: "Propose Item Close",
+    description:
+      "Propose that an open item is done (or dropped), citing the thought that shows it (`evidence_thought`: the later \"called the dentist, booked for Tuesday\") and a `label` (resolves, implements). It never closes the item: a key other than you accepts or rejects it (decide_item_close). Your pending proposal with the same evidence is answered `unchanged` when it says the same, and withdrawn for this one when it does not. Refused: a done or dropped item (ITEM_SETTLED), an evidence thought the brain does not hold (EVIDENCE_NOT_FOUND), an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on another's item or with another key's thought (ITEM_NOT_YOURS).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      id: ITEM_ID.describe("The open item's id"),
+      status: z.enum(["done", "dropped"]).optional().default("done").describe("What the item would close to. Default done"),
+      evidence_thought: z.uuid().optional().describe("The id of the thought that shows it"),
+      label: z.string().max(40).optional().describe("One lower-case word naming how the evidence settles it: resolves, implements"),
+      reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
+    },
+  },
+  decide_item_close: {
+    title: "Decide Item Close",
+    description:
+      "Accept or reject a proposed close (its id, from item_history or the proposal's reply). Accepting closes the item to the proposal's status, with an event naming it, and moots the item's other pending proposals; rejecting leaves the item as it is. A proposal is accepted by a key other than its proposer (PROPOSAL_YOURS); its proposer may withdraw it by rejecting it. Refused: no such proposal (PROPOSAL_NOT_FOUND), one decided or moot already (PROPOSAL_DECIDED), a capture-only key on a proposal for another's item (ITEM_NOT_YOURS, answered alike for one that is not there).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      id: ITEM_ID.describe("The proposed close's id"),
+      accept: z.boolean().describe("True to accept (close the item), false to reject"),
+      reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
+    },
+  },
+  item_history: {
+    title: "Item History",
+    description:
+      "Read one open item: as it stands (status, text, owner, due time, where it came from, who opened it and when it was first said), every change made to it in the order written — each with its maker, the state after it and its reason — and every close proposed on it, with its evidence, proposer and decision. Refused: an id the brain does not hold (ITEM_NOT_FOUND).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      id: ITEM_ID.describe("The open item's id"),
+    },
+  },
+  list_items: {
+    title: "List Items",
+    description:
+      "List open items: by `status` (open, the default; proposed; done; dropped; unsettled, open and proposed; settled, done and dropped; all), `overdue: true` for those due before now and not settled, from one `origin_thought`, or one `plugin`'s. Each carries `overdue` and `pendingProposals` (closes waiting on a decision). In due-time order, undated last, then the newest first said. `truncated: true` means the limit cut the list: narrow it.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      status: z.enum(["open", "proposed", "done", "dropped", "unsettled", "settled", "all"]).optional().default("open").describe("Which items: open (default), proposed, done, dropped, unsettled, settled or all"),
+      overdue: z.boolean().optional().describe("Only items due before now that are open or proposed"),
+      origin_thought: z.uuid().optional().describe("Only items read from this thought"),
+      plugin: z.string().min(1).max(64).optional().describe("Only items standing for this plugin's rows"),
+      limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many. Default 100"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

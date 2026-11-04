@@ -241,7 +241,7 @@ console.log("\n[7] A read-only key cannot see the tool that writes");
   assert(visibleToolNames({ scope: "write" }).join() === [...new Set([...READ_TOOL_NAMES, ...visibleToolNames({ scope: "capture" }), ...WRITE_TOOL_NAMES])].sort().join(),
     "the write surface is the union of the three groups the manifest names");
   // capture_thought, and the priority writers a capture-only key reaches for a thought it captured (decision 10, SMD-3664).
-  assert(capture.join() === "capture_thought,clear_priority,set_priority", `…which is capture_thought and the priority writers alone (${capture.join(", ")})`);
+  assert(capture.join() === "capture_thought,clear_priority,decide_item_close,open_item,propose_item_close,set_item_status,set_priority,update_item", `…which is capture_thought, the priority writers and the open-item writers alone (${capture.join(", ")})`);
   for (const t of READ_TOOL_NAMES) assert(!capture.includes(t), `"${t}" is absent from a capture key — it cannot read the brain`);
   for (const t of MUTATING.filter((t) => t !== "capture_thought")) assert(!capture.includes(t), `"${t}" is absent from a capture key`);
 }
@@ -291,7 +291,7 @@ console.log("\n[8] Scope applies through the ?key= URL form too");
   const write = await toolsFor(WRITE_KEY, "query");
   assert(MUTATING.every((t) => write.includes(t)), "a write key in the URL still sees the mutating tools");
   const capture = await toolsFor(CAPTURE_KEY, "query");
-  assert(capture.join() === "capture_thought,clear_priority,set_priority", "a capture key in the URL sees capture_thought and the priority writers alone");
+  assert(capture.join() === "capture_thought,clear_priority,decide_item_close,open_item,propose_item_close,set_item_status,set_priority,update_item", "a capture key in the URL sees capture_thought, the priority writers and the open-item writers alone");
 }
 
 console.log("\n[8b] GET /health says what the brain is to a key that may read it, and `ok` to any other (SMD-2041)");

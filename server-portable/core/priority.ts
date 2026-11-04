@@ -114,14 +114,14 @@ async function argumentRefused(ctx: Ctx, e: PriorityRefused, input: Input<"set_p
   return inputRefused(e);
 }
 
-export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"set_priority">): Promise<Outcome<SetPriorityResult, SetPriorityCode>> {
+export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"set_priority">, opts: { plugin?: string } = {}): Promise<Outcome<SetPriorityResult, SetPriorityCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
   const away = scope === "capture" ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).assertPriority({
     kind: input.kind, key: input.key, level: input.level, dueAt: instant(input.due_at), notBefore: instant(input.not_before),
-    dueRef: input.due_ref, reason: input.reason, inferred: input.inferred, actor: actorOf(ctx, principal), scope,
+    dueRef: input.due_ref, reason: input.reason, inferred: input.inferred, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,
   }));
   if (a instanceof PriorityRefused) return argumentRefused(ctx, a, input);
   if ((a.outcome === "asserted" || a.outcome === "unchanged") && a.assertion) {

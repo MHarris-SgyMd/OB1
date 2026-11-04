@@ -1551,6 +1551,118 @@ console.log("\n[12] The claimed label (SMD-3599): a live claim on a ticket a res
   for (const c of [inside, past]) await rest("POST", `/v1/claims/${(c.body.claim as Claim | undefined)?.id}/release`, { token: c.body.token, reason: "done" }, KEYS.rival);
 }
 
+console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2): an item opened over MCP from a thought is the one REST's history names, noted at the thought's capture time; a close another key proposes with the later thought as evidence is refused its proposer's accept and closes on the writer's; the same record through both doors; a read key may not open but lists, a capture-only key opens its own and is refused another's alike for one that is not there, never confirms its own proposed item and reads nothing; update, reopen and overdue; what 117 refuses answers by its rule and status");
+{
+  type I = { id: string; status: string; text: string; owner: string | null; dueAt: string | null; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null } };
+  type P = { id: string; status: string; evidenceThoughtId: string | null; label: string | null; decision: string | null; proposer: { name: string } };
+  const asReply = (e: unknown): Reply => ({ text: `(no reply: ${(e as Error).message})`, sc: {}, isError: true });
+  const origin = String((await rest("POST", "/v1/thoughts", { content: "omicron: remind me to call the dentist" })).body.id);
+  const later = String((await rest("POST", "/v1/thoughts", { content: "omicron: called the dentist, booked for Tuesday" })).body.id);
+  const [{ created_at: capturedAt }] = await sql`SELECT to_jsonb(created_at) #>> '{}' AS created_at FROM thoughts WHERE id = ${origin}::uuid`;
+  const NOWHERE = "00000000-0000-4000-8000-000000003665";
+
+  // Verify, through both doors: opened over MCP from a thought; its history over REST names it, noted at the thought's capture time.
+  const opened = await mcp("open_item", { text: "call the dentist", origin_thought: origin, owner: "me" });
+  const item = opened.sc.item as I | undefined;
+  const id = item?.id ?? NOWHERE;
+  const h = await rest("GET", `/v1/items/${id}`);
+  assert(!opened.isError && opened.sc.outcome === "opened" && item?.status === "open" && item.originThoughtId === origin && item.openedBy.name === "writer" && item.openedBy.scope === "write"
+      && new Date(item.notedAt).getTime() === new Date(String(capturedAt)).getTime()
+      && h.status === 200 && (h.body.item as I).id === id && (h.body.events as unknown[]).length === 1 && /^Opened open item \S+: "call the dentist", owner "me"\.$/.test(opened.text),
+    `an item opened over MCP from a thought is the one REST's history names, noted at the thought's capture time, the writer its opener at write scope (${opened.text.slice(0, 120)} | ${h.status})`);
+  const [ev] = await sql`SELECT actor_scope, actor_agent_id IS NOT NULL AS has_id FROM open_item_events WHERE item_id = ${id}::uuid`;
+  assert(ev?.actor_scope === "write" && ev?.has_id === true, `the envelope stated the write key's scope, and its agent id, to 117 (${JSON.stringify(ev)})`);
+  // The same record through both doors.
+  const hm = await mcp("item_history", { id });
+  const out = rendered((v) => say.renderItemHistory(ok(v)), h.body);
+  assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc),
+    `item_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 100)} | ${firstDiff(out.structuredContent, hm.sc)})`);
+
+  // The rival proposes the close, citing the later thought; its own accept is refused; the writer's closes the item.
+  const proposed = await rest("POST", `/v1/items/${id}/proposals`, { evidence_thought: later, label: "resolves", reason: "the later thought says it was done" }, KEYS.rival);
+  const prop = proposed.body.proposal as P | undefined;
+  const pid = prop?.id ?? NOWHERE;
+  const ownAccept = await rest("POST", `/v1/item-proposals/${pid}/decision`, { accept: true }, KEYS.rival);
+  const accepted = await mcp("decide_item_close", { id: pid, accept: true, reason: "agreed" });
+  const again = await rest("POST", `/v1/item-proposals/${pid}/decision`, { accept: false });
+  assert(proposed.status === 200 && proposed.body.outcome === "proposed" && prop?.label === "resolves" && prop.evidenceThoughtId === later && (proposed.body.item as I).status === "open"
+      && ownAccept.status === 403 && ownAccept.body.code === "PROPOSAL_YOURS" && ownAccept.body.proposal === pid
+      && !accepted.isError && accepted.sc.outcome === "accepted" && (accepted.sc.item as I).status === "done" && /^Accepted proposal \S+ to close it done \(resolves\)/.test(accepted.text)
+      && again.status === 409 && again.body.code === "PROPOSAL_DECIDED" && again.body.decision === "accepted",
+    `the rival's proposal, the later thought its evidence, leaves the item open; its own accept is 403 PROPOSAL_YOURS; the writer's accept over MCP closes it done; deciding again is 409 PROPOSAL_DECIDED (${proposed.status} ${ownAccept.status} ${ownAccept.body.code} | ${accepted.text.slice(0, 80)} | ${again.status} ${again.body.code})`);
+  const settled = await rest("POST", `/v1/items/${id}/proposals`, {}, KEYS.rival);
+  assert(settled.status === 409 && settled.body.code === "ITEM_SETTLED" && settled.body.status === "done" && settled.body.item === id,
+    `a close proposed on a done item is 409 ITEM_SETTLED, naming the item and its status (${settled.status} ${JSON.stringify(settled.body)})`);
+
+  // update_item: a JSON null clears; set_item_status reopens; list_items says overdue.
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const moved = await rest("PATCH", `/v1/items/${id}`, { owner: null, due_at: yesterday });
+  const reopened = await mcp("set_item_status", { id, status: "open", reason: "they cancelled" });
+  const listed = await rest("GET", `/v1/items?status=open&overdue=true`);
+  const row = ((listed.body.items ?? []) as (I & { overdue: boolean })[]).find((r) => r.id === id);
+  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && (moved.body.item as I).dueAt?.startsWith(yesterday)
+      && !reopened.isError && (reopened.sc.item as I).status === "open" && listed.status === 200 && row?.overdue === true && listed.body.truncated === false,
+    `a PATCH with owner null clears it and moves the due time to yesterday; reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+
+  // A read key may not open, and lists; a capture-only key opens its own, is refused another's alike for one that is not there, and reads nothing.
+  const readerOpen = await rest("POST", "/v1/items", { text: "a read key's to-do" }, KEYS.reader);
+  const readerList = await rest("GET", "/v1/items", undefined, KEYS.reader);
+  const hookOwn = await rest("POST", "/v1/items", { text: "omicron: the hook's own to-do", proposed: true }, KEYS.hook);
+  const hookId = String((hookOwn.body.item as I | undefined)?.id ?? NOWHERE);
+  const hookOther = await rest("PATCH", `/v1/items/${id}`, { owner: "the hook" }, KEYS.hook);
+  const hookNowhere = await rest("PATCH", `/v1/items/${NOWHERE}`, { owner: "the hook" }, KEYS.hook);
+  const hookConfirm = await rest("POST", `/v1/items/${hookId}/status`, { status: "open" }, KEYS.hook);
+  const hookConfirmMcp = await mcp("set_item_status", { id: hookId, status: "open" }, KEYS.hook).catch(asReply);
+  const hookDismiss = await rest("POST", `/v1/items/${hookId}/status`, { status: "dropped" }, KEYS.hook);
+  const hookReads = await rest("GET", `/v1/items/${hookId}`, undefined, KEYS.hook);
+  const { item: _o, ...otherFacts } = hookOther.body as Record<string, unknown>;
+  const { item: _n, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
+  assert(readerOpen.status === 403 && readerOpen.body.code === "FORBIDDEN" && readerList.status === 200,
+    `a read key may not open an item (403 FORBIDDEN) and lists them (${readerOpen.status} ${readerOpen.body.code} ${readerList.status})`);
+  assert(hookOwn.status === 200 && (hookOwn.body.item as I).status === "proposed" && (hookOwn.body.item as I).openedBy.scope === "capture"
+      && hookOther.status === 403 && hookOther.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(otherFacts, nowhereFacts)
+      && hookConfirm.status === 403 && hookConfirm.body.code === "CONFIRM_NOT_YOURS" && hookConfirmMcp.isError && /^Refused: open item \S+ was proposed, not stated; a write key confirms it/.test(hookConfirmMcp.text)
+      && hookDismiss.status === 200 && (hookDismiss.body.item as I).status === "dropped" && hookReads.status === 403,
+    `a capture-only key opens its own (proposed, at capture scope), is refused another's 403 ITEM_NOT_YOURS alike for one that is not there, may not confirm its own proposed item (CONFIRM_NOT_YOURS, in words over MCP) but dismisses it, and reads no item (${hookOwn.status} | ${hookOther.status} ${hookOther.body.code} | ${hookConfirm.body.code} | ${hookDismiss.status} | ${hookReads.status})`);
+
+  // What 117 refuses, each by its rule and status.
+  const noOrigin = await rest("POST", "/v1/items", { text: "from nowhere", origin_thought: NOWHERE });
+  const noRow = await rest("POST", "/v1/items", { text: "a row with no plugin", plugin_row: "task-1" });
+  const badId = await rest("GET", "/v1/items/not-a-uuid");
+  const noItem = await rest("GET", `/v1/items/${NOWHERE}`);
+  const noItemMcp = await mcp("item_history", { id: NOWHERE });
+  const noProposal = await rest("POST", `/v1/item-proposals/${NOWHERE}/decision`, { accept: true });
+  const noEvidence = await rest("POST", `/v1/items/${id}/proposals`, { evidence_thought: NOWHERE });
+  const badDue = await rest("PATCH", `/v1/items/${id}`, { due_at: "tomorrow" });
+  assert(noOrigin.status === 404 && noOrigin.body.code === "ORIGIN_NOT_FOUND" && noOrigin.body.thought === NOWHERE
+      && noRow.status === 400 && noRow.body.code === "REFUSED_ITEM_INPUT" && badId.status === 400 && badId.body.code === "REFUSED_ITEM_INPUT"
+      && noItem.status === 404 && noItem.body.code === "ITEM_NOT_FOUND" && (noItem.body.item as { kind: string; key: string }).key === NOWHERE
+      && noItemMcp.isError && noItemMcp.text === `Refused: the brain holds no open item ${NOWHERE}.`
+      && noProposal.status === 404 && noProposal.body.code === "PROPOSAL_NOT_FOUND" && noEvidence.status === 404 && noEvidence.body.code === "EVIDENCE_NOT_FOUND"
+      && badDue.status === 400,
+    `117's refusals by rule and status: a missing origin 404 ORIGIN_NOT_FOUND, a plugin row with no plugin 400 and a malformed id 400 REFUSED_ITEM_INPUT, an unknown item 404 ITEM_NOT_FOUND (in words over MCP), an unknown proposal 404 PROPOSAL_NOT_FOUND, a missing evidence 404 EVIDENCE_NOT_FOUND, a due time that is no ISO date 400 (${[noOrigin, noRow, badId, noItem, noProposal, noEvidence, badDue].map((r) => `${r.status} ${r.body.code}`).join(" | ")})`);
+
+  // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
+  // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority
+  // on it; another plugin's hook may not touch it; with no row it opens nothing (ITEM_UNATTRIBUTED, no agent id).
+  const { contextFor, hookPrincipal } = await import("./core/plugins.ts");
+  const hm2 = contextFor("home-maintenance", { core: direct, principal: hookPrincipal("home-maintenance") });
+  const fc = contextFor("family-calendar", { core: direct, principal: hookPrincipal("family-calendar") });
+  type Out = { ok: boolean; value?: Record<string, unknown>; refusal?: Record<string, unknown> };
+  const rowOpen = await hm2.call("open_item", { text: "omicron: replace the furnace filter", plugin_row: "task-7", due_at: "2026-11-01" }) as Out;
+  const rowItem = rowOpen.value?.item as (I & { plugin: { name: string; row: string } | null }) | undefined;
+  const rowId = rowItem?.id ?? NOWHERE;
+  const rowMove = await hm2.call("update_item", { id: rowId, due_at: "2027-02-01" }) as Out;
+  const rowPrio = await hm2.call("set_priority", { kind: "item", key: rowId, level: 3 }) as Out;
+  const otherHook = await fc.call("update_item", { id: rowId, owner: "x" }) as Out;
+  const noRowHook = await hm2.call("open_item", { text: "omicron: a hook's item for no row" }) as Out;
+  const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
+  assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
+      && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
+      && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNATTRIBUTED" && noRowHook.refusal?.cause === "no_agent_id",
+    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNATTRIBUTED (no agent id) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

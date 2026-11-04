@@ -1545,7 +1545,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 
   const surface = ((await rpc("tools/list", {})).result?.tools ?? []).map((t) => t.name);
   // …and the priority writers, which 116 lets it use on a thought it captured alone (decision 10, SMD-3664): no read tool.
-  assert(surface.join() === "capture_thought,set_priority,clear_priority", `the capture key's surface is capture_thought and the priority writers alone (${surface.join(", ") || "nothing"})`);
+  assert(surface.join() === "capture_thought,set_priority,clear_priority,open_item,update_item,set_item_status,propose_item_close,decide_item_close", `the capture key's surface is capture_thought, the priority writers and the open-item writers alone (${surface.join(", ") || "nothing"})`);
 
   // A thought "the session retrieved", written by the writer key, is the
   // summary's source; the hook names it as derived_from and the harness as source.

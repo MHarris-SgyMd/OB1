@@ -2480,7 +2480,9 @@ An item's text, owner and reasons may hold personal data: `forget_thought`
 (SMD-1723) has to reach the items read from a forgotten thought. The **items**
 grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
 and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
-REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
+REST and MCP are `open_item`, `update_item`, `set_item_status`, `propose_item_close`,
+`decide_item_close`, `item_history` and `list_items` (SMD-3665 PR 2;
+server-portable/README.md, Open items); node_state's open-item kind is SMD-3667's.
 
 ## What changed relative to the guide
 

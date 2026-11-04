@@ -340,6 +340,14 @@ const WORDS: Record<ToolName, Words> = {
   set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },
   priority_history: { render: (o) => say.renderPriorityHistory(o), fault: readFault() },
+  // Open items (SMD-3665 PR 2).
+  open_item: { render: (o) => say.renderOpenItem(o), fault: writeFault("open_item failed: ") },
+  update_item: { render: (o) => say.renderUpdateItem(o), fault: writeFault("update_item failed: ") },
+  set_item_status: { render: (o) => say.renderSetItemStatus(o), fault: writeFault("set_item_status failed: ") },
+  propose_item_close: { render: (o) => say.renderProposeItemClose(o), fault: writeFault("propose_item_close failed: ") },
+  decide_item_close: { render: (o) => say.renderDecideItemClose(o), fault: writeFault("decide_item_close failed: ") },
+  item_history: { render: (o) => say.renderItemHistory(o), fault: readFault() },
+  list_items: { render: (o) => say.renderListItems(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };
