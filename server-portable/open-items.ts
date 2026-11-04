@@ -82,10 +82,26 @@ export type ItemListRow = OpenItem & { overdue: boolean; pendingProposals: numbe
  * its length, a status of no kind), told by its message, the database's words. Any other raise stays the store's fault.
  */
 export class ItemRefused extends Error {
-  constructor(message: string) {
+  constructor(readonly problem: ItemProblem, message: string) {
     super(message);
     this.name = "ItemRefused";
   }
+}
+export type ItemProblem = "id" | "text" | "owner" | "due_at" | "status" | "label" | "plugin_row" | "changes" | "reason" | "key_name" | "other";
+
+/** Which argument a 22023 from 117 names, by its message's opening words (117's and 115's own wording, one rule each) — review pass 1: a client reading values had none. */
+export function itemProblemOf(message: string): ItemProblem {
+  if (/^not an open item's id\b/.test(message)) return "id";
+  if (/^an item's text\b|^an open item needs its text\b/.test(message)) return "text";
+  if (/^an owner\b/.test(message)) return "owner";
+  if (/^not a due time\b|^a due time\b/.test(message)) return "due_at";
+  if (/^an item's status is set to\b|^a proposed close is to\b/.test(message)) return "status";
+  if (/^a proposal's label\b/.test(message)) return "label";
+  if (/a plugin row\b/.test(message)) return "plugin_row";
+  if (/^update_item (?:takes|changes)\b/.test(message)) return "changes";
+  if (/^a reason is at most\b/.test(message)) return "reason";
+  if (/a maker's key name is at most\b|p_actor must be a JSON object|the envelope's plugin\b/.test(message)) return "key_name";
+  return "other";
 }
 
 const OUTCOMES = new Set(["opened", "updated", "changed", "unchanged", "proposed", "accepted", "rejected", "refused"]);

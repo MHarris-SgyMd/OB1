@@ -1635,12 +1635,22 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   const noEvidence = await rest("POST", `/v1/items/${id}/proposals`, { evidence_thought: NOWHERE });
   const badDue = await rest("PATCH", `/v1/items/${id}`, { due_at: "tomorrow" });
   assert(noOrigin.status === 404 && noOrigin.body.code === "ORIGIN_NOT_FOUND" && noOrigin.body.thought === NOWHERE
-      && noRow.status === 400 && noRow.body.code === "REFUSED_ITEM_INPUT" && badId.status === 400 && badId.body.code === "REFUSED_ITEM_INPUT"
+      && noRow.status === 400 && noRow.body.code === "REFUSED_ITEM_INPUT" && noRow.body.problem === "plugin_row" && badId.status === 400 && badId.body.code === "REFUSED_ITEM_INPUT" && badId.body.problem === "id"
       && noItem.status === 404 && noItem.body.code === "ITEM_NOT_FOUND" && (noItem.body.item as { kind: string; key: string }).key === NOWHERE
       && noItemMcp.isError && noItemMcp.text === `Refused: the brain holds no open item ${NOWHERE}.`
       && noProposal.status === 404 && noProposal.body.code === "PROPOSAL_NOT_FOUND" && noEvidence.status === 404 && noEvidence.body.code === "EVIDENCE_NOT_FOUND"
-      && badDue.status === 400,
+      && badDue.status === 400 && badDue.body.code === "REFUSED_INPUT",
     `117's refusals by rule and status: a missing origin 404 ORIGIN_NOT_FOUND, a plugin row with no plugin 400 and a malformed id 400 REFUSED_ITEM_INPUT, an unknown item 404 ITEM_NOT_FOUND (in words over MCP), an unknown proposal 404 PROPOSAL_NOT_FOUND, a missing evidence 404 EVIDENCE_NOT_FOUND, a due time that is no ISO date 400 (${[noOrigin, noRow, badId, noItem, noProposal, noEvidence, badDue].map((r) => `${r.status} ${r.body.code}`).join(" | ")})`);
+
+  // Review pass 1: overdue alone lists proposed items too; a thought id Postgres reads but RFC 9562 does not is the
+  // brain's to answer; a NUL in a label is the schema's 400.
+  const lateProposed = await rest("POST", "/v1/items", { text: "omicron: an inferred to-do, overdue", proposed: true, due_at: yesterday });
+  const overdueAll = await rest("GET", "/v1/items?overdue=true");
+  const inOverdue = ((overdueAll.body.items ?? []) as I[]).some((r) => r.id === (lateProposed.body.item as I | undefined)?.id);
+  const nonRfc = await rest("POST", "/v1/items", { text: "from an imported id", origin_thought: "11111111-1111-1111-1111-111111111111" });
+  const nulLabel = await rest("POST", `/v1/items/${id}/proposals`, { label: "res" + String.fromCharCode(0) + "olves" });
+  assert(lateProposed.status === 200 && inOverdue && nonRfc.status === 404 && nonRfc.body.code === "ORIGIN_NOT_FOUND" && nulLabel.status === 400,
+    `overdue with no status lists a proposed item due yesterday; a non-RFC uuid is the brain's ORIGIN_NOT_FOUND, not the schema's; a NUL in a label is a 400 (${inOverdue} | ${nonRfc.status} ${nonRfc.body.code} | ${nulLabel.status} ${nulLabel.body.code})`);
 
   // A plugin through ctx.call (SMD-3665 PR 2): its hook (capture scope, no agent id) opens the item its row stands for,
   // the plugin stamped on the envelope by the call and never an argument; it moves the due time and states a priority
@@ -1656,11 +1666,17 @@ console.log("\n[13] Open items through both doors (migration 117, SMD-3665 PR 2)
   const rowPrio = await hm2.call("set_priority", { kind: "item", key: rowId, level: 3 }) as Out;
   const otherHook = await fc.call("update_item", { id: rowId, owner: "x" }) as Out;
   const noRowHook = await hm2.call("open_item", { text: "omicron: a hook's item for no row" }) as Out;
+  // A capture key whose agent id the registry did not give: refused before the call on its own, but through a plugin
+  // 117 decides, and a plugin row's item is the plugin's (review pass 1).
+  const away = { name: "cap-away", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
+  const awayDirect = await direct.openItem(away, { text: "omicron: while the registry is away" } as never);
+  const awayPlugin = await contextFor("home-maintenance", { core: direct, principal: away }).call("open_item", { text: "omicron: a plugin row while the registry is away", plugin_row: "task-8" }) as Out;
   const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
   assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
       && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
-      && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNATTRIBUTED" && noRowHook.refusal?.cause === "no_agent_id",
-    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNATTRIBUTED (no agent id) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+      && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNOWNABLE"
+      && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true,
+    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
 }
 
 apiServer.stop();

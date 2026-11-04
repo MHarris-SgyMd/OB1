@@ -1287,7 +1287,9 @@ export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
 /** An item a priority is stated on (migration 116, SMD-3663): its kind and its key, as 116 normalised them. */
 export type PriorityItem = { kind: PriorityKind; key: string };
 export { PRIORITY_KINDS };
-export { ITEM_STATUSES, ItemRefused, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemProposal, type ItemRecord, type ItemStatus, type OpenItem, type OpenItemEvent } from "./open-items.ts";
+// Types alone: open-items.ts reads isoTimestamp from here, so its values are imported from it directly (review pass 1:
+// a value re-exported both ways was an import cycle).
+export type { ItemAnswer, ItemListRow, ItemProposal, ItemRecord, ItemStatus, OpenItem, OpenItemEvent } from "./open-items.ts";
 /**
  * One priority assertion as 116's ob1_priority_json answers it (SMD-3664): the
  * item, the level and times, the reason (the maker's free text, data), the

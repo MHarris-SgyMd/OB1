@@ -9,7 +9,7 @@
 // and a plugin hook on its rows'); item_history and list_items are reads.
 
 import type { Principal } from "../auth.ts";
-import { ItemRefused, ITEM_STATUSES, type ItemAnswer, type ItemListRow, type ItemProposal, type ItemRecord, type ItemStatus, type OpenItem, type OpenItemEvent } from "../store.ts";
+import { ItemRefused, ITEM_STATUSES, type ItemAnswer, type ItemListRow, type ItemProposal, type ItemRecord, type ItemStatus, type OpenItem, type OpenItemEvent } from "../open-items.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -19,9 +19,10 @@ import { actorOf } from "./writes.ts";
 export type ItemCallOptions = { plugin?: string };
 
 type WriteCode = "READ_ONLY_KEY" | "ITEM_NOT_YOURS" | "ITEM_NOT_FOUND" | "ITEM_UNATTRIBUTED" | "REFUSED_ITEM_INPUT";
+
 /** open_item's value: the item opened, or the one that is there (null: a capture-only key may not be shown it), and a note when it stands otherwise than asked. */
 export type OpenItemResult = { outcome: "opened" | "unchanged"; item: OpenItem | null; event: OpenItemEvent | null; note: string | null };
-export type OpenItemCode = Exclude<WriteCode, "ITEM_NOT_FOUND"> | "ORIGIN_NOT_FOUND";
+export type OpenItemCode = Exclude<WriteCode, "ITEM_NOT_FOUND"> | "ORIGIN_NOT_FOUND" | "ITEM_UNOWNABLE";
 export type UpdateItemResult = { outcome: "updated" | "unchanged"; item: OpenItem; event: OpenItemEvent | null };
 export type UpdateItemCode = WriteCode;
 /** set_item_status's value, and how many pending proposals settling the item mooted. */
@@ -51,7 +52,7 @@ async function asked<T>(run: () => Promise<T>): Promise<T | ItemRefused> {
     throw e;
   }
 }
-const inputRefused = (e: ItemRefused) => refuse({ code: "REFUSED_ITEM_INPUT", retryable: false, message: e.message });
+const inputRefused = (e: ItemRefused) => refuse({ code: "REFUSED_ITEM_INPUT", retryable: false, problem: e.problem, message: e.message });
 const readOnly = (principal: Principal) => refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
 const itemRef = (id: string) => ({ kind: "item" as const, key: id.trim().toLowerCase() });
 
@@ -59,7 +60,8 @@ const itemRef = (id: string) => ({ kind: "item" as const, key: id.trim().toLower
  * A capture-only key's own items are proved by the agent id its envelope carries: with that id not to hand because
  * the registry did not give it, 117 would refuse the key's own item as another's, or refuse to open one. Said as that,
  * before the call (set_priority's rule, SMD-3664 review pass 1); a principal with no agent id by design — a plugin
- * hook's — is 117's to answer.
+ * hook's — is 117's to answer, and so is any call through a plugin (review pass 1: a plugin row's item is the
+ * plugin's, which 117 grants without an agent id, and this refused it first).
  */
 function unattributed(principal: Principal) {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
@@ -77,8 +79,11 @@ function refusedBy(a: ItemAnswer, principal: Principal, named: { kind: "item" | 
   switch (a.code) {
     case "READ_ONLY_KEY": return readOnly(principal);
     case "ITEM_NOT_YOURS": return refuse({ code: "ITEM_NOT_YOURS", retryable: false, item: named, dueRef: null });
-    case "ITEM_NOT_FOUND": return refuse({ code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: itemRef(a.proposal?.itemId ?? ids.item ?? "") });
-    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? refuse({ code: "ITEM_UNATTRIBUTED", retryable: false, cause: "no_agent_id" });
+    // decide_item_close names a proposal, not an item: a proposal whose item the brain no longer holds is said as
+    // not found by its own id (review pass 1: it named an empty key).
+    case "ITEM_NOT_FOUND": return ids.item ? refuse({ code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: itemRef(ids.item) }) : refuse({ code: "PROPOSAL_NOT_FOUND", retryable: false, proposal: ids.proposal ?? "" });
+    // A caller with no agent id by design is told so as final (403), not as a registry's outage (review pass 1).
+    case "ITEM_UNATTRIBUTED": return unattributed(principal) ?? refuse({ code: "ITEM_UNOWNABLE", retryable: false });
     case "ORIGIN_NOT_FOUND": return refuse({ code: "ORIGIN_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "EVIDENCE_NOT_FOUND": return refuse({ code: "EVIDENCE_NOT_FOUND", retryable: false, thought: ids.thought ?? "" });
     case "ITEM_SETTLED": return refuse({ code: "ITEM_SETTLED", retryable: false, item: a.item?.id ?? ids.item ?? "", status: a.item?.status === "dropped" ? "dropped" : "done" });
@@ -93,7 +98,7 @@ function refusedBy(a: ItemAnswer, principal: Principal, named: { kind: "item" | 
 export async function openItem(ctx: Ctx, principal: Principal, input: Input<"open_item">, opts: ItemCallOptions = {}): Promise<Outcome<OpenItemResult, OpenItemCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
+  const away = scope === "capture" && opts.plugin === undefined ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).openItem({
     text: input.text, owner: input.owner, dueAt: input.due_at, originThought: input.origin_thought, pluginRow: input.plugin_row, proposed: input.proposed,
@@ -108,7 +113,7 @@ export async function openItem(ctx: Ctx, principal: Principal, input: Input<"ope
 export async function updateItem(ctx: Ctx, principal: Principal, input: Input<"update_item">, opts: ItemCallOptions = {}): Promise<Outcome<UpdateItemResult, UpdateItemCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
+  const away = scope === "capture" && opts.plugin === undefined ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).updateItem({
     id: input.id, changes: { text: input.text, owner: input.owner, dueAt: input.due_at }, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,
@@ -122,7 +127,7 @@ export async function updateItem(ctx: Ctx, principal: Principal, input: Input<"u
 export async function setItemStatus(ctx: Ctx, principal: Principal, input: Input<"set_item_status">, opts: ItemCallOptions = {}): Promise<Outcome<SetItemStatusResult, SetItemStatusCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
+  const away = scope === "capture" && opts.plugin === undefined ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).setItemStatus({ id: input.id, status: input.status, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin }));
   if (a instanceof ItemRefused) return inputRefused(a);
@@ -134,7 +139,7 @@ export async function setItemStatus(ctx: Ctx, principal: Principal, input: Input
 export async function proposeItemClose(ctx: Ctx, principal: Principal, input: Input<"propose_item_close">, opts: ItemCallOptions = {}): Promise<Outcome<ProposeItemCloseResult, ProposeItemCloseCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
+  const away = scope === "capture" && opts.plugin === undefined ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).proposeItemClose({
     id: input.id, status: input.status, evidenceThought: input.evidence_thought, label: input.label, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,
@@ -148,7 +153,7 @@ export async function proposeItemClose(ctx: Ctx, principal: Principal, input: In
 export async function decideItemClose(ctx: Ctx, principal: Principal, input: Input<"decide_item_close">, opts: ItemCallOptions = {}): Promise<Outcome<DecideItemCloseResult, DecideItemCloseCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const away = scope === "capture" ? unattributed(principal) : null;
+  const away = scope === "capture" && opts.plugin === undefined ? unattributed(principal) : null;
   if (away) return away;
   const a = await asked(async () => (await ctx.store()).decideItemClose({ proposal: input.id, accept: input.accept, reason: input.reason, actor: actorOf(ctx, principal), scope, plugin: opts.plugin }));
   if (a instanceof ItemRefused) return inputRefused(a);
@@ -165,14 +170,16 @@ export async function itemHistory(ctx: Ctx, _principal: Principal, input: Input<
 }
 
 /** list_items' `status` word as the statuses it reads. */
-const STATUS_WORDS: Record<Input<"list_items">["status"], ItemStatus[]> = {
+const STATUS_WORDS: Record<NonNullable<Input<"list_items">["status"]>, ItemStatus[]> = {
   open: ["open"], proposed: ["proposed"], done: ["done"], dropped: ["dropped"],
   unsettled: ["proposed", "open"], settled: ["done", "dropped"], all: [...ITEM_STATUSES],
 };
 
 export async function listItems(ctx: Ctx, _principal: Principal, input: Input<"list_items">): Promise<Outcome<ListItemsResult, ListItemsCode>> {
+  // No status given: open, or with overdue alone unsettled — an overdue item may be a proposed one (review pass 1).
+  const status = input.status ?? (input.overdue === true ? "unsettled" : "open");
   const r = await asked(async () => (await ctx.store()).listItems({
-    statuses: STATUS_WORDS[input.status], overdue: input.overdue === true, originThought: input.origin_thought, plugin: input.plugin, limit: input.limit,
+    statuses: STATUS_WORDS[status], overdue: input.overdue === true, originThought: input.origin_thought, plugin: input.plugin, limit: input.limit,
   }));
   if (r instanceof ItemRefused) return inputRefused(r);
   return ok(r);

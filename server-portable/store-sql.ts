@@ -25,7 +25,7 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ItemRefused, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./store.ts";
+import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
 import type {
   Actor,
@@ -112,15 +112,10 @@ async function priorityCall(what: string, run: () => Promise<Record<string, unkn
 }
 
 /**
- * The maker's envelope for 116: the actor's own, its scope stated. Only here: the actor's `scope` is otherwise a
- * capture key's alone, which 082 reads off an audit row, and a write key's envelope on a thought write states none.
- */
-const priorityEnvelope = (actor: Actor | undefined, scope: "write" | "capture") => (actor ? { ...actorPayload(actor), scope } : null);
-
-/**
- * The maker's envelope for 117 (SMD-3665 PR 2): 116's, its scope stated, and the plugin a call came through — a
- * plugin's ctx.call names it, and 117 reads it there alone (a plugin row's item is the plugin's), never from an
- * argument.
+ * The maker's envelope for 116's and 117's calls: the actor's own, its scope stated, and the plugin a call came
+ * through (SMD-3665 PR 2: a plugin's ctx.call names it, and 117 reads it there alone — a plugin row's item is the
+ * plugin's — never from an argument). Only here: the actor's `scope` is otherwise a capture key's alone, which 082
+ * reads off an audit row, and a write key's envelope on a thought write states none.
  */
 const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plugin: string | undefined) =>
   (actor ? { ...actorPayload(actor), scope, ...(plugin !== undefined ? { plugin } : {}) } : null);
@@ -128,7 +123,8 @@ const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plug
 /** A raise 117 means as a refused argument: its 22023, or a uuid Postgres could not cast (22P02); any other, the store's fault. */
 function itemRefusedOr(e: unknown): unknown {
   const errno = String((e as { errno?: unknown }).errno ?? "");
-  return errno === "22023" || errno === "22P02" ? new ItemRefused(String((e as Error)?.message ?? "")) : e;
+  const message = String((e as Error)?.message ?? "");
+  return errno === "22023" || errno === "22P02" ? new ItemRefused(errno === "22P02" ? "id" : itemProblemOf(message), message) : e;
 }
 
 /** One of 117's writers, run and read: its jsonb answer as an ItemAnswer, a malformed argument as ItemRefused. */
@@ -1084,7 +1080,7 @@ export class SqlStore implements ThoughtStore {
 
   async clearPriority(opts: { kind: string; key: string; actor?: Actor; scope: "write" | "capture" }): Promise<PriorityAnswer> {
     return priorityCall("clear_priority", () => this.sql`
-      SELECT clear_priority(${opts.kind}::text, ${opts.key}::text, ${priorityEnvelope(opts.actor, opts.scope)}::jsonb) AS r`);
+      SELECT clear_priority(${opts.kind}::text, ${opts.key}::text, ${itemEnvelope(opts.actor, opts.scope, undefined)}::jsonb) AS r`);
   }
 
   async priorityRecord(kind: string, key: string): Promise<PriorityRecord> {
