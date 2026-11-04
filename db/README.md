@@ -2449,10 +2449,11 @@ row. A **proposed
 close** (`open_item_close_proposals`: the status, the evidence thought, a label
 such as `resolves`, a reason) never closes the item by itself: a key other than
 its proposer accepts it, which closes the item with an event naming it, or
-rejects it (`PROPOSAL_YOURS` for the proposer accepting its own, matched as 116
-matches a maker: by agent id when one was recorded, else by name). A proposer's
-second proposal with the same evidence withdraws its first when it says
-something else. A row changes only to be decided, once. The scope rule fails closed as 116's. A
+rejects it (`PROPOSAL_YOURS` for the proposer accepting its own, matched by its
+name or its agent id, so the guard fails closed). A proposer's second proposal
+with the same evidence withdraws its first when it says something else, the
+first matched as 116 matches a maker (by agent id when one was recorded, else by
+name), so no key given another's old name withdraws its proposals. A row changes only to be decided, once. The scope rule fails closed as 116's. A
 **capture-only key** may open an item, from a thought only if it captured the
 thought, and change only an item it opened under its envelope's agent id that
 no other key has changed since, or one that stands for a row of the plugin its

@@ -76,6 +76,13 @@
 --        and refused alike for an item that is not there (ITEM_NOT_YOURS). One
 --        whose envelope carries no agent id of its own opens no item but a
 --        plugin row's (ITEM_UNATTRIBUTED): it could never prove one its own;
+--      * `proposed` marks what the extractor inferred, not a key's right: a
+--        capture-only key may dismiss its proposed item but not confirm it
+--        (CONFIRM_NOT_YOURS), and may still open an item open of its own, as
+--        an operator's statement through it would (review pass 5);
+--      * a plugin hook (no agent id) proves no thought its own, so it opens
+--        its row's item without an origin thought; a write key's call through
+--        the plugin may pass one (review pass 5);
 --      * a plugin row is the plugin's: the plugin is read from the envelope
 --        (`plugin`, which the server's ctx.call stamps, SMD-3665 PR 2), never
 --        from an argument, so no caller names a plugin's row by hand.
@@ -163,9 +170,9 @@
 --   calls them in SMD-3665's PR 2, whose preflight checks the group.
 --
 -- SAFETY
---   Three new tables, their indexes, four refusing triggers; twenty-eight
+--   Three new tables, their indexes, four refusing triggers; twenty-nine
 --   new functions (six calls, a drift check, a rebuild, the two triggers'
---   functions and eighteen helpers), three of 116's replaced
+--   functions and nineteen helpers), three of 116's replaced
 --   (ob1_priority_item_exists and assert_priority, with one rule widened, and
 --   ob1_priority_actor, on the maker reader it now shares with the item
 --   writers, its rules as they were); no row is changed. MINOR under
@@ -516,11 +523,13 @@ $$;
 COMMENT ON FUNCTION ob1_item_owns(uuid, uuid, text) IS
   'Whether a capture-only call owns the item p_item: it stands for a row of the plugin p_plugin (the envelope''s, which the server''s ctx.call stamps), or the agent p_agent opened it, its id proved by the envelope at the opening, and no event since is another key''s. False, never NULL, for neither, or an item that is not there. Migration 117 / SMD-3665.';
 
--- Whether a proposal is this key's own: made under its agent id, or by its name
--- alone before the key had an id (116's ob1_priority_is_maker rule, review
--- pass 1: matched by the key's id as of now, a proposal made by name before
--- the key had one was not its own, and its proposer could accept it). Never
--- NULL.
+-- Whether a call may be a proposal's proposer, for the accept guard alone
+-- (PROPOSAL_YOURS): its name, or its agent id, matching. Loose on purpose, so
+-- the guard fails closed (review pass 1: by the id as of now, a proposal made
+-- by name before the key had one was not its own; pass 3: by the id alone, a
+-- call made without it read as another key's). Withdrawing a proposal uses
+-- ob1_item_proposal_is_own, the strict rule (pass 5: by name, a key given a
+-- renamed key's old name could withdraw that key's proposals). Never NULL.
 CREATE OR REPLACE FUNCTION ob1_item_is_proposer(p open_item_close_proposals, p_name text, p_agent uuid)
 RETURNS boolean
 LANGUAGE sql
@@ -533,7 +542,21 @@ AS $$
          OR COALESCE(p.proposer_agent_id IS NOT NULL AND p.proposer_agent_id = p_agent, false)
 $$;
 COMMENT ON FUNCTION ob1_item_is_proposer(open_item_close_proposals, text, uuid) IS
-  'True when the proposal is the key''s own: made under the name the call names, or under the agent id it carries; false otherwise, never NULL. A key renamed since keeps its proposals by its id, and a call without its id is matched by its name, so PROPOSAL_YOURS fails closed. Migration 117 / SMD-3665.';
+  'True when the call may be the proposal''s proposer: the proposal was made under the name the call names, or under the agent id it carries; false otherwise, never NULL. The accept guard''s rule alone (PROPOSAL_YOURS fails closed); withdrawing uses ob1_item_proposal_is_own. Migration 117 / SMD-3665.';
+
+-- Whether a proposal is this key's own, to withdraw: made under its agent id,
+-- or by its name alone before the key had an id (116's ob1_priority_is_maker
+-- rule). Never NULL.
+CREATE OR REPLACE FUNCTION ob1_item_proposal_is_own(p open_item_close_proposals, p_name text, p_agent uuid)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT COALESCE(CASE WHEN p.proposer_agent_id IS NOT NULL THEN p.proposer_agent_id = p_agent
+                       ELSE p.proposer_name = p_name END, false)
+$$;
+COMMENT ON FUNCTION ob1_item_proposal_is_own(open_item_close_proposals, text, uuid) IS
+  'True when the proposal is the key''s own: one made under an agent id by that id, one made by name alone (no id then) by the name; false otherwise, never NULL. What a proposer''s correction withdraws (116''s maker rule). Migration 117 / SMD-3665.';
 
 -- An item as the writers name it: a uuid, lower-cased, or a raise naming it.
 CREATE OR REPLACE FUNCTION ob1_item_id(p_item text)
@@ -882,11 +905,11 @@ BEGIN
   END IF;
   IF v_have.item_id IS NOT NULL THEN
     -- A capture key is shown it only if it is its own: another key's item
-    -- would tell it that key's owner, due time and status. Asked under the
-    -- item's lock, as every ownership check is, so a take in flight is waited
-    -- for (review pass 4).
-    PERFORM ob1_item_lock(v_have.item_id);
-    SELECT * INTO v_have FROM open_items WHERE item_id = v_have.item_id;
+    -- would tell it that key's owner, due time and status. Read without the
+    -- item's lock: here it would come after the origin thought's share lock,
+    -- against the order every writer keeps (review pass 5, undoing pass 4's
+    -- lock). So a capture key may be shown its own item as it stood just
+    -- before another key's take commits: what it opened, as it was.
     v_show := v_who.scope = 'write' OR ob1_item_owns(v_have.item_id, v_who.env_agent_id, v_who.plugin);
     -- Nothing is written, so it is unchanged; but a call whose owner or due
     -- time differ from the item's — or, for a plugin row, whose text does — is
@@ -897,7 +920,7 @@ BEGIN
     v_other := (v_have.owner, v_have.due_at) IS DISTINCT FROM (v_owner, v_due)
                OR (v_row IS NOT NULL AND v_have.text IS DISTINCT FROM v_text);
     RETURN jsonb_build_object('outcome', 'unchanged', 'code', NULL,
-      'message', CASE WHEN NOT v_show THEN 'an item for this is already open'
+      'message', CASE WHEN NOT v_show THEN 'an item for this exists already'
                       WHEN v_other THEN 'the item stands as it was, not as this call says: update_item changes its text, owner or due time' END,
       'item', CASE WHEN v_show THEN ob1_item_json(v_have) END,
       'event', NULL);
@@ -1128,7 +1151,7 @@ BEGIN
   -- correction was answered unchanged and dropped).
   SELECT * INTO v_have FROM open_item_close_proposals p
    WHERE p.item_id = v_id AND p.decision IS NULL
-     AND ob1_item_is_proposer(p, v_who.name, v_who.agent_id)
+     AND ob1_item_proposal_is_own(p, v_who.name, v_who.agent_id)
      AND p.evidence_thought_id IS NOT DISTINCT FROM p_evidence_thought
    ORDER BY p.seq DESC LIMIT 1
    FOR UPDATE;
@@ -1141,7 +1164,7 @@ BEGIN
        SET decision = 'rejected', decided_at = v_now, decider_name = v_who.name, decider_agent_id = v_who.agent_id,
            decision_reason = 'withdrawn by its proposer for a later proposal'
      WHERE p.item_id = v_id AND p.decision IS NULL
-       AND ob1_item_is_proposer(p, v_who.name, v_who.agent_id)
+       AND ob1_item_proposal_is_own(p, v_who.name, v_who.agent_id)
        AND p.evidence_thought_id IS NOT DISTINCT FROM p_evidence_thought;
     SELECT * INTO v_have FROM open_item_close_proposals WHERE id = v_have.id;
   END IF;

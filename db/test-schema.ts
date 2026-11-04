@@ -16964,7 +16964,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const capDecideOthers = await decide(proposed.proposal?.id ?? GHOST, false, CAP);
   const opDecideGhost = await decide(GHOST, true, OP);
   const opFromGhost = await open("from a thought that is not there", OP, { thought: GHOST });
-  assert(opFromCap.outcome === "opened" && capSameAsOp.outcome === "unchanged" && capSameAsOp.item === null && /already open/.test(capSameAsOp.message ?? "")
+  assert(opFromCap.outcome === "opened" && capSameAsOp.outcome === "unchanged" && capSameAsOp.item === null && /exists already/.test(capSameAsOp.message ?? "")
          && capSameAsOpGhost.code === "ITEM_NOT_YOURS" && capDecideOthers.code === "ITEM_NOT_YOURS" && capSameAsOpGhost.message === capDecideOthers.message
          && opDecideGhost.code === "PROPOSAL_NOT_FOUND" && opFromGhost.code === "ORIGIN_NOT_FOUND",
     `a capture key opening an item another key opened from its thought is answered unchanged and shown none of it; a proposal that is not there is ITEM_NOT_YOURS to a capture key, in the words it gets for one on another key's item, and PROPOSAL_NOT_FOUND to a write key; a write key's open from a thought that is not there is ORIGIN_NOT_FOUND (${capSameAsOp.outcome}, ${JSON.stringify(capSameAsOp.item)}, ${capSameAsOpGhost.code}, ${opDecideGhost.code})`);
@@ -17044,6 +17044,17 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const renAccept = await decide(renProp.proposal?.id ?? GHOST, true, { name: "item-ren", scope: "write" });
   assert(renProp.outcome === "proposed" && renAccept.code === "PROPOSAL_YOURS",
     `a proposer whose later call carries no agent id is matched by its name: its accept is PROPOSAL_YOURS (${renProp.outcome}, ${renAccept.code})`);
+
+  // A key given a renamed key's old name does not withdraw that key's proposal: a correction withdraws only the proposer's own, by 116's maker rule (review pass 5).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-old', 'agent')`);
+  const namesakeItem = await open("[105] an item two keys of one name propose on", OP);
+  const oldProp = await propose(namesakeItem.item?.id ?? GHOST, { name: "item-old", scope: "write", agent_id: await agentOf("item-old") }, { evidence: booked, status: "done" });
+  await db.exec(`UPDATE ob1_agents SET label = 'item-old-renamed' WHERE label = 'item-old'`);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-old', 'agent')`);
+  const newProp = await propose(namesakeItem.item?.id ?? GHOST, { name: "item-old", scope: "write", agent_id: await agentOf("item-old") }, { evidence: booked, status: "dropped" });
+  const bothPending = (await history(namesakeItem.item?.id ?? GHOST)).proposals.filter((x) => x.decision === null).length;
+  assert(oldProp.outcome === "proposed" && newProp.outcome === "proposed" && (newProp as { replaced?: Proposal | null }).replaced === null && bothPending === 2,
+    `a new key given a renamed key's old name proposes beside that key's proposal and withdraws none of it (${newProp.outcome}, ${JSON.stringify((newProp as { replaced?: Proposal | null }).replaced)}, ${bothPending})`);
 
   // A capture-only key may dismiss its own proposed item, never confirm it (review pass 3).
   const capProposed = await open("[105] the extractor's guess", CAP, { proposed: true });
@@ -17195,7 +17206,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const ones = await Promise.all(["open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "open_item_history", "assert_priority"].map(functionsNamed));
   assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
 
-  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late', 'item-ren-renamed')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late', 'item-ren-renamed', 'item-old', 'item-old-renamed')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
