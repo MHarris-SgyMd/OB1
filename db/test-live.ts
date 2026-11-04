@@ -124,11 +124,11 @@ if (!URL_) {
  * timers instead. The rest's other sections wait on the CPU, so its time
  * moves most with the runner's speed: its slow runs are its median, its fast
  * run ~50 s under. SMD-3306 PR 6b-1's sweep cases took [10h] from ~97 s to
- * ~242 s on CI, so [10g] went to sleep, [9f] to long, [10e], [17] and [37] to
- * extract and [10] to the rest, by the section medians of main's runs
- * 41715131299, 41727043474, 41735151304 and 41738360556 and [10h] timed beside
- * main's locally: live steps of sleep 300 s, long 302, extract 303 and the
- * rest 298 projected, against ~389 for extract with the cells as they were. A
+ * ~242 s on CI, and SMD-3379 PR 1c-4b grew [38] by about a minute, so [38]
+ * runs alone in sleep, the floor, [9f] went to long, [10e], [17] and [37] to
+ * extract, and [10] and [10g] to the rest: ci-parity's cells on that PR's
+ * merge with main 0a200f80, sleep 292 s, long 293, extract 298 and the rest
+ * 294, against ~389 projected on CI for extract with the cells as they were. A
  * cell's job runs ~15-25 s past its live step, so a
  * section added to a cell adds to the run's length once that cell's job is
  * the run's longest.
@@ -137,7 +137,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["38", "10g"],
+  sleep: ["38"],
   long: ["9", "9f", "38r", "38b"],
   extract: ["5d", "10e", "10f", "10h", "17", "37", "37b", "39", "41"],
 };
