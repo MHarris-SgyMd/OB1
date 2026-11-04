@@ -328,9 +328,9 @@ keep their rows below.
 ## How the "verified no references" gate is applied
 
 An artifact is *referenced* — and therefore not removable — when something outside its
-own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.ts`),
-`.github/workflows/fork-checks.yml`, `extensions/package.json` scripts, the SQL-shim
+own folder depends on it: a code import, a CI parity test (`integrations/test-auth.ts`,
+`integrations/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.ts`),
+`.github/workflows/fork-checks.yml`, `integrations/package.json` scripts, the SQL-shim
 codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md`
 are the *audit record*, not a live dependency, and do not block a removal.

@@ -304,8 +304,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
 type Handler = (req: Request) => Response | Promise<Response>;
 // A recipe or integration imports STACK's four by bare name and has no install of its own beside it; they resolve
-// from extensions/node_modules through the committed recipes/node_modules and integrations/node_modules links,
-// which test-auth.ts holds (SMD-1991).
+// from integrations/node_modules, the integrations from under it and the recipes through the committed
+// recipes/node_modules link, which test-auth.ts holds (SMD-1991; this directory's since SMD-3747).
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
@@ -997,9 +997,10 @@ const BYPASS_1524 = ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/sche
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
   "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128
-// Every vendored .ts, read once; each ticket's rule tests the same texts.
+// Every vendored .ts, read once; each ticket's rule tests the same texts. The suites beside the install in
+// integrations/ (here since SMD-3747) are not vendored servers: they name the tickets they test.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-  .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
+  .filter((f) => !f.includes("node_modules") && !/^integrations\/test-[^/]+\.ts$/.test(f)).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
 for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544], ["SMD-1541", DRIVEN_1541]] as const) {
   const headed = HEADED.filter(([, text]) => new RegExp(ticket).test(text)).map(([f]) => f).sort();
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);

@@ -95,14 +95,14 @@ is green.
    path-A prerequisite). The three `index.ts` changes above; drop `@hono/mcp` +
    `@modelcontextprotocol/sdk`, add `@modelcontextprotocol/core` +
    `/server`; rewrite the two `test-server` Accept assertions and the one
-   `test-e2e-sql` error-shape assertion; keep `extensions/package.json` in lockstep
-   (the two pin sets must stay identical — `extensions/test-auth.ts` fails if they
+   `test-e2e-sql` error-shape assertion; keep `integrations/package.json` in lockstep
+   (the two pin sets must stay identical — `integrations/test-auth.ts` fails if they
    drift; FORK.md change 84). A `changes/smd-NNNN.md` fragment is required (it
    touches `server-portable/`).
 2. **The shared-install vendored servers → v2, or retire per SMD-1931.**
    `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp`, `ob-graph`,
    `work-operating-model-activation` resolve the SDK from one
-   `extensions/node_modules` install, so it is one swap plus each server's own
+   `integrations/node_modules` install, so it is one swap plus each server's own
    `StreamableHTTPTransport` → `WebStandardStreamableHTTPServerTransport` line.
    `delete-thought-mcp` / `update-thought-mcp` also import `ListToolsRequestSchema`
    from the SDK — re-point to v2's type exports. This stage is a candidate to
@@ -138,7 +138,7 @@ servers, 20 SDK importers. The swap per site:
 | `ListToolsRequestSchema` from `.../sdk/.../types.js` | the same name is exported from `@modelcontextprotocol/server` |
 | client `Client` + `StreamableHTTPClientTransport` from `.../sdk/client/*` | `@modelcontextprotocol/client` |
 
-Pin sites to touch: `server-portable/package.json`, `extensions/package.json`
+Pin sites to touch: `server-portable/package.json`, `integrations/package.json`
 (lockstep), `evals/package.json` (client only),
 `recipes/vercel-neon-telegram/package.json`, and their `bun.lock` files
 (`integrations/kubernetes-deployment`'s retired: SMD-2288). The transitive tree shrinks: v1 pulled `express`, `raw-body`,

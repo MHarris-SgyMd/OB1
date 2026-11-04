@@ -92,7 +92,7 @@ const ACTOR = { name: "MCP_ACCESS_KEY", via: "smart-ingest" };
  * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
  * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
  * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
- * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
+ * that reads a knob this way; integrations/test-writes.ts holds the two copies identical.
  */
 function httpTargetFrom(name: string): string | null {
   const value = process.env[name]?.trim();

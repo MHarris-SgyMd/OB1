@@ -29,13 +29,13 @@
 // ob1-fork (SMD-1524): the audit report is stored through the database's upsert_thought,
 // which writes the content fingerprint (003) and the audit actor (008) with the text; a
 // raw insert left the fingerprint NULL and the row invisible to dedup. The report carries
-// no vector, so the 2-argument form is resolved. FORK.md change 71; extensions/test-writes.ts
+// no vector, so the 2-argument form is resolved. FORK.md change 71; integrations/test-writes.ts
 // drives it against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 67; extensions/test-auth.ts exercises it.
+// change 67; integrations/test-auth.ts exercises it.
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite, listenOn } from "../_shared/auth.ts";
 

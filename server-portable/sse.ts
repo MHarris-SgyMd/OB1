@@ -1,15 +1,11 @@
 // A response stream kept alive while a call runs (SMD-1864), for every server
 // that answers with an event stream — the MCP transport's replies and the job
 // streams (SMD-2273). Moved out of index.ts (SMD-2284) so the REST core keeps
-// its streams alive with the same frame and the same ceiling. The vendored MCP
-// servers answer on the same kind of stream (@hono/mcp's transport, which pings
-// only a GET's stream), so a byte-for-byte copy of this file sits in
-// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph
-// and work-operating-model-activation, SMD-2920), and each of those servers
-// sends its reply through mcpReply below (SMD-2001). `bun run sync-sse` in
-// extensions/ rewrites the copy from this file; extensions/test-auth.ts fails
-// if it differs or a server skips it. It imports nothing, and everything here
-// runs as it is on Bun, Node, Deno and Workers.
+// its streams alive with the same frame and the same ceiling. A byte-for-byte
+// copy sat in extensions/_shared/ for the vendored MCP servers, with mcpReply
+// and vendoredStalledLine for their replies (SMD-2001), until the last of those
+// servers retired (SMD-2311) and the copy with them (SMD-3747). It imports
+// nothing, and everything here runs as it is on Bun, Node, Deno and Workers.
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
 // result to it when the tool returns; until then the stream carries nothing
@@ -66,8 +62,8 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  * `intervalMs` until the body ends (`onEnd` runs once, then), the client
  * leaves (`signal` aborts, or the next frame finds the stream closed — either
  * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
- * since `startedAt` (the timer stops, `stalledLine` — stalledRequestLine
- * unless given — is logged for `label` and `onStall` runs once — the route marks the request settled, so
+ * since `startedAt` (the timer stops, stalledRequestLine is logged for
+ * `label` and `onStall` runs once — the route marks the request settled, so
  * the runtime's reap that follows on Bun is not logged as a client leaving; on
  * Node or Workers nothing reaps a silent stream, and it stays open until the
  * client or a proxy gives up). A response that is not an event stream is
@@ -90,7 +86,6 @@ export function withSseKeepalive(
   response: Response,
   opts: {
     intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
-    stalledLine?: (label: string, elapsedMs: number) => string;
   } = {},
 ): Response {
   const body = response.body;
@@ -115,7 +110,7 @@ export function withSseKeepalive(
         const elapsed = performance.now() - started;
         if (elapsed >= maxMs) {
           stop();
-          console.warn((opts.stalledLine ?? stalledRequestLine)(opts.label ?? "?", elapsed));
+          console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
           opts.onStall?.();
           return;
         }
@@ -157,17 +152,6 @@ export function stalledRequestLine(label: string, elapsedMs: number): string {
 }
 
 /**
- * The same, from a vendored server (review pass 3). The core's advice does not
- * carry over: no vendored MCP server calls a provider since kubernetes-deployment,
- * the one that did under its own OB1_LLM_TIMEOUT (SMD-2692), retired with
- * compose-only (SMD-2288); the rest make queries alone. So the line names no
- * provider bound: the stuck part is a query.
- */
-export function vendoredStalledLine(label: string, elapsedMs: number): string {
-  return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; the call is stuck on a query (SMD-2001)`;
-}
-
-/**
  * What a log line may say about a request: the JSON-RPC method and, for a
  * tool call, the tool's name — never the arguments, which are the thought —
  * each as `labelPart` admits it, since both are the caller's strings. A batch
@@ -193,67 +177,4 @@ export function requestLabel(bodyText: string | null): string {
  */
 export function abandonedRequestLine(label: string, elapsedMs: number): string {
   return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
-}
-
-/**
- * A vendored MCP server's reply, given the two things the core route gives its
- * own (SMD-2001): the stream kept alive by withSseKeepalive while the tool
- * runs, and a client that leaves before the reply is complete logged once with
- * abandonedRequestLine, named by requestLabel.
- *
- * `c` is the route's Hono context, typed by the two members read here:
- * `c.req.raw`, the request as it came (its signal is the client's), and
- * `c.req.text()`, its body. Hono caches the text, and @hono/mcp's transport
- * reads `ctx.req.json()` from that cache, so it sees the same body. The SDK v2
- * transport (SMD-2279) reads the raw Request stream instead, which this read
- * will have drained: that move must hand it a Request rebuilt from the text,
- * as the core route does (SMD-2278). `respond` is the transport's
- * handleRequest.
- *
- * The watch starts after the key check and the server's build, which take
- * nothing long, and its listener comes before the body read, so a client that
- * leaves mid-upload is logged, as `?`. Then:
- * - a method other than POST carries no call: its reply is respond()'s as it
- *   is, body unread, close unwatched — a GET handed to the transport opens a
- *   stream only the client ends;
- * - a client already gone gets the line and a 408, and the tool never runs
- *   (unlike at the core route, the server has been built);
- * - a reply that is not an event stream (JSON, a 202, a refusal) comes back as
- *   it is, and a respond() that throws settles the request and throws;
- * - a stream held to the ceiling is logged with vendoredStalledLine.
- */
-export async function mcpReply(
-  c: { req: { raw: Request; text(): Promise<string> } },
-  respond: () => Promise<Response | undefined> | Response | undefined,
-): Promise<Response | undefined> {
-  const req = c.req.raw;
-  if (req.method !== "POST") return respond();
-  const started = performance.now();
-  let label = "?";
-  let settled = false;
-  const settle = () => { settled = true; };
-  const abandoned = () => {
-    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
-  };
-  // A listener added to a signal already aborted never fires, so that case is logged by hand.
-  req.signal.addEventListener("abort", abandoned, { once: true });
-  if (req.signal.aborted) abandoned();
-  else label = requestLabel(await c.req.text().catch(() => null));
-  if (req.signal.aborted) {
-    // Gone before the call: logged once (by the listener or above), and no call.
-    settle();
-    return new Response(null, { status: 408 });
-  }
-  let response: Response | undefined;
-  try {
-    response = await respond();
-  } catch (e) {
-    settle();
-    throw e;
-  }
-  if (!response) {
-    settle();
-    return response;
-  }
-  return withSseKeepalive(response, { signal: req.signal, label, startedAt: started, onEnd: settle, onStall: settle, stalledLine: vendoredStalledLine });
 }

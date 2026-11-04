@@ -11,12 +11,12 @@
 // secret, not a key, and 008 keeps a NULL actor for a write without one. The enhanced-thoughts
 // columns the function does not know follow by an update carrying neither content nor
 // vector, where they are NULL — a fresh row's, or a half-shaped row's on re-capture. FORK.md
-// change 71; extensions/test-writes.ts drives it
+// change 71; integrations/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function.
-// FORK.md change 67; extensions/test-auth.ts exercises it.
+// FORK.md change 67; integrations/test-auth.ts exercises it.
 // readwise-capture / index.ts
 //
 // Supabase Edge Function that receives Readwise highlight webhooks,

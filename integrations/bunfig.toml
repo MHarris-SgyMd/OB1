@@ -1,0 +1,12 @@
+# Bun reads this file for any command run from integrations/: the two suites
+# (test-auth, test-writes) and package.json's scripts (here since SMD-3747; in
+# extensions/ until then). With auto-install off, a package that does not
+# resolve fails the import instead of Bun fetching whatever npm serves. That
+# holds for the recipe and integration servers the suites import in-process,
+# which reach this directory's install: the integrations from under it, the
+# recipes through the committed recipes/node_modules link (SMD-1991).
+# `bun install` is unaffected. Check 44 of scripts/check-fork-consistency.ts
+# holds this file and its siblings in the other directories CI runs from
+# (SMD-2978).
+[install]
+auto = "disable"

@@ -2,7 +2,7 @@
 
 A guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.
 
-> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was.
+> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them: a server of your own in `integrations/` imports `integrations/_shared/auth.ts`, and keeps its own stream alive.
 
 ## When You Need This
 
@@ -297,7 +297,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/mcp -H 'x
 # → 401: the primary server's key is not in MCP_HOUSEHOLD_ACCESS_KEYS
 ```
 
-The list is the whole boundary: a tool a key is not given is not registered for it, so there is nothing to call. (`extensions/test-auth.ts` asserts exactly this for the shared server in CI.) To have the database hold a second line, give the shared server a `SUPABASE_URL` whose role has only the household tables' privileges, and verify with `psql` as that role — `select count(*) from thoughts` should be refused.
+The list is the whole boundary: a tool a key is not given is not registered for it, so there is nothing to call. (The vendored suite asserted exactly this for the shared server in CI, until it retired.) To have the database hold a second line, give the shared server a `SUPABASE_URL` whose role has only the household tables' privileges, and verify with `psql` as that role — `select count(*) from thoughts` should be refused.
 
 ## Concrete Example: Spouse Access to Meal Planning
 

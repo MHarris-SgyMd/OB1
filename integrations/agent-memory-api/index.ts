@@ -8,7 +8,7 @@
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
-// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// reaches the audit (008). FORK.md change 69; integrations/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // SMD-1541 (change 103): the key's name rides as the actor in upsert_thought's
 // payload — so 008's row names it, and the write-back's runtime rides in its
@@ -17,7 +17,7 @@
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is refused by the routes
-// that write. FORK.md change 67; extensions/test-auth.ts exercises it.
+// that write. FORK.md change 67; integrations/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
 

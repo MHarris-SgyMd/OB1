@@ -35,10 +35,10 @@ Run the extension's `schema.sql` against your Open Brain database, as the extens
 Once per checkout:
 
 ```bash
-(cd extensions && bun install)
+(cd integrations && bun install)
 ```
 
-`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server resolves the same install through `integrations/node_modules` or `recipes/node_modules`, committed links to `../extensions/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
+`integrations/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every vendored server. An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 
@@ -96,7 +96,7 @@ PORT=8787 bun extensions/extension-name/index.ts
 http://your-host:8787/mcp?key=your-access-key
 ```
 
-Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five such servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database. `extensions/test-auth.ts` starts every vendored recipe and integration server this way in CI.
+Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five such servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database. `integrations/test-auth.ts` starts every vendored recipe and integration server this way in CI.
 
 ## Step 5: Put It Behind HTTPS
 
@@ -128,7 +128,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Something holds the port. `PORT` unset is 8000, the stack's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the clients the new URL.
 
 **`Cannot find package 'hono'` (or `zod`, `@hono/mcp`)**
-- Step 2 was skipped: `(cd extensions && bun install)`. An integration or recipe server needs the same install; it finds it through the `node_modules` link in `integrations/` or `recipes/`.
+- Step 2 was skipped: `(cd integrations && bun install)`. A recipe server needs the same install; it finds it through the `node_modules` link in `recipes/`.
 
 **401 on every request**
 - The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either — they admit read and write): check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.

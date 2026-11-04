@@ -781,8 +781,8 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
- * The MCP stack — the four packages extensions/package.json installs for the
- * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
+ * The MCP stack — the four packages integrations/package.json installs for the
+ * vendored servers, one list (SMD-1800): integrations/test-auth.ts's pin guard
  * holds that install to them, and server-portable's and mcp-server's to the
  * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
  * recipes and integrations reach that install through the committed
@@ -798,7 +798,7 @@ export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcont
  * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
  * `hono` and `zod` are shared with STACK. The vendored servers (extensions) stay
  * on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
- * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
+ * during the window the two stacks coexist and integrations/test-auth.ts's pin guard
  * holds each install to its own.
  */
 export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
