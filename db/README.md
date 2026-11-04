@@ -4486,10 +4486,11 @@ after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
 lands. A vector arriving queues no claim, yet consolidation judges only a
 thought with one: so a vector come since the last whole read — an audited
-update whose diff says `embedding_present`, the vector mender's or a
+update whose diff says `embedding_present` true, the vector mender's or a
 re-embed's — brings the next whole read forward, at most once a minute after
-the last whole read or a period's end read, and a vector read once is not
-read again (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+the last whole read or a period's end read (so within that and a `--poll`),
+and a vector read once is not read again; the rescan keeps its own clock
+(SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
 delete of a window or a replay leaves, re-embed's backlog — waits for the
 rescan, or goes with a period other work begins (deleting a thought leaves
 none: its lineage rows go with it); the next poll reads it whole after a
@@ -4687,7 +4688,8 @@ its pools drain, where the clock stopped it after `OB1_SLEEP_BUDGET` minutes,
 so a backlog drains in one period, paused by each live write. A statement
 past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
-whole; a vector arriving brings that read forward (SMD-3379 PR 1d). A row a scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
+whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
+scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
 `resting` — is still read, for a rollback.
 
 **Its start, and refusals.** Before its first period it runs each pass's start

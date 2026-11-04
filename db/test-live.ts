@@ -43,7 +43,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
-import { LOOPBACK_HOSTS } from "./connect.ts";
+import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
@@ -71,7 +71,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { newestLive, passDumpFile, run as runSleep, usText } from "./sleep.ts";
+import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, vectorCome, vectorMark } from "./sleep.ts";
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -21255,7 +21255,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a period re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a live write pauses it, a call past the bound aborted; its provider gone, its key refused or a throw sets it down for the period, a statement timed out holds it until a restart, extraction running on; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot run that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, intercept, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, intercept, nextPeriod, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -21795,20 +21795,37 @@ if (want("38r")) {
     // waited for the rescan — 10 min here. Now a vector come since the last
     // whole read brings the next forward, at most once a floor (4 s here)
     // after the last whole read or end read, and one read is not read again.
-    // Two thoughts planted extracted and vectorless, out of the claims and the
-    // pools: P1 with no entity, which consolidation never judges, and P2 with
-    // one. The mender's write gives each a vector: P1's brings a whole read
-    // forward that finds no work; P2's, mended just after it, waits out the
-    // floor from that read, and then begins a period for consolidation. P3,
+    // Three thoughts planted extracted and vectorless, out of the claims and
+    // the pools: P1 and P3 with no entity, which consolidation never judges,
+    // and P2 with one. The mender's write gives each a vector: P1's brings a
+    // whole read forward that finds no work; P2's, landing during that read
+    // once its consolidation pool is read (the mark taken before it, so P2's
+    // is read again), waits out the floor from that read, and then begins a
+    // period for consolidation. P3,
     // with no entity, is mended during that period: its end read takes the
     // mark, so P3's vector brings no whole read after it.
     // Re-embed is kept out of sleep (the unfit name above): its backlog — a
     // vectorless row is one — is read whole, so P2 would begin P1's period.
+    // When each mark is asked for (vectorMark's statement: a whole read's or an end read's, not vectorCome's), and
+    // each live read (newestLive), which follows a whole read in the idle poll: one after a mark, that read is done.
     const markAt: number[] = [];
+    const liveAt: number[] = [];
+    // Run once, after the next consolidation pool read's statement (poolOf's fragment, then its read).
+    let duringPool: (() => Promise<void>) | null = null;
+    let poolNext = false;
     const counted = intercept((text, run) => {
-      if (/ AS seen$/.test(text.trim())) markAt.push(Date.now());
+      if (/ AS seen$/.test(text.trim()) && !/ AS came,/.test(text)) markAt.push(Date.now());
+      if (/ AS write_us/.test(text)) liveAt.push(Date.now());
+      if (duringPool !== null && /FROM consolidation_pool\(/.test(text)) poolNext = true;
+      else if (poolNext && /::int AS pending/.test(text)) {
+        poolNext = false;
+        const then = duringPool!;
+        duringPool = null;
+        return (run() as Promise<unknown>).then(async (r) => { await then(); return r; });
+      }
       return run();
     });
+    const readDone = (at: number) => pollUntil(async () => liveAt.some((t) => t > at), 5000);
     const plant = async (content: string, entity: boolean) => {
       // One transaction: the extraction claim the insert queues (016) is settled before a poll can read it.
       return await sql.begin(async (tx) => {
@@ -21835,12 +21852,14 @@ if (want("38r")) {
     };
     await sql`UPDATE ob1_config SET value = 'stub embed' WHERE key = 'embedding_model'`;
     const vectorRun = follow({ sql: counted, env: unfitEnv, rescanMs: 600_000, vectorFloorMs: 4000 });
-    let idle = false, plantedQuiet = false, p1Read = false, p2Begun = false;
-    let p1ReadAt = 0, p2MendedAt = 0, p2BegunAt = 0, readsAfter = -1, workingAfter = -1, judged = -1, p3During = false;
+    let idle = false, plantedQuiet = false, p1Read = false, p2Begun = false, p2Ended = false, stopCode = -9;
+    let p1ReadAt = 0, p2MendedAt = 0, p2BegunAt = 0, readsAfter = -1, workingAfter = -1, judged = -1, p3During = false, p3BeforeEndMark = false;
     let p1 = "", p2 = "", p3 = "";
     try {
-      // Idle: the baseline read, and any period it began ended.
-      idle = await pollUntil(async () => markAt.length > 0 && periodOver(), 30_000);
+      // Idle: the baseline read done, a period it found work for begun by now (the capture's 1 s and a poll), and ended.
+      idle = await pollUntil(async () => markAt.length > 0, 10_000) && await readDone(markAt[0]);
+      await Bun.sleep(2500);
+      idle = idle && await pollUntil(async () => periodOver(), 30_000);
       p1 = await plant(p1Text, false);
       p2 = await plant(p2Text, true);
       p3 = await plant(p3Text, false);
@@ -21850,31 +21869,62 @@ if (want("38r")) {
       // Past the floor from the last read, P1's vector reads the work whole at the next poll, and finds none.
       await Bun.sleep(Math.max(0, 4000 - (Date.now() - markAt[markAt.length - 1])));
       const marks = markAt.length;
+      // P2's vector lands inside P1's read, past its consolidation pool: a mark taken after the read would hold it as
+      // read, its period waiting for the rescan (review pass 1, run-it's mutant).
+      duringPool = () => mend(p2, p2Text, 22).then(() => { p2MendedAt = Date.now(); });
       await mend(p1, p1Text, 21);
       p1Read = await pollUntil(async () => markAt.length > marks, 5000);
       p1ReadAt = markAt[markAt.length - 1] ?? 0;
-      await mend(p2, p2Text, 22);
-      p2MendedAt = Date.now();
+      p1Read = p1Read && await readDone(p1ReadAt) && p2MendedAt > 0;
       p2Begun = await pollUntil(async () => working() > before, 15_000);
       p2BegunAt = Date.now();
       // P3 mended in the period; its end read takes the mark, so past the floor no poll reads the work whole again.
       await mend(p3, p3Text, 23);
+      const p3MendedAt = Date.now();
       p3During = !periodOver();
-      await pollUntil(async () => periodOver(), 30_000);
+      p2Ended = await pollUntil(async () => periodOver(), 30_000);
       const ended = markAt.length;
+      // The end read's mark asked for after P3's mend landed: one asked for just before it reads P3 once more (review pass 1).
+      p3BeforeEndMark = (markAt[ended - 1] ?? 0) >= p3MendedAt;
       await Bun.sleep(6000);
       readsAfter = markAt.length - ended;
       workingAfter = working() - before;
-      judged = ((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = ${p2}::uuid AND work_type <> ${EX}`)[0] as { c: number }).c;
+      judged = ((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = ${p2}::uuid AND work_type = ${CO}`)[0] as { c: number }).c;
     } finally {
-      await vectorRun.stop();
+      stopCode = await vectorRun.stop();
       for (const id of [p1, p2, p3].filter(Boolean)) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
       await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
     }
-    assert(idle && plantedQuiet && p1Read && p2Begun && p2BegunAt - p1ReadAt >= 3700 && p2BegunAt - p2MendedAt <= 4000 + 4000 && judged > 0,
-      `a vector come brings the whole read forward, not before the floor from the last: the plants begin nothing, P1's vector is read at once and P2's, mended after that read, begins a period for consolidation once the floor has passed (idle ${idle}; planted quiet ${plantedQuiet}; P1 read ${p1Read}; P2 begun ${p2Begun}, ${p2BegunAt - p1ReadAt} ms after P1's read, ${p2BegunAt - p2MendedAt} ms after its mend; ${judged} claim(s) on P2 beyond extraction's)`);
-    assert(p3During && readsAfter === 0 && workingAfter === 1,
-      `…and a vector read once is not read again, a period's end read reading those come in it: no whole read in the 6 s after the period's end, past the floor (P3 mended in the period ${p3During}; ${readsAfter} read(s); ${workingAfter} period(s) begun)`);
+    assert(idle && plantedQuiet && p1Read && p2Begun && p2BegunAt - p1ReadAt >= 3700 && p2BegunAt - p2MendedAt <= 4000 + 4000 && judged > 0 && p2Ended && stopCode === 0,
+      `a vector come brings the whole read forward, not before the floor from the last: the plants begin nothing, P1's vector is read at once and P2's, landing inside that read, begins a period for consolidation once the floor has passed (idle ${idle}; planted quiet ${plantedQuiet}; P1 read ${p1Read}; P2 begun ${p2Begun}, ${p2BegunAt - p1ReadAt} ms after P1's read, ${p2BegunAt - p2MendedAt} ms after its mend; ${judged} consolidation claim(s) on P2; its period ended ${p2Ended}; stopped ${stopCode})`);
+    assert(p3During && (p3BeforeEndMark ? readsAfter === 0 : readsAfter <= 1) && workingAfter === 1,
+      `…and a vector read once is not read again, a period's end read reading those come in it: no whole read in the 6 s after the period's end, past the floor (P3 mended in the period ${p3During}, before the end read's mark ${p3BeforeEndMark}; ${readsAfter} read(s); ${workingAfter} period(s) begun)`);
+
+    // vectorCome's plan stays the custom one (review pass 1 of PR 1d, run-it): a burst of vectors the statistics
+    // see, and a prepared vectorCome went generic from its sixth call — a scan of every audit row, each idle poll,
+    // for the connection's life. The scheduler's own connections plan each statement for its values
+    // (schedulerSession's plan_cache_mode); a plain connection, under the same burst, is the control.
+    const burst = (await sql`INSERT INTO thoughts (content, metadata) SELECT 'A burst note, number ' || g, '{"source":"live"}'::jsonb FROM generate_series(1, 1500) g RETURNING id::text AS id`).map((r: { id: string }) => r.id);
+    let plainGeneric = -1, ownGeneric = -1;
+    const plain = new SQL({ url: URL_, max: 1 });
+    const own = openSql(URL_!, { max: 1, session: schedulerSession({ workMem: 4, maintenanceWorkMem: 64 }) });
+    try {
+      await sql`UPDATE thoughts SET embedding = ${unit(24)}::vector WHERE id = ANY(${sql.array(burst, "TEXT")}::uuid[])`;
+      await sql.unsafe("VACUUM ANALYZE thought_audit");
+      const generic = async (c: SQL) => {
+        const mark = await vectorMark(c, 30);
+        for (let i = 0; i < 8; i++) await vectorCome(c, mark, 30);
+        return Number((await c`SELECT COALESCE(sum(generic_plans), 0)::int AS g FROM pg_prepared_statements WHERE statement LIKE '%AS came,%' AND statement NOT LIKE '%pg_prepared_statements%'`)[0].g);
+      };
+      plainGeneric = await generic(plain);
+      ownGeneric = await generic(own);
+    } finally {
+      await plain.close();
+      await own.close();
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(burst, "TEXT")}::uuid[])`;
+    }
+    assert(plainGeneric > 0 && ownGeneric === 0,
+      `after a burst of 1,500 vectors, analysed, a plain connection's prepared vectorCome goes generic and the scheduler's own does not (generic plans: plain ${plainGeneric}, the scheduler's ${ownGeneric})`);
 
     // A re-embed follower running outside sleep does not yield to a live call: the scheduler refuses (2), as for the others.
     const outsideKey = `heartbeat:${EMBED_JOB}`;
