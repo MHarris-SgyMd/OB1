@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and sixteen (116) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and seventeen (117) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2344,7 +2344,7 @@ Migration 116 adds priority assertions: a key states how much an item matters,
 by when and why, and every statement is kept (SMD-3663, docs/priority.md's
 decisions 1, 2, 4 and 10). An **item** is `(kind, key)`: a `thought` or an
 `entity` by its id, a `ticket` by its key (normalised as `work_claims.issue`
-is), or an `item`, an open item, refused until SMD-3665 adds its table.
+is), or an `item`, an open item (117).
 `assert_priority` checks the item exists (a ticket by its head row, 068). A
 **level** is 0 none to 5 critical, anything else raised (22023); unknown is no
 assertion at all, never low. An assertion may carry `due_at`, `not_before`, a
@@ -2421,6 +2421,66 @@ grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
 server-portable/README.md, Priority assertions).
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
+
+Migration 117 adds open items: a to-do, a commitment or a plugin's task gets an
+id, a status and a history (SMD-3665 PR 1; docs/priority.md decision 1's fourth
+kind). An item has its text (at most 1000 characters, cleaned as 115 cleans a
+label), an optional owner (free text: who is to do it, not a key) and due time,
+and a **status**: `proposed`, `open`, `done` or `dropped`. `proposed` is a start
+state alone, the extractor's (SMD-3665 PR 3): it reads as not yet open until a
+key confirms it (`open`) or dismisses it (`dropped`). Where it came from is fixed
+at the open: the thought it was read from, and the plugin row it stands for
+(decision 8) — the plugin read from the envelope's `plugin`, which the server's
+`ctx.call` stamps, never from an argument. `noted_at` is its thought's capture
+time, so an item read from an old thought reads as old. `open_item_events` holds
+every change (opened, updated or status), each carrying the item's whole state
+after it, its maker stamped from the envelope as 116 stamps a priority's, and a
+reason; a trigger refuses every UPDATE, DELETE and TRUNCATE. `open_items` is its
+projection, kept current in the write's transaction, with
+`ob1_item_projection_drift()` and `ob1_rebuild_item_projection()` (068's
+pattern). The writers are `open_item`, `update_item` (text, owner and due time
+from a JSON object, a JSON null clearing owner or due time), `set_item_status`
+(open, done or dropped, never back to proposed; settling moots the item's
+pending proposals), `propose_item_close` and `decide_item_close`; each answers
+`{outcome, code, message, …}` and changes nothing it was not asked to (the same
+again is `unchanged`). The same thought and text, or the same plugin row, opened
+again is the item that is there, so a re-run opens nothing twice; a plugin row
+is its item's identity, the thought and text that of an item standing for no
+row. A **proposed
+close** (`open_item_close_proposals`: the status, the evidence thought, a label
+such as `resolves`, a reason) never closes the item by itself: a key other than
+its proposer accepts it, which closes the item with an event naming it, or
+rejects it (`PROPOSAL_YOURS` for the proposer accepting its own, matched by its
+name or its agent id, so the guard fails closed). A proposer's second proposal
+with the same evidence withdraws its first when it says something else, the
+first matched as 116 matches a maker (by agent id when one was recorded, else by
+name), so no key given another's old name withdraws its proposals. A row changes only to be decided, once. The scope rule fails closed as 116's. A
+**capture-only key** may open an item, from a thought only if it captured the
+thought, and change only an item it opened under its envelope's agent id that
+no other key has changed since, or one that stands for a row of the plugin its
+call came through (a plugin hook, `hook:<plugin>`, has no agent id) — asked
+before any existence answer, and refused alike for an item that is not there
+(`ITEM_NOT_YOURS`); one whose envelope carries no agent id of its own opens no
+item but a plugin row's (`ITEM_UNATTRIBUTED`), since it could never prove one its
+own. A missing origin thought is `ORIGIN_NOT_FOUND`. A due time is ISO 8601
+alone (a date, or a date and time with an optional offset), so none of
+Postgres's words (`now`, `tomorrow`, `epoch`) anywhere in it; anything else is
+refused (22023), and text without an offset is UTC, as `set_priority` reads a
+bare date. A capture-only key may dismiss a proposed item but not confirm it,
+directly or by reopening it (`CONFIRM_NOT_YOURS`). 117 replaces 116's
+`ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
+whose capture rule now admits an open item the key owns, and redefines
+`ob1_priority_actor` on `ob1_actor_maker`, the maker reader the item writers
+share (its answers as 116's); `ob1_priority_item_exists` is PL/pgSQL now, so a
+role granted the priority group at 116 reaches `open_items` only for an item of
+kind `item`. `open_item_history`
+reads one item, every event and every proposal. Each writer raises (0A000) above
+READ COMMITTED and takes an advisory lock on its item, then its projection row.
+An item's text, owner and reasons may hold personal data: `forget_thought`
+(SMD-1723) has to reach the items read from a forgotten thought. The **items**
+grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
+and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
+REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
 
 ## What changed relative to the guide
 
@@ -2545,6 +2605,10 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
+| | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
+| **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
+| | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2615,8 +2679,8 @@ ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
-claim work (115), and **priority** for a role whose clients state priorities
-(116). The
+claim work (115), **priority** for a role whose clients state priorities
+(116), and **items** for a role whose clients open items (117). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -4402,28 +4466,31 @@ transaction of its own, so it holds on a pooled client or a reserved
 connection with no transaction of the caller's open (its rollback would end
 one a raw `BEGIN` opened); a transaction's handle is refused for one.
 
-## Sleep: the passes while the brain is quiet (SMD-1794)
+## Sleep: the passes in work periods (SMD-1794)
 
-`sleep.ts` runs re-embed, extraction and consolidation while the brain is
-quiet, and pauses them within `--poll` seconds of the first live call being
-recorded, until it is quiet again — "dolphin sleep": one half works while the
-other keeps answering. The header
+`sleep.ts` runs re-embed, extraction and consolidation in work periods: a
+period begins once a pass has work and no live write has landed for
+`--capture` seconds, its passes pause within `--poll` seconds of a live write
+until `--capture` seconds pass with none, and it ends once its pools drain —
+"dolphin sleep": one half works while the other keeps answering. The header
 of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
-bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain or its budget stops it, pausing for live calls
+bun sleep.ts --url … --follow      # a period whenever there is work, for ever
+bun sleep.ts --url …               # one period, if there is work, until its pools drain, pausing for live writes
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --abort-after SECONDS (60; at least the 60 s stall floor)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
-#   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained (a live write during its sweep), or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
+#   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held, or no work but a backlog a model switch leaves aside, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
-(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its five numbers, and `OB1_SLEEP_BUDGET`,
+(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_CAPTURE`,
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_RESCAN`, `OB1_SLEEP_POLL` and
+`OB1_SLEEP_WORKERS` for its five numbers, and
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -4475,7 +4542,27 @@ on a deadlock — at the default 5 s poll two polls outlast Postgres' 1 s
 spares the deadlock. For a migration that alters a table the passes write,
 stop the coordinator first.
 
-**What wakes it.** A live write — one the audit recorded through a key not
+**When a period begins** (SMD-3379 PR 1c-4b). Once a pass has work and no
+live write has landed for `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20). The
+work is read whole at the scheduler's start — each pass's pool, re-embed's
+backlog among them, and the sweep's orphans — and every `--rescan` seconds
+after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
+lookup a claim pass: a claim pending or in hand, which a capture queues as it
+lands. So what no claim row shows — a vector come for a thought extracted
+already, a delete's orphans, re-embed's backlog — waits for the rescan, or
+goes with a period other work begins; the next poll reads it whole after a
+live write or its limit cut the sweep, a retried start refusal's wait, or a
+re-embed set-aside cleared. The sweep's census reads one window of 10,001
+lineage rows a whole read, an empty window moving it on, so on an idle brain
+an orphan far into a large table is found one rescan a window later — a
+one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
+pass held begins none: one a statement held
+(**Its budget**, below), re-embed set aside or set down (a set-down is tried
+again at the next period's start, or by the next rescan). A one-shot run
+exits 0 once a read finds no work — at once, or when what it found has been
+done elsewhere; `--dry-run` says whether a period would begin, and when.
+
+**What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
 on the audit row, are not live either (SMD-2889). That is what "a live call"
 means below and in its lines. A search is not one, whatever `OB1_QUERY_LOG`
@@ -4483,43 +4570,42 @@ says: a running pass costs a search 24–33 ms (SMD-3024), so the passes go on
 through one, and the scheduler reads no `query_log` (SMD-3315; before 2.0.0 a
 logged search woke it, for a role granted the retired `sleep` group).
 board-sync's key is classified `ingested` on the stable brain; an unclassified
-key's writes wake it (a one-shot reembed run, ingest-records, a migration's
+key's writes are live (a one-shot reembed run, ingest-records, a migration's
 backfill) until `SELECT set_agent_kind('<key name>', 'ingested')` says they
 are background work. The passes it runs write no audit row but re-embed's,
 for a row it gives its first vector, which is marked background as the
-mender's are (SMD-2679), so they never wake it.
+mender's are (SMD-2679), so they never pause it.
 
-**What a live write does asleep** (SMD-3379 PR 1c-3b). It pauses the sleep
-rather than ending it: the passes wait between thoughts, between a long
-thought's windows and between a thought's pairs — a worker between thoughts
-holding no claim, one mid-thought keeping its claim and the windows answered —
-and go on once `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20, held to the
-quiet) have passed with no live write. The log says `paused:` and `resumed:`,
-and the row `paused { since }`. While paused, a model call in hand longer than
-`--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at least the stall floor) is aborted and its thought set back in the queue, extraction keeping its
-answered windows and counting the stop (093); consolidation's at most three a
-sleep. As the passes go on, the thoughts stopped that way are moved behind
-the newer work. A pause is not the clock's: the budget counts the passes'
-time. Under `--follow`, a live write that finds the pools drained — the work
-it added itself aside, a capture's extraction — ends the sleep as a wake did,
-so the next one reads re-embed's backlog and sweeps again; a live write
-during the sweep ends it too. A one-shot run pauses and drains, ending 0, or
-1 for a live write during its sweep.
+**What a live write does in a period** (SMD-3379 PR 1c-3b). It pauses the
+passes: they wait between thoughts, between a long thought's windows and
+between a thought's pairs — a worker between thoughts holding no claim, one
+mid-thought keeping its claim and the windows answered — and go on once
+`--capture` seconds have passed with no live write. The log says `paused:`
+and `resumed:`, and the row `paused { since }`. While paused, a model call in
+hand longer than `--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at
+least the stall floor) is aborted and its thought set back in the queue,
+extraction keeping its answered windows and counting the stop (093);
+consolidation's at most three an hour of a period. As the passes go on, the
+thoughts stopped that way are moved behind the newer work. A live write
+during the sweep ends the period, the passes not yet started; the next reads
+its work whole. A period ends once its pools drain — the log says `the pools
+drained — the period ends` — and the next begins once there is work again.
 
-**What it does asleep.** First the re-derive pass (SMD-1794's order,
+**What a period does.** First the re-derive pass (SMD-1794's order,
 SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
 delete or a replay took, deleted through `rebuild_derived`'s orphans-only mode,
-at most 500 thoughts a sleep, no model — on a connection of its own under the
+at most 500 thoughts a period, no model — on a connection of its own under the
 budget's session; the log says `re-derive: N orphaned lineage row(s) swept`.
-It reads 10,001 lineage rows in id order a sleep, the next window each sleep
-once the one before is swept whole, so a larger table is walked (said once;
+It reads 10,001 lineage rows in id order a period, the next window each period
+once the one before is swept whole — and each idle whole read that finds none
+in its window — so a larger table is walked (said once;
 the place is kept in the process, so a restart begins at the first window;
-and `--dry-run` counts the first window's orphans). A wake, a stop or the clock
-spent stops it between thoughts, its call in hand given 2 s before it is
+and `--dry-run` counts the first window's orphans). A live write or a stop
+stops it between thoughts, its call in hand given 2 s before it is
 cancelled on the server (`pg_cancel_backend`), rolled back; a call waiting
 on a lock gives up after 2 s (`lock_timeout`), so no wait behind a row
-holds the supersession lock past it, and is passed over; a wake ends the
-sleep, and a clock spent by the sweep starts no pass. A thought whose call
+holds the supersession lock past it, and is passed over; a live write ends
+the period there. A thought whose call
 fails is passed over, said in the summary with its id, and tried again
 when the sweep comes round; every call failing is said on stderr once. A failure of the sweep itself is said once, a
 replay's refusal stops it said once, and a brain without 063 or a role
@@ -4535,64 +4621,61 @@ the model or with no vector, finished rows whose thought has moved;
 a brain with nothing to re-embed starts no pass and calls no embedding
 endpoint at all: re-embed's start is not among those the scheduler checks.
 Until its pool drains; anything else that ends it sets it down for that
-sleep — refused (a key, credit, the model not served, the egress policy, a
-refusal mid-pass), a statement past its timeout, its provider not answering —
-said, on the row (`aside`, its kind; a thrown error's reason in the log), and
-extraction and consolidation run on; the next sleep with work tries it again.
+period — refused (a key, credit, the model not served, the egress policy, a
+refusal mid-pass), its provider not answering — said, on the row (`aside`,
+its kind; a thrown error's reason in the log), and extraction and
+consolidation run on; the next period tries it again. A statement past its
+timeout holds it until a restart, as it holds any pass (**Its budget**).
 A model switch it will not make —
 the brain recording an embedding model other than the stack's
-`OB1_EMBEDDING_MODEL` — sets it aside, said and on the row (briefly at each
-later sleep), extraction and consolidation running on; the record is read
-again at each sleep's start and each poll while it is aside, so running
-`reembed.ts --switch-model` clears it — re-embed runs in that sleep if read
-at its start, else in the next sleep with work. Putting the variable back instead means
-recreating `sleep` (and `api`): the scheduler reads its environment once.
+`OB1_EMBEDDING_MODEL` — sets it aside, said and on the row, which reads
+failed (briefly at each later period; idle too, a one-shot run with no other
+work exiting 1), extraction and consolidation running on; the record is read
+again at each period's start and each poll while it is aside, so running
+`reembed.ts --switch-model` clears it — re-embed runs in that period if read
+at its start, else in the next period with work. Putting the variable back
+instead means recreating `sleep` (and `api`): the scheduler reads its
+environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
-with no model, and its first sleeps re-embed and label them, one embedding
-call a row, before they extract, across as many sleeps as the clock needs;
-the first sleep's start line and `--dry-run` count them (a later sleep's
-start line counts only rows not yet claimed, so follow the `re-embed pass`
-row), and `reembed.ts --dry-run` before
-upgrading says how many. Then extraction alone until its
+with no model, and its first periods re-embed and label them, one embedding
+call a row, before they extract; the start line and `--dry-run` count them
+(a later period's line counts only rows not yet claimed, so follow the
+`re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
+many. Then extraction alone until its
 pool drains, then consolidation beside it — the order "Start `extract` alone
 on a backlog" asks of an operator. A live write pauses the passes (above),
-a call in hand a minute old aborted while paused and its thought set back; a
-sleep's end hard-stops them: every lease returned, the model call in hand
-aborted, the thoughts in hand moved to the back of the queue. A long
-thought's answered windows are kept (093, [Long thoughts
-resume](#extract-entitiests)), so one longer than every sleep or pause advances
+a call in hand a minute old aborted while paused and its thought set back. A
+long thought's answered windows are kept (093, [Long thoughts
+resume](#extract-entitiests)), so one longer than every pause's bound advances
 by the windows answered before each stop, and is done once its last is. Consolidation also
 joins once extraction holds nothing but thoughts that three or more long hard
 stops in a row took with no window saved between, and none saved since (093's
 `stalled` and `gained`, SMD-2694; long: the thought held a minute, provider
-pauses aside, so a busy day's short sleeps count none) — a single window
-longer than every long sleep,
+pauses aside, so a busy day's short holds count none) — a single window
+longer than any run between stops,
 or a stop that keeps landing past the last window, in the decider's call or
 the write — which would otherwise hold it back for as long as the brain keeps
 pausing it. The cost is an unextracted neighbour's: a newer thought judged
 meanwhile misses its pair with such a thought, which consolidation reaches
 from its newer side only and does not revisit. Once taken, the decision
-holds for the rest of the sleep. Stalled thoughts go last: as each sleep
+holds for the rest of the period. Stalled thoughts go last: as each period
 begins, every thought a stop has taken moves behind new captures, the least
-stalled first, so the awake period's captures are extracted first (a wake
-dated it at the wake, and they waited behind it all day). They are dated 30
-days ahead, so a capture made during the sleep — a sync write's, which does
-not wake the brain — goes ahead of them too; claims are taken in that order,
+stalled first, so the captures since are extracted first (a wake once dated
+it at the wake, and they waited behind it all day). They are dated 30
+days ahead, so a capture made during the period — a sync write's, which
+pauses nothing — goes ahead of them too; claims are taken in that order,
 which reads no clock (SMD-3008). One that lands while extraction has a
 stalled thought in hand, before consolidation joins, restarts extraction —
 two polls reading only stalled thoughts in hand and newer work behind them,
 at most once a minute — so the capture is extracted and the join follows in
-the same sleep, where with one worker both waited out the window. When
+the same period, where with one worker both waited out the window. When
 consolidation joins past, extraction is set aside — stopped, if in hand with
 a stalled thought — until consolidation's pool drains, then resumes, so on a
-one-slot model the judge does not wait behind the window, and a night still
-reaches the thought. It is tried in every sleep once consolidation's pool
-drains, and finished by the first sleep long enough for both — one its clock
-(`--budget`) allows. Limits stand:
-sleeps of about a minute on their clock, each under the stall floor, neither stall a slow
-window nor let it finish, and consolidation waits on it until a longer
-sleep; and once consolidation has joined, a stalled thought in hand keeps
-its turn, and a capture made then waits for the next sleep, where it goes
+one-slot model the judge does not wait behind the window, and a period still
+reaches the thought. It is tried in every period once consolidation's pool
+drains, and finished by the first run between pauses long enough for it.
+A limit stands: once consolidation has joined, a stalled thought in hand keeps
+its turn, and a capture made then waits for the next period, where it goes
 first, as one behind a thought still gaining windows, or a stall or two
 short of the join, waits for its window. While consolidation waits for its
 provider — at its start, or mid-pass (past its workers' pauses for a 5xx,
@@ -4605,12 +4688,12 @@ one worker, its claims read by this process's worker ids since this run
 began so a lease another left, or this container before a restart, does not
 count, and each stalled thought it reaches is stopped. These stops of the
 scheduler's own — the join's set-aside, the restart, the let-out's — are
-counted on the thought as cuts, apart from its stops, which say the wakes
-(migration 101, SMD-3060): a cut stalls nothing, and an outage's cuts
-neither read as wakes on the held word nor pick the thoughts it names. If
+counted on the thought as cuts, apart from its stops, which say the pauses'
+aborts (migration 101, SMD-3060): a cut stalls nothing, and an outage's cuts
+neither read as pauses on the held word nor pick the thoughts it names. If
 the judge answers and consolidation drains while it is out, it goes on with one worker under `--workers 1`, and with more it is
 set aside once it holds nothing, so the drain's resume starts them all. A
-judge model missing at the start is refused, as before. Each sleep's move
+judge model missing at the start is refused, as before. Each period's move
 also dates now a forward-dated row that is no longer a stopped thought (one
 finished, then put back by a retry).
 A brain before 093, or a role that cannot read its table (the
@@ -4619,12 +4702,11 @@ so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
 
 **Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
-from the brain's size):
+from the brain's size) — its session settings; the clock went in 2.0.0:
 
 | Bound | Flag | Default | At it |
 |---|---|---|---|
-| the sleep's clock | `--budget MINUTES` | 60 (0: none) | the passes stop after the thought in hand, every lease returned, none starts; one still in hand 300 s later is stopped hard, a cut |
-| each pass's `statement_timeout` | `--statement-timeout SECONDS` | 300 (0: the role's or the database's own) | the statement is cancelled (57014): the pass ends, the others stop hard, and the sleep stops — not the scheduler, which ended with 1 before |
+| each pass's `statement_timeout` | `--statement-timeout SECONDS` | 300 (0: the role's or the database's own) | the statement is cancelled (57014): its pass is held until a restart, the others go on, and the period ends once they drain |
 | each pass's `work_mem` | `--work-mem MB` | 4 | Postgres's own default: a server sized up for its awake index does not hand it to the background passes |
 | each pass's `maintenance_work_mem` | `--maintenance-work-mem MB` | 64 | Postgres's own default; no pass builds an index or vacuums yet, so it bounds SMD-2918's heal ahead of it |
 
@@ -4634,77 +4716,75 @@ beat the role's and the database's own: a timeout of 0 is left out, so theirs
 stands); the start's check runs under them. The scheduler's own two
 connections take the memory settings and statement_timeout 0, beating a
 role's or database's own — its poll reads the pools, a scan of every thought,
-and a timeout there would end the scheduler — and the clock is read between
-those reads, so a sleep can run one past it. A clock stop is counted and
-marked only when it cut work (a claim pending or in hand as the clock was
-spent, as the drain reads the pools — consolidation's not yet enqueued
-included, another process's claims under the keys too — or a pass waiting for
-its provider): an idle clock-out ends the sleep as quietly as a drained one,
-the next still after a live call, and one sleep's exits 0. The settings go
-out as startup parameters, which a transaction pooler (PgBouncer, a managed
-host's pooled endpoint) refuses: connect the scheduler to Postgres directly,
-as the compose stack does.
-A sleep stopped on its budget ends, and the next begins only after a live call
-and the quiet — not after a rest: the budget bounds a night's work, and the
-passes resume from the claim tables. A restarted scheduler sleeps after the
-quiet alone. The clock counts idle minutes too, so a sleep whose pools
-drained still ends at it, and a sync write's capture after that waits for the
-next sleep. A statement past its timeout inside a thought's own write fails
-that thought, as any database error there does; on a claim it costs that
-worker its poll. An operator's `pg_cancel_backend` is 57014 too ("user
-request"): no budget's, it ends the scheduler as a pass that throws does.
-Under `--follow` the row says which stopped the last sleep (`slept.budget`:
-`clock` or `statement`) and the bound it stopped at (`slept.limit`), that it
-waits for a live call (`resting`), and carries the budget with the sleeps
-stopped on it since the process began (`budget`); preflight's `sleep` row
-says each, and warns on a statement stop with its setting until that is
-raised past the bound; one sleep stopped on its budget exits 1.
+and a timeout there would end the scheduler. The settings go out as startup
+parameters, which a transaction pooler (PgBouncer, a managed host's pooled
+endpoint) refuses: connect the scheduler to Postgres directly, as the compose
+stack does.
+A statement past its timeout — a start-of-pass scan the brain has outgrown,
+most likely — holds its pass until a restart (N9, SMD-3379 PR 1c-4b): said,
+with `OB1_SLEEP_STATEMENT_TIMEOUT` to raise and the coordinator to recreate;
+the row's outcome failed, `holds` naming the pass with why `statement` and no
+time; the other passes go on, and the period ends once they drain. A held
+pass begins no period and starts in none, so the scan that timed out is not
+run again on its own; a one-shot run with one exits 1. A statement past its
+timeout inside a thought's own write fails that thought, as any database
+error there does; on a claim it costs that worker its poll. An operator's
+`pg_cancel_backend` is 57014 too ("user request"): no budget's, it ends the
+scheduler as a pass that throws does. Under `--follow` the row carries the
+budget in force (`budget`, its `minutes` 0 and its `stops` the passes a
+statement holds); preflight's `sleep` row says each held pass, and warns
+with its setting.
 
-**Upgrading to the budget.** The clock is on by default: from this release a
-long quiet night holds the model for 60 minutes, and the rest of a backlog
-waits for the next live call and the quiet. `OB1_SLEEP_BUDGET=0` (`--budget
-0`) and a recreate run a sleep until its pools drain, a live write then
-ending it (since SMD-3379 PR 1c-3b one that finds work pauses it, so a
-stalled thought keeps the sleep going); a larger value drains a
-backlog — a model change's re-pooled consolidation, say — in fewer nights.
+**Upgrading to 2.0.0.** `--quiet` and `--budget` (`OB1_SLEEP_QUIET`,
+`OB1_SLEEP_BUDGET`) were removed: the CLI refuses either with 2, naming what
+replaced it, and the coordinator no longer reads them, so a value left in
+`deploy/.env` does nothing — delete it. A period begins once a pass has work
+and no live write has landed for `OB1_SLEEP_CAPTURE` seconds, where a sleep
+began after `OB1_SLEEP_QUIET` seconds with none, work or not; it runs until
+its pools drain, where the clock stopped it after `OB1_SLEEP_BUDGET` minutes,
+so a backlog drains in one period, paused by each live write. A statement
+past its timeout holds its pass until a restart, where it stopped the sleep.
+`OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
+whole. A row a scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
+`resting` — is still read, for a rollback.
 
-**Its start, and refusals.** Before its first quiet it runs each pass's start
+**Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
 the model's probe, the worker key, extraction's recorded key. A refusal there
 ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
 not served (the judge's met there, not once extraction's backlog drains), or an
 `entity_extraction_key` recorded under another model. A provider that does not
 answer is no refusal; each pass waits for it at its own start. The passes each
-sleep starts then print no banner and run no end-of-run summary queries (its counts
-and graph, scans a wake would wait for). Every sleep's passes meet their start's
-refusals again, and each names which it is:
+period starts then print no banner and run no end-of-run summary queries
+(its counts and graph, scans a period's end would wait for). Every period's
+passes meet their start's refusals again, and each names which it is:
 - the worker key revoked, the extraction key moved by another process's
   `--switch-key`, the tables, the egress policy — no retry mends these, and
   the scheduler ends with 2 (until SMD-2752 they were retried until a restart);
 - the model not served, the provider refusing the call, or the key's lookup
   not naming it under an actor-only egress policy, at the start of a
-  pass that got through its start before (the check, or an earlier sleep), is
+  pass that got through its start before (the check, or an earlier period), is
   retried on SMD-2599's schedule (5 s, doubling, at most 5 min) — a model
   re-pulled, a 402 cleared by topping up credit, a gateway's passing
   401/403/404 — and at a pass's first start ends it with 2;
 - a refusal mid-pass (the provider refusing the request itself) ends the
   scheduler with 2, as it ends a follower — so the same 402 ends it mid-pass
-  and is retried when a sleep's start meets it first.
+  and is retried when a period's start meets it first.
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
-with `slept`, the current or last sleep's start and, once it is over, its
+with `slept`, the current or last period's start and, once it is over, its
 end (it carried `reads`, whether its role read `query_log`, until SMD-3315,
-when the scheduler stopped reading it). Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
-running, for how long; awake, with when the last sleep ended and how long it
-lasted; "its last pass failed" while a pass's last word was a failure (into
-the next sleep, until one of its passes stamps); stopped once it ends, or
-stale, each with the service's restart; and what a live write does —
-pauses its passes, or ends a sleep whose pools are drained; a search does
-not. The
+when the scheduler stopped reading it). Preflight's own `sleep` row reads it
+(SMD-2678): working, its passes running, for how long; idle, with when the
+last period ended and how long it lasted, or "none yet"; "its last pass
+failed" while a pass's last word was a failure (into the next period, until
+one of its passes stamps); stopped once it ends, or stale, each with the
+service's restart; and what a live write does — pauses its passes; a search
+does not. The
 `workers` row no longer reads it. Since SMD-2752 the row carries two more
 words, and the `sleep` row says each:
 - `waiting`, the passes waiting at their start for a provider that does not
-  answer — "asleep, extract waiting for the provider at its start", a warning
+  answer — "working, extract waiting for the provider at its start", a warning
   naming the provider, where it read "its passes running";
 - `refused`, the start refusal that ended it — "refused at a pass's start
   (key)", with that kind's remedy before the restart, where "start it again"
@@ -4712,24 +4792,24 @@ words, and the `sleep` row says each:
 
 Since SMD-2905 it also carries `waitingMidPass`, the passes waiting mid-pass
 for a provider that stopped answering (past a worker's pauses for a 5xx, at
-once for a model gone missing or a call no probe answers): "asleep,
+once for a model gone missing or a call no probe answers): "working,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
-provider answering clears it, and so does a wake. A follower's own row
+provider answering clears it, and so does a period's end. A follower's own row
 (`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
 own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins.
 
-Since SMD-2679 it carries `budget`, the budget in force and the sleeps
-stopped on it since the process began, and the last sleep's `slept.budget`
-(`clock` or `statement`) says which stopped it: "awake — the last sleep
-ended … stopped on its budget — its clock spent (60 min); the next begins
-after a live call and the quiet" while it waits for one (`resting`), no
-warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
-that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
-above). Since SMD-2679's PR 4b its `waiting` and `waitingMidPass` name
-`reembed` too, `reembedJob` is its own re-embed key (`reembed:<model>@<dim>`,
+Since SMD-2679 it carries `budget`, the budget in force — since 2.0.0 its
+`minutes` 0 and its `stops` the passes a statement holds, which the row says
+as "N pass(es) held by a statement past its timeout" and warns of, its fix
+`OB1_SLEEP_STATEMENT_TIMEOUT` (**Its budget**, above). A row a scheduler
+before 2.0.0 wrote reads as it did: its last sleep's `slept.budget` (`clock`
+or `statement`), the bound it stopped at (`slept.limit`), and `resting`
+while it waited for a live call. Since SMD-2679's PR 4b its `waiting` and
+`waitingMidPass` name `reembed` too, `reembedJob` is its own re-embed key
+(`reembed:<model>@<dim>`,
 which preflight reads whose key it is from, not from its own environment; a
 row without one is read as a scheduler that runs no re-embed — v1.9.0's, one
 whose width forms no key, or one whose model name falls outside a model
@@ -4740,10 +4820,11 @@ stopped one by the configuration its restart takes),
 and `aside` carries re-embed set aside on a model switch —
 `{ reembed: { kind: "model-switch", recorded, configured } }`, the model the
 brain records and the stack's — until the record is put right (read at each
-sleep's start and each of its polls while aside; awake, at the next sleep),
-or set down for the sleep —
+period's start and each poll while aside, idle or in one),
+or set down for the period —
 `{ reembed: { kind } }`, one of `provider`, `model`, `egress`, `tables`,
-`usage`, `statement`, `outage`, `failed` — until the next sleep begins. The
+`usage`, `statement`, `outage`, `failed` — until the next period begins, or
+the restart for `statement`. The
 row's outcome reads failed while re-embed is set aside, or down for a cause
 the operator mends (all but `outage`, its provider's state; while re-embed
 waits mid-pass for its provider, the row does not read failed). Preflight's
@@ -4757,35 +4838,38 @@ read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
-its stops (a hard stop counted on them, 093: a wake's, a paused sleep's
-abort): how many, and the three most stalled, then most stopped, with their
+its stops (a hard stop counted on them, 093: a paused period's abort): how
+many, and the three most stalled, then most stopped, with their
 stops and windows kept — stalled as the scheduler reads it, 0 once a window
 is saved since the last stop — and since SMD-3060 the scheduler's own cuts
 of each, said apart from the stops and ordering nothing ("…, and 41 cut(s)
-of the scheduler's own"; none before 101) — read at its first stamp awake or
-poll asleep, after each wake or resume, at least every minute and before the
-row ends (but on a second signal, whose exit it would delay, or a failure),
-so a thought finished in
-a long sleep leaves the row then, not at the next live call. The `sleep` row
+of the scheduler's own"; none before 101) — read at its first stamp idle or
+poll in a period, after each period or resume, at least every minute and
+before the row ends (but on a second signal, whose exit it would delay, or a
+failure), so a thought finished in a period leaves the row then. The `sleep` row
 names them — "1 thought(s) held back across its stops — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
 stalled one, naming it: consolidation joins past it once extraction holds
-nothing else, and the first sleep long enough — its clock allowing — finishes it, or extraction run
-by hand with the scheduler stopped. One whose windows are all kept is told
+nothing else, and the first run between pauses long enough finishes it, or
+extraction run by hand with the scheduler stopped. One whose windows are all
+kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
 Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
 and 1c-4a `holds`: re-embed set aside on a model switch, or set down until
-the next sleep, neither with a time, and a claim pass whose start's refusal
-`--follow` retries, until its retry wait ends (the next sleep retries it). `paused { since }` is the scheduler paused by a live
-call, its gate closed since then (the database's clock), its passes waiting
-between thoughts. It is read on a live row alone, and `db/supervise.ts`
-drops it from a row it ends. `holds` is the passes the scheduler holds out
+the next period, neither with a time, a claim pass whose start's refusal
+`--follow` retries, until its retry wait ends (the next period retries it),
+and, since 1c-4b, a pass a statement held, until a restart, with no time.
+`paused { since }` is the period paused by a live call, its gate closed since
+then (the database's clock), its passes waiting between thoughts — or, idle,
+its work waiting for the capture time. It is read on a live row alone, and
+`db/supervise.ts` drops it from a row it ends. `holds` is the passes the
+scheduler holds out
 of its work, one to three, each `{ pass, why, until }`:
 - `pass` is `reembed`, `extract` or `consolidate`;
-- `why` is one of re-embed's set-down kinds (above), `lookup` or
-  `model-switch`;
+- `why` is one of re-embed's set-down kinds (above), `lookup`,
+  `model-switch` or `statement`;
 - `until` is the time it re-arms on the database's clock, or null for an
   event rather than a time.
 
@@ -4795,10 +4879,10 @@ running, and preflight's `sleep` row adds "its passes waiting between
 thoughts, going on once the brain is quiet … a live write pauses it". The
 re-embed and consolidate pass rows each name their own pass's hold, or the
 pause. A provider wait goes on beside the pause, and is warned of as ever;
-a pause between sleeps says the work waits for the next. A re-arm past its
-time while paused waits for the quiet. A pause warns of nothing. An ended or
-stale row keeps its holds as its last word, without their times, beside a
-supervisor's restart too, until the new process's first stamp.
+a pause between periods says the work waits for the next. A re-arm past its
+time while paused waits for the capture time. A pause warns of nothing. An
+ended or stale row keeps its holds as its last word, without their times,
+beside a supervisor's restart too, until the new process's first stamp.
 
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there
@@ -4808,8 +4892,8 @@ Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 **From the `workers` pass.** Its followers do not yield, so the two are
 alternatives: the coordinator never runs both (`OB1_PASSES` naming both runs
 `sleep`), and a run refuses (exit 2) while any follower's heartbeat is fresh
-— one run by hand, or an old stack's container — at its start, and when an
-awake or asleep poll finds one (a follower brought up beside it stamps only
+— one run by hand, or an old stack's container — at its start, and when a
+poll, idle or in a period, finds one (a follower brought up beside it stamps only
 after its start probe), and `--dry-run` names them. Name `sleep` in place of
 `workers` and recreate the coordinator (`podman compose -f
 deploy/compose.yaml up -d coordinator`) — a clean stop marks a row ended,
@@ -4822,13 +4906,13 @@ choice of pass, rather than a
 restart that would refuse again; while the scheduler runs, the `workers` row
 asks for a stopped follower's row to be retired, not started again.
 
-**A database not answering at its start** is waited out, as one mid-sleep
+**A database not answering at its start** is waited out, as one mid-period
 is (SMD-2599's schedule), so the service started beside a restarting Postgres
 does not end and wait on its supervisor's clock (SMD-3214). A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the SIGTERM the coordinator's supervisor passes on).
-So does each pass's start at every sleep: a follower waits out every statement
+So does each pass's start at every period: a follower waits out every statement
 up to its first claim — the tables check, the worker key's lookup, extraction's
 key, 079's check, the relations grants; not an operator's `--retry-*` — where it
-used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
+used to end the scheduler (SMD-2752). A stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 test-live [38] drives it against a stub model, and [38r] its re-embed first
