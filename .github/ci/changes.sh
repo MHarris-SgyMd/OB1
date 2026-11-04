@@ -160,7 +160,7 @@ by_job() {
       *' .top '*) printf 'true\t\t%s is edited outside its jobs\n' "$WORKFLOW"; rc=1 ;;
     esac
     for id in $RUN_ALL_JOBS; do
-      if [ "$rc" = 0 ]; then case " $changed " in *" $id "*) printf 'true\t\t%s edits job %s, which every job relies on\n' "$WORKFLOW" "$id"; rc=1 ;; esac; fi
+      if [ "$rc" = 0 ]; then case " $changed " in *" $id "*) printf 'true\t\t%s edits job %s, which every skip relies on\n' "$WORKFLOW" "$id"; rc=1 ;; esac; fi
     done
   fi
   if [ "$rc" = 0 ]; then
