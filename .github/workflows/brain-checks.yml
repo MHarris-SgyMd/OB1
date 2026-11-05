@@ -65,9 +65,13 @@ jobs:
   # ── What the change can affect (SMD-2435) ─────────────────────────────────
   # A pull request into the default branch whose every changed path is docs
   # runs none of the jobs that need this one: .github/ci/changes.sh says
-  # code=false only then, and each gated job runs on any other answer. It
-  # fails open: a failed or cancelled run of this job runs them all, and the
-  # aggregate lets them skip only when this job said code=false. Any other
+  # code=false only then. One whose only other change is an edit of this file
+  # runs the jobs whose block it edits, and skip= names the gated jobs whose
+  # block is unchanged (PR 2; an edit outside the jobs, of this job or of
+  # repo-consistency, which runs the checker, runs them all).
+  # Each gated job runs on any other answer. It fails open: a failed or
+  # cancelled run of this job runs them all, and the aggregate lets them skip
+  # only when this job succeeded and said code=false or named them. Any other
   # event runs every job, with no checkout. The classifier that decides is the
   # BASE branch's copy (HEAD^1's), so a pull request that edits it is judged by
   # the copy already on its base, which denies .github/ (review pass 1); a base
@@ -82,6 +86,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.decide.outputs.code }}
+      skip: ${{ steps.decide.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -230,7 +235,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' portable-server '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -679,7 +684,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' db-schema '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -804,7 +809,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' replay-gate '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -908,7 +913,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' db-live '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1057,7 +1062,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' data-layer '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1586,7 +1591,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' preflight-rest '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1677,7 +1682,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2994,7 +2999,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-brains '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3845,7 +3850,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-auth '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4608,7 +4613,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-observability '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4977,7 +4982,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' auth-poc '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5036,7 +5041,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' compat-shim '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -5285,8 +5290,9 @@ jobs:
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
   # own `if:` runs it on pull requests and the merge queue alone, and
   # publish-test-counts, whose own runs it on a push to main alone; and, only
-  # when the changes job succeeded and said code=false, the jobs it gates
-  # (SMD-2435), so a cancelled run's unstarted jobs never pass. The step is
+  # when the changes job succeeded and said code=false, the jobs it gates, or
+  # when it succeeded, those its skip names (SMD-2435), so a cancelled run's
+  # unstarted jobs never pass. The step is
   # held verbatim by check 20, which runs it against its own cases.
   brain-checks-passed:
     name: Brain Checks passed
@@ -5315,7 +5321,7 @@ jobs:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: ${{ needs.changes.result == 'success' && needs.changes.outputs.code == 'false' && 'commit-lint publish-test-counts portable-server db-schema replay-gate db-live data-layer preflight-rest deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || 'commit-lint publish-test-counts' }}
+          MAY_SKIP: ${{ format('commit-lint publish-test-counts {0}', needs.changes.result == 'success' && (needs.changes.outputs.code == 'false' && 'portable-server db-schema replay-gate db-live data-layer preflight-rest deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || needs.changes.outputs.skip) || '') }}
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
