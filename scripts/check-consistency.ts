@@ -604,10 +604,11 @@
  *      having none, and a name uploaded twice fails on main alone
  *      (SMD-3709). Its probe pins what it refuses and passes
  *  52. scripts/commitlint.config.ts takes `[core]` for the project's own code
- *      and `[fork]`, its name before SMD-3765, both held to ticket-ref, a
- *      contribution category not; a mis-cased, unspaced or colon header fails.
- *      CI's commit-lint lints only a PR's own commits, so nothing else reads
- *      the config's categories
+ *      and `[fork]`, its name before SMD-3765: both read by the header, listed
+ *      in type-enum and held to ticket-ref, which is on (level 1 or more,
+ *      "always"), a contribution category not; a mis-cased, unspaced or colon
+ *      header fails, and the rule is found by name. CI's commit-lint lints
+ *      only a PR's own commits, so nothing else reads the config's categories
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
@@ -11049,8 +11050,9 @@ function checkCommitCategories() {
   if (!ticketRef) return fail(CONFIG, "no plugin defines ticket-ref — a [core] subject without its ticket goes unwarned (check 52, SMD-3765)");
   // The rule's level (0 is off) and the type list commit-lint enforces, beside the header that reads them.
   const rules: Record<string, readonly unknown[] | undefined> = commitlintConfig.rules;
-  const level = rules["ticket-ref"]?.[0];
+  const [level, when] = rules["ticket-ref"] ?? [];
   if (typeof level !== "number" || level < 1) fail(CONFIG, "ticket-ref is switched off or missing from rules — its warning never fires (check 52)");
+  if (when !== "always") fail(CONFIG, `ticket-ref runs "${String(when)}", where "always" warns on a [core] subject without its ticket — "never" inverts it (check 52)`);
   const types = rules["type-enum"]?.[2];
   for (const type of ["core", "fork"]) if (!(Array.isArray(types) && types.includes(type))) fail(CONFIG, `type-enum does not list ${type} — commit-lint refuses a [${type}] subject the header reads (check 52, SMD-3765)`);
   for (const [subject, type] of [["[core] A change (SMD-1)", "core"], ["[fork] A change (SMD-1)", "fork"], ["[recipes] A recipe", "recipes"]] as const) {

@@ -259,7 +259,7 @@ function buildPlan() {
   const before: string[] = [];
   if (BRAIN_VERSION !== version) before.push(`db/version.mjs's BRAIN_VERSION is '${BRAIN_VERSION}'; this cut is ${version} — bump it`);
   const writes = readMig(hi) === null ? null : schemaVersionValue(readMig(hi)!); // hi is a key of migrationFiles()
-  if (writes !== version) before.push(`the highest migration, ${pad3(hi)}, ${writes === null ? "writes no schema_version" : `writes schema_version '${writes}'`} — add db/migrations/${pad3(hi + (writes === null ? 1 : 0))}_schema_version.sql upserting '${version}' (044's shape, its comment naming db/version.mjs's BRAIN_VERSION, FORK_VERSION until SMD-3765), with db/README.md's map and the suites' migration counts moved (check-consistency holds them); the range below then ends on it`);
+  if (writes !== version) before.push(`the highest migration, ${pad3(hi)}, ${writes === null ? "writes no schema_version" : `writes schema_version '${writes}'`} — add db/migrations/${pad3(hi + (writes === null ? 1 : 0))}_schema_version.sql upserting '${version}' (044's shape, its comment naming db/version.mjs's BRAIN_VERSION and check-consistency, FORK_VERSION and check-fork-consistency until SMD-3765), with db/README.md's map and the suites' migration counts moved (check-consistency holds them); the range below then ends on it`);
   // Every migration a fragment says it ships lies in the range this cut freezes:
   // one already frozen by an earlier release, or one with no file, is a fragment
   // that lies about its migration and a changelog that would say so.
