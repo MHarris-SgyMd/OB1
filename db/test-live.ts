@@ -38,7 +38,7 @@
 
 import { SQL } from "bun";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, ROLE_GRANTS, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
@@ -70,6 +70,7 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, priorityStep, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { Ingested } from "./ingest-contract.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, vectorCome, vectorMark } from "./sleep.ts";
@@ -19082,6 +19083,27 @@ if (want("23d")) {
            && noteSaid.length === 1 && noteSaid[0].level === 4 && noteSaid[0].due_at === "2026-12-01T00:00:00Z" && noteSaid[0].reason === "frontmatter priority: Urgent" && noteSaid[0].maker_name === "live-23d-ingester"
            && open(await said("thought", noteDoc.id)).length === 0 && ticket.priority === "asserted" && ticketSaid.length === 1 && ticketSaid[0].level === 2 && ticketSaid[0].due_at === "2026-12-15T00:00:00Z",
       `the pipeline states a note's priority on its own thought as the run's actor, and nothing when told the brain cannot take it; the same again is unchanged, an unknown word clears it; a ticket's on the ticket (${JSON.stringify([off.priority, stated.priority, again.priority, cleared.priority, ticket.priority])})`);
+
+    // A role without the priority group is told what it lacks, not failed at its first write: 116's writers are
+    // PUBLIC's to EXECUTE, so EXECUTE says nothing (review pass 2). Granted the group's privileges, it may.
+    const NOPRI = "live_23d_nopriority";
+    const dropNoPri = () => watch.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${NOPRI}') THEN EXECUTE 'DROP OWNED BY ${NOPRI}'; EXECUTE 'DROP ROLE ${NOPRI}'; END IF; END $$`);
+    await dropNoPri();
+    await watch.unsafe(`CREATE ROLE ${NOPRI} NOLOGIN`);
+    const asNoPri = new SQL({ url: URL_!, max: 1 });
+    try {
+      await asNoPri.unsafe(`SET ROLE ${NOPRI}`);
+      const lacking = await priorityWritersProblem(asNoPri);
+      const stepOff = await priorityStep(asNoPri, writer.actor);
+      for (const { table, privileges } of ROLE_GRANTS.priority as readonly { table: string; privileges: readonly string[] }[]) await watch.unsafe(`GRANT ${privileges.join(", ")} ON ${table} TO ${NOPRI}`);
+      const granted = await priorityWritersProblem(asNoPri);
+      assert(lacking === "this role lacks SELECT on priority_assertions (the priority grant group: cd db && bun migrate.ts --url … --grant <role> --groups priority)"
+             && "off" in stepOff && stepOff.off === lacking && granted === null,
+        `a role without the priority group is told the privilege it lacks and board-sync's step is off, said once, not failed at a write; granted the group's privileges it may state them (${lacking} | ${granted})`);
+    } finally {
+      await asNoPri.close();
+      await dropNoPri();
+    }
   } finally {
     await watch`SELECT declare_priority_source(${SYNC_ACTOR}, false)`;
     await watch.close();

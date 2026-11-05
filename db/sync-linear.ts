@@ -120,6 +120,7 @@ import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-po
 import { captureLineage } from "../server-portable/lineage.ts";
 import { actorPayload, type Actor } from "../server-portable/store.ts";
 import { dueInstant, levelOf, reasonOf, type PriorityLevel } from "../server-portable/priority-scale.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, LINEAR_SYSTEM, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
@@ -1228,21 +1229,15 @@ export function priorityMoves(heads: readonly PriorityHead[], declared: boolean)
   return moves;
 }
 
-const PRIORITY_FNS = ["assert_priority(text, text, integer, timestamptz, timestamptz, text, text, text, boolean, jsonb)", "clear_priority(text, text, jsonb)"] as const;
-
 /**
  * The step, when this brain and role can take it — asked once at start, as the closed-claims step is: 116's two
- * writers and EXECUTE on them, and SELECT on priority_assertions and priority_sources (the priority grant group).
- * Otherwise why not, said once by the caller; the tickets' priorities stay as facets alone.
+ * writers, and every privilege the priority grant group gives (priority-writers.ts; review pass 2: EXECUTE, which
+ * PUBLIC holds, said nothing). Otherwise why not, said once by the caller; the tickets' priorities stay as facets.
+ * `problem` is the check, a self-check's stub in its place.
  */
-export async function priorityStep(sql: SQL, actor: Actor): Promise<{ step: PriorityStep } | { off: string }> {
-  // Each writer by its own parameter: Bun binds a JS array as one comma-joined string, which no text[] cast reads.
-  const [assertFn, clearFn] = PRIORITY_FNS;
-  const [r] = await sql`SELECT to_regprocedure(${assertFn}) IS NOT NULL AND to_regprocedure(${clearFn}) IS NOT NULL AS ok`;
-  if (!(r as { ok: boolean }).ok) return { off: "migration 116 is not applied on this brain (cd db && bun migrate.ts --url …)" };
-  const [g] = await sql`SELECT has_function_privilege(${assertFn}, 'EXECUTE') AND has_function_privilege(${clearFn}, 'EXECUTE')
-                               AND has_table_privilege('priority_assertions', 'SELECT') AND has_table_privilege('priority_sources', 'SELECT') AS ok`;
-  if (!(g as { ok: boolean }).ok) return { off: "this role lacks the priority grant group (cd db && bun migrate.ts --url … --grant <role> --groups priority)" };
+export async function priorityStep(sql: SQL, actor: Actor, problem: (sql: SQL) => Promise<string | null> = priorityWritersProblem): Promise<{ step: PriorityStep } | { off: string }> {
+  const off = await problem(sql);
+  if (off !== null) return { off };
   const env = { ...actorPayload(actor), scope: "write" };
   return {
     step: {
@@ -1901,14 +1896,15 @@ function selfCheck(): Promise<number> {
         (async (_s: TemplateStringsArray, ...values: unknown[]) => { seen.push(values); return answers.shift() ?? []; }) as unknown as SQL;
       const before116 = await priorityStep(fakeSql([[{ ok: false }]], []), { name: ACTOR_NAME });
       const ungranted = await priorityStep(fakeSql([[{ ok: true }], [{ ok: false }]], []), { name: ACTOR_NAME });
-      ok("off" in before116 && /^migration 116 is not applied/.test(before116.off) && "off" in ungranted && /lacks the priority grant group .*--groups priority/.test(ungranted.off),
-        `the priority step is off before 116 and for a role without the priority group, each said by name (${"off" in before116 ? before116.off.slice(0, 40) : "on"})`);
+      ok("off" in before116 && /^migration 116 is not applied/.test(before116.off) && "off" in ungranted && /^this role lacks SELECT on priority_assertions \(the priority grant group: .*--groups priority\)$/.test(ungranted.off),
+        `the priority step is off before 116 and for a role without the priority group, the privilege it lacks named (${"off" in before116 ? before116.off.slice(0, 40) : "on"} | ${"off" in ungranted ? ungranted.off : "on"})`);
+      const allowed = async () => null;
       const seen: unknown[][] = [];
-      const on = await priorityStep(fakeSql([[{ ok: true }], [{ ok: true }], [head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
-        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF });
+      const on = await priorityStep(fakeSql([[head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
+        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF }, allowed);
       const dry = "step" in on ? await on.step.run({ dryRun: true }) : null;
-      const onAgain = await priorityStep(fakeSql([[{ ok: true }], [{ ok: true }], [head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
-        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF });
+      const onAgain = await priorityStep(fakeSql([[head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
+        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF }, allowed);
       const wrote = "step" in onAgain ? await onAgain.step.run({ dryRun: false }) : null;
       const assertCall = seen.at(-2) ?? [];
       ok(JSON.stringify(dry) === JSON.stringify({ asserted: 1, cleared: 1, refused: [] }) && JSON.stringify(wrote) === JSON.stringify({ asserted: 1, cleared: 0, refused: ["SMD-6 ITEM_NOT_FOUND"] })

@@ -91,6 +91,7 @@ import { headingOf, ticketsOf } from "../scripts/changes-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { dueInstant, levelOf, reasonOf, type PriorityLevel, type PriorityScale } from "../server-portable/priority-scale.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
@@ -643,9 +644,6 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
 /** 116's answer to a record's priority, as the run counts it: its outcome, or `refused` and the code. */
 export type PriorityStated = "asserted" | "unchanged" | "cleared" | "nothing_to_clear" | `refused ${string}`;
 
-/** The 116 writers this run states priorities through, by signature: absent (a brain before 116) or not the role's to run, the run states none. */
-export const PRIORITY_WRITERS = ["assert_priority(text, text, integer, timestamptz, timestamptz, text, text, text, boolean, jsonb)", "clear_priority(text, text, jsonb)"] as const;
-
 /**
  * A record's priority through 116, as the actor (SMD-3666): a level states it — the same again is `unchanged` —
  * and unknown clears the actor's own earlier statement, nothing else. The envelope states write scope, as the
@@ -993,12 +991,11 @@ async function main(): Promise<void> {
   const heldBy = new Map<string, number>();
   // The records' priorities (SMD-3666), when the brain has 116's writers and this role may run them; else said once.
   const docsWithPriority = docs.filter((d) => d.priority).length;
-  // Each writer by its own parameter: Bun binds a JS array as one comma-joined string, which no text[] cast reads.
-  const [assertFn, clearFn] = PRIORITY_WRITERS;
-  const [pw] = (await sql`SELECT to_regprocedure(${assertFn}) IS NOT NULL AND to_regprocedure(${clearFn}) IS NOT NULL
-                                 AND has_function_privilege(${assertFn}, 'EXECUTE') AND has_function_privilege(${clearFn}, 'EXECUTE') AS ok`) as { ok: boolean }[];
-  const priorities = pw?.ok === true;
-  if (docsWithPriority && !priorities) console.error(`  priority: ${docsWithPriority} record(s) carry a priority, and this brain has no migration 116 (or this role may not run its writers): none is stated`);
+  // Asked of the role's privileges, not EXECUTE, which PUBLIC holds (review pass 2: a role without the group failed
+  // its first write, ending the run).
+  const priorityProblem = docsWithPriority ? await priorityWritersProblem(sql) : null;
+  const priorities = docsWithPriority > 0 && priorityProblem === null;
+  if (priorityProblem) console.error(`  priority: ${docsWithPriority} record(s) carry a priority, and none is stated: ${priorityProblem}`);
   const priorityTally = new Map<string, number>();
   /** Why an item wrote nothing, in the emitter's terms (held names the holder inline). */
   const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
