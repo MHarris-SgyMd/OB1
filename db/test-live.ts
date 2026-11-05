@@ -20275,7 +20275,9 @@ if (want("38")) {
     // and every --rescan after; between, each poll reads the claims alone.
     // Drained first, a one-shot run with no work at all exits 0 at once, no
     // period begun: at its first read, before any live read (SMD-3783 review
-    // pass 1, mutant: under 10 s let a run that waited 33 polls of 300 ms by).
+    // pass 1, mutant: under 10 s let a run that waited 12 more polls of 300 ms
+    // by). Under 5 s too, ~0.1 s here, for a wait before the reads begin
+    // (review pass 2).
     const acWholeDrain = new AbortController();
     const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
     lines.length = 0;
@@ -20288,8 +20290,8 @@ if (want("38")) {
     const noneAt = Date.now();
     const noneCode = await bounded(sleepRun({ ...ONE_SHOT, sql: counting, signal: acNone.signal }), acNone);
     const noneMs = Date.now() - noneAt;
-    assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneReads === 0,
-      `a one-shot run that finds no work exits 0 at its first read, no live read made, no period begun (exit ${noneCode} in ${noneMs} ms; ${noneReads} live read(s); ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
+    assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneReads === 0 && noneMs < 5_000,
+      `a one-shot run that finds no work exits 0 at its first read, no live read made, within 5 s, no period begun (exit ${noneCode} in ${noneMs} ms; ${noneReads} live read(s); ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
     // A one-shot run whose work goes while the gate holds it — the claim another
     // process finishes — ends with 0 once a read finds none, the rescan's
     // included (review pass 1: past its first read, it idled on for ever).
