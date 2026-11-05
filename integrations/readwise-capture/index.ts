@@ -12,7 +12,7 @@
 // columns the function does not know follow by an update carrying neither content nor
 // vector, where they are NULL — a fresh row's, or a half-shaped row's on re-capture. FORK.md
 // change 71; integrations/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
+// against Postgres, and scripts/check-consistency.ts check 10 holds it.
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function.

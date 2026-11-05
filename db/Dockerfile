@@ -7,7 +7,7 @@
 # the context to what the two images need — and published per tag by
 # .github/workflows/release.yml beside ob1-server, so the two move together: the
 # server's preflight compares the brain's schema_version with its own
-# FORK_VERSION, and this is what wrote it.
+# BRAIN_VERSION, and this is what wrote it.
 #
 # No `bun install`: migrate.ts imports only Bun built-ins, node: modules,
 # db/config.mjs + db/version.mjs, db/cli.ts (the flag scanner every db/ script

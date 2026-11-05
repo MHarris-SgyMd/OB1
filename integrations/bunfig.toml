@@ -5,7 +5,7 @@
 # holds for the recipe and integration servers the suites import in-process,
 # which reach this directory's install: the integrations from under it, the
 # recipes through the committed recipes/node_modules link (SMD-1991).
-# `bun install` is unaffected. Check 44 of scripts/check-fork-consistency.ts
+# `bun install` is unaffected. Check 44 of scripts/check-consistency.ts
 # holds this file and its siblings in the other directories CI runs from
 # (SMD-2978).
 [install]

@@ -12,7 +12,7 @@ client's own MCP connector, a browser extension — land in the brain through
 It is a spec with a data file behind it. `docs/connector-registry.json` is the
 one source: the facet sets, every family's schema, every external-touching
 artifact with its capabilities. The tables at the end of this page are rendered
-from it by `scripts/connector-registry.ts`, and `check-fork-consistency`
+from it by `scripts/connector-registry.ts`, and `check-consistency`
 check 19 holds the registry sound, the tables current, and the coverage
 complete (see "Held by"). Edit the JSON; run the script; the prose here is the
 part a human writes.
@@ -121,7 +121,7 @@ A **fetcher** is whatever obtains the vendor item. Four kinds, one contract:
 | Fetcher | When | Owns |
 |---|---|---|
 | **low-code node** — a node of n8n, the tool SMD-1863 picked | the default for any vendor the tool exposes; every stateful workflow (schedule, trigger, retry, multi-step, two-way sync) | vendor auth, pagination, rate limit, retry, the persistent connection |
-| **native driver** — a typed OB1 script or function | a vendor the tool lacks, a one-shot archive parse (a tool adds nothing to a file walk), or where a reviewable typed script is preferred | the same, in OB1's tree, held to the check-fork rules |
+| **native driver** — a typed OB1 script or function | a vendor the tool lacks, a one-shot archive parse (a tool adds nothing to a file walk), or where a reviewable typed script is preferred | the same, in OB1's tree, held to the check-consistency rules |
 | **MCP server** — the AI client's own connector or channel plugin | one call on demand from the AI client: "draft this digest", "what is on my calendar" | the vendor call, inside the client |
 | **browser extension** — a client in the user's browser | what the user is looking at, pushed when they choose; bulk sync over a session the browser already holds | the DOM or the session the vendor exposes only there |
 
@@ -264,7 +264,7 @@ their home under `primitives/` once SMD-1918 extracts them:
 
 ## Held by
 
-`scripts/check-fork-consistency.ts` check 19, one pure function
+`scripts/check-consistency.ts` check 19, one pure function
 (`registryProblems` in `scripts/connector-registry.ts`) with must-fail and
 must-pass probes on every run:
 

@@ -65,10 +65,10 @@ jobs:
           no-cache: true
 
       # Everything the rest of this job needs to know, checked first. On a tag:
-      # the tag names releases.json's last entry, FORK_VERSION equals it, the
+      # the tag names releases.json's last entry, BRAIN_VERSION equals it, the
       # range closes every migration on disk, no fragment sits in changes/, the
       # commit is on origin/main, Ollama is pinned. A rehearsal takes the tree
-      # as it is (version FORK_VERSION, image tag `rehearsal`).
+      # as it is (version BRAIN_VERSION, image tag `rehearsal`).
       - name: What this run releases
         id: facts
         env:
@@ -147,7 +147,7 @@ jobs:
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
