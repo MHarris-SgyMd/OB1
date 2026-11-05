@@ -786,8 +786,8 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
  * holds that install to them, and server-portable's and mcp-server's to the
  * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
  * integrations reach that install from under it, the recipes through the
- * committed recipes/node_modules link (SMD-1991; in integrations/ since SMD-3747). A name
- * added here alone reaches every reader.
+ * committed recipes/node_modules link (SMD-1991; in integrations/ since
+ * SMD-3747). A name added here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
 

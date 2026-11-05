@@ -619,10 +619,9 @@ jobs:
       # Imported as modules — each server's default export's `fetch`, the shape
       # `bun <file>` serves (SMD-1799) — their packages from this install: a
       # wrong or revoked key is refused, a read-scoped key is told so by a route
-      # that writes and may only dry-run a worker,
-      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
-      # started under `bun` for real and answered over its port (change 74). No
-      # database.
+      # that writes and may only dry-run a worker, every copy is byte for
+      # byte auth.ts. Then every server on the SQL shim is started under `bun`
+      # for real and answered over its port (change 74). No database.
       - name: Scoped access keys reach every vendored server
         working-directory: integrations
         run: bun test-auth.ts

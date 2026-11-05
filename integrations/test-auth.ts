@@ -24,8 +24,8 @@
  * Supabase function is bundled from supabase/functions/, so the module is
  * copied beside the servers rather than imported across the tree), no file
  * under the three category directories imports an MCP server package or builds
- * an MCP server transport (the Vercel route on its own install aside), and the MCP stack's
- * shared pins agree across the tree's installs (this directory's,
+ * an MCP server transport (the Vercel route on its own install aside), and the
+ * MCP stack's shared pins agree across the tree's installs (this directory's,
  * server-portable's, mcp-server's).
  *
  * The files are imported as modules: each exports Bun's entry shape,
@@ -98,7 +98,7 @@ async function importServer(file: string): Promise<Handler> {
   assert(!linked && existsSync(join(HERE, "node_modules", "hono")), "integrations/node_modules is the install itself, not a link (bun install here)");
 }
 
-// ── The servers, and what each tool or route does to the database ───────────
+// ── The servers, and what each route or worker does to the database ──────────
 
 const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
@@ -124,8 +124,6 @@ type Server = {
   readProbe?: string;
   /** Worker: where dry_run is said. */
   dryRun?: "query" | "body";
-  /** An unauthenticated GET this server answers (a health probe), if any. */
-  health?: string;
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
 };
@@ -148,7 +146,8 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 const SERVERS: Server[] = [
   // The extension servers (change 64) are gone: the six are plugins since SMD-2311, served by the brain itself, and
   // meal-planning's shared server retired with them. The recipes and integrations (change 67): no MCP server among
-  // them, so the MCP kind retired with SMD-3747 (the guard below fails a vendored file that builds a transport).
+  // them, so the MCP kind retired with SMD-3747 (the guard below fails a vendored file that imports an MCP server
+  // package or builds a transport).
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
     ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: PG_REFUSED, readProbe: "POST /recall" }),
@@ -222,8 +221,9 @@ type Reply = { status: number; json: any; text: string };
 /** How long an in-process request may take before it is called a hang — a handler answers in single-digit ms here, and a query is refused at once. */
 const REQUEST_MS = 2000;
 // The silencer is counted, not saved and restored per call: two requests in
-// flight at once (an MCP server's overlapping probe was one, until SMD-3747) would otherwise each save the
-// other's no-op and leave the console dark for the rest of the run.
+// flight at once (an MCP server's overlapping probe was one, until SMD-3747)
+// would otherwise each save the other's no-op and leave the console dark for
+// the rest of the run.
 const CONSOLE = { error: console.error, warn: console.warn };
 let hushed = 0;
 function hush() { if (hushed++ === 0) { console.error = () => {}; console.warn = () => {}; } }
@@ -255,9 +255,9 @@ async function answer(handler: Handler, req: Request): Promise<Reply> {
   // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
   hush();
   // Every request has a deadline: a handler that never answers (an MCP server's
-  // crossed transports parked one, SMD-1497) is reported as a timeout with status 0, not
-  // waited on — and the silencer above is released either way, which a
-  // `finally` on the bare handler promise could not promise.
+  // crossed transports parked one, SMD-1497) is reported as a timeout with
+  // status 0, not waited on — and the silencer above is released either way,
+  // which a `finally` on the bare handler promise could not promise.
   const timeout: Reply = { status: 0, json: null, text: `timed out after ${REQUEST_MS} ms` };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -373,7 +373,8 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
 }
 
 // Each form a key may travel in, at each worker: a read key's dry run passes, its real run is refused, and a wrong key
-// in it is refused even for a dry run, through every form (the auditor's own schedule sends ?key=). Asked of an MCP server's tools/list until the last left (SMD-3747).
+// in it is refused even for a dry run, through every form (the auditor's own schedule sends ?key=). Asked of an MCP
+// server's tools/list until the last left (SMD-3747).
 for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   env(s, KEYS);
   for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
@@ -505,7 +506,8 @@ for (const live of LIVE) {
   const env: Record<string, string | undefined> = { ...process.env, PORT: "0", ...live.env, OB1_LISTEN_HOST: "127.0.0.1" };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
-  // A NODE_PATH from the shell goes too: an integration's packages resolve from the install above it, a recipe's through the committed link, or not at all (SMD-1991).
+  // A NODE_PATH from the shell goes too: an integration's packages resolve from the install above it, a recipe's
+  // through the committed link, or not at all (SMD-1991).
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
   // Bun's own start line (`Started development server:`, or `Started server:` in production) gives the port, 0 if
@@ -567,7 +569,8 @@ assert(second !== null && askedElsewhere > 0 && answeredElsewhere.length === 0, 
 console.log("\n[where the key may travel]");
 for (const s of SERVERS.filter((s) => s.kind === "rest" && s.writes.length > 0)) {
   // Each form a key may travel in authenticates, and the scope applies through it: a read key passes the read probe
-  // and is told a write route writes, and a wrong key in it is refused. (An MCP server's tools/list asked this until the last left: SMD-3747.)
+  // and is told a write route writes, and a wrong key in it is refused. (An MCP server's tools/list asked this until
+  // the last left: SMD-3747.)
   env(s, KEYS);
   for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
     const read = await http(s, READ_KEY, s.readProbe!, via);
@@ -581,8 +584,9 @@ for (const s of SERVERS.filter((s) => s.kind === "rest" && s.writes.length > 0))
   // Every form presented is tried: a gateway's own token in Authorization, or a
   // stale header a client keeps sending, does not shadow the key the client means.
   // Asked of the first HTTP API, at its read probe and its first write route: the
-  // auth module is the same byte copy behind every vendored server. Past the gate is the assertion: the handler's own answer
-  // after it (a refused database here) is no refusal of the key.
+  // auth module is the same byte copy behind every vendored server. Past the
+  // gate is the assertion: the handler's own answer after it (a refused
+  // database here) is no refusal of the key.
   const s = SERVERS.find((x) => x.kind === "rest")!;
   env(s, KEYS);
   const at = (route: string, key: string | null, via: Via, also: Partial<Record<Via, string>>, accept = true) => {
@@ -599,10 +603,6 @@ for (const s of SERVERS.filter((s) => s.kind === "rest" && s.writes.length > 0))
   // read from the request as it came, so ?key= on a bare request authenticates.
   assert(passed(await at(s.readProbe!, READ_KEY, "query", {}, false)), "a request without an Accept header still authenticates from ?key=");
   assert((await at(s.readProbe!, "not-a-key", "x-access-key", {}, false)).status === 401, "…and is still refused with a wrong key");
-}
-for (const s of SERVERS.filter((s) => s.health)) {
-  const health = await handlers[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
-  assert(health.status === 200 && (await health.json()).status === "ok", `${s.file}: the unauthenticated GET ${s.health} health check still answers`);
 }
 
 // ── A request URL that will not parse ────────────────────────────────────────
@@ -699,7 +699,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
 
 // ── Drift guards ─────────────────────────────────────────────────────────────
 
-/** Stored functions a tool or route may call and still be a read; any other `.rpc(` is a write. */
+/** Stored functions a route or worker may call and still be a read; any other `.rpc(` is a write. */
 const RPC_READS = ["match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
 /** Tables a READ may insert into: a recall records itself (for a write-scoped key). An update or delete on them, or an insert anywhere else, is a write. */
 const LOG_TABLES = ["agent_memory_recall_traces", "agent_memory_recall_items", "agent_memory_audit_events"];
@@ -711,7 +711,7 @@ const LOG_INSERT = new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)
  * by a literal in RPC_READS (a variable name is a write).
  */
 const writes = (reach: string) => {
-  const rest = reach.replace(new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)\s*\.insert\(`, "g"), ".from(LOG).logged(");
+  const rest = reach.replace(new RegExp(LOG_INSERT.source, "g"), ".from(LOG).logged(");
   return /\.(insert|update|upsert)\(|\.delete\(\s*[){]/.test(rest)
     || /\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b/.test(rest)
     || [...rest.matchAll(/\.rpc\(\s*(?:(["'`])([^"'`]+)\1)?/g)].some((m) => !m[2] || !RPC_READS.includes(m[2]));
@@ -772,8 +772,8 @@ for (const s of SERVERS) {
 {
   // No vendored file builds @hono/mcp's transport: the MCP kind that held such a server (built per request, its
   // reply kept alive, its allow-list naming the browser headers) retired with the last of them (SMD-3747). New
-  // operations on the brain are a plugin (plugins/README.md), not a vendored MCP server. (The Next.js route on Vercel builds the SDK's own transport, on
-  // Node, from its own install; it is not a Bun server.)
+  // operations on the brain are a plugin (plugins/README.md), not a vendored MCP server. (The Next.js route on
+  // Vercel builds the SDK's own transport, on Node, from its own install; it is not a Bun server.)
   // An MCP server, by what it imports (@hono/mcp, the v1 SDK's server, the v2 server or node packages) or by a
   // server transport it builds (the spellings probed below: spaced, namespaced, generic; Streamable HTTP, SSE or stdio).
   const IMPORTS = /\b(?:from\s*|(?:import|require)\s*\(\s*)["'`][^"'`]*(?:@hono\/mcp|@modelcontextprotocol\/(?:sdk\/server|server|node))\b/;
@@ -869,7 +869,5 @@ for (const t of TEXT_ONLY) {
     assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `${file} is on the v2 MCP stack (SMD-2278): hono+zod match integrations, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${STACK.filter((n) => !SERVER_STACK.includes(n)).join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
   }
 }
-
-
 
 report();

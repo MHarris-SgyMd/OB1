@@ -95,12 +95,12 @@
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799); every server
  * imports compat/supabase-sql itself since SMD-1798, and resolves its packages
- * through the install in integrations/ and the committed recipes/node_modules link (SMD-1991). The model provider is
- * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — as are Readwise's book lookup and the extraction worker
- * smart-ingest triggers (SMD-2110), and everything below the tool or
- * route boundary is real; test-auth.ts is where the servers start under bun
- * for real.
+ * through the install in integrations/ and the committed recipes/node_modules
+ * link (SMD-1991). The model provider is stubbed — a unit vector keyed off the
+ * text, so the vector a writer stored is recognisable — as are Readwise's book
+ * lookup and the extraction worker smart-ingest triggers (SMD-2110), and
+ * everything below the tool or route boundary is real; test-auth.ts is where
+ * the servers start under bun for real.
  *
  * The database is the fork's migrations plus four vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write

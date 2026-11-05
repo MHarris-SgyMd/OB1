@@ -86,8 +86,8 @@ The install lives in `integrations/node_modules` (in `extensions/` until
 SMD-3747). An integration resolves that pinned install from under it, and a
 recipe through `recipes/node_modules`, a committed link to
 `../integrations/node_modules`, so the one `bun install` above serves every
-server from any working directory (SMD-1991). `NODE_PATH`, which these commands used
-to set, does not reach the MCP SDK's `exports` subpaths under Bun.
+server from any working directory (SMD-1991). `NODE_PATH`, which these
+commands used to set, does not reach the MCP SDK's `exports` subpaths under Bun.
 `--no-install` makes a skipped install fail the start, naming the package.
 Without it, Bun downloads whatever version npm serves when it finds no
 `node_modules` above the file, and a link whose target was never installed
