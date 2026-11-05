@@ -4892,6 +4892,8 @@ if (want("10")) {
   let callsInFlight = 0;
   /** While above zero, the next calls answer 429 at once, one each (SMD-3311 review pass 1): a run of them past the pauses, whoever's call. */
   let answer429 = 0;
+  /** The statuses the next calls answer, one each, in order (SMD-3311 review pass 5): a 500 the runner crashed, a 503 a gateway's while it restarts. */
+  const callScript: number[] = [];
   /** While above zero, the next calls answer 400 naming the answer budget, as an endpoint that refuses `max_tokens` does (extract's maxTokensFatal). */
   let refuseBudget = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
@@ -4932,6 +4934,8 @@ if (want("10")) {
         answer429--;
         return new Response(JSON.stringify({ error: { message: "too many requests" } }), { status: 429 });
       }
+      const scripted = callScript.shift();
+      if (scripted !== undefined) return new Response(JSON.stringify({ error: { message: scripted === 500 ? "the runner crashed" : "overloaded" } }), { status: scripted });
       if (refuseBudget > 0) {
         refuseBudget--;
         return new Response(JSON.stringify({ error: { message: "max_tokens is too large: 4096. This model supports at most 2048 completion tokens" } }), { status: 400 });
@@ -5689,7 +5693,20 @@ if (want("10")) {
       const run429Outages = lines.slice(outagesBefore).filter((l) => /the provider is not answering \(Extraction request to [^)]*429.*goes back to the pool unrecorded/.test(l)).length;
       assert(run429Status === "succeeded" && run429Outages >= 2 && answer429 === 0,
              `one thought meeting a 429 past the pauses twice in a row, its second right after the probe answered, is extracted, not failed as its own (${run429Status}, ${run429Outages} outage(s), ${answer429} 429s left)`);
+
+      // The streak decides the suspect, not its last error (review pass 5, walkthrough; the subject sweep's streakPoison):
+      // a thought whose call crashes the runner (500) and then meets a gateway's 503s while it restarts, past the
+      // pauses, is the suspect, and crashing it again right after the probe answered is recorded its own — where the
+      // last error alone, a 503, made none, and it crashed the provider at every outage's end, failed never.
+      callScript.splice(0, callScript.length, 500, 503, 503, 503, 500, 503, 503, 503);
+      const crasher = await seed("Vera's crash report names the runner's restart loop.");
+      created.push(crasher);
+      await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
+      const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${callScript.length} scripted left)`);
     } finally {
+      callScript.length = 0;
       answer429 = 0;
       limitConcurrent = false;
       down = "503";
@@ -14924,6 +14941,8 @@ if (want("16")) {
   let judge429 = 0;
   /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
   let judge400TimedOut = 0;
+  /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
+  const judgeCallScript: number[] = [];
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
@@ -14958,6 +14977,8 @@ if (want("16")) {
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      const judgeScripted = judgeCallScript.shift();
+      if (judgeScripted !== undefined) return new Response(JSON.stringify({ error: { message: judgeScripted === 500 ? "the runner crashed" : "overloaded" } }), { status: judgeScripted });
       if (judge400TimedOut > 0) {
         judge400TimedOut--;
         return new Response(JSON.stringify({ error: { message: "the tool call timed out" } }), { status: 400 });
@@ -16389,7 +16410,18 @@ if (want("16")) {
       const row400 = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${newer400}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
       assert(row400?.status === "failed" && /pair\(s\) not judged: pair with [^:]+: timed out after/.test(row400.last_error ?? "") && judgeProbes > probesBefore400,
              `a 400 whose words say "timed out" stays the pair's under --follow: probed, recorded as the pair's timeout (${row400?.status}: ${row400?.last_error?.slice(0, 120)}; ${judgeProbes - probesBefore400} probe(s))`);
+
+      // As [10]'s: the streak decides the suspect, a 500 then a gateway's 503s past the pauses (review pass 5).
+      created.push(await seed("The crash log names the judge's restart loop.", 70, 3, ["crash-log"]));
+      judgeCallScript.splice(0, judgeCallScript.length, 500, 503, 503, 503, 500, 503, 503, 503);
+      const crasher = await seed("The crash log names the judge's new restart loop.", 70, 0, ["crash-log"]);
+      created.push(crasher);
+      await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
+      const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a pair's thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${judgeCallScript.length} scripted left)`);
     } finally {
+      judgeCallScript.length = 0;
       judge429 = 0;
       judge400TimedOut = 0;
       judgeLimitConcurrent = false;

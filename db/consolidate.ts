@@ -93,7 +93,9 @@
  *   - a pair's timeout after which a one-token probe gets no answer either.
  * In each case the thought goes back to the pool unrecorded and the follower
  * probes the judge model until it answers. A thought that fails the same way
- * right after a probe answered is recorded failed. A follower probes once
+ * right after a probe answered is recorded failed — unless every error of its
+ * streak was the provider holding calls back (a 429, a 503, the model not
+ * served), which makes no suspect (SMD-3311). A follower probes once
  * before it writes anything, and refuses an unserved model, a refused key or
  * a wrong base URL with exit 2.
  *
@@ -2076,6 +2078,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
             const asked = { at: readAt };
+            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; the subject sweep's streakPoison). */
+            let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 // A wait for a slot on the model-call seam is not the call's time (review pass 3).
@@ -2114,6 +2118,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 }
                 // Under --follow through followClassify's split, as extract-entities.ts reads it (followerFault, SMD-3311).
                 const { kind, suspect } = FOLLOW ? followerFault(e) : { kind: classifyError(e), suspect: true };
+                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599), as extract-entities.ts reads it: a
@@ -2126,7 +2131,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
-                  if (outage.begin(msg, suspect ? b.thought_id : undefined) === "outage") {
+                  if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);

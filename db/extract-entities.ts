@@ -106,14 +106,16 @@
  * on it.
  *
  * It outlasts the provider going away too. Three things are outages:
- *   - a rate limit, a server error or a lost connection still failing after
- *     the pauses;
+ *   - a rate limit, a server error, a 408 or a lost connection still failing
+ *     after the pauses;
  *   - the model missing, as while Ollama pulls it;
  *   - a timeout after which a one-token probe gets no answer either.
  * In each case the thought in hand goes back to the pool, not failed, the
  * other workers stop after theirs, and the follower probes the model on the
  * same schedule until it answers. A thought that draws the error again right
- * after a probe answered is its own fault, and is recorded failed. Before it
+ * after a probe answered is its own fault, and is recorded failed — unless
+ * every error of its streak was the provider holding calls back (a 429, a 503,
+ * the model not served), which makes no suspect (SMD-3311). Before it
  * writes anything, the worker key's registration included, a follower probes
  * once. A model the provider does not serve, a key it refuses or a wrong
  * base URL exits 2 there, and an unreachable provider is waited for.
@@ -1602,6 +1604,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             inCall.begin(workerId);
             const asked = { at: readAt };
+            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; the subject sweep's streakPoison). */
+            let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 // A wait for a slot on the model-call seam is neither the call's
@@ -1678,6 +1682,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // the provider's, paused for, not the request's; a 429, a 503 or the model not served
                 // makes no suspect of the thought in hand.
                 const { kind, suspect } = FOLLOW ? followerFault(e, { maxTokensFatal: true }) : { kind: classifyError(e, { maxTokensFatal: true }), suspect: true };
+                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599): a transient error past the pauses,
@@ -1695,7 +1700,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
                   const begins = outage.reason === null;
-                  if (outage.begin(msg, suspect ? b.thought_id : undefined) === "outage") {
+                  if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     // The escalation model gone since the start: the outage probes it (review pass 2).
                     if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
