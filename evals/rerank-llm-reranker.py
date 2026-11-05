@@ -17,7 +17,7 @@ A generic cross-encoder raises any-hit and lowers strict (it concentrates on one
 gold); MemReranker's calibration recovers strict — but that +10 does NOT reproduce
 on the held-out Linear corpus (rerank-heldout.ts), so it is largely benchmark-fit.
 
-Needs a torch env (Ollama serves no reranker; Daemonic Brain's Python is too new
+Needs a torch env (Ollama serves no reranker; this machine's Python is too new
 for torch wheels — itself part of the finding). Run with uv, off a pool dump:
 
     # LongMemEval pool from rerank-spike.ts, or held-out pool from rerank-heldout.ts

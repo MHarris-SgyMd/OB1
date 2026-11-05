@@ -722,7 +722,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
         else lines.push(`  - fingerprint ${d.fingerprint}… → ${d.copies} copies (ids: ${d.ids.join(", ")})`);
       }
     }
-    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — in Daemonic Brain migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).`);
+    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — in Daemonic Brain, migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).`);
     lines.push("");
   }
 

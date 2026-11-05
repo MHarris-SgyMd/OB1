@@ -139,7 +139,7 @@ export function kindBandRows(f: Fixture): LedgerRow[] {
  * is resolved by the fork record where the fixture says confirmed or refuted;
  * a thought another thought supersedes is resolved against — the ticket's
  * reading ("superseded by a corrected value"), which counts a supersession
- * that merely extends the same way and so overstates refutation; Daemonic Brain
+ * that merely extends the same way and so overstates refutation; the fork
  * record wins where both apply, since a verdict is a resolution and a pointer
  * is a hint at one. A thought that declared a value and that nothing resolved
  * is unresolved. The confidence is whatever the writer declared under
