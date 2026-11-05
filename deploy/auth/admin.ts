@@ -4,7 +4,7 @@
  * 15's revocation page). server.ts serves it on its own port, ADMIN_PORT, on
  * the `auth` service's networks: the `mesh`, where the GUI reaches it, and
  * `auth-egress`, which holds the authorization server alone. No proxy rule
- * routes to it (check 28 of scripts/check-fork-consistency.ts holds every
+ * routes to it (check 28 of scripts/check-consistency.ts holds every
  * route table and who joins each network) and no host port publishes it. On a
  * Linux engine a process on the host can still reach the container's bridge
  * address, as it can port 3000's; the credential below is what guards it

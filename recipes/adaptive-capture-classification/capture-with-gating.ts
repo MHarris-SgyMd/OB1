@@ -10,7 +10,7 @@
 // one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
 // here, so the 2-argument form is resolved and the row waits for the servers'
 // vector mender (SMD-2889) or a re-embed pass. FORK.md
-// change 71; scripts/check-fork-consistency.ts check 10 holds it.
+// change 71; scripts/check-consistency.ts check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *

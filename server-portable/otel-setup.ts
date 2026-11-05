@@ -44,7 +44,7 @@ import { BatchLogRecordProcessor, LoggerProvider, SimpleLogRecordProcessor, type
 import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader, type PushMetricExporter } from "@opentelemetry/sdk-metrics";
 import { BasicTracerProvider, BatchSpanProcessor, SimpleSpanProcessor, type ReadableSpan, type Span, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { FlushResult } from "./shutdown.ts";
-import { FORK_VERSION } from "./version.ts";
+import { BRAIN_VERSION } from "./version.ts";
 import { PIPELINE_TIERS } from "../db/config.mjs";
 
 /** The three signals, each sent only where it has a URL. */
@@ -621,7 +621,7 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   const resource = defaultResource()
     // service.instance.id a fresh UUID per start (review pass 3 of PR 2d): the MCP server and the REST core under one
     // OTEL_SERVICE_NAME, or two tiers, would otherwise be one series whose cumulative readings interleave. No host, no process.
-    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION, "service.instance.id": crypto.randomUUID() }))
+    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": BRAIN_VERSION, "service.instance.id": crypto.randomUUID() }))
     .merge(detectResources({ detectors: [envDetector] }))
     // A pipeline tier's brain (OB1_TIER, SMD-1806) says which as deployment.environment.name, a label Prometheus keeps, so a
     // canary sending to stable's collector is told apart by name, not by an instance id (SMD-1849 PR 3a) — over

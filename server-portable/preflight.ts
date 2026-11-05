@@ -4937,13 +4937,13 @@ if (configFailed) {
 
         // The version the brain was migrated under (044, SMD-1804): schema_version
         // in ob1_config, reported beside the highest migration the ledger records.
-        // The server carries its own FORK_VERSION (db/version.mjs). A mismatch is a
+        // The server carries its own BRAIN_VERSION (db/version.mjs). A mismatch is a
         // named warning, never a refusal — a brain and a server at different
         // releases still serve; the operator decides whether that is intended.
         try {
           // Dynamic import, as the config.mjs value reads above are: a static
           // value import of a .mjs trips noImplicitAny (TS7016) under this tsconfig.
-          const { FORK_VERSION, semverCompare, readReleases, highestReleasedMigration } = await import("../db/version.mjs");
+          const { BRAIN_VERSION, semverCompare, readReleases, highestReleasedMigration } = await import("../db/version.mjs");
           const highestApplied = facts.highestMigration;
           const highest = highestApplied === null ? "unknown" : pad3(highestApplied);
           // ob1_config's schema_version, from `facts` (SMD-2041); a read it
@@ -4952,16 +4952,16 @@ if (configFailed) {
           const brain = facts.schemaVersion;
           if (!brain) {
             add("schema version", "warn",
-              `ob1_config records no schema_version — this brain predates migration 044 (highest migration ${highest}); the server runs ${FORK_VERSION}`,
+              `ob1_config records no schema_version — this brain predates migration 044 (highest migration ${highest}); the server runs ${BRAIN_VERSION}`,
               "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL — a plain run applies 044, or --reapply if the ledger already records it.");
           } else {
             const releasedHi = highestReleasedMigration(readReleases());
             // semverCompare ignores build metadata, so 0.0.0+upstream.<a> and
             // 0.0.0+upstream.<b> compare equal — a fresh brain at the baseline is ok.
-            const cmp = semverCompare(FORK_VERSION, brain);
+            const cmp = semverCompare(BRAIN_VERSION, brain);
             if (cmp < 0) {
               add("schema version", "warn",
-                `the brain is at ${brain} but this server is ${FORK_VERSION} — a server older than the brain it serves`,
+                `the brain is at ${brain} but this server is ${BRAIN_VERSION} — a server older than the brain it serves`,
                 "Deploy the server for the brain's release (its tag names the server commit), or roll the brain back to a server that matches.");
             } else if (highestApplied !== null && releasedHi > 0 && highestApplied > releasedHi) {
               add("schema version", "warn",
@@ -4982,7 +4982,7 @@ if (configFailed) {
                     ? "A migration or a long transaction holds the ledger; run preflight again once it has finished."
                     : "See the migration ledger row for why the ledger could not be read.");
             } else {
-              add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${FORK_VERSION} is newer)` : ""}`);
+              add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${BRAIN_VERSION} is newer)` : ""}`);
             }
           }
         } catch (e) {

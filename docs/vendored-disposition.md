@@ -4,7 +4,7 @@ The fork vendors ~33k lines of upstream community code across `integrations/`,
 `recipes/`, `schemas/` and a few `docs/drafts/` SQL sketches. The standing posture is
 **"audit once, hold the delta"** (SMD-1228 / SMD-1250 / SMD-1256): the tree is *kept* —
 these are the repo's "open for contributions" categories — held to the core's standard
-where it matters, with `scripts/check-fork-consistency.ts` as the standing guard.
+where it matters, with `scripts/check-consistency.ts` as the standing guard.
 
 This document runs that standard to completion: **one inventory, one disposition per
 artifact.** For an arbitrary vendored file you can now say whether it is live,
@@ -25,7 +25,7 @@ Every external-touching artifact here — the SMD-1867 fold-in rows below, and t
 sinks (the digests and briefings), which the sweep finds by their `metadata.json`
 services and tags rather than by this table — is classified by the five-facet
 connector taxonomy in [`docs/connector-taxonomy.md`](connector-taxonomy.md)
-(SMD-1933); `check-fork-consistency` check 19 reads the fold-in rows from this
+(SMD-1933); `check-consistency` check 19 reads the fold-in rows from this
 table as one of its coverage triggers.
 
 Some capture-source integrations are additionally **folded into SMD-1867** (the
@@ -105,7 +105,7 @@ exactly one disposition.
 
 **Guard follow-ups (SMD-1924 verify item — "a newly vendored file redefining a core object
 fails CI"):**
-1. `scripts/check-fork-consistency.ts` check 7 already covers **function** redefinitions
+1. `scripts/check-consistency.ts` check 7 already covers **function** redefinitions
    (`upsert_thought` / `match_thoughts` / `update_updated_at`) since SMD-1250 — confirmed.
 2. **Done** — check 5 now also fails a vendored `.sql` that does `DROP COLUMN` / `ALTER COLUMN`
    on core `thoughts` (rule `thoughts-column-mutation`, scoped to `schemas`/`recipes`/`integrations`
@@ -217,7 +217,7 @@ each named in SMD-2137, which removed the directory), `local-ollama-embeddings` 
 `OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138; two of its three models are rows of `SETUP.md`'s table, with the fork's numbers), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
 (migration 023).
 
-**Held by check 24** of `scripts/check-fork-consistency.ts`: in every code file under the
+**Held by check 24** of `scripts/check-consistency.ts`: in every code file under the
 seven category directories and docs/, a `rest/v1` path in a string, a supabase-py import or
 `create_client(`, or a `@supabase/postgrest-js` specifier is a hit, comments blanked; the
 files below are counted per file in `POSTGREST_EXCEPTIONS` with the ticket that ports or
@@ -329,7 +329,7 @@ keep their rows below.
 
 An artifact is *referenced* — and therefore not removable — when something outside its
 own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.ts`),
+`extensions/test-writes.ts`), the fork guard (`scripts/check-consistency.ts`),
 `.github/workflows/fork-checks.yml`, `extensions/package.json` scripts, the SQL-shim
 codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md`
@@ -370,7 +370,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `rest-api` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the general REST gateway (CORS, CRUD, an `/ingest` proxy to `smart-ingest`, entity endpoints). Every route's fate is in "The brain's outward surface" above. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `slack-capture` | keep + audited → fold-in **SMD-1867** | Slack quick-capture source. Live: README index, `docs/01-getting-started` step, CI. Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/slack` (SMD-2101).** |
 | `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622` (`rest-api`'s `/ingest` proxy to it retired with SMD-1931), `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) **SMD-1931 (2026-10-08): a REST-core plugin, port SMD-2690.** |
-| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`extensions/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-fork-consistency.ts`). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/telegram` (SMD-2101).** |
+| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`extensions/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-consistency.ts`). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/telegram` (SMD-2101).** |
 | `update-thought-mcp` | ~~keep + audited *(revises seed "remove")*~~ → **retired (SMD-1931)** | Was a standalone single-tool server. The core's `update_thought` (MCP tool and `PATCH /v1/thoughts/{id}`) does what it did. `skills/updating-thoughts` now names the core connector, and its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 
 ### `schemas/` (16)
@@ -385,7 +385,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `per-agent-identity` | keep + audited *(revises seed "remove")* | Community `openbrain_agents` / `agent_memory_keys` + `lookup_agent_memory_key` — granted by the fork's own `db/config.mjs` ROLE_GRANTS (SMD-1226). Migration 010 is "Ported from schemas/per-agent-identity" with departures (ob1_* names); the community file is the upstream-faithful origin, held to the delta. |
 | `provenance-chains` | keep + audited *(revises seed "remove")* | Additive derivation columns + own merge functions (granted by `db/config.mjs`); `recipes/provenance-chains` + `typed-edge-classifier` read it. Guard check 7 (line 554) already fences its function set. Distinct from core's 025/026/032 provenance. |
 | `readwise-books` | keep + audited | Own `readwise_books` cache + RPCs; granted by `db/config.mjs`; companion to `integrations/readwise-capture` + `recipes/readwise-import`; CI `test-writes.ts` SIDECARS. Not superseded, not a hazard. |
-| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-fork-consistency.ts` once carried for it. |
+| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-consistency.ts` once carried for it. |
 | `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `brain-health-monitoring` references it (`enhanced-mcp` and `rest-api` did until SMD-1931). *(The `schemas/smart-ingest-tables` folder-name drift is resolved; see "Consistency fixes" above.)* Rebuild tracked under SMD-1253. |
 | `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function the fork replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); was referenced by `delete-thought-mcp` / `update-thought-mcp` until SMD-1931 retired them. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |

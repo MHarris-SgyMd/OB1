@@ -9,7 +9,7 @@
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
+// against Postgres, and scripts/check-consistency.ts check 10 holds it.
 // SMD-1524 (change 71): the first run's row too — the raw insert computed its own
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
 // and the key's name reaches 008's audit row as the actor on both paths (the
