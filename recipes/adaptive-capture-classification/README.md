@@ -100,7 +100,7 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > better call there. The classifier's `type`, `tags`, `project` and `due_date` ride
 > in `metadata` — `thoughts` has no such columns; a brain with the enhanced-thoughts
 > schema can write its `type` column beside the call, on a fresh row, as
-> `integrations/readwise-capture` does.
+> `integrations/readwise-capture` did until SMD-2690 made it a plugin.
 
 Replace your current direct call to the OB1 `capture` MCP tool with the following pattern.
 

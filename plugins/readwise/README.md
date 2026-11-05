@@ -1,0 +1,104 @@
+# Readwise Plugin
+
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@mlava](https://github.com/mlava)** as the Readwise Capture integration, a server of its own; a plugin of the brain's since SMD-2690.
+
+## What it does
+
+Readwise posts each new highlight to a webhook the brain serves, and the plugin stores it as a thought. Readwise collects highlights from Kindle, Apple Books, Reader, Instapaper, Hypothesis, podcast apps and physical books (its OCR app), so one webhook covers them all.
+
+- **The webhook**, `POST /hooks/readwise/highlight`, is served by the brain's REST core once the operator turns it on (below). It does three things for each `readwise.highlight.created` event:
+  - It checks the secret Readwise echoes in the body against the one the operator set.
+  - It captures the passage, and the reader's note after it (`— note`), as a thought of trust `ingested`, with `source: readwise`. The core embeds it and extracts its metadata as it does any capture. The thought carries the highlight's and the book's Readwise ids as metadata (`readwise_highlight_id`, `readwise_book_id`).
+  - It records the rest of what Readwise sent in the plugin's own table: the note, location, colour, url, tags and times.
+- **Each highlight is captured once.** A highlight Readwise sends again is answered with the thought the first delivery captured, and nothing runs. Its id is kept for good, because Readwise signs no time.
+- **Other events are ignored.** An empty body (Readwise's **Test Endpoint** button) and any other event type are answered 200 and change nothing.
+- **`readwise_list_highlights`** (read; `GET /v1/plugins/readwise/highlights`) lists the highlights the webhook captured. They are newest highlighted first, optionally one book's, and each names the thought its text is in (`fetch` reads it).
+
+**What the standalone server did that the plugin does not:**
+- **No book title or author.** A plugin makes no outbound call, so the plugin cannot ask Readwise's API for the book's title and author. A highlight carries Readwise's book id alone (filling a books table the plugin can read is SMD-3878). The [readwise-import recipe](../../recipes/readwise-import/) and its [readwise-books schema](../../schemas/readwise-books/) keep a books table.
+- **No `source_type` or `type` columns.** The webhook is a capture-only caller, so the thought's `source_type` and `type` columns (the enhanced-thoughts schema's) are not set. `metadata.source` is `readwise`, and the core's extractor gives the thought its type. The readwise-books schema's `get_book_highlights` filters on `source_type`, so it does not find the plugin's highlights; `readwise_list_highlights` does.
+- **No metadata merge on known text.** A highlight whose text the brain already holds is answered with that thought, and the thought keeps the metadata it had: a capture-only caller's re-capture changes nothing. The highlight's own row still names the thought.
+- **One extra model call per highlight.** Every capture now runs the core's metadata extraction as well as its embedding. That is the same cost as any other capture on the brain, and more than the old server's embedding alone.
+
+**Readwise's secret is a bearer secret.** Readwise signs nothing and sends no time: the secret travels in each delivery's body. Anyone who has seen one delivery (a proxy log, a leaked request) can post highlights of their own. They are captured as ingested text, the trust a stranger's text gets, and change no existing thought. Keep the webhook URL behind TLS. If a delivery leaks, delete the webhook in Readwise and make a new one, which gets a new secret.
+
+## Prerequisites
+
+- A working brain stack (`deploy/compose.yaml`) that Readwise can reach over HTTPS: the TLS proxy or tunnel in front of it ([docs/01-getting-started.md](../../docs/01-getting-started.md), Step 6).
+- A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`) to list highlights.
+- A Readwise account. Its Free and paid plans both offer webhooks at [readwise.io/webhook](https://readwise.io/webhook).
+
+## Turn it on
+
+1. **Turn the plugin on.** Add it to `deploy/.env`, with the secret each plugin's login role's password is derived from. If `OB1_PLUGIN_DB_PASSWORD` is already set for another plugin, keep it: one secret serves them all. Names in `OB1_PLUGINS` are comma-separated.
+
+   Readwise makes the webhook's secret only after it creates the webhook, and it creates one only once its **Test Endpoint** gets a 2xx. The brain answers 503 to a webhook with no secret. So set a placeholder secret for now, and replace it in step 4:
+
+   ```
+   OB1_PLUGINS=readwise
+   OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
+   OB1_HOOKS=readwise
+   OB1_HOOK_SECRETS=readwise=<openssl rand -hex 32, replaced in step 4>
+   ```
+
+   `OB1_HOOKS` and `OB1_HOOK_SECRETS` hold every webhook plugin, the secrets as `plugin=secret` pairs separated by spaces.
+2. **Recreate the services so they read it.** From `deploy/`, run `docker compose up -d migrate api mcp`, then `docker compose up -d --force-recreate --no-deps app`. Then name the webhook overlay, so the proxy routes `/hooks`: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy forwarder`. Name the stack's other `-f` files in each.
+   - The migrator makes the plugin's role, its schema and its login role `ob1_plugins_readwise`, and applies `001_highlights.sql` and `002_deliveries.sql`.
+   - Recreating `app` signs everyone out of the GUI: its sessions live in its memory.
+3. **Register the webhook in Readwise.**
+   - At [readwise.io/webhook](https://readwise.io/webhook), add a webhook. The URL is `https://<your brain's host>/hooks/readwise/highlight`. For the event, choose `readwise.highlight.created` alone: the plugin ignores the rest.
+   - Click **Test Endpoint**. It should pass: the brain answers its empty body 200.
+   - Save the webhook. Readwise shows the secret it made under the webhook's masked **Secret** field.
+4. **Set Readwise's secret.** Put that secret in place of the placeholder (`OB1_HOOK_SECRETS=readwise=<Readwise's secret>`), and recreate the REST core and then the GUI: `docker compose up -d api`, then `docker compose up -d --force-recreate --no-deps app`, each with the stack's other `-f` files. Until then, every real delivery is refused with `401 BAD_SECRET`.
+5. **Check it.**
+   - The REST core's preflight `plugin webhooks` row says `readwise` is served, and its `plugin tables` row says the role, schema and migrations are in place.
+   - Make a highlight anywhere Readwise collects from. Within a minute or so (Readwise batches some sources), `readwise_list_highlights` lists it, and `fetch` with its `thought_id` shows the passage.
+
+Remove the name from `OB1_PLUGINS` and `OB1_HOOKS`, and recreate the same services, to turn it off. The webhook path then answers 404, and Readwise's deliveries fail until the webhook is deleted there. The plugin's tables and rows stay, and come back when it is turned on again.
+
+## Moving from the standalone server
+
+The standalone server (`integrations/readwise-capture`) wrote each highlight into `thoughts`, with Readwise's fields in its metadata, and nothing else of its own but `readwise_books`. Those thoughts stay as they are. The plugin starts with an empty `highlights` table, so `readwise_list_highlights` lists only what it captures itself.
+
+The old server's book cache, `public.readwise_books`, stays: the readwise-import recipe still writes it.
+
+To list the old highlights too, copy them across. As the database owner, in `psql`, this seeds the plugin's table from the thoughts the old server captured, and marks each highlight's id as captured. It is one transaction, so a refused row copies nothing and the block can be run again. A highlight already in the plugin's table is left as it is:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+INSERT INTO plugin_readwise.highlights (highlight_id, thought_id, book_id, note, location, location_type, color, url, tags, highlighted_at)
+  SELECT DISTINCT ON ((t.metadata->>'readwise_highlight_id')::bigint)
+         (t.metadata->>'readwise_highlight_id')::bigint, t.id, (t.metadata->>'readwise_book_id')::bigint,
+         nullif(t.metadata->>'note', ''), (t.metadata->>'location')::double precision, nullif(t.metadata->>'location_type', ''),
+         nullif(t.metadata->>'color', ''), nullif(t.metadata->>'url', ''),
+         (SELECT coalesce(array_agg(x ORDER BY n), '{}') FROM jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(t.metadata->'tags') = 'array' THEN t.metadata->'tags' ELSE '[]'::jsonb END) WITH ORDINALITY AS a(x, n)),
+         (t.metadata->>'highlighted_at')::timestamptz
+    FROM public.thoughts t
+   WHERE t.metadata->>'source' = 'readwise'
+     AND t.metadata->>'readwise_highlight_id' ~ '^[1-9][0-9]{0,15}$' AND t.metadata->>'readwise_book_id' ~ '^[1-9][0-9]{0,15}$'
+   ORDER BY (t.metadata->>'readwise_highlight_id')::bigint, t.created_at
+ON CONFLICT (highlight_id) DO NOTHING;
+INSERT INTO plugin_readwise.deliveries (id, thought_id)
+  SELECT highlight_id::text, thought_id FROM plugin_readwise.highlights
+ON CONFLICT (id) DO NOTHING;
+COMMIT;
+```
+
+- **Which thoughts.** Those whose `metadata.source` is `readwise`, with a numeric highlight and book id. When one highlight's id is on two thoughts, the first captured is kept.
+- **A refused copy.** A `location` that is not a number or a `highlighted_at` that is not a time stops the copy, which names the value. Fix that thought's metadata, or leave it out with one more condition in the `WHERE`, and run the block again.
+- **The ids as captured.** The second insert marks each copied highlight's id as captured, so Readwise sending one again is answered with its thought rather than captured twice.
+- **The old server's metadata** stays on the old thoughts. A new highlight's thought carries the two ids alone.
+
+## Troubleshooting
+
+- **Readwise's Test Endpoint fails with `503`.** The webhook has no secret, or the REST core was not recreated after `OB1_HOOK_SECRETS` was set: the body says `HOOK_NOT_CONFIGURED`. Set the placeholder (step 1) and recreate `api`.
+- **It fails with `404`.** The plugin is not in `OB1_HOOKS` and `OB1_PLUGINS` on the running REST core, or the proxy was started without `compose.hooks-public.yaml`.
+- **Deliveries are refused with `401 BAD_SECRET`.** The secret in `OB1_HOOK_SECRETS` is not the one Readwise made for this webhook. Copy it again from the webhook's entry, then recreate `api` (step 4).
+- **`400 BAD_HIGHLIGHT`.** The event lacked a field the plugin reads, or one was not of its kind (`fields` names them): a highlight with no text, say. Nothing was captured.
+- **`422 CORE_REFUSED` or `503 CORE_REFUSED`.** The core refused the capture, and `refused` names its code. A 503 is one the core says is worth retrying, such as a model provider that did not answer. The highlight's id is given back, so a resend captures it.
+- **`409 IN_FLIGHT`.** A delivery of the same highlight is still being captured. A resend after it finishes is answered with its thought.
+- **`readwise_list_highlights` answers `403 FORBIDDEN`.** The key cannot read: a capture-only key cannot list.

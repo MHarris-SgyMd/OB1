@@ -158,8 +158,8 @@ const SERVERS: Server[] = [
   vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
 ];
 
-/** The webhook receiver: a secret the caller echoes, compared through the module's secretMatches(). */
-const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "READWISE_WEBHOOK_SECRET", secret: "a-secret-readwise-minted" };
+// The webhook receiver, readwise-capture, is the readwise plugin's hook since SMD-2690: the brain serves it behind its
+// own webhook gate, and server-portable/test-plugin-ports.ts drives it.
 
 // Every function deploys one level under supabase/functions/, so every server
 // imports `../_shared/auth.ts` and a copy sits in each directory that holds a
@@ -194,7 +194,6 @@ const COPIES = ["recipes/editorial-policy/_shared/auth.ts", "integrations/_share
 for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEYS = KEYS;
-process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
   for (const s of SERVERS) {
     process.env.SUPABASE_URL = s.url;
@@ -202,8 +201,6 @@ try {
     assert(handlers.length === SERVERS.indexOf(s) + 1, `${s.file} imports as a module and exports default { fetch }`);
   }
   process.env.SUPABASE_URL = PG;
-  handlers.push(await importServer(WEBHOOK.file));
-  assert(handlers.length === SERVERS.length + 1, `${WEBHOOK.file} imports as a module and exports default { fetch }`);
 } catch (e) {
   // A server that listens or connects at import, or reaches a `Deno` nothing installs, is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
@@ -386,23 +383,6 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   }
 }
 
-// ── The webhook receiver ─────────────────────────────────────────────────────
-
-console.log(`\n[${WEBHOOK.file}]`);
-{
-  const handler = handlers[SERVERS.length];
-  const post = async (body: unknown) => {
-    const r = await handler(new Request("http://extension.test/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
-    return { status: r.status, text: await r.text() };
-  };
-  const right = await post({ secret: WEBHOOK.secret, event_type: "readwise.other" });
-  assert(right.status === 200 && right.text === "ignored", "the echoed secret admits the request (an event type it ignores, so nothing is written)");
-  assert((await post({ secret: "not-the-secret", event_type: "readwise.other" })).status === 401, "a wrong secret is refused with 401");
-  assert((await post({ event_type: "readwise.other" })).status === 401, "no secret is refused with 401");
-  assert((await post({ secret: 12345, event_type: "readwise.other" })).status === 401, "a secret that is not a string is refused, not hashed");
-  assert((await post({ secret: hashKey(WEBHOOK.secret), event_type: "readwise.other" })).status === 401, "the secret's digest is not the secret");
-}
-
 // ── Under bun, for real ──────────────────────────────────────────────────────
 //
 // Everything above drove each server's `fetch` in this process. `bun <file>`
@@ -416,7 +396,7 @@ console.log(`\n[${WEBHOOK.file}]`);
 // through the install and link above or fails to start, rather than having Bun
 // fetch them from npm (SMD-1991) — then asked over the port for the one thing that proves it is
 // that server, authenticating: an API's read probe passes under a read key, a
-// worker dry-runs under one, the receiver admits its secret; each refuses a
+// worker dry-runs under one; each refuses a
 // wrong key; each is still running afterwards and not reached at a second loopback address; then stopped. The API on its
 // own constant-time compare of a single key (smart-ingest; its key is not
 // _shared/auth.ts's — it takes only routable and listenOn from it — and check 8 passes
@@ -447,12 +427,6 @@ const LIVE: Live[] = [
       }
     },
   })),
-  { file: WEBHOOK.file, env: { [WEBHOOK.secretEnv]: WEBHOOK.secret, SUPABASE_URL: PG }, probe: async (base) => {
-    const post = (body: unknown) => fetch(base, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const right = await post({ secret: WEBHOOK.secret, event_type: "readwise.other" });
-    assert(right.status === 200 && (await right.text()) === "ignored", `${WEBHOOK.file}: under bun, the echoed secret admits the request (${right.status})`);
-    assert((await post({ secret: "not-the-secret", event_type: "readwise.other" })).status === 401, "…and a wrong secret is refused with 401");
-  } },
   ...([["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
     file, env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG },
     probe: async (base) => {
@@ -763,11 +737,6 @@ for (const s of SERVERS) {
   }
   assert(text.includes('from "../_shared/auth.ts"'), "…the module is ../_shared/auth.ts — the one import a function one level under supabase/functions/ resolves");
   assert(!OLD_SPELLINGS.test(text), "…and the key is compared nowhere else");
-}
-{
-  const text = readFileSync(join(ROOT, WEBHOOK.file), "utf8");
-  assert(text.includes('from "../_shared/auth.ts"') && text.includes("secretMatches(") && !/[!=]== ?READWISE_WEBHOOK_SECRET\b/.test(text),
-    `${WEBHOOK.file}: the echoed secret is compared through the module's secretMatches(), digest to digest, and with no operator`);
 }
 {
   // No vendored file builds @hono/mcp's transport: the MCP kind that held such a server (built per request, its

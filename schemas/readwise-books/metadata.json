@@ -1,6 +1,6 @@
 {
   "name": "Readwise Books",
-  "description": "Side-table cache of Readwise book-level metadata (title, author, cover, category) plus RPCs for in-order highlight retrieval. Required by the readwise-capture integration and readwise-import recipe.",
+  "description": "Side-table cache of Readwise book-level metadata (title, author, cover, category) plus RPCs for in-order highlight retrieval. Required by the readwise-import recipe.",
   "category": "schemas",
   "author": {
     "name": "Mark Lavercombe",
@@ -16,5 +16,5 @@
   "difficulty": "beginner",
   "estimated_time": "5 minutes",
   "created": "2026-04-24",
-  "updated": "2026-04-24"
+  "updated": "2026-11-05"
 }
