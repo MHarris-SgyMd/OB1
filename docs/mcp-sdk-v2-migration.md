@@ -2,12 +2,12 @@
 
 > **Amended 2026-09-27 by `docs/operator-surface-tiers.md` (SMD-2282).** The staging below still holds, and stage 1 (SMD-2278) has landed. But server-portable is no longer the long-term canonical surface. The REST core (SMD-2284) is the contract, and the MCP surface becomes a new SDK-v2 server that is a client of it (SMD-2287). Where this record calls server-portable "the canonical one-HTTP-process server" or "the canonical surface", read it as true until SMD-2287's cutover. Stage 2 (SMD-2279) is mostly retirement under SMD-1931.
 
-An architecture decision record. **Decided 2026-09-27: GO — migrate the fork
-onto the MCP TypeScript SDK v2 scoped packages (`@modelcontextprotocol/core` +
-`@modelcontextprotocol/server`), retiring the v1 single package
-`@modelcontextprotocol/sdk` and the third-party `@hono/mcp`. Staged,
-server-portable first. The spike proves the transport swap is small — three
-localized changes in `server-portable/index.ts` carry it, and every
+An architecture decision record. **Decided 2026-09-27: GO — migrate
+Daemonic Brain onto the MCP TypeScript SDK v2 scoped packages
+(`@modelcontextprotocol/core` + `@modelcontextprotocol/server`), retiring the v1
+single package `@modelcontextprotocol/sdk` and the third-party `@hono/mcp`.
+Staged, server-portable first. The spike proves the transport swap is small —
+three localized changes in `server-portable/index.ts` carry it, and every
 server-portable suite is green but three understood assertions.** The evidence
 is a throwaway spike on branch `michaelharris/smd-2275-sdk-v2-spike` (commit
 `def84115`), measured against this tree. This page is the pick, what the spike
@@ -19,7 +19,7 @@ The verified package facts are the memory note `mcp-typescript-sdk-v2-repackagin
 1. **Go, not defer.** There is no forcing function today — v1 keeps ~6 months of
    fixes — but the swap is small (below), the official `@modelcontextprotocol/hono`
    retires a third-party dependency (`@hono/mcp`, v1-only, superseded), and v2's
-   transport is spec-strict where the fork's v1 stack had drifted lenient. We
+   transport is spec-strict where Daemonic Brain's v1 stack had drifted lenient. We
    migrate proactively while it is cheap rather than under a client requirement
    or a Tasks build later.
 2. **The v2 packages, over staying on v1.** `@modelcontextprotocol/sdk` (1.30.0)
@@ -27,9 +27,9 @@ The verified package facts are the memory note `mcp-typescript-sdk-v2-repackagin
    `@hono/mcp` (0.3.2) → **dropped**. Server-portable uses
    `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server`
    (a Web-standard `Request → Response` transport), so it needs no framework
-   middleware package at all — `@modelcontextprotocol/hono` is available but the
-   fork does not need it, because it owns its own Hono app and only wants a
-   transport.
+   middleware package at all — `@modelcontextprotocol/hono` is available but
+   Daemonic Brain does not need it, because it owns its own Hono app and only wants
+   a transport.
 3. **Staged, server-portable first.** The canonical one-HTTP-process server
    (`server-portable/`) migrates first as its own PR; the vendored servers and the
    SDK client follow, or the vendored servers retire per SMD-1931. The stages are
@@ -52,9 +52,10 @@ tree. It is not for merge — it is the sizing behind this ADR.
   is **reconstructed into a fresh `Request`** for the transport. This was the
   single biggest source of breakage and is the one real gotcha: v2's transport
   reads the **raw request body stream**, where `@hono/mcp` read Hono's *cached*
-  body, so the fork's read-the-body-for-the-label-first step (SMD-1864's request
-  labelling) left the v2 transport with an empty stream and every call returned
-  `-32700 Parse error: Invalid JSON` until the body was handed over reconstructed.
+  body, so Daemonic Brain's read-the-body-for-the-label-first step (SMD-1864's
+  request labelling) left the v2 transport with an empty stream and every call
+  returned `-32700 Parse error: Invalid JSON` until the body was handed over
+  reconstructed.
 
 **`McpServer`, `registerTool`, `connect` are v2-compatible.** `McpServer`'s
 constructor (`{ name, version }`), `registerTool(name, config, cb)` (still
@@ -74,17 +75,17 @@ untouched. **No tool code changed.** The tool `inputSchema` stays a zod object.
   unregistered-tool call (e.g. a capture key calling `search_thoughts`) now
   surfaces as a **JSON-RPC error** (`-32602`), where v1's `McpServer` wrapped
   "tool not found" as an `isError` tool *result*. A test/handling reconciliation,
-  not a regression (the fork's own refusals-as-values path, SMD-1978, is
+  not a regression (Daemonic Brain's own refusals-as-values path, SMD-1978, is
   unaffected — this is the SDK's built-in not-found).
 - `test-auth.ts` — **120/120**.
 - Workers (Cloudflare's CLI, a dry-run deploy) — **builds and serves** (1767 KiB /
   336 KiB gzip), `nodejs_compat` only. (A target since retired, with the
   PostgREST store it ran, in SMD-3152.)
 
-**The revision matches the fork's posture.** v2 negotiated `protocolVersion`
-down to the client's requested `2024-11-05` and returned a well-formed
-`initialize` result, so existing clients that send both `Accept` tokens keep
-working. v2 answers a normal request/response as an SSE stream
+**The revision matches Daemonic Brain's posture.** v2 negotiated
+`protocolVersion` down to the client's requested `2024-11-05` and returned a
+well-formed `initialize` result, so existing clients that send both `Accept`
+tokens keep working. v2 answers a normal request/response as an SSE stream
 (`content-type: text/event-stream`) when the client accepts it, so the SMD-1864
 `withSseKeepalive` wrapper still applies unchanged — the `[17]` keepalive suite
 is green.
@@ -138,7 +139,7 @@ servers, 20 SDK importers. The swap per site:
 | `ListToolsRequestSchema` from `.../sdk/.../types.js` | the same name is exported from `@modelcontextprotocol/server` |
 | client `Client` + `StreamableHTTPClientTransport` from `.../sdk/client/*` | `@modelcontextprotocol/client` |
 
-Pin sites to touch: `server-portable/package.json`, `extensions/package.json`
+Pin sites to touch: `server-portable/package.json`, `integrations/package.json`
 (lockstep), `evals/package.json` (client only),
 `recipes/vercel-neon-telegram/package.json`, and their `bun.lock` files
 (`integrations/kubernetes-deployment`'s retired: SMD-2288). The transitive tree shrinks: v1 pulled `express`, `raw-body`,
@@ -167,7 +168,8 @@ because v2 answers with `text/event-stream`. `MCP_METHODS = ["POST"]` and the
   official clients do; a bespoke client that sends one now gets a clear 406).
 - The `?key=` / `x-brain-key` auth rides **on top** of the transport, unchanged —
   the auth gate runs before `handleRequest` and is untouched by the swap (v2's
-  own `requireBearerAuth`/OAuth helpers are not used; the fork keeps its key auth).
+  own `requireBearerAuth`/OAuth helpers are not used; Daemonic Brain keeps its
+  key auth).
 - v2 ships built-in legacy handling (`legacyStatelessFallback`,
   `classifyInboundRequest`, `isLegacyRequest`) — a backstop for older-protocol
   clients that the stage-1 PR should exercise against a real connector before it

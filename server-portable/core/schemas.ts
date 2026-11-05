@@ -79,9 +79,9 @@ const minTrustInput = z.enum(TRUST).optional()
 
 export const SPECS = {
   search: {
-    title: "Search Open Brain",
+    title: "Search Daemonic Brain",
     description:
-      "Search Open Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
+      "Search Daemonic Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
       "Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts. " +
       "A result naming a ticket whose status has moved since it was written carries `moved` — `{ticket, was, now}` in status types — and over MCP its title starts `[moved since written: <ticket> <then> → <now>]`, each status as its type's word (Triage, Backlog, Todo, In Progress, Done, Canceled, Duplicate; a custom \"In Review\" shows as In Progress), never the board's name; trust the ticket's status now over what the thought says (a ticket now Duplicate: its work is tracked under the ticket it duplicates). " +
       "No `moved` makes no claim: a superseded thought, a ticket row and a note filed under a ticket are not checked, nor is any result on a brain before migration 095, nor a key past the first 50 a result mentions (beside a move, `movedNotRead` counts them)." +
@@ -91,19 +91,19 @@ export const SPECS = {
       readOnlyHint: true,
     },
     inputSchema: {
-      query: z.string().describe("The search query to run against Open Brain thoughts"),
+      query: z.string().describe("The search query to run against Daemonic Brain thoughts"),
     },
   },
   fetch: {
-    title: "Fetch Open Brain Thought",
+    title: "Fetch Daemonic Brain Thought",
     description:
-      "Fetch one Open Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
+      "Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
       "A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs.",
     annotations: {
       readOnlyHint: true,
     },
     inputSchema: {
-      id: z.string().describe("The Open Brain thought ID returned by the search tool"),
+      id: z.string().describe("The Daemonic Brain thought ID returned by the search tool"),
     },
   },
   search_thoughts: {
@@ -260,7 +260,7 @@ export const SPECS = {
   thought_changes: {
     title: "What Changed",
     description:
-      "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
+      "List what changed in the brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
       "Start from `since`: an ISO-8601 time with Z or an offset (2026-09-22T08:00:00Z), a date (read as UTC midnight), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
       "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
     annotations: {
@@ -325,7 +325,7 @@ export const SPECS = {
   brain_info: {
     title: "Brain Info",
     description:
-      "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
+      "Say what this brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
       "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
       "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects), the long-running workers' heartbeats (alive, stopped or stale), and what consolidation found: the supersession proposals pending review (how many, how long ago the oldest was judged, how many pair two tickets the board does not link, how many are stale), the judged relations standing, by word, and what became of the findings posted to the board (accepted, rejected, withdrawn, open, unanswered after a month, and the acceptance rate: accepted over accepted, rejected and unanswered). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
       "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
@@ -337,7 +337,7 @@ export const SPECS = {
   capture_thought: {
     title: "Capture Thought",
     description:
-      "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.",
+      "Save a new thought to the brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,

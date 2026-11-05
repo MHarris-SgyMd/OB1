@@ -206,8 +206,8 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
 export function ociLabels(kind: ImageKind, f: { version: string; head: string; created: string }): string {
   const title = kind === "server" ? "ob1-server" : "ob1-migrate";
   const description = kind === "server"
-    ? "Open Brain MCP server (server-portable) with its preflight gate — the OB1 fork, no Supabase"
-    : "Open Brain schema migrator (db/migrate.ts and the migrations) — the OB1 fork";
+    ? "Daemonic Brain MCP server (server-portable) with its preflight gate, no Supabase"
+    : "Daemonic Brain schema migrator (db/migrate.ts and the migrations)";
   return [
     `org.opencontainers.image.title=${title}`,
     `org.opencontainers.image.description=${description}`,

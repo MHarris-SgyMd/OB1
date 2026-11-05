@@ -77,8 +77,8 @@ export const DEFAULT_OVERLAP_TOKENS = 150;
  * Passed to `resolveExtractWindow` as the fallback because db/config.mjs cannot
  * import a .ts file under Node; here rather than in entities.ts because embed.ts
  * resolves the configuration and entities.ts reads it — a constant both import
- * lives in the module neither depends on. The value is measured on the fork's
- * brain: evals/README.md, "Entity extraction in windows".
+ * lives in the module neither depends on. The value is measured on the
+ * maintainer's brain: evals/README.md, "Entity extraction in windows".
  */
 export const DEFAULT_EXTRACT_WINDOW_TOKENS = 1200;
 /** Overlap between consecutive extraction windows, at this file's ratio (150 of 1200) of the window. */

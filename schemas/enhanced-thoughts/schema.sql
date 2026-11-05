@@ -2,27 +2,27 @@
 -- Adds structured columns and utility functions to the Open Brain thoughts table.
 -- Safe to run multiple times (fully idempotent).
 --
--- This fork (SMD-1250): upstream's file ended with a section 6 that redefined
--- public.upsert_thought(p_content TEXT, p_payload JSONB) so these columns were
--- mirrored on write. On a brain built by db/migrate.ts that statement replaced
--- the body migration 005 installed — no error, the signature matches — and a
--- double-encoded payload was emptied silently again. The section is removed
--- here: the columns below are filled by backfill_thought_types() and the
--- UPDATE in section 5, and a capture does not update them. Two things to know
+-- Daemonic Brain (SMD-1250): upstream's file ended with a section 6 that
+-- redefined public.upsert_thought(p_content TEXT, p_payload JSONB) so these
+-- columns were mirrored on write. On a brain built by db/migrate.ts that
+-- statement replaced the body migration 005 installed — no error, the signature
+-- matches — and a double-encoded payload was emptied silently again. The section
+-- is removed here: the columns below are filled by backfill_thought_types() and
+-- the UPDATE in section 5, and a capture does not update them. Two things to know
 -- before running the rest on a migrated brain: section 5 moves updated_at on
--- every row with a type or source in its metadata (001's trigger), and on
--- this fork updated_at gates the accepted-vector caveat and the edited-since
--- rules (FORK.md changes 39 and 40) — run it between re-embed passes, not
--- during one. The GRANT EXECUTE … TO authenticated, service_role that followed
--- each of the four functions is gone too (SMD-1796): those are Supabase's
--- roles, absent on plain Postgres (`role "authenticated" does not exist`
--- stopped the file there), and EXECUTE is PUBLIC's by default, so nothing
--- replaces them. The "do NOT grant to anon" notes stay as upstream's reasoning;
--- on plain Postgres PUBLIC already includes every role that can connect, so if
--- the two SECURITY DEFINER RPCs should not read `thoughts` for all of them,
--- REVOKE EXECUTE … FROM PUBLIC yourself and grant the roles you mean (README,
--- Security). scripts/check-consistency.ts check 7 fails the build if the
--- upsert returns, and its Supabase-isms check if a grant does.
+-- every row with a type or source in its metadata (001's trigger), and in
+-- Daemonic Brain updated_at gates the accepted-vector caveat and the
+-- edited-since rules (FORK.md changes 39 and 40) — run it between re-embed
+-- passes, not during one. The GRANT EXECUTE … TO authenticated, service_role
+-- that followed each of the four functions is gone too (SMD-1796): those are
+-- Supabase's roles, absent on plain Postgres (`role "authenticated" does not
+-- exist` stopped the file there), and EXECUTE is PUBLIC's by default, so
+-- nothing replaces them. The "do NOT grant to anon" notes stay as upstream's
+-- reasoning; on plain Postgres PUBLIC already includes every role that can
+-- connect, so if the two SECURITY DEFINER RPCs should not read `thoughts` for
+-- all of them, REVOKE EXECUTE … FROM PUBLIC yourself and grant the roles you
+-- mean (README, Security). scripts/check-consistency.ts check 7 fails the build
+-- if the upsert returns, and its Supabase-isms check if a grant does.
 
 -- ============================================================
 -- 1. NEW COLUMNS

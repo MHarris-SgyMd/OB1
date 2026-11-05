@@ -183,7 +183,7 @@ END$$;
 -- ============================================================
 -- 9. GRANTS
 -- ============================================================
--- This fork (SMD-1810): upstream's file ended here with `GRANT SELECT … TO
+-- Daemonic Brain (SMD-1810): upstream's file ended here with `GRANT SELECT … TO
 -- service_role` on the five always-installed views — the three guarded views
 -- were granted the same way inside their DO blocks, as `EXECUTE 'GRANT …'`
 -- strings — and a `NOTIFY pgrst, 'reload schema'` for PostgREST. Supabase's
@@ -194,4 +194,5 @@ END$$;
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the eight
 -- ops_* views (SELECT), each issued only once its view exists; a role that
--- owns the tables needs nothing. Row-level security on this fork: SMD-1716.
+-- owns the tables needs nothing. Row-level security in Daemonic Brain:
+-- SMD-1716.

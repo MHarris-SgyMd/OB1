@@ -9,7 +9,7 @@ Primitives are reusable concept guides that show up in multiple extensions. Lear
 | [Run a Remote MCP Server](deploy-remote-mcp/) | Running a vendored recipe or integration server under Bun, behind HTTPS | Recipes and integrations; no extension since SMD-2311 |
 | [Remote MCP Connection](remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | Recipes and integrations; no extension since SMD-2311 |
 | [Common Troubleshooting](troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
-| [Row Level Security](rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Background; no extension since SMD-2311 |
+| [Row Level Security](rls/) | PostgreSQL policies for multi-user data isolation — background; no schema here ships them (SMD-1810) | Background; no extension since SMD-2311 |
 | [Shared MCP Server](shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4, until SMD-2311 |
 
 ## How Primitives Work

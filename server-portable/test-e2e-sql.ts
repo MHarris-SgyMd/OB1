@@ -1457,7 +1457,7 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
     assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
 
     const undated = JSON.parse(await call("fetch", { id: undatedId }));
-    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(/^Daemonic Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Daemonic Brain …", not the epoch (${undated.title})`);
     assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
 
     const inf = JSON.parse(await call("fetch", { id: infinityId }));
@@ -1573,8 +1573,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // Absent, not refused: a read through the capture key is an unknown tool. v2's
   // McpServer surfaces a call to a tool that was never registered for this principal
   // as a JSON-RPC error (-32602), where v1 wrapped "tool not found" as an isError
-  // result (SMD-2278). The fork's own refusals-as-values path (SMD-1978) is
-  // unaffected — this is the SDK's built-in not-found, not a fork refusal.
+  // result (SMD-2278). Daemonic Brain's own refusals-as-values path (SMD-1978) is
+  // unaffected — this is the SDK's built-in not-found, not one of those refusals.
   const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
   assert(read.result === undefined && read.error?.code === -32602 && /Tool search_thoughts not found/.test(String(read.error?.message)), `search_thoughts is not a tool the capture key can call — a JSON-RPC -32602 error, not a result (${JSON.stringify(read.error ?? read.result)?.slice(0, 80)})`);
   assert(/not found|unknown tool/i.test(String(read.error?.message ?? "")), "…told as a missing tool, not a permission error");
@@ -2492,8 +2492,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // resetSchema applies the files with no ledger: the record says so rather
   // than inventing a number, and does not judge the brain against the tree.
   // Another tool's schema_migrations (Supabase's supabase_migrations, Rails,
-  // dbmate) is not the fork's ledger: no sha256 column, so the brain still has
-  // none — not one it cannot resolve (review pass 3).
+  // dbmate) is not Daemonic Brain's ledger: no sha256 column, so the brain
+  // still has none — not one it cannot resolve (review pass 3).
   await sql.unsafe(`CREATE SCHEMA e2e_other_tool`);
   await sql.unsafe(`CREATE TABLE e2e_other_tool.schema_migrations (version text PRIMARY KEY)`);
   const bare = await health("e2e-key") as Record<string, any>;
@@ -2850,9 +2850,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       await lost.close();
     }
 
-    // Another tool's schema_migrations earlier on the role's path shadows the
-    // fork's (review pass 4): what resolves is not the ledger — no sha256 —
-    // so the fork's is invisible, not "read" and failing with 42703.
+    // Another tool's schema_migrations earlier on the role's path shadows
+    // Daemonic Brain's (review pass 4): what resolves is not the ledger — no
+    // sha256 — so Daemonic Brain's is invisible, not "read" and failing with
+    // 42703.
     await sql.unsafe(`CREATE SCHEMA e2e_shadow`);
     await sql.unsafe(`CREATE TABLE e2e_shadow.schema_migrations (version text PRIMARY KEY)`);
     await sql.unsafe(`GRANT USAGE ON SCHEMA e2e_shadow TO brain_reader`);
@@ -2863,7 +2864,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const f = await readDatabaseFacts(shadowed);
       assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && /reaches e2e_shadow\.schema_migrations first/.test(f.unread.ledger?.message ?? "")
           && f.highestMigration === null && f.schemaVersion === BRAIN_VERSION,
-        `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
+        `a foreign schema_migrations ahead on the path is not the ledger; Daemonic Brain's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
     } finally {
       await shadowed.close();
       await sql.unsafe(`DROP TABLE e2e_shadow.schema_migrations`);

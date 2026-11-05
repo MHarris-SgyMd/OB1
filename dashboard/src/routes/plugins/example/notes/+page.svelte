@@ -9,7 +9,7 @@
 	const here = $derived(page.url.pathname);
 </script>
 
-<svelte:head><title>Notes · Open Brain</title></svelte:head>
+<svelte:head><title>Notes · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<header>

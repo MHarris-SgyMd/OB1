@@ -107,7 +107,7 @@ begin
 end;
 $$;
 
--- This fork (SMD-1796): upstream's `grant execute … to authenticated,
+-- Daemonic Brain (SMD-1796): upstream's `grant execute … to authenticated,
 -- service_role` after each of the four functions is gone. Those are Supabase's
 -- roles — on plain Postgres the first grant stops the file (`role
 -- "authenticated" does not exist`) — and EXECUTE is PUBLIC's by default, so

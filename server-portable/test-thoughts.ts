@@ -84,14 +84,14 @@ console.log("\n[5] Titles collapse whitespace and truncate");
   const body = long.split(" - ")[1] ?? "";
   assert(body.length === 80, `truncated to 80 characters (${body.length})`);
 
-  assert(/^Open Brain/.test(thoughtTitle("something")), "no date yields the Open Brain prefix");
+  assert(/^Daemonic Brain/.test(thoughtTitle("something")), "no date yields the Daemonic Brain prefix");
   assert(/thought$/.test(thoughtTitle("")), "empty content still produces a usable title");
   assert(/thought$/.test(thoughtTitle("   ")), "whitespace-only content counts as empty");
 
-  // SMD-1328: created_at is `string | null`. A null date is the Open Brain
+  // SMD-1328: created_at is `string | null`. A null date is the Daemonic Brain
   // fallback, never the fabricated epoch; a no-ISO-form value is its own text.
-  assert(/^Open Brain/.test(thoughtTitle("x", null)) && !/1970/.test(thoughtTitle("x", null)),
-         "a null date yields the Open Brain prefix, not 1/1/1970");
+  assert(/^Daemonic Brain/.test(thoughtTitle("x", null)) && !/1970/.test(thoughtTitle("x", null)),
+         "a null date yields the Daemonic Brain prefix, not 1/1/1970");
   assert(thoughtTitle("x", "infinity").startsWith("infinity - "),
          "an infinity date renders its own text in the title, not Invalid Date");
 }
@@ -373,13 +373,13 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
 
   // One key for a relation within an answer and across windows (second review
   // pass: a single answer kept duplicate relations where the merge folded them).
-  const dup = parseExtraction(JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Open Brain", type: "project", confidence: 0.9 }], relationships: [
-    { from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.6 }, { from: "anita", to: "OPEN BRAIN", relation: "works_on", confidence: 0.9 }, { from: "Anita", to: "Open Brain", relation: "uses", confidence: 0.7 }] }));
+  const dup = parseExtraction(JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Daemonic Brain", type: "project", confidence: 0.9 }], relationships: [
+    { from: "Anita", to: "Daemonic Brain", relation: "works_on", confidence: 0.6 }, { from: "anita", to: "DAEMONIC BRAIN", relation: "works_on", confidence: 0.9 }, { from: "Anita", to: "Daemonic Brain", relation: "uses", confidence: 0.7 }] }));
   assert(dup.relations.length === 2 && dup.relations.find((r) => r.relation === "works_on")?.confidence === 0.9, `a relation stated twice in one answer is one relation at the higher confidence, whatever the case; a different verb is another (${JSON.stringify(dup.relations)})`);
   // …and an entity read twice in one answer merges as two windows' readings do
   // (fourth review pass: the first reading was kept and the second's aliases dropped).
-  const twice = parseExtraction(JSON.stringify({ entities: [{ name: "Open Brain", type: "project", confidence: 0.6, aliases: ["the brain"] }, { name: "open brain", type: "project", confidence: 0.95, aliases: ["OB1", "The Brain"] }], relationships: [] }));
-  assert(twice.entities.length === 1 && twice.entities[0].name === "open brain" && twice.entities[0].confidence === 0.95 && [...twice.entities[0].aliases].sort().join("|") === "OB1|the brain",
+  const twice = parseExtraction(JSON.stringify({ entities: [{ name: "Daemonic Brain", type: "project", confidence: 0.6, aliases: ["the brain"] }, { name: "daemonic brain", type: "project", confidence: 0.95, aliases: ["OB1", "The Brain"] }], relationships: [] }));
+  assert(twice.entities.length === 1 && twice.entities[0].name === "daemonic brain" && twice.entities[0].confidence === 0.95 && [...twice.entities[0].aliases].sort().join("|") === "OB1|the brain",
          `an entity read twice in one answer is one, spelt as the more confident reading, at its confidence, with both readings' aliases folded by case (${JSON.stringify(twice.entities)})`);
   const unknown = resolveEmbedConfig({ OB1_METADATA_MODEL: "some-chat-model" });
   assert(unknown.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && unknown.extractChunkTokensFrom === "default" && unknown.extractModelWindow === undefined,
@@ -399,19 +399,19 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
     index, tokens: 100, ...parseExtraction(JSON.stringify({ entities, relationships: relations })), malformed, ms: 1,
   });
   const merged = mergeExtractions([
-    part(0, [{ name: "Open Brain", type: "project", confidence: 0.8, aliases: ["OB1"] }, { name: "Anita", type: "person", confidence: 0.9 }], [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }]),
-    part(1, [{ name: "open brain", type: "project", confidence: 0.95, aliases: ["the brain"] }], [{ from: "anita", to: "OPEN BRAIN", relation: "works_on", confidence: 0.9 }]),
-    part(2, [{ name: "Open Brain", type: "project", confidence: 0.6 }, { name: "Open Brain", type: "topic", confidence: 0.7 }, { name: "PostgreSQL", type: "tool", confidence: 0.9 }], [{ from: "Open Brain", to: "PostgreSQL", relation: "uses", confidence: 0.8 }]),
+    part(0, [{ name: "Daemonic Brain", type: "project", confidence: 0.8, aliases: ["OB1"] }, { name: "Anita", type: "person", confidence: 0.9 }], [{ from: "Anita", to: "Daemonic Brain", relation: "works_on", confidence: 0.7 }]),
+    part(1, [{ name: "daemonic brain", type: "project", confidence: 0.95, aliases: ["the brain"] }], [{ from: "anita", to: "DAEMONIC BRAIN", relation: "works_on", confidence: 0.9 }]),
+    part(2, [{ name: "Daemonic Brain", type: "project", confidence: 0.6 }, { name: "Daemonic Brain", type: "topic", confidence: 0.7 }, { name: "PostgreSQL", type: "tool", confidence: 0.9 }], [{ from: "Daemonic Brain", to: "PostgreSQL", relation: "uses", confidence: 0.8 }]),
   ]);
   assert(merged.windows === 3 && merged.parts?.length === 3 && !merged.malformed, "three windows merge to one answer that keeps each window's record");
   const ob = merged.entities.filter((e) => e.type === "project");
-  assert(ob.length === 1 && ob[0].name === "open brain" && ob[0].confidence === 0.95, `a project named in all three windows is ONE entity, spelt as the most confident window spelt it (${JSON.stringify(ob)})`);
+  assert(ob.length === 1 && ob[0].name === "daemonic brain" && ob[0].confidence === 0.95, `a project named in all three windows is ONE entity, spelt as the most confident window spelt it (${JSON.stringify(ob)})`);
   assert([...ob[0].aliases].sort().join("|") === "OB1|the brain", `…carrying every window's aliases, and not the name's own other casing, which the database's alias rule would drop too (${ob[0].aliases.join(", ")})`);
   const once = parseExtraction(JSON.stringify({ entities: [{ name: "Postgres", type: "tool", confidence: 0.7, aliases: ["PG", "pg", "postgres"] }], relationships: [] }));
   assert(once.entities[0].aliases.join("|") === "PG", `one reading folds its aliases by case and drops the name's own casing, as two readings do (${once.entities[0].aliases.join("|")})`);
   const spelt = mergeExtractions([part(0, [{ name: "Postgres", type: "tool", confidence: 0.7, aliases: ["PG", "pg"] }]), part(1, [{ name: "postgres", type: "tool", confidence: 0.9, aliases: ["PostgreSQL", "Pg"] }])]);
   assert(spelt.entities.length === 1 && spelt.entities[0].name === "postgres" && spelt.entities[0].aliases.join("|") === "PG|PostgreSQL", `two casings of one name are one entity; a genuinely different spelling the model offered stays an alias, and aliases fold by case as the database's do (${spelt.entities[0].aliases.join("|")})`);
-  assert(merged.entities.some((e) => e.type === "topic" && e.name === "Open Brain"), "the same name under another type is another entity — the key is (type, name), as within one answer");
+  assert(merged.entities.some((e) => e.type === "topic" && e.name === "Daemonic Brain"), "the same name under another type is another entity — the key is (type, name), as within one answer");
   assert(merged.entities.length === 4, `four entities in all: the project, the topic, Anita, PostgreSQL (${merged.entities.map((e) => `${e.name}/${e.type}`).join(", ")})`);
   const works = merged.relations.filter((r) => r.relation === "works_on");
   assert(works.length === 1 && works[0].confidence === 0.9, "a relation stated in two windows is one edge at the higher confidence, whatever the case of the names");
@@ -431,7 +431,7 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   // The header: the note's first non-empty line, cut, inside the untrusted
   // delimiter and only on a window after the first; a whole thought is the
   // p1 request word for word.
-  assert(documentHeader("\n\n  Open Brain review notes  \n\nAnita leads…") === "Open Brain review notes", "the header is the first non-empty line, trimmed");
+  assert(documentHeader("\n\n  Daemonic Brain review notes  \n\nAnita leads…") === "Daemonic Brain review notes", "the header is the first non-empty line, trimmed");
   assert(documentHeader("x".repeat(500)).length === HEADER_CHARS && documentHeader("x".repeat(500)).endsWith("…"), `…cut to ${HEADER_CHARS} characters`);
   const whole = buildMessages("Anita met Grace.")[0].content;
   assert(whole === ENTITY_EXTRACTION_PROMPT.replace("{content}", () => wrapContent("Anita met Grace.")), "a thought within the window is the p1 request: no part marker, no header");
@@ -471,7 +471,7 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   const copies = fires(answer([item({ name: "Loop", type: "tool", confidence: 0.6 }), item({ name: "  LOOP ", type: "Tool", confidence: 1.0, aliases: ["x"] }), item({ name: "loop", type: "tool", confidence: 0.9 })]));
   assert(copies?.key === "e:tool loop", "copies that differ in confidence, aliases, case or whitespace are copies");
   assert(fires(answer([item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 }), item({ name: "thoughts", type: "table", confidence: 1 })]))?.key === "e:table thoughts", "an item the rules would reject (type `table`) repeated is a loop all the same — tails 7, 20 and 21 looped on rejected types");
-  const enumeration = fires(answer(Array.from({ length: 40 }, (_, i) => ent(`SMD-${1000 + i}`, "topic")), Array.from({ length: 40 }, (_, i) => rel("Open Brain", `SMD-${1000 + i}`))), 5);
+  const enumeration = fires(answer(Array.from({ length: 40 }, (_, i) => ent(`SMD-${1000 + i}`, "topic")), Array.from({ length: 40 }, (_, i) => rel("Daemonic Brain", `SMD-${1000 + i}`))), 5);
   assert(enumeration === null, "forty distinct ids, each an entity and a `uses` edge, are an enumeration, not a loop — it runs to the budget, as the ticket requires");
   const skipped = fires(`{"entities": [{"name": }, {"name": "x", "type": "tool", "confidence": 1}, {"name": "x", "type": "tool", "confidence": 1}, {"name": "x", "type": "tool", "confidence": 1}]}`);
   assert(skipped?.items === 3, `an item that is not JSON is skipped, not counted, and does not stop the reading (${JSON.stringify(skipped)})`);

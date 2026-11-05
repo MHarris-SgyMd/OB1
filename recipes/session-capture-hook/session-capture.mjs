@@ -784,7 +784,7 @@ const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "S
 export function ticketsIn(text, teams) {
   const out = [];
   for (const m of String(text ?? "").matchAll(TICKET_RE)) {
-    const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: the fork's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
+    const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: Daemonic Brain's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
     if (NOT_TICKETS.has(team) || out.includes(id)) continue;
     if (teams && (teams.size ? !teams.has(team) : m[1] !== team)) continue;
     out.push(id);
@@ -1245,11 +1245,12 @@ export const SECRET_PATTERNS = [
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
   ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
-  // This fork's own access keys are 64 hex characters (keygen.ts), as are their
-  // digests — told apart only by where they sit: a digest follows `name:scope:`
-  // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
-  // otherwise (second review pass: the mixed-case rule let every hex string by).
-  // …and not the everyday spellings of a digest: `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
+  // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
+  // their digests — told apart only by where they sit: a digest follows
+  // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
+  // until proven otherwise (second review pass: the mixed-case rule let every
+  // hex string by). …and not the everyday spellings of a digest:
+  // `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
   // and `sha256sum`'s own output shape, `<hex>  file` — two spaces then the name (fifth review pass:
   // an actionlint pin line refused a session; sixth: a lookbehind on the WORD sha256sum excused any
   // hex later on that line, a key included).
@@ -2014,7 +2015,7 @@ export function pointerFor(sessionId, name, state, landedHere) {
 /** One model call's ceiling. The detached child has no 1.5 s hook budget, but a summary is not worth a long wait; a slower model falls back to the derived one. */
 const MODEL_TIMEOUT_MS = 30_000;
 
-/** The model's brief: the fork's plain register, what to write, the caps, and the guards. */
+/** The model's brief: Daemonic Brain's plain register, what to write, the caps, and the guards. */
 const MODEL_SYSTEM = [
   "You are writing a memory of one piece of a coding session's work, to be stored and retrieved later by any AI.",
   "From the derived summary and the assistant's own messages below, write plain, direct prose covering:",

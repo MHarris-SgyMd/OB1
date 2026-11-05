@@ -1,6 +1,6 @@
 # Row Level Security (RLS)
 
-> **This fork (SMD-1810):** no extension or recipe in this tree ships these policies any more. Upstream's Extensions 1, 2, 4, 5 and 6 enabled RLS on `auth.uid() = user_id` (only Family Calendar never did), which needs Supabase's GoTrue; the fork runs one operator's brain on plain Postgres, the extensions are plugins whose rows every key that may read sees (SMD-2311), and per-user isolation is deferred by decision (SMD-1716). This guide stays as the concept guide — what the policies did, and how to add them on a database that has an authenticated-user context — and describes Supabase's model throughout; `scripts/check-consistency.ts` check 12 refuses the constructs in any `.sql` here.
+> **Daemonic Brain (SMD-1810):** no extension or recipe in this tree ships these policies any more. Upstream's Extensions 1, 2, 4, 5 and 6 enabled RLS on `auth.uid() = user_id` (only Family Calendar never did), which needs Supabase's GoTrue; Daemonic Brain runs one operator's brain on plain Postgres, the extensions are plugins whose rows every key that may read sees (SMD-2311), and per-user isolation is deferred by decision (SMD-1716). This guide stays as the concept guide — what the policies did, and how to add them on a database that has an authenticated-user context — and describes Supabase's model throughout; `scripts/check-consistency.ts` check 12 refuses the constructs in any `.sql` here.
 
 Row Level Security (RLS) is PostgreSQL's built-in mechanism for controlling which rows in a table are visible or modifiable by different users. Instead of managing access control in your application code, you define policies directly on the database — so security is enforced at the data layer regardless of how you connect (MCP, REST API, direct SQL).
 
@@ -17,7 +17,7 @@ RLS is the foundation that makes multi-user and shared-access extensions possibl
 
 ## Prerequisites
 
-- A Postgres with at least one table created — the fork's stack, or a Supabase project
+- A Postgres with at least one table created — Daemonic Brain's stack, or a Supabase project
 - Basic understanding of SQL and PostgreSQL
 - Familiarity with Supabase authentication (users have UUIDs via `auth.uid()`)
 
@@ -331,7 +331,7 @@ CREATE POLICY "Users can delete their own recipes"
 
 ## Extensions That Used This
 
-Upstream's [Household Knowledge](../../extensions/household-knowledge/) and [Home Maintenance](../../extensions/home-maintenance/) (Pattern 1 on two tables each), [Meal Planning](../../extensions/meal-planning/) (shared household access to recipes, meal plans and shopping lists), [Professional CRM](../../extensions/professional-crm/) (contacts, interactions, opportunities) and [Job Hunt Pipeline](../../extensions/job-hunt/) (five tables) carried Pattern 1 — meal planning Pattern 2 as well — in their `schema.sql`. This fork removed the policies (SMD-1810), and then the files, when the six became plugins (SMD-2311).
+Upstream's [Household Knowledge](../../extensions/household-knowledge/) and [Home Maintenance](../../extensions/home-maintenance/) (Pattern 1 on two tables each), [Meal Planning](../../extensions/meal-planning/) (shared household access to recipes, meal plans and shopping lists), [Professional CRM](../../extensions/professional-crm/) (contacts, interactions, opportunities) and [Job Hunt Pipeline](../../extensions/job-hunt/) (five tables) carried Pattern 1 — meal planning Pattern 2 as well — in their `schema.sql`. Daemonic Brain removed the policies (SMD-1810), and then the files, when the six became plugins (SMD-2311).
 
 ## Further Reading
 

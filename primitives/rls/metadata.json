@@ -1,6 +1,6 @@
 {
   "name": "Row Level Security (RLS)",
-  "description": "Concept guide to PostgreSQL Row Level Security — what upstream's extensions enforced with it; this fork's schemas ship no policies (SMD-1810).",
+  "description": "Concept guide to PostgreSQL Row Level Security — what upstream's extensions enforced with it; Daemonic Brain's schemas ship no policies (SMD-1810).",
   "category": "primitives",
   "author": {
     "name": "Nate B. Jones",

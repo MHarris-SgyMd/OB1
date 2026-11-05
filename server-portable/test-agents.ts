@@ -3,7 +3,7 @@
  * test-agents.ts — stable agent identity, driven through the real MCP server.
  *
  * Migration 010's claim is narrow and worth stating precisely, because the
- * extension it was ported from claims something this fork already had:
+ * extension it was ported from claims something Daemonic Brain already had:
  *
  *   ALREADY TRUE BEFORE 010. Attribution survives key ROTATION, because
  *   thought_audit.actor_name records the key's NAME and rotation changes only

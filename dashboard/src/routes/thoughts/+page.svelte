@@ -20,7 +20,7 @@
 	const filtered = $derived(FILTER_KEYS.some((k) => data.q[k] !== undefined));
 </script>
 
-<svelte:head><title>Browse · Open Brain</title></svelte:head>
+<svelte:head><title>Browse · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Browse</h1>

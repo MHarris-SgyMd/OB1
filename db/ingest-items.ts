@@ -19,9 +19,12 @@
  *
  * What a line is: a JSON object with exactly the keys `Ingested` names for an
  * item — `identity {system, key}`, `scope`, `canonical {form, mediaType}`,
- * `text`, `links`, `mentions`, `facets`, and optionally `createdAt` and
- * `watermark {key, value, asOf?}` (`null` for either is absent — what a
- * Python emitter writes for None). The round-trip rule holds by construction:
+ * `text`, `links`, `mentions`, `facets`, and optionally `createdAt`,
+ * `watermark {key, value, asOf?}` and `priority {scale, value, due?}` (`null`
+ * for any of them is absent — what a Python emitter writes for None). A
+ * priority is the source's own value on one of server-portable/priority-scale.ts's
+ * scales and when the item is due, stated on the item's own thought (SMD-3666);
+ * a line names no ticket for it, the board's being board-sync's. The round-trip rule holds by construction:
  * the canonical IS the line's `form`, stored byte for byte; the text is the
  * emitter's projection of it. `derived` is not taken from a file — a part
  * that is a thought of its own is a line of its own.
@@ -55,18 +58,19 @@
 import { decodeUtf8Strict, IDENTITY_MAX, LINK_RELATIONS, normaliseLinks, normaliseMentions, SYSTEM_RE, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
 import { commandLine } from "./cli.ts";
 import { ENTITY_TYPES } from "../server-portable/entities.ts";
+import { dueInstant, isPriorityScale, PRIORITY_SCALES } from "../server-portable/priority-scale.ts";
 
 /** The keys a line may carry — `Ingested`'s, less `derived`. */
-export const ITEM_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets", "createdAt", "watermark"] as const;
+export const ITEM_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets", "createdAt", "watermark", "priority"] as const;
 /** The keys a line must carry. */
 export const REQUIRED_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets"] as const;
 /**
  * The pipeline's own sources (ingest-records.ts SOURCES — its self-check
- * holds the two lists equal). A file may not claim one: the fork's records
- * have no adapter and their rows are the tree's; `linear` and `markdown` are
- * the adapters' id spaces, where a file's row would land on the board sync's
- * row for a ticket and overwrite it — same id, so `held` never trips (first
- * review pass, run-it); `items` is this flag's name, not a system.
+ * holds the two lists equal). A file may not claim one: Daemonic Brain's
+ * records have no adapter and their rows are the tree's; `linear` and
+ * `markdown` are the adapters' id spaces, where a file's row would land on the
+ * board sync's row for a ticket and overwrite it — same id, so `held` never
+ * trips (first review pass, run-it); `items` is this flag's name, not a system.
  */
 export const RESERVED_SYSTEMS = ["fork", "commit", "linear", "memory", "markdown", "items"] as const;
 /**
@@ -313,6 +317,18 @@ export function parseItem(value: unknown, line: number, label: string = "--items
     watermark = { key: w.key, value: w.value, ...(isString(w.asOf) ? { asOf: w.asOf } : {}) };
   }
 
+  // priority — `null` is absent too (SMD-3666): the source's own value on a known scale, and when the item is due.
+  let priority: Ingested["priority"];
+  const pr = value.priority ?? undefined;
+  if (pr !== undefined) {
+    if (!isObject(pr)) return refuse("priority", "an object {scale, value, due?} — the source's own priority and when the item is due; omit the key (or write null) when the source has none");
+    for (const k of Object.keys(pr)) if (k !== "scale" && k !== "value" && k !== "due") return refuse(`priority.${k}`, k === "on" ? "a line states a priority on its own item; a ticket's is board-sync's" : "not a key of a priority — {scale, value, due?}");
+    if (!isPriorityScale(pr.scale)) return refuse("priority.scale", `one of ${PRIORITY_SCALES.join(", ")} — the table the value is read by (server-portable/priority-scale.ts)`);
+    if (pr.value !== null && pr.value !== undefined && (!isString(pr.value) || pr.value.length > 100)) return refuse("priority.value", "the source's own word, at most 100 characters, or null for none; a word the scale does not hold states nothing");
+    if (pr.due != null && (!isString(pr.due) || dueInstant(pr.due) === null)) return refuse("priority.due", "a date (2026-12-01, the start of that day in UTC) or a time with its offset, a calendar day that exists; omit it (or write null) when the item has none");
+    priority = { scale: pr.scale, value: isString(pr.value) ? pr.value : null, ...(isString(pr.due) ? { due: pr.due } : {}) };
+  }
+
   // What no column holds, anywhere in the line: text, canonical.form and
   // identity.key go to `text` columns; facets, link targets, mention names
   // and the watermark to jsonb. One walk, the first offender named by path —
@@ -333,6 +349,7 @@ export function parseItem(value: unknown, line: number, label: string = "--items
     facets: { ...(value.facets as Record<string, unknown>) },
     ...(isString(createdAt) ? { createdAt } : {}),
     ...(watermark ? { watermark } : {}),
+    ...(priority ? { priority } : {}),
   };
   return { item, linksDropped: norm.dropped };
 }
@@ -511,6 +528,13 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["a watermark under the pipeline's key actor_kind", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "actor_kind", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
   ["a watermark under the pipeline's key actor_name", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "actor_name", value: "v" } }), "watermark.key", /pipeline's own metadata key/],
   ["a watermark key that is not a string", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: 1, value: "v" } }), "watermark.key", /non-empty string/],
+  // A priority (SMD-3666): a known scale, a word or null, a due time 116 takes, on the item's own thought alone.
+  ["a priority that is not an object", JSON.stringify({ ...SAMPLE_ITEM, priority: "high" }), "priority", /\{scale, value, due\?\}/],
+  ["a priority on a scale with no table", JSON.stringify({ ...SAMPLE_ITEM, priority: { scale: "importance", value: "5" } }), "priority.scale", /one of linear, frontmatter/],
+  ["a priority naming a ticket", JSON.stringify({ ...SAMPLE_ITEM, priority: { scale: "frontmatter", value: "high", on: { kind: "ticket", key: "SMD-1" } } }), "priority.on", /a ticket's is board-sync's/],
+  ["a priority value that is not a word", JSON.stringify({ ...SAMPLE_ITEM, priority: { scale: "frontmatter", value: 3 } }), "priority.value", /own word/],
+  ["a priority due on a day that does not exist", JSON.stringify({ ...SAMPLE_ITEM, priority: { scale: "frontmatter", value: "high", due: "2026-02-30" } }), "priority.due", /a calendar day that exists/],
+  ["a priority due with no offset", JSON.stringify({ ...SAMPLE_ITEM, priority: { scale: "frontmatter", value: "high", due: "2026-12-01T17:00:00" } }), "priority.due", /with its offset/],
   ["an identity with an extra key", JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k", id: 1 } }), "identity.id", /not a key of an identity/],
   ["a watermark with an empty value", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "" } }), "watermark.value", /sorts as it orders/],
   ["a watermark asOf that is not an instant", JSON.stringify({ ...SAMPLE_ITEM, watermark: { key: "k", value: "v", asOf: "yesterday" } }), "watermark.asOf", /ISO-8601 instant/],
@@ -545,6 +569,10 @@ export function selfCheck(): number {
   ok(JSON.stringify(it.links) === '[{"relation":"references","target":"conv-1b2c"}]' && JSON.stringify(it.mentions) === '[{"name":"PostgreSQL","type":"tool"}]' && one.linksDropped === 0, "links and mentions carried, normalised");
   ok(it.watermark?.key === "chatgpt_updated_at" && it.watermark.value === "2026-09-02T00:00:00Z" && it.watermark.asOf === undefined, "the watermark carried, no asOf unless given");
   ok((it as Record<string, unknown>).derived === undefined && !("asOf" in (it.watermark ?? {})), "no key invented");
+  const prioritised = parseItem({ ...JSON.parse(SAMPLE_LINE), priority: { scale: "frontmatter", value: "High", due: "2026-12-01" } }, 1, "x.jsonl").item;
+  const nullPriority = parseItem({ ...JSON.parse(SAMPLE_LINE), priority: null }, 1, "x.jsonl").item;
+  ok(JSON.stringify(prioritised.priority) === JSON.stringify({ scale: "frontmatter", value: "High", due: "2026-12-01" }) && it.priority === undefined && nullPriority.priority === undefined,
+    "a priority carried as the source gave it, word and due day; none, or null, is no priority (SMD-3666)");
   const minimal = parseItem({ identity: { system: "s", key: "k" }, scope: "s", canonical: { form: "f", mediaType: "text/plain" }, text: "t", links: [], mentions: [], facets: {} }, 1).item;
   ok(minimal.createdAt === undefined && minimal.watermark === undefined && minimal.links.length === 0, "the optional keys absent stay absent — the pipeline leaves created_at to now()");
   const nulls = parseItem({ ...SAMPLE_ITEM, createdAt: null, watermark: null }, 1).item;

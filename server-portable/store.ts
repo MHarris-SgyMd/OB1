@@ -1204,14 +1204,14 @@ export type WorkClaim = {
 };
 /** The refusal codes 115's writers answer with (SMD-3597). */
 export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
+/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). `byAgentId` (claim_work's form): the claim was made under an agent id, so 115's holder test needs that id to read it as the caller's (SMD-3705). */
+export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; byAgentId?: boolean; issue?: string; releasedByKind?: string | null };
+export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
 /**
  * One of 115's writers' jsonb answers, read: its outcome, its refusal code, the
  * claim, the claims in the way, and the token — set on claim_work's `claimed`
  * alone, and passed through untouched to the caller who claimed.
  */
-/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). */
-export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; issue?: string; releasedByKind?: string | null };
-export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
 export type ClaimAnswer = {
   outcome: "claimed" | "renewed" | "released" | "already_released" | "refused";
   code: ClaimRefusalCode | null;
@@ -2080,7 +2080,9 @@ export interface ThoughtStore {
    * away — a claim made with one under the caller's name, as ownWhileAway reads
    * it (review pass 5). Its own ended claim on that work is where 115's writer
    * makes a new claim without a word (review pass 4: the refusal read any work,
-   * and refused a split's fresh claims).
+   * and refused a split's fresh claims). `byAgentId` says the claim was made
+   * under an agent id, which 115's holder test then needs (SMD-3705): its own
+   * unreleased claim, read with no id to hand, is refused rather than taken over.
    * Null when no claim has that token (or, given `id`, when that claim hasn't).
    * 115's writers report the new lease, not the one renewed, so a renewal that
    * revived a lapsed claim learns it here. renew_claim gives the id, which the

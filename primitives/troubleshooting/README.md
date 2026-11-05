@@ -35,7 +35,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 
 **The server won't start**
 - `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the compose stack's, and on macOS podman's `gvproxy` holds it too. Pick another port.
-- `Cannot find package 'hono'`: run `(cd extensions && bun install)` once; an integration or recipe server reaches that same install through the `node_modules` link in `integrations/` or `recipes/`
+- `Cannot find package 'hono'`: run `(cd integrations && bun install)` once; a recipe server reaches that same install through the `node_modules` link in `recipes/`
 - A missing environment variable: the server names it and exits. The recipe's or integration's README lists what it reads.
 - The stack's `api` service exits with `preflight FAILED` (the image runs it first): read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
 
@@ -43,7 +43,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Read the server's output: a failed tool call logs its cause there
 - `relation "…" does not exist`: the recipe's `schema.sql` did not run against the database `SUPABASE_URL` names
 - `schema "auth" does not exist`, or `function auth.uid() does not exist` / `relation "auth.users" does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
-- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
+- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at Daemonic Brain's local default (1024); the README says which width it needs
 
 ## Database Issues
 

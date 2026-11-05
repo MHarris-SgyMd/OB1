@@ -75,19 +75,19 @@ codemod's triage, and fails check 11 of `scripts/check-consistency.ts`.
 Then, from a checkout:
 
 ```bash
-(cd extensions && bun install)     # once: the pinned hono, zod and MCP SDK the servers import
+(cd integrations && bun install)   # once: the pinned hono and zod the servers import
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
 ```
 
-The install lives in `extensions/node_modules` (the extensions' servers used it
-until SMD-2311). A recipe or integration resolves that pinned install through
-`recipes/node_modules` and `integrations/node_modules`, committed links to
-`../extensions/node_modules`, so the one `bun install` above serves every server
-from any working directory (SMD-1991). `NODE_PATH`, which these commands used
-to set, does not reach the MCP SDK's `exports` subpaths under Bun.
+The install lives in `integrations/node_modules` (in `extensions/` until
+SMD-3747). An integration resolves that pinned install from under it, and a
+recipe through `recipes/node_modules`, a committed link to
+`../integrations/node_modules`, so the one `bun install` above serves every
+server from any working directory (SMD-1991). `NODE_PATH`, which these
+commands used to set, does not reach the MCP SDK's `exports` subpaths under Bun.
 `--no-install` makes a skipped install fail the start, naming the package.
 Without it, Bun downloads whatever version npm serves when it finds no
 `node_modules` above the file, and a link whose target was never installed
@@ -99,7 +99,7 @@ a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
 are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
-`extensions/test-auth.ts` starts each one under `bun` and answers it over its port
+`integrations/test-auth.ts` starts each one under `bun` and answers it over its port
 in CI. The codemod's `KEEP` list — a file that deploys where PostgREST is present
 and `bun` is not — is empty since SMD-1800 retired its one entry with its recipe.
 
@@ -115,7 +115,7 @@ cd compat/supabase-sql && bun run test
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page has
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-writes.ts` then drives the servers
+`integrations/test-writes.ts` then drives the servers
 that need the model provider stubbed (agent-memory-api's nine routes,
 the two consolidation workers, smart-ingest): the migrated
 files this shim is judged by.
@@ -328,7 +328,7 @@ development — the test caught it.
   cannot pool connections at all. The servers on it run as `bun <file>` (step 3).
 - **Most migrated recipes and integrations are not individually tested.** Most
   need live credentials — Gmail, Slack, Readwise. The shim is tested; each
-  migrated file is verified to parse; `extensions/test-writes.ts` drives the
+  migrated file is verified to parse; `integrations/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
   filters on a JSON path, found the two gaps change 73 closed). Until the
   last extension became a plugin (SMD-2311), `extensions/test-tools.ts` drove

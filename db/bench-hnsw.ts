@@ -6,13 +6,13 @@
  * SMD-968 (upstream NateBJones-Projects/OB1#417) says a filtered semantic
  * search silently loses recall: pgvector's HNSW scan hands over its first
  * `hnsw.ef_search` candidates (40 by default) and stops, and a filter applied
- * after that sees only those 40. This fork's function had the sharper form —
- * an explicit `LIMIT v_fetch` inside each candidate CTE, applied before the
+ * after that sees only those 40. Daemonic Brain's function had the sharper form
+ * — an explicit `LIMIT v_fetch` inside each candidate CTE, applied before the
  * filter — plus a second defect the same mechanism predicts: `v_fetch` above
  * 40 could never be honoured, so `match_count = 50` returned 40 rows.
  *
- * Both are claims about a scan, and the fork's rule is that a claim about a
- * plan is measured, not inferred (SMD-925 learned this the hard way: a
+ * Both are claims about a scan, and Daemonic Brain's rule is that a claim about
+ * a plan is measured, not inferred (SMD-925 learned this the hard way: a
  * statistics counter read too early said "index not used" while the timing
  * column said otherwise). So this loads a synthetic corpus, asks the function
  * as shipped by migrations 001–013, applies 014 and every later migration on
@@ -712,8 +712,8 @@ async function physicalState(sql: SQL): Promise<Physical> {
  * main fork grown past the tolerance, or rows the counters saw. A counter that
  * went DOWN is a statistics reset (a crash-recovered data directory) — said,
  * not refused, since the file and the size still judge the heap and the
- * graphs: rows a migration rewrote before the reset grew the fork, and that
- * growth is what the size catches (review pass).
+ * graphs: rows a migration rewrote before the reset grew the main fork, and
+ * that growth is what the size catches (review pass).
  */
 function physicalMoves(since: Physical, now: Physical, sinceWhat: string): string[] {
   const out: string[] = [];

@@ -1,9 +1,9 @@
 # server-portable
 
-The Open Brain REST core (`api.ts`) and the core every brain operation runs
+The Daemonic Brain REST core (`api.ts`) and the core every brain operation runs
 in. It began as a runtime-neutral build of the MCP server, so the runtime could
 be chosen last, with the same tools and wire behaviour as upstream's Edge
-Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
+Function build (`server/index.ts`, in this tree until SMD-1800). The runtime
 chosen was Bun: the brain runs as the compose stack (`SETUP.md`). That MCP
 server, this directory's `index.ts`, retired in SMD-2287 PR 6b, and `/mcp` is
 `mcp-server/`, a client of this REST core. The
@@ -230,10 +230,10 @@ informational and may be stale, as for the other failure reasons). An edit is
 judged on the row's own metadata; a capture is judged before the write, on
 the actor and the text alone. A refused search names `search_thoughts_keyword`, which makes no
 model call. Every dialler — `providerCall`, the judge, the entity extractor —
-asks the gate itself before the request, so no call the fork makes is ungated;
-a refusal there is a `ProviderError` of kind `egress`. Deny is the default and
-"local" is declared, never guessed: a stack from before the gate that points
-at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
+asks the gate itself before the request, so no call Daemonic Brain makes is
+ungated; a refusal there is a `ProviderError` of kind `egress`. Deny is the
+default and "local" is declared, never guessed: a stack from before the gate that
+points at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
 egress` row says so with the line.
 
 A local endpoint — local by its hostname, the credential rule's sense and not
@@ -520,8 +520,8 @@ Every suite that drives an MCP server (all but `test-rest.ts`, `test-thoughts.ts
 auto-install off, so without them the import fails, naming the package, rather than
 Bun fetching it (SMD-2978).
 
-`hono` and `zod` are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, and `extensions/test-auth.ts` fails if they
+`hono` and `zod` are pinned to the exact versions `../integrations/package.json`
+installs for the vendored servers, and `integrations/test-auth.ts` fails if they
 drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
 `@hono/mcp` there, until SMD-2279 and SMD-2281). **If you bump a shared package
 in one file, bump it in both in the same commit.**
@@ -1003,7 +1003,7 @@ calls does.
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
-| `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), which still holds. `forced: true`: a forced release, which needs the id to classify an operator. |
+| `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
 Each call is one statement, so its own READ COMMITTED transaction holding one ticket's
@@ -1428,7 +1428,7 @@ word any refusal as this one does.
 Each prints `N assertions: N passed, 0 failed` and `PASS`. Each suite's N, and
 each shard's, as main's last run counted them, is on the wiki's
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page,
-which Fork Checks writes on every push to main (SMD-3614).
+which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-server.ts        # transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
@@ -1454,7 +1454,7 @@ to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 `test-server.ts` **imports the real server.** That is the point of this directory.
 
-Upstream's Edge Function build, `server/index.ts` (in this fork until SMD-1800),
+Upstream's Edge Function build, `server/index.ts` (in this tree until SMD-1800),
 could not be imported by a test runner — it read `Deno.env` at module scope and
 imported from `jsr:` — so the suites beside it reimplemented the server inline and
 asserted against the copy. That is precisely how upstream's auth assertions came
@@ -1462,9 +1462,9 @@ to claim HTTP 401 for three months after the server started returning HTTP 200
 ([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)). The copy
 kept passing.
 
-The fork's first answer over there was a drift guard that grepped `index.ts` as
-text, which detected the divergence but did not prevent it. Here there is nothing
-to diverge from, so the guards are unnecessary and absent.
+Daemonic Brain's first answer over there was a drift guard that grepped
+`index.ts` as text, which detected the divergence but did not prevent it. Here
+there is nothing to diverge from, so the guards are unnecessary and absent.
 
 `test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE` unset —
 the default store is what it drives — and `SUPABASE_URL` deleted from the
@@ -1516,8 +1516,7 @@ stored in the same write").
   until the client or a proxy gives up. A provider call is bounded by
   `OB1_LLM_TIMEOUT`, so a call that long is stuck in the database. The brain's
   servers serve with Bun's ceiling, 255 s, for their GETs (the idle timeout,
-  above), and keep the keepalive for the proxy in front and a call past 255 s;
-  the vendored MCP servers stay on the default (`sse.ts` says why, SMD-2931).
+  above), and keep the keepalive for the proxy in front and a call past 255 s.
   The two intervals are constants, not knobs: 5 s is inside any proxy read
   timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged

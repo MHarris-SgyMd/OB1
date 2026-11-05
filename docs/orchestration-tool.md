@@ -1,6 +1,6 @@
 # The orchestration tool is n8n (SMD-1863)
 
-An architecture decision record. **Decided 2026-09-25: n8n is the fork's
+An architecture decision record. **Decided 2026-09-25: n8n is Daemonic Brain's
 orchestration tool for ingestion and sync — an optional, self-hosted sidecar
 that reaches the brain only through its REST core (through its MCP surface
 until SMD-2295), shipped as a compose
@@ -139,10 +139,10 @@ yet built):
    cost of one more connector to configure. The live check below shows each path
    works.
 8. **One owner per source per brain.** A source is ingested by one writer on a
-   given brain, or the brain holds the same item twice in two renderings. The
-   fork's Linear board is board-sync's (SMD-1954), which updates a ticket's row
-   in place; an n8n Linear template ships only when it can do the same —
-   identity-keyed upsert through SMD-1931's capture route with SMD-1867's
+   given brain, or the brain holds the same item twice in two renderings.
+   Daemonic Brain's Linear board is board-sync's (SMD-1954), which updates a
+   ticket's row in place; an n8n Linear template ships only when it can do the
+   same — identity-keyed upsert through SMD-1931's capture route with SMD-1867's
    identity — and then, on a brain that runs it, replaces board-sync there.
    The rule holds during a cut-over too: a template proving itself "unattended"
    before a native path retires does so on another brain (the canary tier is its
@@ -195,8 +195,8 @@ disabled. n8n's licence is the price; Gate 1 is where that price is checked.
 
 ## Gate 1: the licence
 
-What follows is the fork's reading of the licence texts, not legal advice; where
-it rests on an inference, it says so.
+What follows is Daemonic Brain's reading of the licence texts, not legal advice;
+where it rests on an inference, it says so.
 
 n8n's Sustainable Use License 1.0 grants use, copying, distribution, making
 available and derivative works, limited so: "You may use or modify the software
@@ -215,8 +215,8 @@ licence does not address in words:
 - **The profile references the image; OB1 does not distribute n8n.** The
   operator's own compose pulls `n8nio/n8n` from Docker Hub; no n8n code is in
   the tree. Because OB1 distributes nothing of n8n's, the SUL's Notices clause
-  (pass these terms on with a copy) does not bite; if the fork ever built or
-  published an image containing n8n, it would.
+  (pass these terms on with a copy) does not bite; if Daemonic Brain ever built
+  or published an image containing n8n, it would.
 - **The templates are OB1's.** Workflow JSON naming nodes and connections is
   configuration an operator writes; OB1 writing it for them adds nothing of
   n8n's to the tree.
@@ -252,7 +252,7 @@ form without an explicit agreement". By the reading above, a profile
 referencing its image distributes nothing either; what the SUL lacks and
 Windmill's terms add is "wrap", and a compose profile built around the image to
 serve OB1 is arguably wrapping it. That leaves Windmill conditional on an
-agreement the fork does not have — moot for the pick, since it failed C2.
+agreement Daemonic Brain does not have — moot for the pick, since it failed C2.
 
 ## Gate 2: egress
 
@@ -538,9 +538,9 @@ the first of them converts (SMD-2149, SMD-2021).
 ## What moves, what stays
 
 - **board-sync (SMD-1954) stays** as the no-orchestrator fallback: the path for
-  any brain without the profile, and the owner of the fork's Linear board until
-  an n8n Linear template meets decision 8 — at which point, on a brain that runs
-  that template, the template replaces it there.
+  any brain without the profile, and the owner of Daemonic Brain's Linear board
+  until an n8n Linear template meets decision 8 — at which point, on a brain that
+  runs that template, the template replaces it there.
 - **The recipes stay until a template replaces one.** Of the capture recipes,
   only `gmail-smart-pull` has a planned template (SMD-2257), and it retires only
   after that template has run unattended — on another brain, or with the recipe
@@ -562,7 +562,7 @@ the first of them converts (SMD-2149, SMD-2021).
   and SMD-1815's to decide, not this record's.
 - **The eval kit stays an eval kit.** `evals/orchestration/`'s adapter interface
   (provision, run, run history, MCP endpoint) is enough to verify any candidate;
-  it is promoted to an operations interface only if the fork ever runs or
+  it is promoted to an operations interface only if Daemonic Brain ever runs or
   switches between two tools. Workflow templates are not made portable across
   tools — that would mean a workflow language of our own and give up the
   catalogue that is the reason to adopt one. The portable seams are the ones

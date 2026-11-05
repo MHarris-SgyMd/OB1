@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
+# ci-parity.sh — run what .github/workflows/brain-checks.yml runs, the way CI does:
 # the data-layer job's database-backed suites in CI's order against ONE shared
 # Postgres; beside them, all from the start, test-live.ts's four shards, each on
 # a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
@@ -21,7 +21,7 @@
 #   ./db/ci-parity.sh
 #
 # Check 35 in scripts/check-consistency.ts holds this list to the workflow:
-# every script a fork-checks.yml step runs is a `run` or `nodb` line here, from
+# every script a brain-checks.yml step runs is a `run` or `nodb` line here, from
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
@@ -316,7 +316,7 @@ free_rows() {
   nodb deploy/auth        limits.ts --self-check
   nodb deploy/auth        target.ts --self-check
   nodb deploy/auth        admin.ts --self-check
-  nodb extensions         test-auth.ts
+  nodb integrations       test-auth.ts
   nodb db                 sync-linear.ts --self-check
   nodb db                 ingest-linear.ts --self-check
   nodb db                 ingest-markdown.ts --self-check
@@ -506,7 +506,7 @@ main() {
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
-  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth integrations scripts compat/supabase-sql dashboard; do install "$dir"; done
 
   # Every other lane starts now, beside this one (SMD-3688): the four test-live
   # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
@@ -544,7 +544,7 @@ main() {
   # data-layer job runs them — last, since it applies vendored schemas to the
   # shared database and drops them after. (The extension tools' suite,
   # test-tools.ts, retired with the last extension server: SMD-2311.)
-  run extensions         test-writes.ts
+  run integrations       test-writes.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
   local shard pid

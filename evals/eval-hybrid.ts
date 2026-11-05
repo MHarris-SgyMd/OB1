@@ -88,5 +88,5 @@ console.log(`\n=== SMD-2017 shape comparison on the SMD-1961 gold (${items.lengt
 console.log(`  shape                         valid-acc   type-acc   exact`);
 console.log(`  pure generative (7B types)    ${pct(gen.validAcc).padStart(7)}    ${pct(gen.typeAcc).padStart(7)}   ${pct(gen.exact).padStart(7)}`);
 console.log(`  HYBRID (7B propose→decide)    ${pct(hyb.validAcc).padStart(7)}    ${pct(hyb.typeAcc).padStart(7)}   ${pct(hyb.exact).padStart(7)}`);
-console.log(`\n  pure propose→decide is additionally recall-capped by the proposer ceiling (67% research / 78% fork exact, ~89% containment — eval-propose-recall/coverage).`);
+console.log(`\n  pure propose→decide is additionally recall-capped by the proposer ceiling (67% research / 78% own-content exact, ~89% containment — eval-propose-recall/coverage).`);
 await sql.end();

@@ -28,7 +28,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 - **`editorial-policy.md`** — the full 40-rule constitution. Copy to your `docs/editorial-policy.md`. Adapt the operator-specific rules (R1.1, R9.2, R9.3) to your name and timezone; keep everything else.
 - **`schema.sql`** — adds one helper RPC (`get_recent_audit_reports`) and one partial index on the `thoughts` table. No new tables.
-- **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
+- **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. In Daemonic Brain the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
 - **`schedule.sql`** — a pg_cron entry to fire the auditor weekly, for a Postgres that has `pg_cron` and `pg_net`; an ordinary cron line does the same (Step 6).
 
 ## Prerequisites
@@ -136,7 +136,7 @@ bun recipes/editorial-policy/auditor/index.ts
 
 The two Slack variables are read only when a run posts (`post_to_slack: true` and a critical finding); a run without them stores its report and then fails on the post, so either set them or schedule with `post_to_slack: false`.
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `integrations/test-auth.ts` starts it this way in CI, and `integrations/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
 
 ### Step 6: Schedule the weekly run
 

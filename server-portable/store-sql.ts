@@ -1075,7 +1075,7 @@ export class SqlStore implements ThoughtStore {
       : work === undefined
         ? await this.sql`SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
         : await this.sql`
-            SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason,
+            SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason, c.holder_agent_id IS NOT NULL AS by_agent_id,
                    (c.issue = ob1_work_claim_issue(${work.ticket}::text)
                     AND NOT (${work.piece ?? null}::text IS NOT NULL AND ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece') IS NULL)
                     AND c.piece_key = COALESCE(lower(ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece')), '')
@@ -1088,7 +1088,7 @@ export class SqlStore implements ThoughtStore {
       id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
       releasedBy: typeof r.released_by === "string" ? r.released_by : null, releaseReason: typeof r.release_reason === "string" ? r.release_reason : null,
       ...(typeof r.issue === "string" ? { issue: r.issue } : {}), releasedByKind: typeof r.released_by_kind === "string" ? r.released_by_kind : null,
-      ...(work !== undefined ? { ownOnThisWork: r.own_on_this_work === true } : {}),
+      ...(work !== undefined ? { ownOnThisWork: r.own_on_this_work === true, byAgentId: r.by_agent_id === true } : {}),
     };
   }
 
