@@ -4040,7 +4040,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await agentCall("renew_claim", { id: C(92), token: tok(94) }, unattributedText(C(92), "registry_away", past));
   await factsCall(95, { lapsedAt: "soon, and later" });
   await factsCall(96, { id: C(92), lapsedAt: past });
-  // A lapse still to come, or no time at all, is no lapse (review pass 3).
+  // A lapse more than five minutes to come, or no time as the server writes one, is no lapse; one within the clocks' skew is (review passes 3 and 4).
   putClaim(103);
   putClaim(104);
   putClaim(107);
@@ -4051,14 +4051,13 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await factsCall(104, { lapsedAt: "9999-99-99T99:99:99Z" });
   await factsCall(107, { lapsedAt: "Wed, 01 Jan 2020 00:00:00 GMT" }); // a date, but not as the server writes one
   const soon = (min) => new Date(Date.now() + min * 60_000).toISOString();
-  const tenOn = soon(10), twoOn = soon(2);
-  await factsCall(108, { lapsedAt: tenOn }); // past the clocks' five minutes of skew
-  await factsCall(109, { lapsedAt: twoOn }); // within them
+  await factsCall(108, { lapsedAt: soon(10) }); // past the clocks' five minutes of skew
+  await factsCall(109, { lapsedAt: soon(2) }); // within them
   assert([103, 104, 107, 108].every((n) => stateOf(n)?.expiresAt === undefined) && stateOf(109)?.expiresAt !== undefined, "…a lapsedAt more than five minutes to come, no real time, or a date not as the server writes one records nothing; one within the clocks' skew does");
   // The facts inside a JSON-RPC result, handed over as its JSON: every shape resultText reads.
   await claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(97), token: tok(97) }, tool_response: JSON.stringify({ result: { content: [{ type: "text", text: unattributedText(C(97), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(97), forced: false, lapsedAt: past } } }) });
   assert(stateOf(97)?.expiresAt === past, "the agent's own call's lapse is read from facts inside a result, handed over as JSON");
-  // 109, within the skew, is renewed in its run.
+  // Only 109, recorded within the skew and so made due, was renewed.
   assert(!renews().some((c) => c.args.id !== C(109)) && stateOf(92)?.expiresAt === past && stateOf(93)?.expiresAt === past && [94, 95, 96].every((n) => stateOf(n)?.expiresAt === undefined)
     && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at ${pastRe}; made due, so the hook's renewal checks the claims made or renewed on its work since$`, "m").test(logText()),
     "the agent's own call refused CLAIM_UNATTRIBUTED with its claim's lapse records it, read off the words or the facts; another claim's lapse records nothing");

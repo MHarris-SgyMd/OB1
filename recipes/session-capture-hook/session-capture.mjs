@@ -2975,13 +2975,13 @@ const QUIET_LAPSE_HEAD = " (it had lapsed at ";
 const quietLapse = (at) => `${QUIET_LAPSE_HEAD}${at}; no other claim was made or renewed on its work meanwhile)`;
 /** A marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2; WORK_CLAIMED's too, review pass 3). */
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
-/** A time as the server writes one, and nothing else: it goes into the log and the hook's record. */
+/** A time as the server writes one, and a real one (isTime), nothing else: it goes into the log and the hook's record. */
 const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const isTime = (v) => typeof v === "string" && ISO_TIME_RE.test(v) && Number.isFinite(Date.parse(v));
 /**
  * When CLAIM_UNATTRIBUTED says the claim `id` had lapsed (SMD-3705): its
- * `lapsedAt`, from the reply's facts, else from its words, which are all a
- * harness may hand a PostToolUse hook. Undefined for another claim's, or none.
+ * `lapsedAt`, from the reply's facts, else from its words, for a harness that
+ * hands a hook the text alone. Undefined for another claim's, or none.
  */
 function unattributedLapse(sc, text, id) {
   let at;
@@ -2991,7 +2991,7 @@ function unattributedLapse(sc, text, id) {
     at = m && m[1].toLowerCase() === id ? m[2] : undefined;
   }
   // Past, give or take five minutes of the two clocks' skew: one further off is no lapse (review pass 3).
-  return typeof at === "string" && isTime(at) && Date.parse(at) <= Date.now() + 300_000 ? at : undefined;
+  return isTime(at) && Date.parse(at) <= Date.now() + 300_000 ? at : undefined;
 }
 /** CLAIM_UNATTRIBUTED in the log, from the reply's facts: the brain's words run past markerSaid's cut once a lapse is in them (SMD-3807). */
 const unattributedSaid = (cause, lapsedAt) => `CLAIM_UNATTRIBUTED (${cause}): the agent registry ${cause === "registry_away" ? "did not give the claim key's agent id just now; renewals retry" : "cannot give the claim key's agent id until an operator acts (the server's log says why): tell the user"}${lapsedAt ? `; it had lapsed at ${lapsedAt}, and until a renewal lands a claim on exactly its work can take it over` : ""}`;
