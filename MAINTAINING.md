@@ -314,8 +314,9 @@ answers with one `remote: -` line per rule it applied.
 Renaming the aggregate job changes the one context the ruleset requires, so the
 file and the ruleset move together: apply the new `main.json` with the command
 above just before the PR that renames the job merges, then merge it at once. A
-PR still on the old name waits until it merges `main`, as the strict rule makes
-every PR do. The workflow was `fork-checks.yml`, "Fork Checks", its job "Fork
+PR whose branch is still on the old workflow reports the old check, which the
+ruleset no longer requires, so it waits until it merges `main`, as the strict
+rule makes every PR do. The workflow was `fork-checks.yml`, "Fork Checks", its job "Fork
 Checks passed", until SMD-3765; `scripts/ci-step-times.ts` reads main's runs
 under either name, so a CI shift's window spans the rename.
 

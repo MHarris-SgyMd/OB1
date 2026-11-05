@@ -5116,7 +5116,7 @@ const MAY_REPORT_CASES: [name: string, answer: "carries" | "could render as" | n
   ["${{ x }}Brain Checks passed extra", "carries"],
   ["${{ matrix.label }}", "could render as"],
   ["Brain Checks ${{ matrix.word }}", "could render as"],
-  ["${{ 'Fork' }} Checks ${{ 'pass' }}ed", "could render as"],
+  ["${{ 'Brain' }} Checks ${{ 'pass' }}ed", "could render as"],
   ["${{ fromJSON('{\"a\":{\"b\":\"Brain Checks\"}}').a.b }} passed", "could render as"],
   ["Brain Checks pass${{ x", "could render as"],
 ];
