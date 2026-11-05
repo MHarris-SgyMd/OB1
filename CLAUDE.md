@@ -174,14 +174,14 @@ Do this only while the key holds no live claims.
 - **Title format:** `[category] Short description` (e.g., `[recipes] Email history import via Gmail API`, `[skills] Panning for Gold standalone skill pack`)
 - **Branch convention:** `contrib/<github-username>/<short-description>`
 - **Commit prefixes:** `[category]` matching the contribution type
-- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run here)
+- Every PR must pass `.github/workflows/brain-checks.yml` — the suites, the typechecks, `scripts/check-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run here)
 - See `CONTRIBUTING.md` for the full review process, metadata.json template, and README requirements
 
 ## Key Files
 
 - `CONTRIBUTING.md` — Source of truth for contribution rules, metadata format, and the review process
 - `MAINTAINING.md` — The version scheme, cutting a release, the one deployment, CI and its checks, and how a review pass records what it caught
-- `.github/workflows/fork-checks.yml` — The project's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
+- `.github/workflows/brain-checks.yml` — The project's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template
 - `LICENSE.md` — FSL-1.1-MIT terms
