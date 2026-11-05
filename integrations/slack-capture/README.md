@@ -81,7 +81,7 @@ In Slack, open your capture channel and type: `/invite @Open Brain`
 
 ## Step 3: Run the Capture Server
 
-This is the brains of the operation. One HTTP server receives messages from Slack, generates an embedding, extracts metadata, stores everything in your brain's Postgres, and replies with a confirmation. It runs under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps for an MCP server).
+This is the brains of the operation. One HTTP server receives messages from Slack, generates an embedding, extracts metadata, stores everything in your brain's Postgres, and replies with a confirmation. It runs under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps).
 
 > **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, open **PowerShell**. Everything below gets typed there, not in your browser.
 

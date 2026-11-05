@@ -788,7 +788,8 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
  * integrations reach that install from under it, the recipes through the
  * committed recipes/node_modules link (SMD-1991; in integrations/ since
  * SMD-3747). The v1 MCP pair, `@hono/mcp` and `@modelcontextprotocol/sdk`, left
- * it with SMD-3747: no vendored server imports an MCP package. A name added
+ * it with SMD-3747: no vendored server on this install imports an MCP package
+ * (the Vercel recipe's route has its own). A name added
  * here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod"];

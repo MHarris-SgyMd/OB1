@@ -20,7 +20,9 @@ REPLACE all instances of:
   - "extension-name" with its slug (lower-case words joined by hyphens), the
     plugin's directory and OB1_PLUGINS name
   - "extension_name" with the tool prefix: the slug, hyphens as underscores
-  - "N" with its place in the learning path
+  - "N" with its place in the learning path. The path is six, curated: a
+    new extension takes the next number, and its row goes into this table in
+    every guide, extensions/README.md's and plugins/README.md's
 
 DELETE this comment block before submitting your PR.
 =============================================================================
@@ -146,5 +148,5 @@ For common issues (connection errors, 401s), see [Common Troubleshooting](../../
 
 <!--
 REQUIRED: every extension links docs/05-tool-audit.md in its README; the
-automated review checks for it. Keep the link when you reword the blockquote.
+review checks for it. Keep the link when you reword the blockquote.
 -->

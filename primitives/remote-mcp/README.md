@@ -22,7 +22,7 @@ The connector authenticates each request by its key: in an `x-brain-key` or `x-a
 - **`write`** sees every tool, writes included.
 - **`capture`** is the session capture hook's: it is shown `capture_thought` and the few writes on what it captured or opened, nothing that reads.
 
-A plugin's tools follow the same rule: a read key sees its reads. Mint a key per client, so one is revoked on its own by removing its line from `MCP_ACCESS_KEYS` and recreating the servers (`docker compose up -d mcp api` from `deploy/`, with the stack's other `-f` files).
+A plugin's tools follow the same rule: a read key sees its reads. Mint a key per client, so one is revoked on its own by removing its line from `MCP_ACCESS_KEYS` in `deploy/.env` and running Getting Started's Step 4 command again with `-d`, which recreates the servers that read the keys (a `restart` keeps the old ones).
 
 ## Step-by-step Instructions
 

@@ -16,10 +16,10 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
 - An entry in `MCP_ACCESS_KEYS` that is not `name:read|write|capture|forward:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
 - A key's scope is what you expect: a read-scoped key does not see the tools that write, and a server whose only tools write shows it nothing
-- Try minting a new key: Step 3 of [Run a Vendored Server](../deploy-remote-mcp/), then restart the server with the new line and update your Connection URL
+- Try minting a new key: Step 3 of [Getting Started](../../docs/01-getting-started.md) for the brain's connector ([Remote MCP Connection](../remote-mcp/), "Keys and Scope", says how to swap it in), or Step 3 of [Run a Vendored Server](../deploy-remote-mcp/) for a vendored server; then update your Connection URL
 
 **"Tools don't appear in Claude Desktop"**
-- The connector dials from Anthropic's side: the URL must be HTTPS and reachable from the internet (Step 5 of [Run a Vendored Server](../deploy-remote-mcp/)); `http://127.0.0.1:…` works only for a client on this machine
+- The connector dials from Anthropic's side: the URL must be HTTPS and reachable from the internet (Step 6.1 of [Getting Started](../../docs/01-getting-started.md)); `http://127.0.0.1:…` works only for a client on this machine
 - Verify the connector is enabled for your conversation — click the "+" button at the bottom of the chat → Connectors → check the toggle
 - Check that the MCP Connection URL is correct and includes `?key=your-access-key`
 - Try removing and re-adding the connector in Settings → Connectors

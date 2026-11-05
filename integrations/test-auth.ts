@@ -82,13 +82,13 @@ async function importServer(file: string): Promise<Handler> {
 }
 
 // ── The vendored servers' packages, from this directory's install ────────────
-// A recipe or integration imports STACK's packages (hono, zod, and the MCP pair a
-// server of that kind would need) by bare name and has no install of its own beside
-// it. The integrations sit under this directory's install; recipes/ holds a
-// committed `node_modules` link to it, so Bun's own lookup, walking up from the
-// importing file, finds the pinned install from either tree, the SDK's `exports`
-// subpaths included, which NODE_PATH does not reach (SMD-1991). The servers below
-// are imported through it, and started through it under `--no-install`.
+// A recipe or integration imports STACK's packages (hono and zod) by bare name and
+// has no install of its own beside it. The integrations sit under this directory's
+// install; recipes/ holds a committed `node_modules` link to it, so Bun's own
+// lookup, walking up from the importing file, finds the pinned install from either
+// tree, a package's `exports` subpaths included, which NODE_PATH does not reach
+// (SMD-1991). The servers below are imported through it, and started through it
+// under `--no-install`.
 {
   let target = "";
   try { target = readlinkSync(join(ROOT, "recipes", "node_modules")); } catch { /* absent, or not a link */ }
@@ -855,11 +855,13 @@ for (const t of TEXT_ONLY) {
   // stack, so a tool's schema built with server-portable's zod and the SDK
   // that validates it agree: held the same way.
   for (const file of ["server-portable/package.json", "mcp-server/package.json"]) {
-    const deps = JSON.parse(readFileSync(join(ROOT, file), "utf8")).dependencies as Record<string, string>;
+    const manifest = JSON.parse(readFileSync(join(ROOT, file), "utf8")) as { dependencies: Record<string, string>; devDependencies?: Record<string, string> };
+    const deps = manifest.dependencies;
     const shared = stack.filter(([name]) => SERVER_STACK.includes(name)); // hono, zod
     const sharedDrift = shared.filter(([name, version]) => deps[name] !== version);
     const v2Drift = Object.entries(SERVER_V2_PINS).filter(([name, version]) => deps[name] !== version);
-    const stale = RETIRED_V1_MCP.filter((name) => deps[name] !== undefined);
+    // In either field: a dev install of the v1 SDK would sit beside the v2 packages all the same.
+    const stale = RETIRED_V1_MCP.filter((name) => deps[name] !== undefined || manifest.devDependencies?.[name] !== undefined);
     const detail = [
       ...sharedDrift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`),
       ...v2Drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`),
@@ -867,6 +869,10 @@ for (const t of TEXT_ONLY) {
     ];
     assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `${file} is on the v2 MCP stack (SMD-2278): hono+zod match integrations, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${RETIRED_V1_MCP.join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
   }
+  // The list the check above reads names the two v1 packages and none of a stack's, so emptying or narrowing it is no
+  // way to switch the check off unseen.
+  assert(["@hono/mcp", "@modelcontextprotocol/sdk"].every((n) => RETIRED_V1_MCP.includes(n)) && !RETIRED_V1_MCP.some((n) => STACK.includes(n) || SERVER_STACK.includes(n)),
+    `…and RETIRED_V1_MCP names @hono/mcp and @modelcontextprotocol/sdk, and no package of a stack (${RETIRED_V1_MCP.join(", ") || "none"})`);
 }
 
 report();

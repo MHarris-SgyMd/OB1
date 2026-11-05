@@ -303,7 +303,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-// A recipe or integration imports STACK's four by bare name and has no install of its own beside it; they resolve
+// A recipe or integration imports STACK's packages (hono and zod) by bare name and has no install of its own beside it; they resolve
 // from integrations/node_modules, the integrations from under it and the recipes through the committed
 // recipes/node_modules link, which test-auth.ts holds (SMD-1991; this directory's since SMD-3747).
 
