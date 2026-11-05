@@ -11455,6 +11455,29 @@ function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<stri
   }
   return problems;
 }
+/** HOLDS_THE_CUT as CHANGES_SCRIPT writes it: the files beside which a workflow edit runs every job. */
+const HOLDS_THE_CUT_LINE = /^HOLDS_THE_CUT="([^"]*)"$/m;
+/**
+ * Review pass 3: a CHARGES row naming no tracked path (a rename or a removal
+ * left it, and the new path runs every job unseen), and HOLDS_THE_CUT against
+ * the two files it must name, since a rename of either would leave a workflow
+ * edit beside it read by job. HOLDS is the line's list, or null when the line
+ * is gone.
+ */
+function chargesPathProblems(table: ChargesRow[], tracked: readonly string[], holds: string | null): string[] {
+  const problems: string[] = [];
+  for (const { pattern } of table) {
+    const live = pattern.endsWith("/*") ? tracked.some((rel) => rel.startsWith(pattern.slice(0, -1))) : tracked.includes(pattern);
+    if (!live) problems.push(`CHARGES names ${pattern}, which no tracked file is — a rename or a removal left it, and its new path runs every job; follow the path or take the row off (check 53, SMD-2435)`);
+  }
+  const want = [SELF, CHANGES_SCRIPT];
+  if (holds === null) problems.push(`${CHANGES_SCRIPT} has no HOLDS_THE_CUT="…" line, the files beside which a workflow edit runs every job (check 53, SMD-2435)`);
+  else {
+    const got = holds.split(" ").filter(Boolean);
+    if (JSON.stringify([...got].sort()) !== JSON.stringify([...want].sort())) problems.push(`HOLDS_THE_CUT is ${got.join(" ") || "empty"}, not ${want.join(" ")} — the checker, which holds the cut to Bun's reading, and ${CHANGES_SCRIPT}, whose cut the base's copy applies to the head's workflow (check 53, SMD-2435)`);
+  }
+  return problems;
+}
 function checkJobMap() {
   const P = (pattern: string, jobs: string[]): ChargesRow => ({ pattern, jobs });
   const blocksOf = (o: Record<string, string>) => new Map(Object.entries(o).map(([k, v]) => [k, v.split("\n")]));
@@ -11513,10 +11536,25 @@ function checkJobMap() {
   const wrong = cases.map(([why, t, r, f, b, says]) => ({ why, says, got: jobMapProblems(t, r, ["d", "l"], f, b) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
   if (wrong.length) fail(SELF, `check 53 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
+  // [why, rows, tracked paths, HOLDS_THE_CUT, what its problems say] (review pass 3).
+  const H = `${SELF} ${CHANGES_SCRIPT}`;
+  const pathCases: [string, ChargesRow[], string[], string | null, string[]][] = [
+    ["every row live, the list as written", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], H, []],
+    ["the list in another order", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], `${CHANGES_SCRIPT} ${SELF}`, []],
+    ["a file row a rename left", T, ["changes/smd-1.md", "scripts/y.ts", ".github/ci/s.sh"], H, ["CHARGES names scripts/x.ts, which no tracked file is"]],
+    ["a directory row with no file left", T, ["scripts/x.ts", ".github/ci/s.sh"], H, ["CHARGES names changes/*, which no tracked file is"]],
+    ["the checker off the list", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], CHANGES_SCRIPT, ["HOLDS_THE_CUT is"]],
+    ["no list", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], null, ["has no HOLDS_THE_CUT"]],
+  ];
+  const pathWrong = pathCases.map(([why, rows, tracked, holds, says]) => ({ why, says, got: chargesPathProblems(rows, tracked, holds) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (pathWrong.length) fail(SELF, `check 53 no longer reads a row's path or HOLDS_THE_CUT as written: ${JSON.stringify(pathWrong)} (SMD-2435)`);
   const table = chargesTable();
   if (typeof table === "string") return fail(CHANGES_SCRIPT, `check 53 cannot read CHARGES: ${table} (SMD-2435)`);
   const files = new Map<string, string>();
-  for (const rel of execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean)) {
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  for (const msg of chargesPathProblems(table, tracked, HOLDS_THE_CUT_LINE.exec(readFileSync(join(ROOT, CHANGES_SCRIPT), "utf8"))?.[1] ?? null)) fail(CHANGES_SCRIPT, msg);
+  for (const rel of tracked) {
     if (rel === WORKFLOW || rel.endsWith(".md")) continue;
     let text: string;
     try { text = readFileSync(join(ROOT, rel), "utf8"); } catch { continue; }
