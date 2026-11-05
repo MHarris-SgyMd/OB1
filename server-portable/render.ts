@@ -1900,7 +1900,10 @@ const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) =
   return r.forced
     ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
     : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.${r.lapsedAt
-      ? ` It had lapsed at ${r.lapsedAt}, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: ${lapseCheck(r.lapsedAt, r.id)}`
+      ? ` It had lapsed at ${r.lapsedAt}, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: ${lapseCheck(r.lapsedAt, r.id)}${r.cause === "registry_away"
+        ? ""
+        // Waiting on an operator, it can't be renewed at all: tell the user whatever the list shows (review pass 3).
+        : " Either way, tell the user: it can't be renewed until an operator acts."}`
       : ""}`;
 };
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
