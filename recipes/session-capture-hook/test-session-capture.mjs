@@ -3094,6 +3094,8 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   // envelope (review pass 4, run against a stack of this branch), rather than the SDK's isError result.
   let away = false, slowRenewMs = 0, rpcEnvelopeForMissingTool = false;
   const listed = new Map(); // ticket → the claims list_claims answers (review pass 5's lapse check)
+  const unattributedText = (id, cause, lapsedAt) => `Refused: claim ${id} was made under this key's agent id, which ${cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}. The token given is this claim's: keep it.${!lapsedAt ? ""
+    : ` It had lapsed at ${lapsedAt}, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: list the ticket's claims with list_claims and include_ended: a claim other than this one (claim ${id}) on its work, claimed or renewed after ${lapsedAt}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.${cause === "registry_away" ? "" : " Either way, tell the user: it can't be renewed until an operator acts."}`}`;
   const claimsBrain = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     if (away) return new Response("Bad Gateway", { status: 502 });
     if (slowRenewMs) await sleep(slowRenewMs); // a brain slow to answer: a renewal in the foreground would hold the hook
@@ -3121,7 +3123,8 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (c.state === "covered") return err(`Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2026-11-01T04:00:00.000Z. list_claims shows each claim's label, so a session can tell its own from another's. Wait for the claim to be released or to lapse, or claim other work. Your claim lapsed before another covered its work.`, { code: "WORK_CLAIMED", heldBy: [] });
     // Six claims in the way, this worktree's own piece last: past the marker's cut (review pass 4).
     if (c.state === "covered-long") return err(`Refused: SMD-9001 is covered by 6 live claims: ${Array.from({ length: 5 }, (_, i) => `SMD-9001 piece "PR ${i}" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8960 + i)})`).join("; ")}; SMD-9001 piece "PR 9" by your own key (claude-code) since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8084)}). A whole ticket and any of its pieces are the same work. Your claim lapsed before another covered its work.`, { code: "WORK_CLAIMED", heldBy: [] });
-    if (c.state === "unattributed") return err(`Error: the agent registry could not attribute this key just now; the token given is this claim's: keep it.`, { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: args.id, forced: false });
+    // The registry away, in render.ts's words: a claim that had lapsed says when (SMD-3705), past markerSaid's cut (SMD-3807).
+    if (c.state === "unattributed" || c.state === "unattributed-final") return err(unattributedText(args.id, c.state === "unattributed" ? "registry_away" : "registry_misconfigured", c.lapsedAt), { code: "CLAIM_UNATTRIBUTED", retryable: c.state === "unattributed", cause: c.state === "unattributed" ? "registry_away" : "registry_misconfigured", id: args.id, forced: false, ...(c.lapsedAt ? { lapsedAt: c.lapsedAt } : {}) });
     if (c.state === "badinput") return err(`Refused: the claim's input is malformed.`, { code: "REFUSED_CLAIM_INPUT", problem: "token" });
     if (c.state === "echo") return err(`Refused: could not renew ${JSON.stringify(args)}`, { code: "SOMETHING_ODD" }); // a misbehaving server that echoes the call
     if (c.state === "echo-escaped") return err(`Refused: could not renew ${args.token.replace("wc_", "wc\\_")}`, { code: "SOMETHING_ODD" }); // …as markdown escapes it
@@ -3927,6 +3930,75 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   calls.length = 0;
   await claimsHook();
   assert(!renews().length && /kept: .* list_claims for SMD-9001 doesn't list it/.test(logText().split("\n").filter(Boolean).pop()), "…and one list_claims doesn't list is kept, not renewed blind");
+  clearClaims();
+
+  // CLAIM_UNATTRIBUTED saying the claim had lapsed, with no expiry on the hook's record (SMD-3807): the lapse recorded,
+  // so the next run's lapse check lists the claims made since and marks one, the registry still away.
+  const coveringSince = (id) => ({ id, piece: null, holder: "codex", claimedAt: new Date(Date.now() - 1_800_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), state: "live" });
+  putClaim(88, {}, "unattributed");
+  claims.get(C(88)).lapsedAt = past;
+  listed.set("SMD-9001", [listEntry(88), coveringSince(uuid(8994))]);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && stateOf(88)?.expiresAt === past && !revivedMarker(88)
+    && new RegExp(`claims: kept: SMD-9001 \\(claim ${C(88)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry; it had lapsed at ${past.replace(/\./g, "\\.")}, .* and marks one$`).test(lastLine()),
+    `the hook's renewal refused CLAIM_UNATTRIBUTED with the claim's lapse records it, the line giving the cause and the lapse whole, where the brain's words run past the cut (${lastLine()?.slice(0, 160)})`);
+  age(88, 61);
+  calls.length = 0;
+  await claimsHook();
+  const unattributedCovered = revivedMarker(88);
+  assert(!renews().length && calls.some((c) => c.name === "list_claims") && unattributedCovered?.blocked?.code === "CLAIMED_WHILE_LAPSED" && new RegExp(`^CLAIMED_WHILE_LAPSED: not renewed; lapsed at .*codex claimed SMD-9001 at .* \\(now live, claim ${uuid(8994)}\\)`).test(unattributedCovered.blocked.message),
+    "…and at the next run, the registry still away, a claim made on its work since gets a CLAIMED_WHILE_LAPSED marker");
+  clearClaims();
+  putClaim(89, {}, "unattributed");
+  claims.get(C(89)).lapsedAt = past;
+  listed.set("SMD-9001", [listEntry(89)]);
+  await claimsHook();
+  age(89, 61);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && !revivedMarker(89) && stateOf(89)?.expiresAt === past && /claims: kept: .* CLAIM_UNATTRIBUTED \(registry_away\)/.test(lastLine()),
+    "…with no claim since, no marker: the renewal is tried again, and kept");
+  clearClaims();
+  // Final: the line says the user is told. Live (no lapse in the reply): nothing recorded.
+  putClaim(90, {}, "unattributed-final");
+  claims.get(C(90)).lapsedAt = past;
+  putClaim(91, {}, "unattributed");
+  await claimsHook();
+  const finalLine = logText().split("\n").find((l) => l.includes(`(claim ${C(90)})`));
+  assert(/CLAIM_UNATTRIBUTED \(registry_misconfigured\): the agent registry cannot give the claim key's agent id until an operator acts \(the server's log says why\): tell the user; it had lapsed at /.test(finalLine ?? "") && stateOf(90)?.expiresAt === past,
+    `…the registry set up wrong, the line says an operator must act and the user be told, and the lapse is recorded (${finalLine?.slice(0, 160)})`);
+  assert(stateOf(91) && stateOf(91).expiresAt === undefined && logText().split("\n").some((l) => new RegExp(`kept: SMD-9001 \\(claim ${C(91)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry$`).test(l)),
+    "…and a live claim's CLAIM_UNATTRIBUTED, saying no lapse, records none");
+  clearClaims();
+  // The agent's own call, seen by the claims hook: from the reply's words alone (all a harness may hand it), or its facts.
+  putClaim(92);
+  putClaim(93, { piece: "PR 3" });
+  putClaim(94);
+  putClaim(95);
+  putClaim(96);
+  putClaim(97);
+  for (const n of [92, 93, 94, 95, 96, 97]) age(n, 0); // not due: only the agent's call records them
+  calls.length = 0;
+  const factsCall = (n, sc) => claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(n), token: tok(n) }, tool_response: { content: [{ type: "text", text: unattributedText(C(n), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(n), forced: false, ...sc } } });
+  await agentCall("renew_claim", { id: C(92), token: tok(92) }, unattributedText(C(92), "registry_away", past));
+  await claimsHook({ tool_name: "mcp__open-brain__claim_work", tool_input: { ticket: "SMD-9001", piece: "PR 3", token: tok(93) }, tool_response: { content: [{ type: "text", text: unattributedText(C(93), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(93), forced: false, lapsedAt: past } } });
+  // Another claim's lapse, carrying this file's token, in words or facts, and a lapse that is no time: none recorded.
+  await agentCall("renew_claim", { id: C(92), token: tok(94) }, unattributedText(C(92), "registry_away", past));
+  await factsCall(95, { lapsedAt: "soon, and later" });
+  await factsCall(96, { id: C(92), lapsedAt: past });
+  // The facts inside a JSON-RPC result, handed over as its JSON: every shape resultText reads.
+  await claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(97), token: tok(97) }, tool_response: JSON.stringify({ result: { content: [{ type: "text", text: unattributedText(C(97), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(97), forced: false, lapsedAt: past } } }) });
+  assert(stateOf(97)?.expiresAt === past, "the agent's own call's lapse is read from facts inside a result, handed over as JSON");
+  assert(!renews().length && stateOf(92)?.expiresAt === past && stateOf(93)?.expiresAt === past && [94, 95, 96].every((n) => stateOf(n)?.expiresAt === undefined)
+    && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at `).test(logText()),
+    "the agent's own call refused CLAIM_UNATTRIBUTED with its claim's lapse records it, read off the words or the facts; another claim's lapse records nothing");
+  listed.set("SMD-9001", [listEntry(92), listEntry(93, { piece: "PR 3" }), listEntry(94), coveringSince(uuid(8993))]);
+  age(92, 61); age(93, 61);
+  calls.length = 0;
+  await claimsHook();
+  assert(!renews().some((c) => c.args.id === C(92) || c.args.id === C(93)) && revivedMarker(92)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && revivedMarker(93)?.blocked?.code === "CLAIMED_WHILE_LAPSED",
+    "…and the next run, the registry still away, marks the claim made on its work since");
   clearClaims();
   claimsBrain.stop(true);
 }

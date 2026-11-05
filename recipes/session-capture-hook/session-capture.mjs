@@ -2975,6 +2975,31 @@ const QUIET_LAPSE_HEAD = " (it had lapsed at ";
 const quietLapse = (at) => `${QUIET_LAPSE_HEAD}${at}; no other claim was made or renewed on its work meanwhile)`;
 /** A marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2; WORK_CLAIMED's too, review pass 3). */
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
+/** A time as the server writes one, and nothing else: it goes into the log and the hook's record. */
+const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+/**
+ * When CLAIM_UNATTRIBUTED says the claim `id` had lapsed (SMD-3705): its
+ * `lapsedAt`, from the reply's facts, else from its words, which are all a
+ * harness may hand a PostToolUse hook. Undefined for another claim's, or none.
+ */
+function unattributedLapse(sc, text, id) {
+  let at;
+  if (sc?.code === "CLAIM_UNATTRIBUTED") at = String(sc.id).toLowerCase() === id ? sc.lapsedAt : undefined;
+  else {
+    const m = new RegExp(`^Refused: claim (${UUID}) was made under this key's agent id\\b.*? It had lapsed at (\\S+?), and stays lapsed until a renewal lands\\b`, "i").exec(text);
+    at = m && m[1].toLowerCase() === id ? m[2] : undefined;
+  }
+  return typeof at === "string" && ISO_TIME_RE.test(at) ? at : undefined;
+}
+/** CLAIM_UNATTRIBUTED in the log, from the reply's facts: the brain's words run past markerSaid's cut once a lapse is in them (SMD-3807). */
+const unattributedSaid = (cause, lapsedAt) => `CLAIM_UNATTRIBUTED (${cause}): the agent registry ${cause === "registry_away" ? "did not give the claim key's agent id just now; renewals retry" : "cannot give the claim key's agent id until an operator acts (the server's log says why): tell the user"}${lapsedAt ? `; it had lapsed at ${lapsedAt}, and until a renewal lands a claim on exactly its work can take it over: the next renewal lists the claims made or renewed on its work since, and marks one` : ""}`;
+/** A tool result's structuredContent, from any shape resultText reads; undefined without one. */
+function resultFacts(resp) {
+  if (typeof resp === "string") { try { return resultFacts(JSON.parse(resp)); } catch { return undefined; } }
+  if (!resp || typeof resp !== "object" || Array.isArray(resp)) return undefined;
+  const sc = resp.structuredContent ?? resultFacts(resp.result);
+  return sc && typeof sc === "object" && !Array.isArray(sc) ? sc : undefined;
+}
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
@@ -3018,6 +3043,13 @@ export async function renewClaim(cfg, claim) {
   if (toolRefused(text)) return cannot;
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
   if (code === "WORK_CLAIMED") return { whole: scrubTokens(oneLine(text)), blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work and tell the user; a .blocked.json beside its token file says so, and renewals wait until it is deleted)` };
+  // The registry away: a lapse it reports is recorded, so the next renewal's lapse check lists the claims made on its
+  // work since, and marks one, while the registry is still away — list_claims needs no agent id (SMD-3807).
+  const cause = result.structuredContent.cause;
+  if (code === "CLAIM_UNATTRIBUTED" && typeof cause === "string" && /^[a-z_]{1,40}$/.test(cause)) {
+    const lapsedAt = unattributedLapse(result.structuredContent, text, claim.id);
+    return { keep: true, lapsedAt, line: `kept: ${what} — ${unattributedSaid(cause, lapsedAt)}` };
+  }
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
@@ -3153,7 +3185,7 @@ async function renewOne(b, path, claim) {
   else {
     if (o.ended) o.line += " (its token file could not be ended now; the next run tries again)"; // the line said "ended" while the file stayed (review pass 5)
     if (o.blocked && !writeMarker(path, claim, "blocked", o.blocked)) o.line += " (the marker could not be written)";
-    writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
+    writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : o.lapsedAt ? { expiresAt: o.lapsedAt } : {}), last: o.line });
   }
   if (closed.length) o.line += ` (${closed.join("; ")})`;
   log(`claims: ${o.line}`);
@@ -3168,7 +3200,9 @@ async function renewOne(b, path, claim) {
  * claim gets its `<id>.blocked.json`, as the hook's own renewal would give it
  * — else the agent's next renewal, once the covering claim ends, revives it
  * silently. Renewed, the hook records the new expiry, so its own record never
- * reads a lapse the agent's renewal prevented. Nothing is sent to a brain.
+ * reads a lapse the agent's renewal prevented. Refused CLAIM_UNATTRIBUTED
+ * saying it had lapsed, the hook records the lapse, so its next renewal checks
+ * the claims made since (SMD-3807). Nothing is sent to a brain.
  */
 function noteAgentClaimCall(hook, brains) {
   if (String(hook.hook_event_name ?? "") !== "PostToolUse") return;
@@ -3192,6 +3226,14 @@ function noteAgentClaimCall(hook, brains) {
       const wrote = writeMarker(f.path, f.claim, "blocked", { code: "CLAIMED_WHILE_LAPSED", message: said });
       log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} revived it: ${said}${wrote ? "" : " (the marker could not be written)"}`);
     }
+    return;
+  }
+  // CLAIM_UNATTRIBUTED on its own lapsed claim (SMD-3807): the lapse recorded, as the hook's own renewal records it.
+  const lapsedAt = unattributedLapse(resultFacts(hook.tool_response), text, f.claim.id);
+  if (lapsedAt) {
+    const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; the next renewal lists the claims made or renewed on its work since, and marks one`;
+    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), expiresAt: lapsedAt, last: line });
+    log(`claims: ${line}`);
     return;
   }
   // One claim in the way or several: render.ts says "a live claim" or "N live claims" (review pass 3: several went
