@@ -99,8 +99,7 @@ try {
     perCount.set(r.thought, n + 1);
     plan.push({ thought: r.thought, text: r.text });
   }
-  const thoughts = perCount.size;
-  console.log(`${thoughts} thoughts with no item yet hold ${plan.length} action items to open; ${tooLong} past 1000 characters and ${capped} past ${perThought} on one thought left out`);
+  console.log(`${perCount.size} thoughts with no item yet hold ${plan.length} action items to open; ${tooLong} past 1000 characters and ${capped} past ${perThought} on one thought left out`);
 
   // The opener: a name the registry has never seen is made an agent's (set_agent_kind, 046), so its items stand at
   // agent trust. A key the registry knows is the operator's to classify (CLAUDE.md, Keys), never this script's

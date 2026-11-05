@@ -956,33 +956,30 @@ const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(
  * An item not proposed here is the backfill's (db/backfill-open-items.ts), which takes a thought holding none.
  * Review pass 1: moved here from core/items.ts (an import cycle), deduplicated and capped as 117 reads the texts.
  */
-async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<number> {
+async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<void> {
   const scope = principal.scope === "write" ? "write" : principal.scope === "capture" ? "capture" : undefined;
   const raw = metadata.action_items;
-  if (!scope || !Array.isArray(raw)) return 0;
+  if (!scope || !Array.isArray(raw)) return;
   const seen = new Set<string>();
   const texts: string[] = [];
   for (const t of raw) {
     if (typeof t !== "string" || t.length > 4000) continue;
-    const text = cleanedAsItem(t);
-    if (!text || text.length > 1000 || seen.has(text.toLowerCase())) continue;
-    seen.add(text.toLowerCase());
+    const text = cleanedAsItem(t), key = text.toLowerCase();
+    if (!text || text.length > 1000 || seen.has(key)) continue;
+    seen.add(key);
     texts.push(text);
     if (texts.length === MAX_PROPOSED_PER_CAPTURE) break;
   }
-  if (texts.length === 0) return 0;
-  let opened = 0;
+  if (texts.length === 0) return;
   const store = await ctx.store();
   for (const text of texts) {
     try {
       const a = await store.openItem({ text, originThought: thoughtId, proposed: true, actor: actorOf(ctx, principal), scope });
-      if (a.outcome === "opened") opened++;
-      else if (a.outcome === "refused") break;
+      if (a.outcome === "refused") break;
     } catch (e) {
       if (e instanceof ItemRefused) continue;
       console.error(`capture: the action items of thought ${thoughtId} were not proposed as open items: ${(e as Error)?.message ?? e}`);
       break;
     }
   }
-  return opened;
 }
