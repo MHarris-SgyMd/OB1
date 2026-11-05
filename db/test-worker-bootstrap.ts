@@ -422,6 +422,8 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // followerFault — the pausing followers' reading (SMD-3311): classifyError's kind, a 408 transient, and no suspect on backpressure.
   const faults: [unknown, { kind: string; suspect: boolean }, string, { maxTokensFatal?: boolean }?][] = [
     [own(408), { kind: "transient", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
+    [own(408, "litellm.Timeout: Request timed out."), { kind: "transient", suspect: true }, "a 408 whose words say \"timed out\" (a gateway's): the status outranks the words (review pass 1)"],
+    [own(504, "upstream request timed out"), { kind: "transient", suspect: true }, "a 504 saying \"timed out\": the same"],
     [own(429), { kind: "transient", suspect: false }, "a 429: paused for, then an outage with no suspect"],
     [own(503), { kind: "transient", suspect: false }, "a 503: the same"],
     [own(500), { kind: "transient", suspect: true }, "a 500: paused for, then an outage with a suspect"],

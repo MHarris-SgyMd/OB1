@@ -425,7 +425,12 @@ export function followClassify(e: unknown): FollowVerdict {
 export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {}): { kind: ErrorKind; suspect: boolean } {
   const verdict = followClassify(e);
   const kind = classifyError(e, opts);
-  return { kind: kind === "fatal" && verdict === "maybe-poison" ? "transient" : kind, suspect: verdict !== "backpressure" };
+  // An answer's status outranks classifyError's "timed out" in its words: a 408 whose body says
+  // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
+  // decides (review pass 1). A deadline with no status keeps "thought", which the probe decides.
+  const answered = typeof (e as { status?: unknown } | undefined)?.status === "number";
+  const outage = verdict === "maybe-poison" && (kind === "fatal" || (kind === "thought" && answered));
+  return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
 }
 
 /**
@@ -470,7 +475,7 @@ export const PROBE_PROMPT = "Reply with the word OK.";
 /**
  * What one probe found. `up`: the model answered, or the provider answered a
  * way the next real call will judge (a 400 for the probe's own `max_tokens`,
- * say). `out`: no answer, a timeout, a 429 or a 5xx — `unanswered`
+ * say). `out`: no answer, a timeout, a 408, a 429 or a 5xx — `unanswered`
  * (probeChat's) when no answer came within its limit or the answer's body
  * never arrived, the provider holding the call, not refusing it nor erring on
  * it (SMD-3306 PR 6b-1: the subject sweep reads a call aborted in hand, this
@@ -550,7 +555,9 @@ export async function probeTier(jev: JevConfig, model: string, timeoutMs: number
     if (wake?.aborted) return { state: "out", why: "the probe was stopped", tier: true };
     const why = `the tier at ${jev.endpoint.base}: ${((e as Error).message ?? "").slice(0, 200)}`;
     const err = e as { kind?: string; status?: number };
-    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429);
+    // A 408 is the tier's outage, as probeChat reads one (SMD-3311 review pass 1): read as refused, an
+    // outage over the decide call's 408 settled at once and its next 408 failed the suspect.
+    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429 && err.status !== 408);
     return { state: answeredAsOther ? "refused" : "out", why, tier: true };
   }
 }

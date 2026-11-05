@@ -2170,6 +2170,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     assert(miss.state === "missing" && miss.tier === true && /serves h2o-test/.test(miss.why), "probeTier: a tier serving another model is the decider missing");
     const dead = resolveJevConfig({ OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1" })!;
     assert((await probeTier(dead, "h2o-test", 2000)).state === "out", "probeTier: nothing answering is an outage");
+    // A tier answering 408 is out, as probeChat reads one, and a 401 still refused (SMD-3311 review pass 1).
+    const answering = (status: number) => Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy", { status }) });
+    const t408 = answering(408);
+    const t401 = answering(401);
+    try {
+      const at = (s: { port?: number }) => resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${s.port}`, OB1_JEV_LOCAL: "1" })!;
+      const p408 = await probeTier(at(t408), "h2o-test", 2000);
+      const p401 = await probeTier(at(t401), "h2o-test", 2000);
+      assert(p408.state === "out" && p401.state === "refused", `probeTier: a 408 is out, a 401 refused (${p408.state}, ${p401.state})`);
+    } finally {
+      t408.stop(true);
+      t401.stop(true);
+    }
   } finally {
     tier.stop(true);
     writer.stop(true);
