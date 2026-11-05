@@ -19141,6 +19141,42 @@ if (want("23d")) {
   }
 }
 
+if (want("23e")) {
+  console.log("\n[23e] A markdown note's frontmatter priority and due day, through the ingester's own command (SMD-3666 PR 2): a note saying priority high and due 2026-12-01 reads that way through priority_of, as the run's actor; a note saying none states nothing; the same vault again writes nothing; the line deleted clears the statement");
+  const vault = mkdtempSync(join(tmpdir(), "ob1-23e-"));
+  const watch = new SQL({ url: URL_!, max: 1 });
+  const ingest = () => {
+    const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", URL_!, "--source", "markdown", "--markdown", vault, "--allow", vault, "--actor", "live-23e-vault"],
+      { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+    return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+  };
+  const note = join(vault, "Passport renewal 23e.md");
+  const id = recordId("markdown", "passport renewal 23e");
+  const read = async () => ((await watch`SELECT level::int AS level, winner->>'due_at' AS due FROM priority_of((${JSON.stringify([{ kind: "thought", key: id }])}::text)::jsonb)`) as { level: number | null; due: string | null }[])[0];
+  const said = async () => (await watch`SELECT level::int AS level, reason, maker_name, close_reason AS closed FROM priority_assertions WHERE item_kind = 'thought' AND item_key = ${id} ORDER BY seq`) as { level: number; reason: string; maker_name: string; closed: string | null }[];
+  try {
+    writeFileSync(note, "---\npriority: high\ndue: 2026-12-01\n---\nRenew the passport before the trip.\n");
+    writeFileSync(join(vault, "Plain note 23e.md"), "Nothing to do here, a note of [23e].\n");
+    const first = ingest();
+    const of = await read();
+    const statements = await said();
+    assert(first.code === 0 && /priorities \(SMD-3666, as live-23e-vault\): asserted 1, nothing_to_clear 1/.test(first.out)
+           && of?.level === 3 && of.due !== null && Date.parse(of.due) === Date.parse("2026-12-01T00:00:00Z")
+           && statements.length === 1 && statements[0].reason === "frontmatter priority: high" && statements[0].maker_name === "live-23e-vault",
+      `a note saying priority high and due 2026-12-01 reads High due that day through priority_of, stated as the run's actor with its word as the reason; a note saying none states nothing (${first.code} ${first.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${JSON.stringify(of)} ${first.err.trim().slice(0, 200)})`);
+    const again = ingest();
+    writeFileSync(note, "---\ndue: 2026-12-01\n---\nRenew the passport before the trip.\n");
+    const deleted = ingest();
+    const after = await said();
+    assert(again.code === 0 && /priorities \(SMD-3666, as live-23e-vault\): unchanged 1, nothing_to_clear 1/.test(again.out) && (await said()).length === 1
+           && deleted.code === 0 && after.length === 1 && after[0].closed === "cleared" && (await read())?.level === null,
+      `the same vault again writes nothing; the priority line deleted clears the statement, the day alone stating nothing, and the note reads unknown (${again.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${deleted.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${JSON.stringify(after.map((r) => r.closed))})`);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+    await watch.close();
+  }
+}
+
 if (want("24")) {
   console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
   type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean; rotated?: boolean };
