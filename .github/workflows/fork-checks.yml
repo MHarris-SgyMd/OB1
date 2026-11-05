@@ -1151,14 +1151,15 @@ jobs:
       # s after 106 s of suites, on the run's critical path. Then test-preflight
       # was the job's floor, the long leg of a pair whose median was ~219 s of
       # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
-      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first here, beside
-      # test-upgrade, and rest in the job preflight-rest, on a runner of its
-      # own, since this job's CPUs are its limit (SMD-3691: that job's
-      # comment has the measurements). test-upgrade.ts applies migrations
-      # INCREMENTALLY, onto a database that already holds data — the one
-      # situation every other suite avoids by resetting first, and the only
-      # one a real deployment is ever in; most of its time is three waits on
-      # the migrator's 10 s lock_timeout.
+      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first, [5] alone
+      # since SMD-3710, here beside test-upgrade, and rest in the job
+      # preflight-rest, on a runner of its own, since this job's CPUs are
+      # its limit (SMD-3691: that job's comment has the measurements, and
+      # SMD-3710's). test-upgrade.ts applies migrations INCREMENTALLY, onto
+      # a database that already holds data — the one situation every other
+      # suite avoids by resetting first, and the only one a real deployment
+      # is ever in; most of its time is three waits on the migrator's 10 s
+      # lock_timeout.
       # test-preflight.ts is the deploy gate: without it a misconfigured server
       # starts, answers the MCP handshake, passes every HTTP liveness probe, and
       # fails only when a user captures their first thought; its time is its
@@ -1569,13 +1570,22 @@ jobs:
   # legs' span; on an AMD EPYC 7763 (four of the five) the CPUs were 88-90%
   # busy on average from the legs' start to 160 s in, and the first shard
   # ended at 182-189 s. So a leg there took its time from the others, and a
-  # fourth would have added contention, not time off. The rest shard is 56
+  # fourth would have added contention, not time off. The rest shard was 56
   # CPU-seconds timed alone on a laptop (39.7 of bun, 16 of its Postgres),
   # the first shard 71.5 and test-upgrade 33 (most of its span waits); the
-  # data layer keeps those two. With two legs, on an EPYC (one run,
+  # data layer kept those two. With two legs, on an EPYC (one run,
   # 41566315515), the first shard ended at 169 s, the CPUs 67% busy and
-  # never at 95%. One Postgres, with a /dev/shm of 1 GB: the data layer's
-  # Postgres step has why.
+  # never at 95%. On an EPYC 7763 (eight main runs to 87240d21) that
+  # first shard still ended 15-20 s after the later of test-upgrade and
+  # the data layer's foreground suites, with [9] (17-19 s there) in it, so
+  # [9] runs here (SMD-3710). This job then gains [9] while the data layer
+  # loses up to as much, so the margin between them falls by up to twice
+  # [9]: from 12-107 s before, over the 16 newest green main runs to
+  # 87240d21, it would have gone below 0 in three (a 7763 at 26 s, an EPYC
+  # 9V45 at 13, a Xeon 6975P-C at 12). Neither job is the run's critical
+  # path: the data layer ended 62 s or more before the run's last job in
+  # all 16, and 125 s or more in those three. One Postgres, with a
+  # /dev/shm of 1 GB: the data layer's Postgres step has why.
   preflight-rest:
     name: The deploy gate's rest shard against real Postgres
     runs-on: ubuntu-24.04
