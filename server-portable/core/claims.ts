@@ -33,7 +33,7 @@ export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { renew
 const SINCE_MAX = 10;
 /** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. `ticketClosed` when the brain records its ticket as closed: board-sync releases the claim at its next pass (SMD-3600). */
 export type ClaimWorkResult = { outcome: "claimed" | "renewed"; claim: WorkClaim; token?: string; lapsed?: ClaimLapse; ticketClosed?: ClosedTicket };
-export type ClaimWorkCode = "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY" | "CLAIM_RELEASED";
+export type ClaimWorkCode = "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY" | "CLAIM_RELEASED" | "CLAIM_UNATTRIBUTED";
 export type RenewClaimResult = { claim: WorkClaim; lapsed?: ClaimLapse; ticketClosed?: ClosedTicket };
 export type RenewClaimCode = "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED" | "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "CLAIM_UNATTRIBUTED";
 export type ReleaseClaimResult = { outcome: "released" | "already_released"; claim: WorkClaim };
@@ -146,6 +146,13 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
   // writer's too, as renew_claim names the holder before the end. Without a token, a new claim as before.
   if (before && before !== "unread" && before.releasedAt !== null && before.ownOnThisWork === true) {
     return refuse({ code: "CLAIM_RELEASED", retryable: false, id: before.id, releasedAt: before.releasedAt, takenOver: before.releaseReason === TAKEN_OVER, releasedBy: before.releasedBy, reason: before.releaseReason, ticketClosed: closedBySync(before.issue, before.releaseReason, before.releasedByKind) });
+  }
+  // SMD-3705: its own claim on exactly this work, unreleased (an ended one was answered above), made under its agent
+  // id while that id is not to hand — 115's holder test reads it as another's, and its writer would take a lapsed one
+  // over, or answer a live one WORK_CLAIMED. Refused as renew_claim refuses it; the lease read by the token's hash is
+  // the proof ownWhileAway's claimTokenIs gives there. One made by name alone is 115's own by name, and renews.
+  if (principal.agentId === undefined && before && before !== "unread" && before.ownOnThisWork === true && before.byAgentId === true) {
+    return unattributedRefusal(principal, before.id, false);
   }
   const a = await asked(ClaimRefused, async () => (await ctx.store()).claimWork({
     issue: input.ticket, piece: input.piece, label: input.label, leaseSeconds: input.lease_seconds, token: tokenOf(input.token), actor: actorOf(ctx, principal),

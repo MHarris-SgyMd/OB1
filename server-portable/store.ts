@@ -1209,8 +1209,8 @@ export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_Y
  * claim, the claims in the way, and the token — set on claim_work's `claimed`
  * alone, and passed through untouched to the caller who claimed.
  */
-/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). */
-export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; issue?: string; releasedByKind?: string | null };
+/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). `byAgentId` (claim_work's form): the claim was made under an agent id, so 115's holder test needs that id to read it as the caller's (SMD-3705). */
+export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; byAgentId?: boolean; issue?: string; releasedByKind?: string | null };
 export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
 export type ClaimAnswer = {
   outcome: "claimed" | "renewed" | "released" | "already_released" | "refused";

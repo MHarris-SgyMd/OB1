@@ -1919,6 +1919,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
+  : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
