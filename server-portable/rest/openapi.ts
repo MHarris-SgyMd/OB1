@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { SPECS } from "../core/index.ts";
 import { scopeOf, type ToolName } from "../tools.ts";
-import { FORK_VERSION } from "../version.ts";
+import { BRAIN_VERSION } from "../version.ts";
 import { pathFields, readsQuery, REFUSAL_STATUS, ROUTES } from "./routes.ts";
 import type { LoadedOp } from "../core/index.ts";
 
@@ -136,7 +136,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
   paths["/health"] = { get: { operationId: "health", summary: "Liveness, and the brain's record for a key that may read it", description: "Internal only: the process is serving, `{ status: \"ok\" }`. With a key that may read brain_info, which the agent registry clears within the deadline, the brain's record on the health surface instead — what the MCP server's public /health shows (SMD-2287). Any other key is answered liveness, as no key is: this route refuses no one.", responses: { "200": { description: "Serving: `{ status: \"ok\" }`, or the brain's record.", content: { "application/json": { schema: { type: "object" } } } }, "405": KEYED_ANSWERS["405"] }, security: [{}, ...CALLER_FORMS] } };
   return {
     openapi: "3.1.0",
-    info: { title: "Open Brain REST core", version: FORK_VERSION, description: "Every operation the brain's MCP tools expose, as JSON (SMD-2284). Internal by default; public at /api only where the operator turns it on." },
+    info: { title: "Open Brain REST core", version: BRAIN_VERSION, description: "Every operation the brain's MCP tools expose, as JSON (SMD-2284). Internal by default; public at /api only where the operator turns it on." },
     paths,
     components: {
       securitySchemes: {

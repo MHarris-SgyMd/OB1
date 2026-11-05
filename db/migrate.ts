@@ -636,7 +636,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
           // Hash the TEMPLATE, not the substituted SQL. Otherwise choosing a
           // different embedding dimension would look like an edited migration and
           // trip the drift check, when the file has not changed at all. The rule is
-          // version.mjs's, shared with check-fork's frozen-range check (SMD-1804).
+          // version.mjs's, shared with check-consistency's frozen-range check (SMD-1804).
           sha: migrationSha(template),
         };
       });

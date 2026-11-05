@@ -393,7 +393,7 @@ function selfCheck() {
     "",
     "Green after:",
     "- bun db/test-schema.ts 907/907",
-    "- bun scripts/check-fork-consistency.ts PASS, with a sentence long enough to look like a finding",
+    "- bun scripts/check-consistency.ts PASS, with a sentence long enough to look like a finding",
     "",
     "Verified against the container, and two things came of it:",
     "- test-live 17/17 (caught: run-it)",
@@ -502,7 +502,7 @@ for (const c of review) {
   if (findings.length === 0) {
     // Older passes carry their findings in the subject only: one coarse row, kept out of the tables.
     subjectOnly++;
-    rows.push(row("subject", c.subject.replace(/^\[fork\]\s*/, "")));
+    rows.push(row("subject", c.subject.replace(/^\[(?:core|fork)\]\s*/, "")));
     continue;
   }
   for (const b of findings) rows.push(row("bullet", b));

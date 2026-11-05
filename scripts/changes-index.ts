@@ -1,16 +1,16 @@
 #!/usr/bin/env bun
 /**
- * fork-index.ts — renders changes/README.md's index of numbered changes from
+ * changes-index.ts — renders changes/README.md's index of numbered changes from
  * changes/ (SMD-1917; in FORK.md until SMD-3765).
  *
  * Changes 1–17 are FORK.md's table, the record of the fork era. Every numbered
  * change from 18 on is one file, changes/NNN-<slug>.md, and this writes the
  * one-line-per-change index changes/README.md carries between two marker
  * comments, so the count and the list are never kept by hand.
- * check-fork-consistency.ts (check 15) renders the same block in memory and
+ * check-consistency.ts (check 15) renders the same block in memory and
  * fails when the committed one differs — the round-trip tools.json has.
  *
- *   bun scripts/fork-index.ts        # rewrite the block in changes/README.md
+ *   bun scripts/changes-index.ts        # rewrite the block in changes/README.md
  *
  * A change file's first line is `# N. <title>`; the index shows the part of the
  * title before " — " (the house shape is "Thing — consequence") and the ticket
@@ -31,7 +31,7 @@ export const CHANGES_DIR = "changes";
 export const INDEX_FILE = `${CHANGES_DIR}/README.md`;
 /** The first numbered change with a file; 1–17 are FORK.md's table. */
 export const FIRST_FILED = 18;
-export const START = "<!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->";
+export const START = "<!-- changes-index:start — generated from changes/ by scripts/changes-index.ts; do not edit by hand -->";
 export const END = "<!-- changes-index:end -->";
 export const NUMBERED = /^(\d{3})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$/;
 export const FRAGMENT = /^smd-(\d+)\.md$/;

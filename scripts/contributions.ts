@@ -1,7 +1,7 @@
 /**
  * contributions.ts — the one walk of the contribution directories.
  *
- * check-fork-consistency.ts walks the seven categories for every check, and
+ * check-consistency.ts walks the seven categories for every check, and
  * connector-registry.ts walks them for the coverage sweep and its CLI; one
  * definition of "what is a contribution" keeps the two from disagreeing about a
  * directory (SMD-1933, review pass 2). Plain fs, no Bun API.

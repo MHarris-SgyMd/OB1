@@ -16,7 +16,7 @@
 // and project name, as the `up` will be given them (COMPOSE_PROFILES in the env file counts, as for `up`; a
 // COMPOSE_FILE there, which compose's own interpolation reads, asks for the same files with -f). Each port's
 // setting is read from the compose files' own mapping, the house form check 13 of
-// scripts/check-fork-consistency.ts holds, "${X_BIND:-127.0.0.1}:${X_PORT:-N}:C" (read a little more widely
+// scripts/check-consistency.ts holds, "${X_BIND:-127.0.0.1}:${X_PORT:-N}:C" (read a little more widely
 // here: any names, any default address), or its one literal loopback exception, "127.0.0.1:${X_PORT:-N}:C",
 // which names a port setting alone (the break-glass listener, SMD-3307). Who holds a port is read from every
 // container, stopped ones included (one takes its port back when it starts; Docker's stopped ones through their port bindings), of every runtime

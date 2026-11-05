@@ -71,7 +71,7 @@ Checked when the server starts, so a malformed manifest stops it:
 - An output schema does not transform: MCP holds the answer to it a second time.
 - A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
 
-Held by check 31 of `scripts/check-fork-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
+Held by check 31 of `scripts/check-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
 
 - **Its directory** holds TypeScript, `migrations/*.sql`, a `README.md` and a `metadata.json`, nothing else.
 - **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own directory's `.ts` files (static, re-exported or bare), nothing else; zod comes from the SDK. Code that runs in the server imports no test file.

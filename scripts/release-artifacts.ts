@@ -10,7 +10,7 @@
  * renderer, so the workflow's bash carries no rule of its own:
  *
  *   facts    what this tag releases, checked against the tree — the tag names
- *            releases.json's last entry and FORK_VERSION equals it; the entry's
+ *            releases.json's last entry and BRAIN_VERSION equals it; the entry's
  *            range closes every migration on disk and no fragment sits in
  *            changes/ (nothing landed between the cut and the tag); the entry's
  *            change files exist; the tagged commit is on origin/main; Ollama is
@@ -24,7 +24,7 @@
  * `--rehearsal` in place of `--tag` is the same run with nothing published: on a
  * pull request and on workflow_dispatch the job builds the images, renders the
  * overlay against them and brings the stack up from them, so the shape is
- * exercised before a tag ever is. The version is then FORK_VERSION and the
+ * exercised before a tag ever is. The version is then BRAIN_VERSION and the
  * image tag `rehearsal`; the release checks that need a release are skipped.
  *
  *   bun scripts/release-artifacts.ts facts --tag v1.0.0 --out "$GITHUB_OUTPUT"
@@ -42,8 +42,8 @@ import { existsSync, readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, highestReleasedMigration, readReleases, type Release } from "../db/version.mjs";
-import { pad3, readChanges, type ClassifiedChanges } from "./fork-index.ts";
+import { BRAIN_VERSION, REPO_URL, UPSTREAM_PIN, highestReleasedMigration, readReleases, type Release } from "../db/version.mjs";
+import { pad3, readChanges, type ClassifiedChanges } from "./changes-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** The images the job publishes, by their short names; the registry path comes from imageNames. */
@@ -86,7 +86,7 @@ export type FactsInput = {
   mode: "tag" | "rehearsal";
   tag?: string;
   releases: Release[];
-  forkVersion: string;
+  brainVersion: string;
   /** Every db/migrations/NNN_*.sql number on disk. */
   migrationNumbers: number[];
   changes: Pick<ClassifiedChanges, "numbered" | "fragments">;
@@ -104,7 +104,7 @@ export type Facts = Record<string, string>;
 /**
  * What the run releases, and everything wrong with releasing it. In `tag` mode
  * every rule applies; in `rehearsal` the tree is taken as it is and the version
- * is FORK_VERSION, the image tag `rehearsal`.
+ * is BRAIN_VERSION, the image tag `rehearsal`.
  */
 export function releaseFacts(input: FactsInput): { problems: string[]; facts: Facts } {
   const problems: string[] = [];
@@ -112,7 +112,7 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
   const hi = input.migrationNumbers.length ? Math.max(...input.migrationNumbers) : 0;
   const last = input.releases[input.releases.length - 1];
   const previous = input.mode === "tag" ? input.releases[input.releases.length - 2] : last;
-  let version = input.forkVersion;
+  let version = input.brainVersion;
   let imageTag = REHEARSAL_TAG;
   let range: [number, number] = [1, hi];
   let changeFiles: string[] = [];
@@ -130,7 +130,7 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
       date = last.date;
       server = last.server;
       if (m && tagFor(last.version) !== tag) problems.push(`the tag is ${tag} but releases.json's last release is ${last.version} (tag ${tagFor(last.version)}) — a tag names the cut that is last in the manifest`);
-      if (input.forkVersion !== last.version) problems.push(`db/version.mjs's FORK_VERSION is ${input.forkVersion} but the release is ${last.version} — the cut did not bump it (check-fork 17d holds it equal to the schema_version migration)`);
+      if (input.brainVersion !== last.version) problems.push(`db/version.mjs's BRAIN_VERSION is ${input.brainVersion} but the release is ${last.version} — the cut did not bump it (check-consistency 17d holds it equal to the schema_version migration)`);
       if (!last.range) problems.push(`release ${last.version} closes no migration range — every cut ships its schema_version migration, so its range is never empty`);
       else {
         range = [last.range[0], last.range[1]];
@@ -391,7 +391,7 @@ function readInput(mode: "tag" | "rehearsal", tag: string | undefined, owner: st
   return {
     mode, tag, owner, head,
     releases: readReleases(),
-    forkVersion: FORK_VERSION,
+    brainVersion: BRAIN_VERSION,
     migrationNumbers,
     changes: readChanges(ROOT),
     composeFiles,
@@ -419,7 +419,7 @@ function selfCheck(): number {
   const composeGood = "x-ollama-image: &o ollama/ollama:0.34.3\nservices:\n  ollama:\n    image: *o\n";
   const release: Release = { version: "1.0.0+upstream.9543c29", range: [1, 48], server: "abcdef12", upstream: "9543c29", date: "2026-09-30", tickets: ["SMD-1"], changes: [104, 105], frozenShas: {} };
   const numbered = (ns: number[]) => ns.map((n) => ({ name: `${pad3(n)}-x.md`, n, heading: { n, title: "x (SMD-1)" }, text: "", lines: 1 }));
-  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], forkVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeFiles: { "compose.yaml": composeGood }, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890", tagExists: () => true };
+  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], brainVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeFiles: { "compose.yaml": composeGood }, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890", tagExists: () => true };
 
   ok(coreOf("1.2.3+upstream.abc") === "1.2.3" && tagFor("1.2.3+upstream.abc") === "v1.2.3", "core and tag drop the build metadata");
   ok(imageNames("MHarris-SgyMd").server === "ghcr.io/mharris-sgymd/ob1-server" && imageNames("X").migrate === "ghcr.io/x/ob1-migrate", "image names lower-case the owner");
@@ -434,7 +434,7 @@ function selfCheck(): number {
     [{ tag: "1.0.0" }, "not v<MAJOR.MINOR.PATCH>", "a tag without the v"],
     [{ tag: "v1.1.0" }, "last release is 1.0.0+upstream.9543c29", "a tag naming another version"],
     [{ releases: [] }, "records no release", "an empty manifest"],
-    [{ forkVersion: "0.0.0+upstream.9543c29" }, "FORK_VERSION is 0.0.0", "FORK_VERSION not bumped"],
+    [{ brainVersion: "0.0.0+upstream.9543c29" }, "BRAIN_VERSION is 0.0.0", "BRAIN_VERSION not bumped"],
     [{ migrationNumbers: Array.from({ length: 49 }, (_, i) => i + 1) }, "highest migration is 049", "a migration past the range"],
     [{ changes: { numbered: numbered([103, 104, 105]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] } }, "still holds smd-9.md", "a fragment left in changes/"],
     [{ changes: { numbered: numbered([103, 104]), fragments: [] } }, "no 105-*.md", "a numbered change file missing"],
@@ -453,13 +453,13 @@ function selfCheck(): number {
   const two = releaseFacts({ ...base, releases: [{ ...release, version: "0.9.0+upstream.9543c29", changes: [100, 103], range: [1, 44] }, release], changes: { numbered: numbered([100, 101, 102, 103, 104, 105]), fragments: [] } });
   ok(two.problems.length === 0 && two.facts.previous_tag === "v0.9.0", "the previous release's tag is the yield window's start");
   // SMD-3317: from 2.0.0 the version is plain, after a last 1.x release that carried the pin as build metadata.
-  const plain = releaseFacts({ ...base, tag: "v2.0.0", forkVersion: "2.0.0", releases: [{ ...release, version: "1.9.0+upstream.9543c29", changes: [100, 103], range: [1, 44] }, { ...release, version: "2.0.0" }], changes: { numbered: numbered([100, 101, 102, 103, 104, 105]), fragments: [] } });
+  const plain = releaseFacts({ ...base, tag: "v2.0.0", brainVersion: "2.0.0", releases: [{ ...release, version: "1.9.0+upstream.9543c29", changes: [100, 103], range: [1, 44] }, { ...release, version: "2.0.0" }], changes: { numbered: numbered([100, 101, 102, 103, 104, 105]), fragments: [] } });
   ok(plain.problems.length === 0 && plain.facts.version === "2.0.0" && plain.facts.core === "2.0.0" && plain.facts.tag === "v2.0.0" && plain.facts.image_tag === "2.0.0" && plain.facts.previous_tag === "v1.9.0" && plain.facts.upstream === "9543c29"
     && new RegExp(plain.facts.preflight_row).test("  ✓  schema version            2.0.0 · highest migration 048") && !new RegExp(plain.facts.preflight_row).test("  ✓  schema version            2.0.0-rc.1 · highest migration 048"),
     `a plain 2.0.0 after 1.9.0+upstream.9543c29: its tag, image tag and preflight row, the previous tag v1.9.0, the pin still recorded as data (${plain.problems.join("; ")})`);
   ok(releaseFacts({ ...base, mode: "rehearsal", tag: undefined, tagExists: () => false }).facts.previous_tag === "" && releaseFacts({ ...base, mode: "rehearsal", tag: undefined }).facts.previous_tag === "v1.0.0", "a rehearsal names the last release's tag only when it exists — a cut's own rehearsal runs before its tag does (caught: run-it, the first cut's rehearsal)");
-  const rehearsal = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, releases: [], forkVersion: "0.0.0+upstream.9543c29", migrationNumbers: Array.from({ length: 47 }, (_, i) => i + 1), changes: { numbered: numbered([103]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] }, headOnMain: false });
-  ok(rehearsal.problems.length === 0 && rehearsal.facts.version === "0.0.0+upstream.9543c29" && rehearsal.facts.tag === REHEARSAL_TAG && rehearsal.facts.image_tag === REHEARSAL_TAG && rehearsal.facts.range_lo === "001" && rehearsal.facts.range_hi === "047" && rehearsal.facts.change_files === "" && rehearsal.facts.previous_tag === "", "a rehearsal on an unreleased tree: FORK_VERSION, the rehearsal tag, the whole migration range, no release checks");
+  const rehearsal = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, releases: [], brainVersion: "0.0.0+upstream.9543c29", migrationNumbers: Array.from({ length: 47 }, (_, i) => i + 1), changes: { numbered: numbered([103]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] }, headOnMain: false });
+  ok(rehearsal.problems.length === 0 && rehearsal.facts.version === "0.0.0+upstream.9543c29" && rehearsal.facts.tag === REHEARSAL_TAG && rehearsal.facts.image_tag === REHEARSAL_TAG && rehearsal.facts.range_lo === "001" && rehearsal.facts.range_hi === "047" && rehearsal.facts.change_files === "" && rehearsal.facts.previous_tag === "", "a rehearsal on an unreleased tree: BRAIN_VERSION, the rehearsal tag, the whole migration range, no release checks");
   ok(releaseFacts({ ...base, mode: "rehearsal", composeFiles: { "compose.yaml": "services: {}\n" } }).problems.length === 1, "a rehearsal still wants the Ollama pin");
   ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.other.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
   const past = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, migrationNumbers: Array.from({ length: 50 }, (_, i) => i + 1) });

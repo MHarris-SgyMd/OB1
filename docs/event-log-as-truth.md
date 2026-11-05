@@ -587,7 +587,7 @@ Nothing in this page is enforced by this page. What holds the decision:
   behaviours `db/test-live.ts`, its cost line 060's header;
 - test-schema's sentinel reads and preflight's recognisers, which pin the
   write functions' bodies and move with them at every step;
-- the SQL-safety rule (`scripts/check-fork-consistency.ts` check 21): no
+- the SQL-safety rule (`scripts/check-consistency.ts` check 21): no
   `.sql` in the tree destroys a row a brain holds, the log's own
   `BEFORE TRUNCATE` refusal included;
 - the version rules: each step is a fragment with its migration, MINOR, cut

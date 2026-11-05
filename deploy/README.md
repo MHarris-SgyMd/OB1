@@ -438,7 +438,7 @@ its forwarder on a loopback port of its own (SMD-2874). It joins none of this
 stack's networks.
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
-`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
+`host_ip: 127.0.0.1`, and `scripts/check-consistency.ts` check 13 parses
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
@@ -527,7 +527,7 @@ hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
 file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
 `compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
-table built in `scripts/check-fork-consistency.ts` (check 28); no compose
+table built in `scripts/check-consistency.ts` (check 28); no compose
 file defines a config that is not a route table (SMD-2658) but compose.yaml's
 forwarder script and the observability profile's dashboard and its provider
 (check 28's `BASE_CONFIGS`, check 37). Every overlay is
@@ -619,7 +619,7 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 **Adding a service** is two edits in `compose.yaml`: the service, with no
 `ports:`, and a router for its path in `x-proxy-routes`, at a priority that
 orders it among the others. The same router, and its backend under `services:`, go in
-`PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
+`PROXY_ROUTE_TABLE` in `scripts/check-consistency.ts`, whose check 28
 holds the table byte for byte. A note on a route goes in the YAML comments
 above the block, never in it: Traefik renders a route file as a Go template
 before it reads the YAML, so a comment line in the table is not inert
@@ -1023,7 +1023,7 @@ unhealthy meanwhile; a bad `JEV_THREADS` holds it until a recreate. The servers
 can need it — with `OB1_JEV_BASE_URL` naming the `jev` service, their preflight
 fails ("The jev service is not running") until it serves — and after a reboot
 it now comes back without a hand start (SMD-2834). Check 32
-of `scripts/check-fork-consistency.ts` holds every service's policy, and that
+of `scripts/check-consistency.ts` holds every service's policy, and that
 each follower runs through the supervisor. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
 without their database. A canary (`canary.sh`) takes the same policies.
@@ -1225,7 +1225,7 @@ docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcom
 
 **Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
 rotated at 10 MB with three files kept (`x-logging` in `compose.yaml`; check 29
-of `scripts/check-fork-consistency.ts` refuses a service there without it). Podman takes the same keys
+of `scripts/check-consistency.ts` refuses a service there without it). Podman takes the same keys
 and keeps one file, truncated at the bound rather than rotated: every line
 goes at once, so it holds anywhere from nothing to 10 MB (measured on podman
 6.0.2). The driver is named per service, so it
