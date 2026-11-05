@@ -36,7 +36,7 @@
  * reads them. A run not read, or being re-run, among the window's newest 26 fails it after the report (a warning may
  * have moved); an older one is a warning. The run reported on (--through's, or a listed window's newest) not read
  * fails it with no report; re-run since the list, it reads nothing, exit 0, as when the list shows it re-run. With
- * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Fork Checks run on
+ * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Brain Checks run on
  * main.
  *
  * With --shift, the list's call, and a run's read among those a gap fails it for (the newest 26 and the run reported
@@ -49,7 +49,7 @@
  *   --step <regex>        steps whose name matches, case-insensitive; default every step of a second or more in
  *                         some run (chosen by name across the runs, so each reads every run it ran in; a step's name
  *                         is taken to be unique in its job, as GitHub's are today)
- *   --workflow <name>     default "Fork Checks"
+ *   --workflow <name>     default "Brain Checks", with its runs as "Fork Checks" before SMD-3765 (DEFAULT_WORKFLOWS)
  *   --branch <name>       default main
  *   --days <n>            runs created in the last n × 24 hours, default 7, at most 400 (GitHub keeps a run 400 days)
  *   --last <n>            the newest n completed runs instead, at most 500; with --shift the newest n up to the
@@ -106,6 +106,55 @@ type Run = { jobs: Job[]; headSha: string; createdAt: string; attempt?: number; 
 
 /** The most runs one `gh run list` returns here; a window that fills it is said to be cut short. */
 const LIST_LIMIT = 500;
+
+/**
+ * The names the default workflow has run under, newest first: "Brain Checks", and "Fork Checks" until SMD-3765
+ * renamed its file (fork-checks.yml) and its name. A default listing reads main's runs of either, so a window across
+ * the rename reads the jobs and steps of both, which kept their names; a --workflow lists the one it names.
+ */
+export const DEFAULT_WORKFLOWS = ["Brain Checks", "Fork Checks"];
+
+/** The default workflow's files, now and before SMD-3765: GitHub may show a workflow whose file is gone by its path. */
+export const DEFAULT_WORKFLOW_PATHS = [".github/workflows/brain-checks.yml", ".github/workflows/fork-checks.yml"];
+
+/**
+ * The runs of a `gh run list` that belong to one of `names`: by the run's own name (`name`, the workflow's name when
+ * it ran) or its workflow's present one (`workflowName`, which may be its path once its file is gone, so `paths` too).
+ */
+export function ofWorkflows<T extends { name?: string; workflowName?: string }>(runs: T[], names: string[], paths: string[] = []): T[] {
+  return runs.filter((r) => names.includes(r.name ?? "") || names.includes(r.workflowName ?? "") || paths.includes(r.workflowName ?? ""));
+}
+
+/** How many runs to ask gh for to keep `want` of one workflow: the default listing shares gh's list with others, so twice. */
+export function listLimit(want: number, named: boolean): number {
+  return Math.min(named ? want : want * 2, LIST_LIMIT);
+}
+
+/**
+ * The runs of gh's list the report keeps. A named --workflow went to gh, which also takes a file name, an id or
+ * another case, and filtered the list itself: kept whole. The default kept by ofWorkflows.
+ */
+export function keptRuns<T extends { name?: string; workflowName?: string }>(raw: T[], named: boolean): T[] {
+  return named ? raw : ofWorkflows(raw, DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS);
+}
+
+/** --days's list is cut short when gh's whole list, other workflows' runs included, filled its limit inside the window. */
+export function daysCutShort(raw: { createdAt: string }[], cutoff: number, limit = LIST_LIMIT): boolean {
+  return raw.length >= limit && Math.min(...raw.map((r) => Date.parse(r.createdAt))) >= cutoff;
+}
+
+/** --days's window from gh's whole list: the runs kept (keptRuns), and whether that list was cut short (daysCutShort). */
+export function daysWindow<T extends { createdAt: string; name?: string; workflowName?: string }>(raw: T[], cutoff: number, named: boolean, limit = LIST_LIMIT): { runs: T[]; cutShort: boolean } {
+  return { runs: keptRuns(raw, named), cutShort: daysCutShort(raw, cutoff, limit) };
+}
+
+/**
+ * The default --last list, gh's asked count all returned, still held fewer than --last of the workflow's runs. Not
+ * for a named workflow or --shift, whose lists hold that workflow's runs alone (on main nothing else pushes).
+ */
+export function lastFellShort(full: boolean, kept: number, last: number, named: boolean, shift: boolean): boolean {
+  return !named && !shift && full && kept < last;
+}
 
 /** Seconds from one ISO time to another, or null when either is missing or the order is wrong (a step never run). */
 export function seconds(from?: string | null, to?: string | null): number | null {
@@ -720,6 +769,23 @@ async function selfCheck(): Promise<number> {
     "where it landed: a run on the line is not over it, nor counts toward half; a spike third from the end of the 10 does not stretch it, one second from the end does (half of two); the first of the 10 can be it");
   ok(whole("20") === 20 && Number.isNaN(whole("0x10")) && Number.isNaN(whole(" 20")) && Number.isNaN(whole("1e1")) && Number.isNaN(whole(true)),
     "a whole number in digits alone");
+  const ofRename = [{ databaseId: 5, name: "Fork Checks", workflowName: ".github/workflows/fork-checks.yml" }, { databaseId: 4, name: "x", workflowName: ".github/workflows/fork-checks.yml" }, { databaseId: 3, workflowName: "Brain Checks" }, { databaseId: 2, workflowName: "CI shift" }, { databaseId: 1, workflowName: "Fork Checks" }, { databaseId: 0 }];
+  ok(ofWorkflows(ofRename, DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS).map((r) => r.databaseId).join() === "5,4,3,1" && ofWorkflows(ofRename, ["CI shift"]).map((r) => r.databaseId).join() === "2"
+    && ofWorkflows(ofRename, DEFAULT_WORKFLOWS).map((r) => r.databaseId).join() === "5,3,1",
+    "a default listing keeps the workflow's runs by their own name, the workflow's name or its file's path, now and before SMD-3765, and drops another workflow's and a nameless one");
+  ok(keptRuns(ofRename, true).length === ofRename.length && keptRuns(ofRename, false).map((r) => r.databaseId).join() === "5,4,3,1",
+    "a named --workflow keeps gh's list whole, as gh filtered it (it takes a file name, an id or another case); the default keeps the workflow's");
+  const madeAt = (iso: string) => ({ createdAt: iso });
+  const full2 = [madeAt("2026-11-05T00:00:00Z"), madeAt("2026-11-04T00:00:00Z")], dayCut = Date.parse("2026-11-03T00:00:00Z");
+  ok(daysCutShort(full2, dayCut, 2) && !daysCutShort(full2.slice(0, 1), dayCut, 2) && !daysCutShort([...full2.slice(0, 1), madeAt("2026-11-02T00:00:00Z")], dayCut, 2),
+    "--days is cut short when gh's whole list fills its limit inside the window, not when it is short or reaches past it");
+  const others = [{ ...madeAt("2026-11-05T00:00:00Z"), workflowName: "CI shift" }, { ...madeAt("2026-11-04T00:00:00Z"), workflowName: "Brain Checks" }];
+  const dw = daysWindow(others, dayCut, false, 2);
+  ok(dw.cutShort && dw.runs.length === 1, "…read on gh's whole list: another workflow's runs fill it too, though the window keeps the workflow's alone");
+  ok(lastFellShort(true, 30, 40, false, false) && !lastFellShort(false, 30, 40, false, false) && !lastFellShort(true, 40, 40, false, false) && !lastFellShort(true, 30, 40, true, false) && !lastFellShort(true, 30, 40, false, true),
+    "a default --last that gh filled is said short only below --last, and never for a named workflow or --shift");
+  ok(listLimit(50, true) === 50 && listLimit(50, false) === 100 && listLimit(400, false) === 500 && listLimit(500, true) === 500,
+    "a named workflow asks gh for what it wants; the default, sharing gh's list with other workflows, twice that, within gh's limit");
   const fifty = Array.from({ length: 50 }, (_, i) => String(i + 1));
   ok(!needsWiderList(fifty, "50", 40) && !needsWiderList(fifty, "40", 40) && needsWiderList(fifty, "39", 40) && needsWiderList(fifty, "x", 40) && !needsWiderList(fifty, undefined, 40),
     "the whole list is read only when the short one holds fewer than --last runs up to --through");
@@ -810,10 +876,15 @@ if (import.meta.main) {
   const runsOpt = typeof opts["--runs"] === "string" ? opts["--runs"] : undefined;
   if (runsOpt !== undefined) for (const f of ["--branch", "--days", "--last", "--workflow", "--through"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
   const repo = typeof opts["--repo"] === "string" ? ["--repo", opts["--repo"]] : [];
-  const workflow = String(opts["--workflow"] ?? "Fork Checks"), branch = String(opts["--branch"] ?? "main");
+  const namedWorkflow = typeof opts["--workflow"] === "string";
+  const workflows = namedWorkflow ? [String(opts["--workflow"])] : DEFAULT_WORKFLOWS;
+  const workflow = workflows[0], branch = String(opts["--branch"] ?? "main");
+  // A named workflow is asked of gh; the default lists the branch's runs of every workflow and keeps its names', so
+  // the runs from before the rename stay in a window. Other workflows' runs take places in the list: twice the room.
+  const byWorkflow = namedWorkflow ? ["--workflow", workflow] : [];
   // A shift reads main's own runs: a fork's pull request from a branch it named main lists as main too.
   const event = shift ? ["--event", "push"] : [];
-  const where = `${workflow} on ${branch}${shift ? " (push)" : ""}`;
+  const where = `${workflow}${namedWorkflow ? "" : ` (or ${DEFAULT_WORKFLOWS.slice(1).join(", ")}, its name before SMD-3765)`} on ${branch}${shift ? " (push)" : ""}`;
   // The summary's line for an exit before the report: a red run with an empty summary says nothing.
   const summaryNote = (text: string) => appendSummary(`**${text}**`);
   // A failure: with --shift, an annotation and a line in the summary too, so a red run says why.
@@ -838,25 +909,31 @@ if (import.meta.main) {
     ids = runsNamed(named);
     console.log(`${ids.length} run${ids.length === 1 ? "" : "s"} named${ids.length < named.length ? ` (${named.length - ids.length} named again, read once)` : ""}`);
   } else if (last !== undefined) {
+    let full = 0; // runs asked for when gh returned them all: the list may then hold fewer of the workflow's than wanted
     const list = async (limit: number) => {
-      const got = await listRuns(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--limit", String(limit), "--json", "databaseId,status"]);
+      const asked = listLimit(limit, namedWorkflow);
+      const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--limit", String(asked), "--json", "databaseId,status,name,workflowName"]);
       if (!got.ok) stop(`gh run list failed: ${got.error}`);
-      return (got.json as { databaseId: number; status: string }[]).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
+      const raw = got.json as { databaseId: number; status: string; name?: string; workflowName?: string }[];
+      full = raw.length >= asked ? asked : 0;
+      return keptRuns(raw, namedWorkflow).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
     };
     // --through names the newest run or near it, as the workflow does; one further back, with fewer than `last` runs
     // up to it in the short list, takes the whole list (~30 s). Runs still going take places in it, so 10 spare.
     listed = await list(Math.min(last + 10, LIST_LIMIT));
     if (last + 10 < LIST_LIMIT && needsWiderList(listed.map((r) => r.id), through, last)) listed = await list(LIST_LIMIT);
+    if (lastFellShort(full > 0, listed.length, last, namedWorkflow, shift)) console.log(`  gh returned all ${full} runs it was asked for, ${listed.length} of them ${where}: fewer than --last ${last}, other workflows' runs filling the rest; give --workflow with one name (${DEFAULT_WORKFLOWS.map((w) => JSON.stringify(w)).join(", or for runs before SMD-3765 ")}), whose list holds that workflow's runs alone`);
   } else {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
-    const got = await listRuns(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
+    const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt,name,workflowName"]);
     if (!got.ok) stop(`gh run list failed: ${got.error}`);
-    const runs = got.json as { databaseId: number; status: string; createdAt: string }[];
+    const raw = got.json as { databaseId: number; status: string; createdAt: string; name?: string; workflowName?: string }[];
+    const { runs, cutShort } = daysWindow(raw, cutoff, namedWorkflow);
     // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
-    const oldest = Math.min(...runs.map((r) => Date.parse(r.createdAt)));
-    if (runs.length >= LIST_LIMIT && oldest >= cutoff) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
+    // gh's list is read whole, other workflows' runs included: they fill it as the workflow's do.
+    if (cutShort) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
     listed = runs.filter((r) => Date.parse(r.createdAt) >= cutoff).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
     console.log(`${where} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${listed.filter((r) => r.status === "completed").length} completed runs`);
   }

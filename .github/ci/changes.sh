@@ -1,5 +1,5 @@
 #!/bin/bash
-# Whether a Fork Checks run's change can affect its code jobs (SMD-2435).
+# Whether a Brain Checks run's change can affect its code jobs (SMD-2435).
 # `changes.sh EVENT BASE_REF DEFAULT_BRANCH` writes code=true|false and why= to
 # $GITHUB_OUTPUT (and says both); `changes.sh --self-check` runs its cases;
 # `changes.sh --not-code` prints which of the paths on stdin skip (check 47).
@@ -113,7 +113,7 @@ self_check() {
   check true pull_request dashboard/static/logo.png
   check true pull_request dashboard/README.md
   check true pull_request README.MD
-  check true pull_request .github/workflows/fork-checks.yml
+  check true pull_request .github/workflows/brain-checks.yml
   check true pull_request "$(printf 'docs/a\nserver-portable/x.ts')"
   check true pull_request
   check true push docs/a.md
