@@ -167,11 +167,10 @@ ship at any time for an urgent fix, but carries no migration.
    it, and add the migration that writes it: a new `NNN_schema_version.sql`
    upserting `ob1_config.schema_version`, the highest migration on disk, so the
    range the cut freezes ends on the migration that names the release (check 17d
-   holds the two equal). Its comment names `BRAIN_VERSION` and
-   `check-consistency`; the frozen stamps' say `FORK_VERSION` and
-   `check-fork-consistency`, their names before SMD-3765. Move `db/README.md`'s
-   migration map and the suites' migration counts with it, and run
-   `bun scripts/gen-version.ts` to regenerate
+   holds the two equal). Its comment names `BRAIN_VERSION` and `check-consistency`;
+   the frozen stamps' say `FORK_VERSION` and `check-fork-consistency`, their
+   names before SMD-3765. Move `db/README.md`'s migration map and the suites'
+   migration counts with it, and run `bun scripts/gen-version.ts` to regenerate
    `server-portable/version.ts` (17e). The stamp takes the next migration number,
    so a branch adding a migration renumbers past it when it merges `main` after
    the cut.

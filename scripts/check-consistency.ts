@@ -11050,7 +11050,8 @@ function checkCommitCategories() {
   if (!ticketRef) return fail(CONFIG, "no plugin defines ticket-ref — a [core] subject without its ticket goes unwarned (check 52, SMD-3765)");
   // The rule's level (0 is off) and the type list commit-lint enforces, beside the header that reads them.
   const rules: Record<string, readonly unknown[] | undefined> = commitlintConfig.rules;
-  const [level, when] = rules["ticket-ref"] ?? [];
+  const ticketRule = rules["ticket-ref"];
+  const [level, when] = Array.isArray(ticketRule) ? ticketRule : []; // a bare number fails below, not as a throw
   if (typeof level !== "number" || level < 1) fail(CONFIG, "ticket-ref is switched off or missing from rules — its warning never fires (check 52)");
   if (when !== "always") fail(CONFIG, `ticket-ref runs "${String(when)}", where "always" warns on a [core] subject without its ticket — "never" inverts it (check 52)`);
   const types = rules["type-enum"]?.[2];
