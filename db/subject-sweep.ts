@@ -147,7 +147,8 @@ import { actorKindOf, cleanForDisplay } from "../server-portable/consolidate.ts"
 import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectPoolKey, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, outageWait, probeChat, probeRefusal, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
-import { admitted, AbortedInHand, inHandCalls, setBack, sleepUnless, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits } from "../server-portable/model-call.ts";
+import { admitted, AbortedInHand, inHandCalls, callWaitsFor, setBack, sleepUnless, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import type { PassStamper } from "./pass-stamp.ts";
 import { andList, consoleWriter, numberProblem, type Writer } from "./cli.ts";
 import { databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -451,16 +452,16 @@ export interface SubjectSweepOptions {
   signal?: AbortSignal;
   /**
    * The sweep's stop as its thoughts begin, and the call's own abort: abortInHand(olderThanMs) aborts the judge's call
-   * in hand once it has run that long, each call's age from its own start — a thought the rules key, a provider pause
-   * and the writes after an answer hold no call — and its thought goes back to the pool, dated now, a later date a
-   * set-back gave it kept, by a following run once the probe after the abort finds no hang (db/lease.ts's setBack),
-   * unanswered and so unjudged, its place under --limit given back when it went back (one edited and pooled again,
-   * taken by another run or deleted meanwhile gives none back), and the run goes on to its next claim, a following
-   * run's past its gate after a one-token call, given the call's own limit, a provider not answering it waited out
-   * (PR 6b-1's review pass 6, the maintainer's choice), unanswered past it, a hang of that thought, its claim marked
-   * or, marked already, failed as its own (review pass 7, the maintainer's choice); one whose answer comes as it is
-   * aborted stands, answered. The sleep scheduler calls it while its gate is closed (SMD-3379's N12), at most three
-   * times a period's hour since PR 6b-2, as consolidation's.
+   * in hand once it has run that long, each call's age from its own start — a thought the rules key, a provider pause,
+   * a wait for a slot on the model-call seam's hook (SMD-3379 PR 2a) and the writes after an answer hold no call — and
+   * its thought goes back to the pool, dated now, a later date a set-back gave it kept, by a following run once the
+   * probe after the abort finds no hang (db/lease.ts's setBack), unanswered and so unjudged, its place under --limit
+   * given back when it went back (one edited and pooled again, taken by another run or deleted meanwhile gives none
+   * back), and the run goes on to its next claim, a following run's past its gate after a one-token call, given the
+   * call's own limit, a provider not answering it waited out (PR 6b-1's review pass 6, the maintainer's choice),
+   * unanswered past it, a hang of that thought, its claim marked or, marked already, failed as its own (review pass 7,
+   * the maintainer's choice); one whose answer comes as it is aborted stands, answered. The sleep scheduler calls it
+   * while its gate is closed (SMD-3379's N12), at most three times a period's hour since PR 6b-2, as consolidation's.
    */
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
@@ -583,6 +584,13 @@ type Done = { release: "succeeded" } | { release: "failed"; error: string; say: 
 
 /** The sweep, callable: the code the CLI exits with (the header's list). */
 export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> {
+  // Its model calls labelled with the pass, sleep's name for it, for the model-call seam's hook (SMD-3379 PR 2a, which
+  // left the sweep's to whichever merged second: SMD-3306 PR 6b-2).
+  return asPass("subjects", () => sweepPass(opts));
+}
+
+/** sweepSubjects' body, inside its pass's label. */
+async function sweepPass(opts: SubjectSweepOptions): Promise<number> {
   /**
    * A following run's word through its caller's row (`stamper`): none without `follow`. Read first, so a refusal of the
    * run's own options says failed too (review pass 1, cold read: the refusals before the run's start said nothing).
@@ -1945,7 +1953,9 @@ async function sweep(
       call.since = t0;
     }
     try {
-      const a = await askOwnSubject(cfg, side, subject, call ? AbortSignal.any([hardStop.signal, call.abort.signal]) : hardStop.signal);
+      // A wait for a slot on the model-call seam is not the call's time: the entry waits through it (SMD-3379 PR 2a).
+      const a = await withCallWaits(callWaitsFor(() => inCall.get(workerId)),
+        () => askOwnSubject(cfg, side, subject, call ? AbortSignal.any([hardStop.signal, call.abort.signal]) : hardStop.signal));
       came = Date.now();
       transients = 0;
       streakPoison = null;

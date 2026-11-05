@@ -10949,6 +10949,38 @@ if (want("10h")) {
         `a thought set back goes behind one queued before it, asked again after it (asks ${setOrder.join(",")}, claims ${setClaims}, exit ${setRun.code}): ${tally(setRun)}`);
       await drop([setFirst, setSecond]);
 
+      // The model-call seam (SMD-3379 PR 2a, which left the sweep's runs to whichever merged second: SMD-3306 PR 6b-2):
+      // the sweep's calls carry its label, sleep's name for it, and its judge's call waiting on the seam's hook for a
+      // slot is no call in hand — abortInHand passes it over, its time counted from when it runs.
+      const [seamT] = await seedAll(["Abort note 8: sweep-pass-good work, its call waiting on the seam's hook."]);
+      const seamCalls: string[] = [];
+      let seamHolding = false;
+      let seamAbort: InHandAbort = () => -1;
+      let duringSeam = -1;
+      const seamHookBefore = setModelCallHook(async (call, run) => {
+        seamCalls.push(`${call.pass}/${call.purpose}`);
+        if (call.purpose !== "extraction") return run();
+        seamHolding = true;
+        await Bun.sleep(1500);
+        seamHolding = false;
+        return run();
+      });
+      let seamRun: Awaited<ReturnType<typeof sweep>> | undefined;
+      try {
+        const seamRunning = sweep({ limit: 1, onPass: (_st, a) => { seamAbort = a; }, signal: backstop() });
+        if (await pollUntil(async () => seamHolding, 10_000)) {
+          await Bun.sleep(1100);
+          duringSeam = seamAbort(1000);
+        }
+        seamRun = await seamRunning;
+      } finally {
+        setModelCallHook(seamHookBefore);
+      }
+      const [seamClaim] = await statusOf([seamT]);
+      assert(duringSeam === 0 && seamRun?.code === 0 && seamClaim === "succeeded" && seamCalls.includes("subjects/extraction") && seamCalls.every((c) => c.startsWith("subjects/")),
+        `the sweep's call waiting 1.1 s on the seam's hook is no call in hand: abortInHand(1000) passes it over, the thought answered; every call of the sweep labelled subjects (${duringSeam} aborted; exit ${seamRun?.code}; claim ${seamClaim}; ${JSON.stringify([...new Set(seamCalls)])})`);
+      await drop([seamT]);
+
       // The provider's pauses count its errors since its last answer, a call timed out or a row the egress gate refuses
       // being no answer: a 503, a timeout, a refused row and three 503s end the run at the fourth error, the last thought
       // unanswered, where either taken for an answer let a sixth call through (review pass 8, mutants: both lived).
