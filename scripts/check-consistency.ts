@@ -11356,7 +11356,7 @@ const PARITY_PROBE_CI = (): ScriptRun[] => [
   { dirs: ["."], script: "deploy/forwarder.ts", args: "--self-check", env: {}, job: "repo", where: "w:fwd" },
   { dirs: ["db"], script: "test-cli.ts", args: "", env: {}, job: "replay", where: "w:cli" },
   { dirs: ["db", "server-portable"], script: "test-pre.ts", args: "", env: { DATABASE_URL: "x", UPGRADE_DATABASE_URL: "y" }, job: "data-layer", where: "w:pre" },
-  { dirs: ["."], script: "scripts/check-landing.ts", args: "--event", env: { EVENT: "${{ github.event_name }}" }, job: "repo", where: "w:landing" },
+  { dirs: ["."], script: "scripts/check-landing.ts", args: '--from "$PR_FROM" --to "$PR_TO"', env: { PR_FROM: "${{ github.event.pull_request.base.sha }}", PR_TO: "${{ github.event.pull_request.head.sha }}" }, job: "repo", where: "w:landing" },
   { dirs: ["deploy"], script: "x.ts", args: "", env: {}, job: "stack", where: "w:stack" },
 ];
 const PARITY_PROBE_NOT_RUN = { jobs: { stack: "why" }, scripts: { "scripts/check-landing.ts": "why" } };

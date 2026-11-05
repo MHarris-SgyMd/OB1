@@ -91,12 +91,12 @@ on:
 permissions:
   contents: read
 
-# One release at a time, and a tag's run is never cancelled: one stopped
-# half-way would leave images published with no release naming them. A newer
-# push to a pull request cancels the rehearsal it supersedes; a tag's run and a
-# dispatched one are never cancelled (SMD-3173).
+# A tag's run is never cancelled: one stopped half-way would leave images
+# published with no release naming them. A newer push to a pull request cancels
+# the rehearsal it supersedes, and a dispatched rehearsal is a group of its own,
+# never queued behind another run or cancelled (SMD-3173).
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

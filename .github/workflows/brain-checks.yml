@@ -55,10 +55,13 @@ defaults:
 # hit its limit. The limits count a job's own run, not its wait for a runner
 # (check 48, SMD-2094).
 
-# A newer push to a pull request cancels the run it supersedes; a push to main
-# never cancels one, so every merge's run reaches its end (SMD-3173).
+# A newer push to a pull request cancels the run it supersedes: one group per
+# PR. Every other run, a push to main or a dispatched one, is a group of its
+# own, so it never waits behind another run and is never cancelled (SMD-3173).
+# With cancel-in-progress off, a shared group would still queue its runs and
+# drop a waiting one when a third arrived.
 concurrency:
-  group: brain-checks-${{ github.ref }}
+  group: brain-checks-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -120,8 +123,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The landing check below diffs the event's range — a PR's base and
-          # head, or the merge group's — so it needs the history, not one tree.
+          # The landing check below diffs a PR's base and head, so it needs the
+          # history, not one tree.
           fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -5161,8 +5164,10 @@ jobs:
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
-  # A pull request and a manual run publish nothing.
-  # contents: write, on this job alone, is what pushes to the wiki's
+  # A pull request and a manual run publish nothing, and nor does a push run
+  # whose commit is no longer main's tip: main's runs no longer cancel one
+  # another (SMD-3173), so an older run ending last would put back older counts
+  # or race the newer run's push. contents: write, on this job alone, is what pushes to the wiki's
   # repository; the token stays out of the clone's config (an extraheader on
   # each git call) and out of the checkout.
   publish-test-counts:
@@ -5199,6 +5204,8 @@ jobs:
           COUNTS_DIR="$RUNNER_TEMP/test-counts" bun .github/ci/test-counts-page.ts > "$RUNNER_TEMP/Test-counts.md"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           echo "::add-mask::${auth#AUTHORIZATION: basic }"
+          tip=$(git -c http.extraheader="$auth" ls-remote "https://github.com/$REPO.git" refs/heads/main | cut -f1)
+          if [ "$tip" != "$SHA" ]; then echo "main is at ${tip:0:12} now, not ${SHA:0:12}: that commit's run publishes the counts"; exit 0; fi
           wiki="$RUNNER_TEMP/wiki"
           # The wiki's repository exists once its first page does (SMD-3614).
           git -c http.extraheader="$auth" clone --depth 1 "https://github.com/$REPO.wiki.git" "$wiki"

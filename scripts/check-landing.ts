@@ -152,15 +152,11 @@ if (import.meta.main) {
   }
   const self = selfTest();
   if (self.length) { for (const s of self) console.error(`  ${s}`); console.error("\ncheck-landing's own probes fail — the script, not the landing."); process.exit(2); }
-  let found: [string, Change[]][];
-  try { found = [landing(from, to)]; } catch (e) { console.error(`cannot read the range as a pull request: ${(e as Error).message}`); process.exit(2); }
-  const problems: string[] = [];
-  for (const [label, changes] of found) {
-    const problem = landingProblem(changes);
-    const fragments = shippedFragments(changes);
-    console.log(`${problem ? "FAIL" : "ok  "} ${label}: ${changes.length} file(s)${fragments.length ? `, fragment ${fragments.join(", ")}` : problem ? "" : ", no fragment needed"}`);
-    if (problem) problems.push(`${label}\n    ${problem}`);
-  }
-  if (problems.length) { console.error(`\nFAIL — ${problems.length} landing(s) carry less than they must:\n`); for (const p of problems) console.error(`  ${p}`); process.exit(1); }
-  console.log(`PASS — ${found.length} landing(s).`);
+  let label: string, changes: Change[];
+  try { [label, changes] = landing(from, to); } catch (e) { console.error(`cannot read the range as a pull request: ${(e as Error).message}`); process.exit(2); }
+  const problem = landingProblem(changes);
+  const fragments = shippedFragments(changes);
+  console.log(`${problem ? "FAIL" : "ok  "} ${label}: ${changes.length} file(s)${fragments.length ? `, fragment ${fragments.join(", ")}` : problem ? "" : ", no fragment needed"}`);
+  if (problem) { console.error(`\nFAIL — the landing carries less than it must:\n\n  ${label}\n    ${problem}`); process.exit(1); }
+  console.log("PASS — the landing carries what it must.");
 }
