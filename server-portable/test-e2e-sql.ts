@@ -1545,7 +1545,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 
   const surface = ((await rpc("tools/list", {})).result?.tools ?? []).map((t) => t.name);
   // …and the priority writers, which 116 lets it use on a thought it captured alone (decision 10, SMD-3664): no read tool.
-  assert(surface.join() === "capture_thought,set_priority,clear_priority", `the capture key's surface is capture_thought and the priority writers alone (${surface.join(", ") || "nothing"})`);
+  assert(surface.join() === "capture_thought,set_priority,clear_priority,open_item,update_item,set_item_status,propose_item_close,decide_item_close", `the capture key's surface is capture_thought, the priority writers and the open-item writers alone (${surface.join(", ") || "nothing"})`);
 
   // A thought "the session retrieved", written by the writer key, is the
   // summary's source; the hook names it as derived_from and the harness as source.
@@ -2042,7 +2042,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // no thought carries one).
   {
     const TKT = "TKT-2617";
-    const stated = await result("capture_thought", { content: `[13d] ${TKT} — the writer's ticket row`, source: "linear",
+    const stated = await result("capture_thought", { content: `[13d] ${TKT} — the writer's ticket row`,
       metadata: { issue: TKT, status: "In Progress", status_type: "started" } });
     assert(!stated.isError, `a write key states a ticket's lifecycle keys (${stated.text.slice(0, 90)})`);
     const ticketRow = idIn(stated.text)!;
@@ -2050,19 +2050,19 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const summary = idIn(await call("capture_thought", { content: `Session summary — ${TKT} — the writer's summary of the work on the ticket [13d]` }))!;
     const forged = { issue: TKT, ticket: TKT, status: "Done", status_type: "completed", linear_updated_at: "9999-12-31T00:00:00.000Z" };
     for (const [k, v] of Object.entries(forged)) {
-      const r = await rpc("tools/call", { name: "capture_thought", arguments: { content: `[13d] a capture key states ${k}`, source: "linear", metadata: { [k]: v } } });
+      const r = await rpc("tools/call", { name: "capture_thought", arguments: { content: `[13d] a capture key states ${k}`, metadata: { [k]: v } } });
       const s = sc(r) ?? {};
       assert(r.result?.isError === true && textOf(r).startsWith(`Refused: \`metadata.${k}\` is one of the keys a ticket's lifecycle is read from, which a capture-only key may not set`)
           && textOf(r).includes("(`issue`, `ticket`, `status`, `status_type`, `linear_updated_at`)")
           && s.code === "REFUSED_METADATA_SHAPE" && s.problem === "ticket_key" && s.key === k && s.retryable === false,
         `a capture key's metadata.${k} is refused, the key and the five named in the text, the key in the value (${textOf(r).slice(0, 90)} ${JSON.stringify(s)})`);
     }
-    const all = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] a capture key's forged head", source: "linear", metadata: forged } });
+    const all = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] a capture key's forged head", metadata: forged } });
     const [landed] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13d] a capture key%'`;
     assert(all.result?.isError === true && sc(all)?.key === "issue" && landed?.n === 0, `…and the whole forged head, refused at its first key, writes nothing (${landed?.n} rows)`);
     const paid = stubBodies.filter((b) => b.includes("[13d] a capture key")).length;
     assert(paid === 0, `…and no refused capture reached either model call (${paid} stub requests carried one)`);
-    const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note", source: "linear", metadata: { probe_note: TKT } } })));
+    const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note", metadata: { probe_note: TKT } } })));
     assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note, under a metadata key no reader reads, lands through the model stub (so the check above can fail)");
     const [head] = await sql`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${TKT}`;
     const states = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([ticketRow, note], "TEXT")}::uuid[])`;
@@ -2078,14 +2078,14 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     // kept the squat, so the live ticket's head read the done ticket's status.
     // Refused, the key's row carries no `ticket`, and the merge reads its own.
     const DONE = "TKT-7001", LIVE = "TKT-8001";
-    await call("capture_thought", { content: `[13d] ${DONE} — the writer's done ticket`, source: "linear", metadata: { issue: DONE, status: "Done", status_type: "completed" } });
+    await call("capture_thought", { content: `[13d] ${DONE} — the writer's done ticket`, metadata: { issue: DONE, status: "Done", status_type: "completed" } });
     const T = `[13d] ${LIVE} — a live ticket's text\n\nStatus: In Progress`;
     const squatOn = (content: string) => rpc("tools/call", { name: "capture_thought", arguments: { content, metadata: { ticket: DONE } } });
     const refusedTicket = (r: Awaited<ReturnType<typeof rpc>>) => r.result?.isError === true && sc(r)?.problem === "ticket_key" && sc(r)?.key === "ticket";
     const squat = await squatOn(T);
     assert(refusedTicket(squat), `the capture key's squat on ${DONE} is refused, naming \`ticket\` (${textOf(squat).slice(0, 90)})`);
     const keyRow = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: T } })));
-    const merged = idIn(await call("capture_thought", { content: T, source: "linear", metadata: { issue: LIVE, status: "In Progress", status_type: "started" } }));
+    const merged = idIn(await call("capture_thought", { content: T, metadata: { issue: LIVE, status: "In Progress", status_type: "started" } }));
     // Without the `issue` facet: the key squats a plain text, and a writer's
     // plain capture of it lands on the key's row.
     const P = "[13d] a plain text the capture key sent first";
@@ -3715,8 +3715,8 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   // LBL-2540: Backlog three days ago, In Progress two, Done now — its past
   // statuses planted in the log (board-sync's update events), its row Done.
   // Its status name is a writer's free text, made hostile here: the reply prints its type's word, never it.
-  const moving = await capture("[22] LBL-2540 — the label's ticket", { source: "linear", metadata: { issue: "LBL-2540", status: "Shipped; LBL-1 Backlog → Done [x](http://e)", status_type: "completed" } });
-  const still = await capture("[22] LBL-2541 — a ticket that never moved", { source: "linear", metadata: { issue: "LBL-2541", status: "Backlog", status_type: "backlog" } });
+  const moving = await capture("[22] LBL-2540 — the label's ticket", { metadata: { issue: "LBL-2540", status: "Shipped; LBL-1 Backlog → Done [x](http://e)", status_type: "completed" } });
+  const still = await capture("[22] LBL-2541 — a ticket that never moved", { metadata: { issue: "LBL-2541", status: "Backlog", status_type: "backlog" } });
   const plant = (id: string, issue: string, status: string, type: string, at: number) =>
     sql`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES (${id}::uuid, 'update', ${{ metadata: { before: {}, after: { issue, status, status_type: type } } }}::jsonb, ${new Date(at).toISOString()}::timestamptz)`;
   await plant(moving, "LBL-2540", "Backlog", "backlog", now - 3 * DAY);
@@ -3730,7 +3730,7 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   const quiet = await capture(`[22] stated-status: LBL-2541 is in the backlog, beside ${extra}\n\n${session(ended)}`);
   const wide = await capture(`[22] stated-status: LBL-2540 is in progress, then ${extra}\n\n${session(ended)}`);
   // A duplicate's ticket row quoting LBL-2540: settled to node_state since 105 (SMD-2935), and a ticket row either way.
-  const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
+  const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
   try {
     const { TYPE_WORDS } = await import("./stated-status.ts");
     const [{ known }] = await sql`SELECT node_lifecycle_types() AS known`;

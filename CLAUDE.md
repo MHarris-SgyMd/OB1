@@ -1,10 +1,10 @@
-# CLAUDE.md — Agent Instructions for Open Brain
+# CLAUDE.md — Agent Instructions for Daemonic Brain
 
 This file helps AI coding tools (Claude Code, Codex, Cursor, etc.) work effectively in this repo.
 
 ## What This Repo Is
 
-Open Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. This repo contains the extensions, recipes, schemas, integrations, skills and plugins that the community builds on top of the core Open Brain setup.
+Daemonic Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. It grew out of Open Brain and is a project in its own right (`FORK.md` records where it came from). This repo holds the brain itself — the compose stack, its servers and schema — and the extensions, recipes, schemas, integrations, skills and plugins built on it.
 
 **License:** FSL-1.1-MIT. No commercial derivative works. Keep this in mind when generating code or suggesting dependencies.
 
@@ -81,7 +81,7 @@ If `open-brain` has no `claim_work` tool, say why:
      - So is an unmerged worktree, branch or open PR for the ticket, with a claim or without one.
      - A lapsed claim whose PR merged or closed is free, even if its branch is still there.
      - Once the user says such work is dead, they release the claim with the operator key and a reason. Or you claim exactly its ticket and piece, which takes the lapsed claim over.
-   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done or Canceled, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does.
+   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done, Canceled or a Duplicate, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does. On a closed ticket, board-sync releases it at its next pass (SMD-3600).
 2. **Before you create the branch,** call `claim_work` with:
    - `ticket`;
    - `piece` for one PR of several, spelled as the ticket's plan names it (`PR 1b-2`) or as `list_claims` already shows it;
@@ -92,6 +92,8 @@ If `open-brain` has no `claim_work` tool, say why:
    - **its id is in your `.work-claims/`:** it is yours. Work under it, or release it and claim the piece. The reply's advice about a lost token is not for you.
    - **your key's, but not in your files:** another session of yours. Stop, and give the user its label from `list_claims`.
    - **another key's:** stop, and tell the user who holds it.
+
+   **A ticket that is Done, Canceled or a Duplicate** keeps no claim: board-sync releases every claim on it at its next pass (SMD-3600). Work on a closed ticket, such as its Verify or a follow-up, needs the ticket reopened or a ticket of its own. A claim or renewal on one says so (`ticketClosed`): if your work under it merged, that is its end; if not, the ticket closed under you, so tell the user.
 
    **When a ticket's work splits into several PRs,** release the whole-ticket claim and delete its token file and any marker beside it, with `rm -f`: the hook may have just made an `.ended.json` of it. Claim the open PR's piece with `lease_seconds: 604800`, and each later piece when you create its worktree.
 
@@ -122,7 +124,7 @@ If `open-brain` has no `claim_work` tool, say why:
      - **It says no other claim was made or renewed:** carry on.
      - **After the user's "carry on",** the renewal you then make names the claim that was in the way again, and the hook may write a marker for it more than once before that renewal lands. A renewal that succeeds, or a marker showing that claim lapsed or released, is the claim they decided on: no new stop. Delete each such marker, and renew with the file's lease if your claim is not renewed yet: a marker from the hook's lapse check says "not renewed". A `WORK_CLAIMED`, or a marker showing that claim live, means its holder revived it: stop, and tell the user. A later reply or marker naming that claim means its holder may have worked on it since: tell the user. If you can't tell whether the user has decided, after a compaction or on resume, tell the user.
      - **After any lapse, or time away longer than the lease,** run step 1's "Find its work" again before you push: a branch or PR for the ticket may have appeared meanwhile. The hook's log line says when its own renewal found a lapse.
-   - **A refusal saying the claim was released, or lapsed and was taken over,** means stop work on it and tell the user. So does an `.ended.json`, which the hook leaves when it finds the claim ended. Don't claim the work again without asking, whatever a reply suggests. Since SMD-3654, `claim_work` with that claim's token on the same work is refused the same way. On the user's go-ahead to do the work anyway, delete the ended claim's token file and any marker beside it, with `rm -f`, then claim it without the token (step 2) and keep the new token (step 3).
+   - **A refusal saying the claim was released, or lapsed and was taken over,** means stop work on it and tell the user. So does an `.ended.json`, which the hook leaves when it finds the claim ended. One exception: a release because the ticket closed (`ticketClosed`, a reason `<ticket> closed: …`, from board-sync) after your own work merged is step 6 done for you, so delete the token file and the marker with `rm -f` and say so. Before your work merged, it means the ticket closed under you: stop and tell the user. Don't claim the work again without asking, whatever a reply suggests. Since SMD-3654, `claim_work` with that claim's token on the same work is refused the same way. On the user's go-ahead to do the work anyway, delete the ended claim's token file and any marker beside it, with `rm -f`, then claim it without the token (step 2) and keep the new token (step 3).
    - **`WORK_CLAIMED` on a renewal,** yours or the hook's, means your claim lapsed and another claim now covers its work. It shows as a `<claim id>.blocked.json`: the hook writes one for its own renewal, for yours when its claims hook is pasted, and with the code `CLAIMED_WHILE_LAPSED` when a renewal's reply names claims made or renewed while the claim had lapsed (or couldn't read them, or whether it had lapsed), or instead of reviving a claim it finds lapsed with another claim made or renewed on its work since. A `CLAIMED_WHILE_LAPSED` marker saying something couldn't be read gets the check above first; stop only if the check finds a claim. A marker saying it was cut, or a reply saying "and N more", names only some claims: list the ticket's claims with `include_ended: true` for the rest, your own pieces among them, before you tell the user. With no marker, treat your own refusal the same. Another agent may have built part of the work since. Stop: finish a local commit in progress, but don't push, open a PR or ask for a merge. Tell the user, and renew again only on their decision:
      - **carry on:** each other claim must end first, if it is still live: its holder releases it, the user releases it with the operator key and a reason, or it lapses. Then delete the marker and renew with the file's lease. Once yours is renewed, a lapsed claim on its work can't be revived while yours stays live.
      - **drop it:** call `release_claim` on your claim (a lapsed claim can be released), then delete the token file and the marker.
@@ -134,6 +136,7 @@ If `open-brain` has no `claim_work` tool, say why:
    - **Before you ask for the merge,** renew. A refusal saying the claim was taken over means someone else may have built the work: tell the user instead of merging.
    - **After the merge, or the abandon,** call `release_claim` with the id, the token and a `reason` (the merged PR, or why the work was dropped). Then delete the token file and any marker beside it, with `rm -f`.
    - **If the merge happened after your session ended,** the next session in the worktree releases first (step 4).
+   - **Board-sync releases** every claim on a ticket once it is Done, Canceled or a Duplicate, at its next pass (SMD-3600). `release_claim` then answers `already_released`, naming board-sync and the reason, and the hook's next renewal leaves an `.ended.json`. Either way the release is done: delete the token file and any marker beside it. Board-sync sees tickets, not PRs: a piece's claim on a ticket still open is yours to release. If the board closes a multi-PR ticket at its first PR's merge, the other pieces' claims go too: tell the user, who reopens the ticket or files the rest as a ticket of its own.
 7. **If you lose the token,** wait for the lease to lapse and claim the work again: your key takes over its own lapsed claim with a new token. A re-claim of work whose PR is open takes `lease_seconds: 604800`. Or ask the user to release it with an operator key, with a reason.
 
 **Keys.** A claim belongs to its key's agent id: the key that claimed it renews it, and no other. The operator key can force-release any claim, and it belongs to the person, so sessions should hold an agent-kind key.
@@ -166,13 +169,14 @@ Do this only while the key holds no live claims.
 - **Title format:** `[category] Short description` (e.g., `[recipes] Email history import via Gmail API`, `[skills] Panning for Gold standalone skill pack`)
 - **Branch convention:** `contrib/<github-username>/<short-description>`
 - **Commit prefixes:** `[category]` matching the contribution type
-- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-fork-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run on this fork)
+- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-fork-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run here)
 - See `CONTRIBUTING.md` for the full review process, metadata.json template, and README requirements
 
 ## Key Files
 
 - `CONTRIBUTING.md` — Source of truth for contribution rules, metadata format, and the review process
-- `.github/workflows/fork-checks.yml` — The fork's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
+- `MAINTAINING.md` — The version scheme, cutting a release, the one deployment, CI and its checks, and how a review pass records what it caught
+- `.github/workflows/fork-checks.yml` — The project's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template
 - `LICENSE.md` — FSL-1.1-MIT terms
@@ -183,5 +187,5 @@ This repo also has a maintainer-local GSD layer in `.planning/`.
 
 - If `.planning/` exists, use it for local brownfield planning and phased execution.
 - Start with `.planning/STATE.md`, then read `.planning/PROJECT.md`, `.planning/ROADMAP.md`, and the relevant `.planning/codebase/*.md` documents.
-- Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract or upstream PR scope.
+- Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract.
 - Public contributor rules still come from `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and the committed repo files.

@@ -13,7 +13,7 @@ import type { createCore } from "./index.ts";
 type Core = ReturnType<typeof createCore>;
 
 /** What a call needs beyond the principal and the input: the stop's tracker, for an operation that starts detached work. */
-export type CallOptions = { track?: <T>(run: () => Promise<T>) => Promise<T> };
+export type CallOptions = { track?: <T>(run: () => Promise<T>) => Promise<T>; plugin?: string };
 
 /** A tool's call: the core, the caller, the tool's parsed input. */
 export type Call<K extends ToolName> = (core: Core, principal: Principal, input: Input<K>, opts: CallOptions) => Promise<Outcome<object>>;
@@ -48,9 +48,18 @@ export const CALLS = {
   renew_claim: (c, p, i) => c.renewClaim(p, i),
   release_claim: (c, p, i) => c.releaseClaim(p, i),
   list_claims: (c, p, i) => c.listClaims(p, i),
-  set_priority: (c, p, i) => c.setPriority(p, i),
+  // The plugin rides here too: 117 lets a plugin's call state a priority on an item its row stands for (SMD-3665 PR 2).
+  set_priority: (c, p, i, o) => c.setPriority(p, i, { plugin: o.plugin }),
   clear_priority: (c, p, i) => c.clearPriority(p, i),
   priority_history: (c, p, i) => c.priorityHistory(p, i),
+  // The plugin a ctx.call came through rides to 117's envelope (SMD-3665 PR 2): a plugin row's item is the plugin's.
+  open_item: (c, p, i, o) => c.openItem(p, i, { plugin: o.plugin }),
+  update_item: (c, p, i, o) => c.updateItem(p, i, { plugin: o.plugin }),
+  set_item_status: (c, p, i, o) => c.setItemStatus(p, i, { plugin: o.plugin }),
+  propose_item_close: (c, p, i, o) => c.proposeItemClose(p, i, { plugin: o.plugin }),
+  decide_item_close: (c, p, i, o) => c.decideItemClose(p, i, { plugin: o.plugin }),
+  item_history: (c, p, i) => c.itemHistory(p, i),
+  list_items: (c, p, i) => c.listItems(p, i),
 } satisfies { [K in ToolName]: Call<K> };
 
 /** The `{field}` names a route's path fills, in order: a core route's (rest/routes.ts) or a plugin operation's. */

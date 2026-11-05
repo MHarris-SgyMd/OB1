@@ -307,7 +307,8 @@ export function contextFor(plugin: string, { core, principal, track }: OpDeps): 
       if (!mayCall(principal, name)) return { ok: false as const, refusal: { code: "FORBIDDEN" as const, retryable: false as const, needs: scopeOf(name) } };
       const parsed = z.object(SPECS[name].inputSchema).strict().safeParse(input);
       if (!parsed.success) return { ok: false as const, refusal: { code: "REFUSED_INPUT" as const, retryable: false as const, issues: parsed.error.issues.map((i) => ({ path: i.path.map(String).join("."), message: i.message })) } };
-      return (CALLS[name] as (...args: unknown[]) => Promise<unknown>)(core, principal, parsed.data, { track }) as never;
+      // The plugin rides as an option, never an input field (SMD-3665 PR 2): 117 reads it off the envelope.
+      return (CALLS[name] as (...args: unknown[]) => Promise<unknown>)(core, principal, parsed.data, { track, plugin }) as never;
     },
   };
 }

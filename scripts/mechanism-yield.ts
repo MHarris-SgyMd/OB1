@@ -29,8 +29,8 @@
  *     row says what was wrong and what changed, not what found it. Nothing is
  *     inferred from phrasing — a pass that tried ("mutant", "the reviewer")
  *     found half its hits were mentions, not catches — so before the tag
- *     (SMD-1711) every row is implicit; the baseline is in FORK.md, "Review
- *     passes: what caught a finding is written at the catch".
+ *     (SMD-1711) every row is implicit; the baseline is in MAINTAINING.md,
+ *     "Review passes: what caught a finding is written at the catch".
  *
  *   target — what was WRONG: code | test-teeth | record | confirmed | filed,
  *     by keyword rules stated in TARGET below, precedence in order. Approximate
@@ -83,8 +83,8 @@
  * and the day a row is shown with is rendered in it. The bare day is never
  * handed to git, whose approxidate reads it as that day at the current time
  * of day and silently drops every commit made earlier in it. The numbers
- * behind all this are in FORK.md, "The window and the attribution, corrected
- * (SMD-1728)". Options take `--name value` or `--name=value`; an unknown
+ * behind all this are in MAINTAINING.md, "The window and the attribution,
+ * corrected (SMD-1728)". Options take `--name value` or `--name=value`; an unknown
  * option is refused. Others: --samples N (rows shown per class, default 6; 0
  * shows none), --dump rows.tsv (every row with its classification, its
  * committer instant and its day in --zone — not the dump `--log` reads). A
@@ -152,7 +152,7 @@ const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 // committer instants — the same comparison the `--since <sha>` anchor makes.
 // The zone is declared, not the machine's: the record's passes were all
 // committed in this one, and a day cut must give the same set on every machine
-// that re-runs the FORK.md command. Rows keep their instant; the calendar day
+// that re-runs the MAINTAINING.md command. Rows keep their instant; the calendar day
 // a row is shown with is rendered in the same zone and is display only.
 // ---------------------------------------------------------------------------
 const DEFAULT_ZONE = "America/Chicago";

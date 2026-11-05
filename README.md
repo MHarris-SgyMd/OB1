@@ -1,25 +1,21 @@
-<p align="center">
-  <img src=".github/ob1-logo-wide.png" alt="Open Brain" width="600">
-</p>
-
-<h1 align="center">Open Brain</h1>
+<h1 align="center">Daemonic Brain</h1>
 
 The infrastructure layer for your thinking. One database, one AI gateway, one chat channel. Any AI you use can plug in. No middleware, no SaaS chains, no Zapier.
 
 This isn't a notes app. It's a database with vector search and an open protocol — built so that every AI tool you use shares the same persistent memory of you. Claude, ChatGPT, Cursor, Claude Code, whatever ships next month. One brain. All of them.
 
-> Open Brain was created by [Nate B. Jones](https://natesnewsletter.substack.com/). Follow the [Substack](https://natesnewsletter.substack.com/) for updates, discussion, and the companion prompt pack. Join the [Discord](https://discord.gg/Cgh9WJEkeG) for real-time help and community.
+> Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1), created by Nate B. Jones. It began as a fork of that tree and is a project in its own right, under the same licence ([FSL-1.1-MIT](LICENSE.md)). [`FORK.md`](FORK.md) records where it came from; [`MAINTAINING.md`](MAINTAINING.md) is how it is versioned, released and checked.
 
 ## Getting Started
 
-Never built an Open Brain? Start here:
+Never built a brain? Start here:
 
 1. **[Setup Guide](docs/01-getting-started.md)** — Bring up the full system (Postgres with pgvector, the local models, the MCP server) on your own machine in about 30 minutes, and connect your AI clients. No coding experience needed, nothing to sign up for. [`SETUP.md`](SETUP.md) is the same stack as an operator's reference — the model choice, the vector width, what leaves the box.
 2. **[AI-Assisted Setup](docs/04-ai-assisted-setup.md)** — Prefer building with Cursor, Claude Code, or another AI coding tool? Point it at this repo and go. Same system, different workflow.
 3. **[Companion Prompts](docs/02-companion-prompts.md)** — Five prompts that help you migrate your memories, discover use cases, and build the capture habit.
 4. **Then pick Extension 1** and start building.
 
-**If you hit a wall:** We built a [FAQ](docs/03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, upstream created dedicated AI assistants that know the system inside and out — they answer for upstream's Supabase deployment, so where they say "Edge Function" or "Supabase secrets", read "the server" and `deploy/.env`: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
+**If you hit a wall:** We built a [FAQ](docs/03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, Open Brain's author created dedicated AI assistants that know its system inside and out — they answer for Open Brain's Supabase deployment, so where they say "Edge Function" or "Supabase secrets", read "the server" and `deploy/.env`: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
 
 ## Recent Contributions
 
@@ -32,7 +28,7 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Refresh README recent contributions](README.md) | Refresh README recent contributions. | [@github-actions[bot]](https://github.com/github-actions[bot]) |
 | [Add deploy-pages workflow for openbrain.fyi](.github/workflows/deploy-pages.yml) | Adds deploy-pages workflow for openbrain.fyi. | [@snapsynapse](https://github.com/snapsynapse) |
 | [Google Activity import: include Gemini answers from safeHtmlItem](recipes/google-activity-import/) | Google Activity import: include Gemini answers from safeHtmlItem. | [@araece](https://github.com/araece) |
-| [Repo-learning-coach: load .env via dotenv + fix research frontmatter](docs/vendored-disposition.md) | Retired (SMD-2923) — the study app it fixed retired, unused on this fork; the brain learning a codebase is SMD-3006 | [@eazene](https://github.com/eazene) |
+| [Repo-learning-coach: load .env via dotenv + fix research frontmatter](docs/vendored-disposition.md) | Retired (SMD-2923) — the study app it fixed retired, unused here; the brain learning a codebase is SMD-3006 | [@eazene](https://github.com/eazene) |
 | [Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter)](recipes/provenance-chains/) | Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter). | [@eazene](https://github.com/eazene) |
 | [Fix editorial-policy auditor JSON parse under claude-haiku-4-5](recipes/editorial-policy/) | Fixes editorial-policy auditor JSON parse under claude-haiku-4-5. | [@eazene](https://github.com/eazene) |
 | [Fix add_household_item storing details as an escaped JSON string](extensions/household-knowledge/) | Fixes add_household_item storing details as an escaped JSON string. | [@hannahgwilson](https://github.com/hannahgwilson) |
@@ -42,8 +38,8 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Report the real cause when all LLM providers fail](integrations/entity-extraction-worker/) | Report the real cause when all LLM providers fail. | [@sjgold](https://github.com/sjgold) |
 | [Content-fingerprint-dedup: add write-time fingerprint trigger](recipes/content-fingerprint-dedup/) | Content-fingerprint-dedup: add write-time fingerprint trigger. | [@eazene](https://github.com/eazene) |
 | [Fix readwise-import against content_fingerprint unique index](recipes/readwise-import/) | Fixes readwise-import against content_fingerprint unique index. | [@eazene](https://github.com/eazene) |
-| [Persistent wiki pages](db/README.md#the-migrations) | Retired (SMD-1812) — on this fork the page store is core, migration 064: `pages`, `page_sections`, `page_section_revisions` and `write_page_section`'s regen guard, a page being a thought whose text is its render (`db/README.md`, migration 064) | — |
-| [Fix update-thought-mcp deploy-blocking bugs](skills/updating-thoughts/) | Retired (SMD-1931) — on this fork `update_thought` is a core tool, listed for a write key; `skills/updating-thoughts` uses it | — |
+| [Persistent wiki pages](db/README.md#the-migrations) | Retired (SMD-1812) — here the page store is core, migration 064: `pages`, `page_sections`, `page_section_revisions` and `write_page_section`'s regen guard, a page being a thought whose text is its render (`db/README.md`, migration 064) | — |
+| [Fix update-thought-mcp deploy-blocking bugs](skills/updating-thoughts/) | Retired (SMD-1931) — here `update_thought` is a core tool, listed for a write key; `skills/updating-thoughts` uses it | — |
 | [Reject non-POST MCP requests with 405 to prevent GET handshake hang](docs/vendored-disposition.md) | Retired (SMD-2288) — the Kubernetes deployment it fixed retired with compose-only: the brain deploys as the compose stack (`deploy/`), whose server answers a GET on the MCP endpoint with 405. | [@jcpoyser](https://github.com/jcpoyser) |
 | [Fix ob-graph MCP GET route causing SSE reconnect storm](docs/vendored-disposition.md) | Retired (SMD-2920) — ob-graph's hand-curated graph retired; the brain's graph is the one extraction builds | [@eazene](https://github.com/eazene) |
 | [Fix UUID id pagination in thought-enrichment backfills](recipes/thought-enrichment/) | Fixes UUID id pagination in thought-enrichment backfills. | [@themacmarketer](https://github.com/themacmarketer) |
@@ -64,7 +60,7 @@ Build these in order. Each one teaches new concepts through something you'll act
 | 5 | [Professional CRM](extensions/professional-crm/) | Contact tracking wired into your thoughts | Intermediate |
 | 6 | [Job Hunt Pipeline](extensions/job-hunt/) | Application tracking and interview pipeline | Advanced |
 
-Extensions compound. Your CRM knows about thoughts you've captured. Your meal planner checks who's home this week. Your job hunt contacts automatically become professional network contacts. This is what happens when your agent can see across your whole system.
+Extensions compound. Your CRM knows about thoughts you've captured. Your meal planner checks who's home this week. Your job hunt contacts become professional network contacts. This is what happens when your agent can see across your whole system.
 
 ## Primitives: Concepts That Compound
 
@@ -72,10 +68,10 @@ Some concepts show up in multiple extensions. Learn them once, apply them everyw
 
 | Primitive | What It Teaches | Used By |
 | --------- | --------------- | ------- |
-| [Run a Remote MCP Server](primitives/deploy-remote-mcp/) | Running any extension server under Bun, behind HTTPS | All extensions |
-| [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | All extensions |
+| [Run a Remote MCP Server](primitives/deploy-remote-mcp/) | Running a vendored recipe or integration server under Bun, behind HTTPS | Recipes and integrations; no extension since SMD-2311 |
+| [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | Recipes and integrations; no extension since SMD-2311 |
 | [Common Troubleshooting](primitives/troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
-| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Extensions 5 and 6, as background |
+| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no schema here ships them (SMD-1810) | Background; no extension since SMD-2311 |
 | [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4, until SMD-2311 |
 
 ## Community Contributions
@@ -90,7 +86,7 @@ Pull your digital life into Open Brain. Each recipe handles a specific data sour
 | ------ | ------------ | ----------- |
 | [ChatGPT Import](recipes/chatgpt-conversation-import/) | Parse ChatGPT data exports, filter trivial conversations, summarize via LLM | [@matthallett1](https://github.com/matthallett1) |
 | [Perplexity Import](recipes/perplexity-conversation-import/) | Import Perplexity AI search history and memory entries | [@demarant](https://github.com/demarant) |
-| [Obsidian Vault Import](db/README.md#the-stable-tier--a-brain-rebuilt-from-the-records-smd-1806) | Retired (SMD-2137) — on this fork the import is core, the `markdown` row of `db/README.md`'s source table: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) | — |
+| [Obsidian Vault Import](db/README.md#the-stable-tier--a-brain-rebuilt-from-the-records-smd-1806) | Retired (SMD-2137) — here the import is core, the `markdown` row of `db/README.md`'s source table: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) | — |
 | [X/Twitter Import](recipes/x-twitter-import/) | Import tweets, DMs, and Grok chats from X data exports | [@alanshurafa](https://github.com/alanshurafa) |
 | [Instagram Import](recipes/instagram-import/) | Import DMs, comments, and captions from Instagram exports | [@alanshurafa](https://github.com/alanshurafa) |
 | [Google Activity Import](recipes/google-activity-import/) | Import Google Search, Gmail, Maps, YouTube, Chrome history from Takeout | [@alanshurafa](https://github.com/alanshurafa) |

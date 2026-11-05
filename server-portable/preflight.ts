@@ -396,7 +396,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
@@ -3085,6 +3085,48 @@ if (configFailed) {
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
+          }
+        }
+
+        /**
+         * Migration 117's open items (SMD-3665 PR 2): the functions the item tools call, under 117's signatures, and
+         * the server role's `items` grant — soft, as the priority group is (117's PRIVILEGES: a role without it is
+         * refused the item calls alone, naming the table). Nothing to read before 117: a skip.
+         */
+        {
+          const ITEM_FNS = ["open_item(text,text,text,uuid,text,boolean,jsonb)", "update_item(text,jsonb,jsonb)", "set_item_status(text,text,text,jsonb)",
+            "propose_item_close(text,text,uuid,text,text,jsonb)", "decide_item_close(uuid,boolean,text,jsonb)", "open_item_history(text)", "ob1_item_json(public.open_items)"];
+          // The group's grants from ROLE_GRANTS, as the priority row reads its own.
+          const ITEM_GRANTS = ROLE_GRANTS.items.flatMap((g) => (g.table ? g.privileges.map((p) => [g.table as string, p] as const) : []));
+          const itRows = await sql.unsafe(`
+            SELECT to_regclass('public.open_items') IS NOT NULL AS has_table,
+                   ARRAY(SELECT f FROM unnest(ARRAY[${ITEM_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
+                   CASE WHEN to_regclass('public.open_items') IS NULL THEN NULL
+                        ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${ITEM_GRANTS.map(([t, p]) => `('${t}', '${p}')`).join(", ")}) g(t, p)
+                                    -- CASE, not OR, as the priority row's: the text form raises for a table not there.
+                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN true ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
+            .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const it = Array.isArray(itRows) ? itRows[0] : null;
+          if (!it) {
+            add("open items", "warn", `could not verify: ${(itRows as Error).message}`, "The check reads open_items and 117's functions in public; the message says why it failed.");
+          } else if (!it.has_table) {
+            add("open items", "skip", "not checked — open_items does not exist (migration 117 not applied)");
+          } else if (it.missing.length) {
+            add("open items", "fail", `migration 117's ${it.missing.join(", ")} missing under 117's signature; the open-item tools call them`,
+                ledgerRemedy("117", "Apply db/migrations/117_open_items.sql."));
+          } else if (it.ungranted?.length) {
+            // The reads (item_history, list_items) need SELECT on the three tables; the writers need every grant.
+            // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
+            // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
+            const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, and set_priority on an open item"
+              : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
+              : reads.length ? "item_history and the open-item writers"
+              : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
+            add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+                "Grant the items group (SMD-3665): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups items (db/README.md, Grants for a capturing role).");
+          } else {
+            add("open items", "ok", "open_item, update_item, set_item_status, propose_item_close, decide_item_close, open_item_history and their helpers present; the server's role holds the items group");
           }
         }
 

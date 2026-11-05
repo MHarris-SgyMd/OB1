@@ -1012,6 +1012,26 @@ naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks t
 functions, the grant and the log setting. The `worker claims` row, named `work
 claims` before this ticket, is migration 015's: it keeps two workers off one thought.
 
+**A closed ticket keeps no claim** (migration 118, SMD-3600). After each pass,
+board-sync (`db/sync-linear.ts`) releases every unreleased claim, live or lapsed, on a
+ticket the brain records as Done, Canceled or a Duplicate, with the reason
+`<ticket> closed: <status> (<type>); <run>`.
+- `claim_work` on such a ticket still claims, and says the claim will go
+  (`ticketClosed`: the status and its type).
+- A renewal of a claim board-sync ended answers `CLAIM_RELEASED` with
+  `ticketClosed: true`: done if the holder's work merged, else the ticket closed
+  under it (tell the user), never a release to ask about claiming again. Only
+  118's own reason, by a releaser neither an operator nor an agent, counts.
+- `renew_claim` on such a ticket, before the release, says the claim will go, as
+  `claim_work` does.
+- A release after it answers `already_released`, naming who ended the claim and why.
+
+No tool reaches the release. A row is trusted as the board's only under
+`source: "linear"`, which `capture_thought` and `update_thought`'s patch refuse
+to every key (`REFUSED_SOURCE_RESERVED`, 400 over REST). A write key can still
+edit the board's own rows (a ticket key, a delete, a `supersedes` at a head) and
+so end a ticket's claims, as it can already mislabel `moved`.
+
 ## Priority assertions (SMD-3664)
 
 A key states how much an item matters, and every statement is kept (migration 116,
@@ -1050,13 +1070,76 @@ caller; a hook's principal is capture-scoped.
 | `ITEM_NOT_FOUND` | 404 | The brain holds no such item: `item` names it as 116 keys it (a ticket upper-cased), `which` whether it was the item or the due reference. `priority_history` answers it for an item nobody stated a priority on. |
 | `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured or an open item it opened, which nobody else took, or a due reference to one. |
 | `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
-| `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. A principal with no agent id by design (a plugin hook's) is answered by 116. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
+| `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Said after 116/117 answer ITEM_NOT_YOURS, so a plugin's call 117 grants goes through (SMD-3665 PR 2). A principal with no agent id by design (a plugin hook's) is answered by 116/117. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
 
 Each writer is one statement, its own READ COMMITTED transaction holding its item's
 lock (116's rule); the history reads the winner and the statements in one statement.
 A role without the `priority` grant group has the priority calls fail, naming the
 table, and nothing else. Preflight's `priority` row checks the functions and the grant.
+
+## Open items (SMD-3665)
+
+An open item is a to-do, a commitment or a plugin's task: an id, its text, an optional
+owner and due time, and a status — `proposed`, `open`, `done` or `dropped` — with every
+change kept as an event made by a key (migration 117, SMD-3665 PR 1). Seven tools reach
+it, each over REST and MCP alike:
+
+| Tool | REST | Group | Answers |
+| --- | --- | --- | --- |
+| `open_item` | `POST /v1/items` | capture | `{outcome: opened\|unchanged, item, event, note}` |
+| `update_item` | `PATCH /v1/items/{id}` | capture | `{outcome: updated\|unchanged, item, event}` |
+| `set_item_status` | `POST /v1/items/{id}/status` | capture | `{outcome: changed\|unchanged, item, event, mooted}` |
+| `propose_item_close` | `POST /v1/items/{id}/proposals` | capture | `{outcome: proposed\|unchanged, proposal, replaced, item}` |
+| `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
+| `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
+| `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
+
+- **Opening.** An item read from a thought (`origin_thought`) is noted at that thought's
+  capture time, so an old to-do reads as old. The same thought and text again is the item
+  already there (`unchanged`, nothing written), and so is a plugin's row. `proposed: true`
+  marks an item inferred rather than stated (the extractor's, SMD-3665 PR 3), which reads as
+  not yet open until a write key confirms it.
+- **Closing.** `set_item_status` settles (`done`, `dropped`) or reopens (`open`), and
+  settling moots the item's pending proposals. A proposed close (`propose_item_close`, with
+  the thought that shows it and a label such as `resolves`) never closes the item: a key
+  other than its proposer accepts it (`decide_item_close`), or it is rejected.
+- **A capture-only key** reaches the five writers, as it reaches `set_priority`: it opens
+  items, from a thought only if it captured that thought, and changes only an item it
+  opened that no other key has changed since. It may dismiss its own proposed item but never
+  confirm one. It is shown an existing item only if it is its own, and it has no read tool.
+- **A plugin** calls the writers through `ctx.call` as its caller. The call stamps the
+  plugin's name on the envelope, never an argument, and a plugin row's item is the
+  plugin's: its hook (`hook:<plugin>`, capture scope, no agent id) opens, changes and
+  settles the items its rows stand for, and states priorities on them; another plugin's may
+  not. A write key changes such an item through the plugin's row (the maintainer,
+  2026-11-03).
+- **Times** are ISO 8601: a time with its offset, or a date (the start of that day in
+  UTC), as `set_priority` takes them. `null` in `update_item` clears the owner or the due
+  time.
+
+**A refusal is an answer**, not an error. An item is named `{kind: "item", key: <id>}`:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `ITEM_NOT_FOUND` | 404 | The brain holds no such item. |
+| `ITEM_NOT_YOURS` | 403 | A capture-only key on an item it may not change, or with a thought it did not capture as origin or evidence, answered alike for an item that is not there; `item` null for a proposal it may not decide. |
+| `CONFIRM_NOT_YOURS` | 403 | A capture-only key confirming a proposed item, directly or by reopening it. |
+| `ORIGIN_NOT_FOUND` | 404 | The origin thought is not in the brain. |
+| `EVIDENCE_NOT_FOUND` | 404 | The evidence thought is not in the brain. |
+| `ITEM_SETTLED` | 409 | A close proposed on an item done or dropped already. |
+| `PROPOSAL_NOT_FOUND` | 404 | No such proposed close (told to a write key alone). |
+| `PROPOSAL_DECIDED` | 409 | The proposal was decided, or is moot, already. |
+| `PROPOSAL_YOURS` | 403 | A proposer accepting its own proposal. |
+| `REFUSED_ITEM_INPUT` | 400 | An argument 117 refuses: a malformed id, a due time that is no ISO date, a text past its length, a plugin row with no plugin. |
+| `ITEM_UNATTRIBUTED` | 503 | A capture-only key whose agent id, which proves its own items, the registry was asked for and did not give: `registry_away` retryable, with `Retry-After`; `registry_misconfigured` and `registry_refused` wait on an operator; `registry_unknown`, a key the server holds no id for and no word why. Said after 117 answers, so a plugin's call 117 grants is not refused — and, 117 answering alike whether the item is the key's, on another key's item too. |
+| `ITEM_UNOWNABLE` | 403 | A caller with no agent id at all (a plugin hook's) opening an item for no plugin row: it could never be shown its own. |
+| `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own. |
+
+Each writer is one statement in its own READ COMMITTED transaction holding the item's
+lock (117's rule). A role without the `items` grant group has the item calls fail, naming
+the table, and nothing else. Preflight's `open items` row checks the functions and the
+grant.
 
 ## Where a tool's logic lives (SMD-2283)
 
@@ -1473,4 +1556,5 @@ stored in the same write").
 ## Related
 
 - `../deploy/` — the compose stack this server is the published port of
-- `../FORK.md` — what this fork changes and why
+- `../MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `../FORK.md` — the fork era: where Daemonic Brain came from

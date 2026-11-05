@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and seventeen (117) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and eighteen (118) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -361,7 +361,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | This fork |
 | `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s row lock wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
-Migrations 024 onward are described in `FORK.md`, one numbered change each
+Migrations 024 onward are described in `changes/`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -389,7 +389,7 @@ that writes its version as the last file of the range it freezes: 048 writes
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
-their ticket (FORK.md's "Versioning" and "Cutting a release", SMD-1804, SMD-1860).
+their ticket (MAINTAINING.md's "Versioning" and "Cutting a release", SMD-1804, SMD-1860).
 
 The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
@@ -2480,7 +2480,39 @@ An item's text, owner and reasons may hold personal data: `forget_thought`
 (SMD-1723) has to reach the items read from a forgotten thought. The **items**
 grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
 and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
-REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
+REST and MCP are `open_item`, `update_item`, `set_item_status`, `propose_item_close`,
+`decide_item_close`, `item_history` and `list_items` (SMD-3665 PR 2;
+server-portable/README.md, Open items); node_state's open-item kind is SMD-3667's.
+
+Migration 118 releases a closed ticket's claims (SMD-3600). Without it, a claim
+whose holder merged and never released stayed on every read naming the ticket
+(SMD-3599's `claimed` label shows lapsed claims never released).
+`release_closed_ticket_claims(p_run, p_dry_run, p_actor)` ends every unreleased
+claim, live or lapsed, the whole ticket's and every piece's, on a ticket whose
+head in `ob1_ticket_head` has a settled status type (`node_settled_types()`:
+completed, canceled, duplicate) and is an importer's row (`metadata.source` is
+`linear`, which the server refuses to every key: capture_thought and
+update_thought's patch answer `REFUSED_SOURCE_RESERVED`, so a key's own thought
+with an `issue` and a `status_type` releases nothing). A write key can still
+make a ticket read closed by editing the board's own rows (patching one's
+ticket keys, or retiring an open head over an older closed board row: a delete,
+or a `supersedes` pointing at it), as it
+can already mislabel `moved`; board-sync writes the board's status back when
+the ticket next moves. A claim made after the ticket closed is
+released too, and a ticket that reopens brings none back. Each release is stamped
+from the call's envelope, with the reason `<issue> closed: <status>
+(<status_type>); <p_run>`. `p_dry_run` reads the same claims and writes nothing.
+It takes each ticket's lock in key order under READ COMMITTED (0A000 above it),
+as 115's writers do. `sync-linear.ts` calls it after each pass, `--dry-run` and
+`--only` included and `--audit` not. EXECUTE is revoked from PUBLIC, the one core
+function so held, and granted by the **closedclaims** group (EXECUTE on the
+function, SELECT and UPDATE on `work_claims`); the server never calls it. A
+plain `migrate.ts --grant <role>` issues every group, this one included: grant a
+server's role by `--groups` to keep it out. Soft: board-sync without the group
+says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
+`duplicate`), 068 and 115; a re-apply is a no-op. test-schema [106] (the tickets released and
+left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
+(onto a populated brain at 117).
 
 ## What changed relative to the guide
 
@@ -2509,7 +2541,9 @@ role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
 change 93 (SMD-1796) cut them; the extension and recipe schemas carried them
 too, with per-user policies on `auth.uid()`, until SMD-1810. Their tables are
-the **community**, **extensions** and **recipes** groups there.
+the **community** and **recipes** groups there. The **extensions** group,
+the learning path's schemas, retired in 2.0.0 when the six became plugins
+(SMD-2311): `--groups` refuses its name.
 
 ## Grants for a capturing role
 
@@ -2528,7 +2562,11 @@ this.)
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once, or with `--groups
-capture,worker,…` those alone (SMD-2289). `--groups` revokes nothing; `--exact` adds the
+capture,worker,…` those alone (SMD-2289). The full set a plain `--grant` issues
+includes **closedclaims**, the release of a closed ticket's claims that board-sync
+alone calls (118): a role granted by `--groups` without it cannot call that
+release, and one granted by a plain `--grant` can.
+`--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
@@ -2600,7 +2638,9 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
+| | `work_claims` (115) | `SELECT, UPDATE` |
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
@@ -2626,8 +2666,6 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): two of the six files, job-hunt's and professional-crm's, whose tables job-hunt's link writes into until it is a plugin too (SMD-2311 PR 4b); the professional CRM and the other four are plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
 | | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2681,7 +2719,7 @@ entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
 claim work (115), **priority** for a role whose clients state priorities
 (116), and **items** for a role whose clients open items (117). The
-**community**, **extensions** and **recipes** groups are issued for whichever
+**community** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
@@ -4637,19 +4675,26 @@ work is read whole at the scheduler's start — each pass's pool, re-embed's
 backlog among them, and the sweep's orphans — and every `--rescan` seconds
 after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
-lands. So what no claim row shows — a vector come for a thought extracted
-already, a delete's orphans, re-embed's backlog — waits for the rescan, or
-goes with a period other work begins; the next poll reads it whole after a
+lands. A vector arriving queues no claim, yet consolidation judges only a
+thought with one: so a vector come since the last whole read — an audited
+update whose diff says `embedding_present` true, the vector mender's or a
+re-embed's — brings the next whole read forward, at most once a minute after
+the end of the last whole read or a period's end read (so within that and a
+`--poll`), and a vector read once is not read again; the rescan keeps its own
+clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+delete of a window or a replay leaves, re-embed's backlog — waits for the
+rescan, or goes with a period other work begins (deleting a thought leaves
+none: its lineage rows go with it); the next poll reads it whole after a
 live write or its limit cut the sweep, a retried start refusal's wait, or a
 re-embed set-aside cleared. The sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
-an orphan far into a large table is found one rescan a window later — a
+an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
-pass held begins none: one a statement held
-(**Its budget**, below), re-embed set aside or set down (a set-down is tried
-again at the next period's start, or by the next rescan). A one-shot run
-exits 0 once a read finds no work — at once, or when what it found has been
-done elsewhere; `--dry-run` says whether a period would begin, and when.
+pass held begins none: one a statement held (**Its budget**, below), re-embed
+set aside or set down (a set-down is tried again at the next period's start, or
+by the next rescan). A one-shot run exits 0 once a read finds no work — at
+once, or when what it found has been done elsewhere; `--dry-run` says whether a
+period would begin, and when.
 
 **What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -4805,10 +4850,12 @@ beat the role's and the database's own: a timeout of 0 is left out, so theirs
 stands); the start's check runs under them. The scheduler's own two
 connections take the memory settings and statement_timeout 0, beating a
 role's or database's own — its poll reads the pools, a scan of every thought,
-and a timeout there would end the scheduler. The settings go out as startup
-parameters, which a transaction pooler (PgBouncer, a managed host's pooled
-endpoint) refuses: connect the scheduler to Postgres directly, as the compose
-stack does.
+and a timeout there would end the scheduler — and `plan_cache_mode =
+force_custom_plan`, so a prepared read of `thought_audit` each poll is planned
+for its values, not by a generic plan that scans the table (SMD-3379 PR 1d).
+The settings go out as startup parameters, which a transaction pooler
+(PgBouncer, a managed host's pooled endpoint) refuses: connect the scheduler
+to Postgres directly, as the compose stack does.
 A statement past its timeout — a start-of-pass scan the brain has outgrown,
 most likely — holds its pass until a restart (N9, SMD-3379 PR 1c-4b): said,
 with `OB1_SLEEP_STATEMENT_TIMEOUT` to raise and the coordinator to recreate;
@@ -4834,8 +4881,9 @@ its pools drain, where the clock stopped it after `OB1_SLEEP_BUDGET` minutes,
 so a backlog drains in one period, paused by each live write. A statement
 past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
-whole. A row a scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
-`resting` — is still read, for a rollback.
+whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
+scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
+still read, for a rollback.
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -6247,6 +6295,16 @@ mirror keeps the hand captures' shape, which had none. A Linear webhook would be
 exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
 which would call this tool's `syncIssue` with the one identifier it was told.
 
+**A closed ticket's claims (SMD-3600).** After each pass, `--dry-run` and `--only`
+included and `--audit` not, one call to migration 118's
+`release_closed_ticket_claims` ends every unreleased claim (live or lapsed) on a
+ticket whose head is this tool's row and says Done, Canceled or a Duplicate,
+and the pass prints `claims on closed tickets: released N — …`, ten named. A dry
+run's `would release` reads the brain as it stands, so a ticket the pass would
+close is not in it. A failed call fails the pass, as a failed findings post does. Asked once at start: a
+brain before 118, or a role without the **closedclaims** group, is said once, and
+the claims stay until their holders release them.
+
 **What it tells the board (SMD-2681).** The board comes in; consolidation's
 findings about it went nowhere until someone read the queue. With
 `LINEAR_COMMENT_API_KEY` set, every pass (not `--audit`, and not `--only`,
@@ -6828,7 +6886,7 @@ orthogonal corpus and none of a random one, and every row the decoder calls
 unreachable is one the walk misses. A random, production-shaped corpus is fully
 reachable; `REINDEX` does not clear the degenerate case (a rebuild of an
 equidistant graph is no more reachable), so it is not the remedy the finding
-first assumed. See FORK.md's SMD-1632 section.
+first assumed. See change 85 (SMD-1632) and MAINTAINING.md's known issues.
 
 ### What only the live suite can catch
 
@@ -7341,6 +7399,7 @@ default — are unaffected.
 
 ## Related
 
-- `../FORK.md` — what this fork changes and why
+- `../MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `../FORK.md` — the fork era: where Daemonic Brain came from
 - `../server-portable/` — the runtime-neutral server (Phase 3)
 - `docs/01-getting-started.md` — the original prose the schema was extracted from

@@ -142,7 +142,7 @@ const fake = Bun.serve({
     const json = (payload) => Response.json(envelope(payload));
     const scope = key === "cap-key" || key === "cap-prio-key" ? "capture" : key === "write-key" ? "write" : key === "read-key" ? "read" : null;
     if (!scope) return json({ error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } });
-    const surface = scope === "capture" ? (key === "cap-prio-key" ? ["capture_thought", "set_priority", "clear_priority"] : ["capture_thought"]) : scope === "write" ? [...READ, "capture_thought", "update_thought", "delete_thought"] : READ;
+    const surface = scope === "capture" ? (key === "cap-prio-key" ? ["capture_thought", "set_priority", "clear_priority", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close"] : ["capture_thought"]) : scope === "write" ? [...READ, "capture_thought", "update_thought", "delete_thought"] : READ;
     if (body.method === "tools/list") return json({ result: { tools: surface.map((name) => ({ name })) } });
     if (body.method === "tools/call") {
       const { name, arguments: args } = body.params;
@@ -2281,10 +2281,10 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
   const wide = await run(["--check"], "write-key");
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
-  // A capture key on a server since SMD-3664 sees the priority writers too: still a capture key, no warning.
+  // A capture key on a server since SMD-3664 sees the priority writers too, and since SMD-3665 the open-item writers: still a capture key, no warning.
   const prio = await run(["--check"], "cap-prio-key");
-  assert(prio.code === 0 && /sees capture_thought, clear_priority, set_priority alone \(capture scope\)/.test(prio.out) && !/warning/.test(prio.err),
-    `--check with a capture key that also sees the priority writers: ok, no warning (${prio.out.trim().slice(0, 120)} | ${prio.err.trim().slice(0, 80)})`);
+  assert(prio.code === 0 && /sees capture_thought, clear_priority, decide_item_close, open_item, propose_item_close, set_item_status, set_priority, update_item alone \(capture scope\)/.test(prio.out) && !/warning/.test(prio.err),
+    `--check with a capture key that also sees the priority and open-item writers: ok, no warning (${prio.out.trim().slice(0, 120)} | ${prio.err.trim().slice(0, 80)})`);
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
   // The proxy's legacy root route: the fake's answers, each marked deprecated with legacy-window's Link (SMD-2686). It keeps the last url asked for.

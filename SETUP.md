@@ -1,18 +1,19 @@
-# Setting up Open Brain
+# Setting up Daemonic Brain
 
-Open Brain here is one compose stack on infrastructure you control: the
+Daemonic Brain is one compose stack on infrastructure you control: the
 forwarder and proxy in front, the REST core, the MCP server, the operator GUI,
-Postgres with pgvector and the migrator, and the profiles beside them. The fork
-began from upstream's Open Brain, whose guide builds it on supabase.com; it has
-grown its own tools and schema since, and needs no Supabase account or CLI, and
-no Deno.
+Postgres with pgvector and the migrator, and the profiles beside them. It grew
+out of Open Brain, whose guide builds the brain on supabase.com; it has grown
+its own tools and schema since, and needs no Supabase account or CLI, and no
+Deno ([`FORK.md`](FORK.md) has where it came from).
 
 This file is the operator's reference: the two decisions, what leaves the box,
 where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started.md)
 walks the same stack at a beginner's pace, one verified step at a time, and
 connects each AI client. The compose stack is the brain's one deployment
 (SMD-2282's decision 6, SMD-2288): there is no single-process, Workers or
-Kubernetes build of it, and no Edge Function build (`FORK.md`, "Deploying").
+Kubernetes build of it, and no Edge Function build (`MAINTAINING.md`,
+"Deploying").
 
 ## Two decisions to make first
 
@@ -395,11 +396,13 @@ Prefer `--scope read` wherever a client only needs to search. A read-only key do
 not get a permission error from `capture_thought` — the tool is never registered
 for it, so it does not appear in `tools/list` at all.
 
-The mirror image is `--scope capture`: `capture_thought`, and `set_priority` and
-`clear_priority` on a thought the key captured (SMD-3664) — no search, no update,
-no delete. It is the key for a session-end hook or an import pipeline, a
-credential that sits in a config file on a machine you do not watch; a leak of it
-can add a thought and state how much its own thoughts matter, and cannot read one
+The mirror image is `--scope capture`: `capture_thought`, `set_priority` and
+`clear_priority` on a thought the key captured (SMD-3664), and the open-item
+writers (`open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`) on an item it opened (SMD-3665) — no search, no
+update of a thought, no delete. It is the key for a session-end hook or an import
+pipeline, a credential that sits in a config file on a machine you do not watch;
+a leak of it can add a thought, state how much its own thoughts matter and keep
+its own to-dos, and cannot read one
 ([`recipes/session-capture-hook`](recipes/session-capture-hook/)).
 
 A fourth, `--scope forward`, grants nothing at all: every server refuses it as a
@@ -409,8 +412,8 @@ records it as who carried the request (SMD-2284), continuing that request's
 `traceparent` (SMD-2287). Give it to no client.
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
-custom connectors are URL-only, so this fork keeps that form — but query strings
-reach access logs, browser history and shell history. A read-only key limits what
+custom connectors are URL-only, so Daemonic Brain keeps that form — but query
+strings reach access logs, browser history and shell history. A read-only key limits what
 a leak is worth. See [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 
 ## Prerequisites
@@ -612,13 +615,13 @@ template's endpoint is at `/mcp/<path>`), with the header
 brain's own tools stay on the connector above. `deploy/README.md`,
 "Orchestration", has the keys, backups, the run-history window and upgrades.
 
-The licences, as the fork reads them (not legal advice): n8n is under its
-Sustainable Use License, OB1 under FSL-1.1-MIT, so running the profile means
-running two non-OSI licences side by side. Installing an OB1 brain with the
-profile on a client's own infrastructure is inside both, since n8n's FAQ
-permits consulting and installing on a client's server. Hosting the profile
-for others is outside n8n's licence. A commercial product built on OB1 that
-competes with it is outside OB1's.
+The licences, as this project reads them (not legal advice): n8n is under its
+Sustainable Use License, Daemonic Brain under Open Brain's FSL-1.1-MIT, so
+running the profile means running two non-OSI licences side by side. Installing
+a brain with the profile on a client's own infrastructure is inside both, since
+n8n's FAQ permits consulting and installing on a client's server. Hosting the
+profile for others is outside n8n's licence. A commercial product built on the
+brain that competes with Open Brain is outside FSL-1.1-MIT.
 
 ## Expected outcome
 
@@ -627,7 +630,7 @@ logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
 (`deploy/README.md` has the count, and the liveness-probe target for a platform
 that can only GET). A client shows every tool in `server-portable/tools.json`
 for a write key, the ones whose scope is `read` for a read key, and
-`capture_thought`, `set_priority` and `clear_priority` for a capture key; smoke.sh's "tool surface matches the
+`capture_thought`, the priority writers and the open-item writers for a capture key; smoke.sh's "tool surface matches the
 manifest" holds a write key's list to that file.
 
 ## Where to run it for real
@@ -671,4 +674,5 @@ or patient-adjacent data, wherever you host it.
 - `compat/supabase-sql/README.md` — running recipes and integrations without PostgREST
 - `evals/README.md` — how the local models were chosen, and how to re-run it
 - `deploy/README.md` — the compose stack in detail
-- `FORK.md` — what this fork changes and why
+- `MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `FORK.md` — the fork era: where Daemonic Brain came from

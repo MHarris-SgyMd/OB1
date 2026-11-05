@@ -43,10 +43,11 @@ if (minted === "read") {
   console.log(`  delete_thought; an extension's add/update tools) are not registered for`);
   console.log(`  this key, so they do not appear in tools/list. Safe for a URL-embedded connector.\n`);
 } else if (minted === "capture") {
-  console.log(`  Capture-only: capture_thought, and set_priority and clear_priority on a thought`);
-  console.log(`  this key captured, are the tools registered for it — no search, no update, no`);
-  console.log(`  delete. For a hook or a pipeline that adds thoughts from a machine you do not`);
-  console.log(`  sit at: a leak of this key can add, and rank what it added, not read.\n`);
+  console.log(`  Capture-only: capture_thought, set_priority and clear_priority on a thought`);
+  console.log(`  this key captured, and the open-item writers on an item it opened, are the`);
+  console.log(`  tools registered for it — no search, no update of a thought, no delete. For a`);
+  console.log(`  hook or a pipeline that adds thoughts from a machine you do not sit at: a leak`);
+  console.log(`  of this key can add, rank and track what it added, not read.\n`);
 } else if (minted === "forward") {
   console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
   console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);

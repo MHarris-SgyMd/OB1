@@ -115,11 +115,11 @@ const TABLES = [
   // `thoughts`. They follow `thoughts` although several reference it: the
   // CASCADE above has already cut those constraints by the time they drop.
   ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
-  // The extension and recipe schemas' tables (SMD-1810): test-live [18] applies
+  // The recipe schemas' tables (SMD-1810; the extensions' are their plugins' since SMD-2311): test-live [18] applies
   // CONTRIB_SCHEMA_FILES after the community files, for the same reason and
   // with the same drop. No sequence among them (every id is a uuid or text);
   // their functions stay, as the community schemas' do.
-  ...grantedTables(["extensions", "recipes"]),
+  ...grantedTables(["recipes"]),
 ];
 
 /**
@@ -457,6 +457,9 @@ const FUNCTIONS = [
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",
+  // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
+  "release_closed_ticket_claims(text, boolean, jsonb)",
+  "ob1_work_claim_closed_head(text)",
 ];
 
 /**
@@ -1426,22 +1429,20 @@ export function communitySchemaFiles(): string[] {
 /** The repository root, which CONTRIB_SCHEMA_FILES are relative to. */
 export const CONTRIB_DIR = join(HERE, "..");
 /**
- * The extension and recipe SQL files that create tables or views — the ones
- * `--grant`'s `extensions` and `recipes` groups cover — in the order test-schema
+ * The recipe SQL files that create tables or views — the ones `--grant`'s
+ * `recipes` group covers (the extensions' went with SMD-2311) — in the order test-schema
  * [50] and test-live [18] apply them, after the community files (SMD-1810).
  * Listed, not walked: recipes/ also holds a psql query layer (`\set`
  * variables), a pg_cron line, two helper functions, a column added to
  * entity-extraction's table and a Neon build of `thoughts` itself, none of
  * which a brain applies as a schema over the migrations; lint-sweep's
- * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` is here ([50]
- * checks), and the order among them is free — no file references another's
+ * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` would be here ([50]
+ * checks; none is left since SMD-2311 made the six plugins), and the order among them is free — no file references another's
  * table — but ops-views.sql reads columns enhanced-thoughts adds to `thoughts`,
  * and its three guarded views exist only over smart-ingest's and
  * entity-extraction's tables, so the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
-  "extensions/job-hunt/schema.sql",
-  "extensions/professional-crm/schema.sql",
   "recipes/adaptive-capture-classification/schema.sql",
   "recipes/brain-health-monitoring/ops-views.sql",
   "recipes/chatgpt-conversation-import/schema.sql",

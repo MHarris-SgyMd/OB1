@@ -3,9 +3,10 @@
 # the data-layer job's database-backed suites in CI's order against ONE shared
 # Postgres; beside them, all from the start, test-live.ts's four shards, each on
 # a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
-# test-preflight on another as CI's are, and in a lane of their own the suites
-# and self-checks that need none and every directory's typecheck (SMD-1932,
-# SMD-1870, SMD-2903, SMD-3638).
+# test-preflight on another as CI's are, test-schema's two widths in a lane of
+# their own (SMD-3715), and in another the suites and self-checks that need no
+# database and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903,
+# SMD-3638).
 # Each row says how long it took, and one still running at its time limit, 600 s
 # unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647).
 #
@@ -51,7 +52,7 @@ row() {
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, about twice the slowest honest row here under the lanes' load
-# (test-live's sleep shard, ~270 s); OB1_PARITY_ROW_LIMIT sets another.
+# (test-live's sleep shard, ~290 s); OB1_PARITY_ROW_LIMIT sets another.
 # Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in
@@ -246,20 +247,31 @@ typecheck() {
   fi
 }
 
-# The database-free lane (SMD-3638): every row with no DATABASE_URL and every
-# typecheck, one after another in a background subshell beside the database
-# suites, its rows printed when the database lane is done. None of these reads
-# the shared Postgres, so the database suites see no other client; what they
-# share is the CPU, and with it the timing rows of every lane (test-server's
-# probe windows, test-live's polls) run under more load than in series. Its
-# FAILED is its own, so it returns its verdict and main() reads it from wait.
-# free_rows NOWFILE: at_row's file.
-free_rows() {
+# The schema lane (SMD-3715): the schema on PGlite, at the default width and
+# at 768, each as CI's db-schema job runs it. They were the database-free
+# lane's longest rows, and that lane set a run's length; apart, this lane and
+# that one each end inside the longest test-live shard. The widths stay one
+# after the other: a lane more is more load on every lane's timing rows, and
+# the run would end no sooner. Like the database-free lane's below, its FAILED
+# is its own. schema_rows NOWFILE: at_row's file.
+schema_rows() {
   FAILED=0 NOW_FILE="$1" LAST_ROW=''
-  # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
   OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text nodb db test-schema.ts
+  at_row ''
+  return "$FAILED"
+}
 
+# The database-free lane (SMD-3638): every other row with no DATABASE_URL and
+# every typecheck, one after another in a background subshell beside the
+# database suites, its rows printed when the database lane is done. None of
+# these reads the shared Postgres, so the database suites see no other client;
+# what they share is the CPU, and with it the timing rows of every lane
+# (test-server's probe windows, test-live's polls) run under more load than in
+# series. Its FAILED is its own, so it returns its verdict and main() reads it
+# from wait. free_rows NOWFILE: at_row's file.
+free_rows() {
+  FAILED=0 NOW_FILE="$1" LAST_ROW=''
   # Suites and self-checks that need no database, by CI job. They are here
   # because CI runs them and this script exists to be CI's local equivalent —
   # leaving them out let two stale tool-count assertions reach a pull request
@@ -415,13 +427,15 @@ start_lanes() {
   local shard
   LANES=$(mktemp -d "$PARITY_TMP/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
-  echo "  … the other lanes write to $LANES: live-<shard>.out each test-live shard's row, pair.out test-upgrade's and test-preflight's, free.out the database-free lane's rows"
+  echo "  … the other lanes write to $LANES: live-<shard>.out each test-live shard's row, pair.out test-upgrade's and test-preflight's, schema.out test-schema's, free.out the database-free lane's rows"
   for shard in $LIVE_SHARDS; do
     "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --live "$shard" "$LANES/live-$shard.now" < /dev/null > "$LANES/live-$shard.out" 2>&1 &
     LIVE_PIDS="$LIVE_PIDS $!" LANE_NAMES="$LANE_NAMES $!:live-$shard"
   done
   "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
   PAIR_PID=$! LANE_NAMES="$LANE_NAMES $!:pair"
+  schema_rows "$LANES/schema.now" > "$LANES/schema.out" 2>&1 &
+  SCHEMA_PID=$! LANE_NAMES="$LANE_NAMES $!:schema"
   free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
   FREE_PID=$! LANE_NAMES="$LANE_NAMES $!:database-free"
 }
@@ -433,21 +447,21 @@ stop_tree() {
 drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 stop_lanes() {
   local pid
-  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
+  for pid in $FREE_PID $SCHEMA_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
   # Each with-postgres.sh removes its container as it exits, ignoring signals
   # while it does; all are waited for within one 30 s deadline, so none
   # outlives the script and a stuck removal cannot hold the prompt (SMD-3688).
   # bash reaps an exited lane itself, so ps no longer shows it and wait
   # returns at once.
   local deadline=$((SECONDS + 30)) name
-  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do
+  for pid in $FREE_PID $SCHEMA_PID $PAIR_PID $LIVE_PIDS; do
     while ps -p "$pid" > /dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done
     if ps -p "$pid" > /dev/null 2>&1; then
       name=lane
       case "$LANE_NAMES " in
         *" $pid:"*) name=${LANE_NAMES##* $pid:}; name="${name%% *} lane" ;;
       esac
-      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds shows in podman ps or docker ps" >&2
+      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds, if any, shows in podman ps or docker ps" >&2
     else
       wait "$pid" 2>/dev/null
     fi
@@ -478,7 +492,7 @@ wait_lane() {
 
 main() {
   FAILED=0
-  FREE_PID='' PAIR_PID='' LIVE_PIDS='' LANE_NAMES='' LANES=''
+  FREE_PID='' SCHEMA_PID='' PAIR_PID='' LIVE_PIDS='' LANE_NAMES='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
   # A closed terminal's hangup reaches every process of this script's group,
   # the lanes and their with-postgres.sh runs among them, and limit's trap
@@ -495,11 +509,12 @@ main() {
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
   # Every other lane starts now, beside this one (SMD-3688): the four test-live
-  # shards (live_rows), test-upgrade and test-preflight (pair_rows), and the
-  # database-free rows (free_rows). Until SMD-3639 the rest shard's [2] appended
-  # a line to the tracked db/migrations/002 for a moment, which the checker
-  # (17c hashes the frozen migrations), test-engines, test-schema, test-upgrade
-  # and test-preflight read, so they waited for it; it edits a copy now.
+  # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
+  # (schema_rows) and the database-free rows (free_rows). Until SMD-3639 the
+  # rest shard's [2] appended a line to the tracked db/migrations/002 for a
+  # moment, which the checker (17c hashes the frozen migrations), test-engines,
+  # test-schema, test-upgrade and test-preflight read, so they waited for it; it
+  # edits a copy now.
   start_lanes
 
   # Against the shared Postgres, in CI's order: the data-layer job's suites,
@@ -525,12 +540,11 @@ main() {
   run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
   run compat/supabase-sql test-compat.ts
-  # The vendored writers of a thought's content or vector (change 69), then
-  # every extension tool on the SQL shim, as CI's data-layer job runs them —
-  # last, since each applies vendored schemas to the shared database and drops
-  # them after.
+  # The vendored writers of a thought's content or vector (change 69), as CI's
+  # data-layer job runs them — last, since it applies vendored schemas to the
+  # shared database and drops them after. (The extension tools' suite,
+  # test-tools.ts, retired with the last extension server: SMD-2311.)
   run extensions         test-writes.ts
-  run extensions         test-tools.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
   local shard pid
@@ -542,6 +556,8 @@ main() {
   done
   wait_lane "$PAIR_PID" pair "test-upgrade and test-preflight, on a Postgres of their own"
   PAIR_PID=''
+  wait_lane "$SCHEMA_PID" schema "test-schema at its two widths, on PGlite"
+  SCHEMA_PID=''
   wait_lane "$FREE_PID" free "The database-free lane"
   FREE_PID=''
   echo

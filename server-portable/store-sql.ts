@@ -25,7 +25,8 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SUBJECT_POOL_PREFIX } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
+import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
+import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -89,12 +90,22 @@ async function claimCall(what: string, run: () => Promise<Record<string, unknown
 }
 
 /**
+ * 116's and 117's raises about the server's own envelope (no maker, a malformed one, a plugin name it stamped) or a
+ * raw write's state: the store's faults, not the caller's argument. Each anchored to how the function starts its
+ * message — `<the call>: …` or `<the call> needs a maker` — never matched inside it, where the function quotes the
+ * caller's own input (SMD-3665 PR 2 review pass 3: an id reading "needs a maker" answered 500).
+ */
+const SERVER_RAISE = /^[a-z_]+(?:\(\))?(?: needs a maker:|: p_actor must be a JSON object|: a maker's key name is at most|: the envelope's plugin .* is not a plugin's name$|: proposal \S+ was pending on an item)/;
+
+/**
  * A 22023 from 116 as PriorityRefused, by its words; a time the schema took that Postgres cannot cast (22007, 22008,
  * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
  * was, the store's fault.
  */
 function priorityRefusedOr(e: unknown): unknown {
   const message = String((e as Error)?.message ?? "");
+  // The server's own envelope refused is its fault, as for the item calls (review pass 3).
+  if (SERVER_RAISE.test(message)) return e;
   if (timeCastFailed(e)) return new PriorityRefused("time", `due_at or not_before is no time Postgres can read: ${message}`);
   return String((e as { errno?: unknown }).errno ?? "") === "22023" ? new PriorityRefused(priorityProblemOf(message), message) : e;
 }
@@ -111,10 +122,34 @@ async function priorityCall(what: string, run: () => Promise<Record<string, unkn
 }
 
 /**
- * The maker's envelope for 116: the actor's own, its scope stated. Only here: the actor's `scope` is otherwise a
- * capture key's alone, which 082 reads off an audit row, and a write key's envelope on a thought write states none.
+ * The maker's envelope for 116's and 117's calls: the actor's own, its scope stated, and the plugin a call came
+ * through (SMD-3665 PR 2: a plugin's ctx.call names it, and 117 reads it there alone — a plugin row's item is the
+ * plugin's — never from an argument). Only here: the actor's `scope` is otherwise a capture key's alone, which 082
+ * reads off an audit row, and a write key's envelope on a thought write states none.
  */
-const priorityEnvelope = (actor: Actor | undefined, scope: "write" | "capture") => (actor ? { ...actorPayload(actor), scope } : null);
+const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plugin: string | undefined) =>
+  (actor ? { ...actorPayload(actor), scope, ...(plugin !== undefined ? { plugin } : {}) } : null);
+
+/** A raise 117 means as a refused argument: its 22023, or a uuid Postgres could not cast (22P02); any other, the store's fault. */
+function itemRefusedOr(e: unknown): unknown {
+  const errno = String((e as { errno?: unknown }).errno ?? "");
+  const message = String((e as Error)?.message ?? "");
+  // 117's raises about the server's own envelope or a raw write's state are the store's faults, not the caller's
+  // argument (review pass 2: a malformed envelope or a pending proposal on a settled item answered 400).
+  if (SERVER_RAISE.test(message)) return e;
+  return errno === "22023" || errno === "22P02" ? new ItemRefused(errno === "22P02" ? "id" : itemProblemOf(message), message) : e;
+}
+
+/** One of 117's writers, run and read: its jsonb answer as an ItemAnswer, a malformed argument as ItemRefused. */
+async function itemCall(what: string, run: () => Promise<Record<string, unknown>[]>): Promise<ItemAnswer> {
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await run();
+  } catch (e) {
+    throw itemRefusedOr(e);
+  }
+  return normaliseItemAnswer(rows[0]?.r, what);
+}
 
 /** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
 function toVector(embedding: number[]): string {
@@ -1014,6 +1049,18 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
   }
 
+  async closedTicket(issue: string): Promise<ClosedTicket | null> {
+    // SMD-3600: 118's own test of a closed ticket, the one board-sync's release reads, so a claim's reply and the
+    // release agree. Its EXECUTE is PUBLIC's (the release's alone is held). A brain before 118 has none: open, as far as it says.
+    try {
+      const [r] = await this.sql`SELECT status, status_type FROM ob1_work_claim_closed_head(${issue}::text)` as { status: unknown; status_type: unknown }[];
+      return r && typeof r.status_type === "string" ? { status: typeof r.status === "string" ? r.status : null, statusType: r.status_type } : null;
+    } catch (e) {
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /ob1_work_claim_closed_head\(/.test(String((e as Error).message))) return null;
+      throw e;
+    }
+  }
+
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
   // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
   async claimLease(token: string, id?: string, work?: ClaimLeaseWork): Promise<ClaimLease | null> {
@@ -1024,11 +1071,11 @@ export class SqlStore implements ThoughtStore {
     // test, or — the registry away, so no agent id — a claim made with an id under the caller's name, as ownWhileAway
     // reads it for renew_claim (review pass 5: such a call made a new claim again).
     const rows = (id !== undefined
-      ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
+      ? await this.sql`SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
       : work === undefined
-        ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
+        ? await this.sql`SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
         : await this.sql`
-            SELECT id, expires_at, released_at, released_by, release_reason,
+            SELECT id, issue, expires_at, released_at, released_by, released_by_kind, release_reason,
                    (c.issue = ob1_work_claim_issue(${work.ticket}::text)
                     AND NOT (${work.piece ?? null}::text IS NOT NULL AND ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece') IS NULL)
                     AND c.piece_key = COALESCE(lower(ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece')), '')
@@ -1040,6 +1087,7 @@ export class SqlStore implements ThoughtStore {
     return {
       id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
       releasedBy: typeof r.released_by === "string" ? r.released_by : null, releaseReason: typeof r.release_reason === "string" ? r.release_reason : null,
+      ...(typeof r.issue === "string" ? { issue: r.issue } : {}), releasedByKind: typeof r.released_by_kind === "string" ? r.released_by_kind : null,
       ...(work !== undefined ? { ownOnThisWork: r.own_on_this_work === true } : {}),
     };
   }
@@ -1061,17 +1109,18 @@ export class SqlStore implements ThoughtStore {
   // and the server's actor carries a scope for a capture key alone — and every value a bind parameter.
   async assertPriority(opts: {
     kind: string; key: string; level: number; dueAt?: string; notBefore?: string; dueRef?: { kind: string; key: string }; reason?: string; inferred?: boolean;
-    actor?: Actor; scope: "write" | "capture";
+    actor?: Actor; scope: "write" | "capture"; plugin?: string;
   }): Promise<PriorityAnswer> {
+    // 117's envelope: the plugin a ctx.call came through, which owns the items its rows stand for (SMD-3665 PR 2).
     return priorityCall("assert_priority", () => this.sql`
       SELECT assert_priority(${opts.kind}::text, ${opts.key}::text, ${opts.level}::int, ${opts.dueAt ?? null}::timestamptz, ${opts.notBefore ?? null}::timestamptz,
                              ${opts.dueRef?.kind ?? null}::text, ${opts.dueRef?.key ?? null}::text, ${opts.reason ?? null}::text, ${opts.inferred === true}::boolean,
-                             ${priorityEnvelope(opts.actor, opts.scope)}::jsonb) AS r`);
+                             ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
   }
 
   async clearPriority(opts: { kind: string; key: string; actor?: Actor; scope: "write" | "capture" }): Promise<PriorityAnswer> {
     return priorityCall("clear_priority", () => this.sql`
-      SELECT clear_priority(${opts.kind}::text, ${opts.key}::text, ${priorityEnvelope(opts.actor, opts.scope)}::jsonb) AS r`);
+      SELECT clear_priority(${opts.kind}::text, ${opts.key}::text, ${itemEnvelope(opts.actor, opts.scope, undefined)}::jsonb) AS r`);
   }
 
   async priorityRecord(kind: string, key: string): Promise<PriorityRecord> {
@@ -1114,6 +1163,71 @@ export class SqlStore implements ThoughtStore {
     const r = rows[0];
     if (!r || !(PRIORITY_KINDS as readonly unknown[]).includes(r.kind) || typeof r.key !== "string") throw new Error("ob1_priority_item answered no item this server reads");
     return { item: { kind: r.kind as PriorityItem["kind"], key: r.key }, exists: r.exists === true };
+  }
+
+  // SMD-3665 PR 2: 117's writers, the envelope stating the key's scope and the plugin a call came through, and every
+  // value a bind parameter. A due time rides as text: 117 reads it (ISO 8601, UTC without an offset).
+  async openItem(opts: { text: string; owner?: string; dueAt?: string; originThought?: string; pluginRow?: string; proposed?: boolean; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer> {
+    return itemCall("open_item", () => this.sql`
+      SELECT open_item(${opts.text}::text, ${opts.owner ?? null}::text, ${opts.dueAt ?? null}::text, ${opts.originThought ?? null}::uuid,
+                       ${opts.pluginRow ?? null}::text, ${opts.proposed === true}::boolean, ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
+  }
+
+  async updateItem(opts: { id: string; changes: { text?: string; owner?: string | null; dueAt?: string | null }; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer> {
+    // Only the fields given: a JSON null clears owner or due_at, an absent one keeps it.
+    const c = opts.changes;
+    const changes = { ...(c.text !== undefined ? { text: c.text } : {}), ...(c.owner !== undefined ? { owner: c.owner } : {}), ...(c.dueAt !== undefined ? { due_at: c.dueAt } : {}) };
+    return itemCall("update_item", () => this.sql`
+      SELECT update_item(${opts.id}::text, ${changes}::jsonb, ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
+  }
+
+  async setItemStatus(opts: { id: string; status: "open" | "done" | "dropped"; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer> {
+    return itemCall("set_item_status", () => this.sql`
+      SELECT set_item_status(${opts.id}::text, ${opts.status}::text, ${opts.reason ?? null}::text, ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
+  }
+
+  async proposeItemClose(opts: { id: string; status: "done" | "dropped"; evidenceThought?: string; label?: string; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer> {
+    return itemCall("propose_item_close", () => this.sql`
+      SELECT propose_item_close(${opts.id}::text, ${opts.status}::text, ${opts.evidenceThought ?? null}::uuid, ${opts.label ?? null}::text, ${opts.reason ?? null}::text,
+                                ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
+  }
+
+  async decideItemClose(opts: { proposal: string; accept: boolean; reason?: string; actor?: Actor; scope: "write" | "capture"; plugin?: string }): Promise<ItemAnswer> {
+    return itemCall("decide_item_close", () => this.sql`
+      SELECT decide_item_close(${opts.proposal}::uuid, ${opts.accept}::boolean, ${opts.reason ?? null}::text, ${itemEnvelope(opts.actor, opts.scope, opts.plugin)}::jsonb) AS r`);
+  }
+
+  async itemHistory(id: string): Promise<ItemRecord> {
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`SELECT open_item_history(${id}::text) AS r` as Record<string, unknown>[];
+    } catch (e) {
+      throw itemRefusedOr(e);
+    }
+    return normaliseItemRecord(rows[0]?.r, "open_item_history");
+  }
+
+  async listItems(opts: { statuses: ItemStatus[]; overdue: boolean; originThought?: string; plugin?: string; limit: number }): Promise<{ items: ItemListRow[]; truncated: boolean }> {
+    // One more than the limit, so `truncated` is read rather than guessed. Overdue on the read's clock (now()): an
+    // open or proposed item due before it. The pending count is the item's closes still waiting on a decision.
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT ob1_item_json(i) AS j,
+               (i.status IN ('open', 'proposed') AND i.due_at < now()) AS overdue,
+               (SELECT count(*)::int FROM open_item_close_proposals p WHERE p.item_id = i.item_id AND p.decision IS NULL) AS pending
+          FROM open_items i
+         WHERE i.status = ANY(${this.sql.array(opts.statuses, "TEXT")}::text[])
+           AND (NOT ${opts.overdue}::boolean OR (i.status IN ('open', 'proposed') AND i.due_at < now()))
+           AND (${opts.originThought ?? null}::uuid IS NULL OR i.origin_thought_id = ${opts.originThought ?? null}::uuid)
+           AND (${opts.plugin ?? null}::text IS NULL OR i.plugin = ${opts.plugin ?? null}::text)
+         ORDER BY i.due_at NULLS LAST, i.noted_at DESC, i.item_id
+         LIMIT ${opts.limit + 1}::int` as Record<string, unknown>[];
+    } catch (e) {
+      throw itemRefusedOr(e);
+    }
+    const items = rows.slice(0, opts.limit).map((r) => ({ ...normaliseOpenItem(r.j, "ob1_item_json"), overdue: r.overdue === true, pendingProposals: Number(r.pending ?? 0) }));
+    return { items, truncated: rows.length > opts.limit };
   }
 
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {

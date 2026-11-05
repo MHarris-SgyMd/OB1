@@ -458,12 +458,12 @@ For reference, here's what the official Open Brain extensions expose:
 | 3. Family Calendar | 7 | — |
 | 4. Meal Planning | 8 | — |
 | 5. Professional CRM | 12 | 1 bridge to core |
-| 6. Job Hunt Pipeline | 10 | 1 bridge to CRM |
-| **All extensions** | **47** | **2 bridges** |
+| 6. Job Hunt Pipeline | 19 | 1 bridge to CRM |
+| **All extensions** | **56** | **2 bridges** |
 
-On this fork the first five are plugins, their tools on the brain's own connector; meal planning's shared server is retired, and its plugin reads and ticks off the list behind the brain's own keys; the CRM's bridge reads a thought through the brain as its caller, and it gained a list and a change for opportunities (SMD-2311). The counts above are this tree's.
+On this fork all six are plugins, their tools on the brain's own connector; meal planning's shared server is retired, and its plugin reads and ticks off the list behind the brain's own keys; the CRM's bridge reads a thought through the brain as its caller, and it gained a list and a change for opportunities; job hunt's bridge records the CRM contact the agent found or added first, and it gained four lists and a change for each kind of row (SMD-2311). The counts above are this tree's.
 
-With all 6 extensions connected simultaneously, that's ~47 tool definitions. Based on community testing ([Issue #36](https://github.com/NateBJones-Projects/OB1/issues/36)), Claude Opus handles this fine in scripted use but routing accuracy degrades for ambiguous, multi-domain prompts — and weaker models struggle significantly.
+With all 6 extensions connected simultaneously, that's ~56 tool definitions. Based on community testing ([Issue #36](https://github.com/NateBJones-Projects/OB1/issues/36)), Claude Opus handles this fine in scripted use but routing accuracy degrades for ambiguous, multi-domain prompts — and weaker models struggle significantly.
 
 The official extensions are designed to be connected selectively (you don't need Meal Planning loaded during a job search), but many users connect everything and leave it. This guide helps you be intentional about it.
 
