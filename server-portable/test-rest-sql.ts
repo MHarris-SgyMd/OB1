@@ -1777,8 +1777,9 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
   const hookAway = { name: "hook", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
   const ownAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("update_item", { id: hookId, owner: "while away" }) as Out;
   const prioAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("set_priority", { kind: "item", key: rowId, level: 2 }) as Out;
-  // SMD-3780: the registry set up wrong, or refusing, is final on the same item, as claims' [10] and priority's [11]
-  // say the first; and a read key's principal reaching a writer is READ_ONLY_KEY naming it, before any call.
+  // SMD-3780: the registry set up wrong, or refusing, is final on the same item, each with its cause (claims' [10] and
+  // priority's [11] read the set-up-wrong case too); and a read key's principal reaching a writer is READ_ONLY_KEY
+  // naming the key, whether the core or 117 refuses it.
   const hookMisconfigured = { ...(hookAway as object), agentUnresolved: "misconfigured" } as unknown as Parameters<typeof direct.openItem>[0];
   const ownMisconfigured = await contextFor("home-maintenance", { core: direct, principal: hookMisconfigured }).call("update_item", { id: hookId, owner: "while set up wrong" }) as Out;
   const hookRefused = { ...(hookAway as object), agentUnresolved: "refused" } as unknown as Parameters<typeof direct.openItem>[0];

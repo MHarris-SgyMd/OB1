@@ -42,8 +42,10 @@ export function unattributedAs(code: "PRIORITY_UNATTRIBUTED", principal: Princip
 export function unattributedAs(code: "ITEM_UNATTRIBUTED", principal: Principal): Outcome<never, "ITEM_UNATTRIBUTED"> | null;
 export function unattributedAs(code: UnattributedCode, principal: Principal, facts?: ClaimFacts): Outcome<never, UnattributedCode> | null {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
-  const refusal = principal.agentUnresolved === "unreachable"
-    ? { code, retryable: true, cause: "registry_away", ...facts }
-    : { code, retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused", ...facts };
-  return refuse<never, UnattributedCode>(refusal as unknown as Extract<Refusal, { code: UnattributedCode }>);
+  // Typed by the refusal's own shape, PRIORITY_UNATTRIBUTED's causes the narrowest of the three, so a mistyped cause
+  // or a flag paired with the wrong cause fails here, where the overloads guard only the callers (review pass 2).
+  const said: Pick<Extract<Refusal, { code: "PRIORITY_UNATTRIBUTED" }>, "retryable" | "cause"> = principal.agentUnresolved === "unreachable"
+    ? { retryable: true, cause: "registry_away" }
+    : { retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused" };
+  return refuse<never, UnattributedCode>({ code, ...said, ...facts } as Extract<Refusal, { code: UnattributedCode }>);
 }
