@@ -1897,9 +1897,14 @@ const noClaim = (r: Extract<Refusal, { code: "CLAIM_NOT_FOUND" }>) =>
   UUID.test(r.id) ? `Refused: no claim ${r.id}.` : "Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims.";
 const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) => {
   const why = r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)";
+  // Its own claim lapsed (SMD-3705): another claim may cover its work by now. Waiting on an operator, it can't be
+  // renewed at all, so the user is told whatever the list shows (review pass 3).
+  const lapsed = !r.lapsedAt ? ""
+    : ` It had lapsed at ${r.lapsedAt}, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: ${lapseCheck(r.lapsedAt, r.id)}`
+      + (r.cause === "registry_away" ? "" : " Either way, tell the user: it can't be renewed until an operator acts.");
   return r.forced
     ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
-    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.`;
+    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.${lapsed}`;
 };
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced
@@ -1919,6 +1924,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
+  : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
