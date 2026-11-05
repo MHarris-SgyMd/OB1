@@ -46,6 +46,7 @@ import {
 } from "../db/config.mjs";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 import { statusType, usageOf, withProviderSpan } from "./spans.ts";
+import { modelCall } from "./model-call.ts";
 
 /** The environment keys this module reads. A subset of root.ts's Env. */
 export type EmbedEnv = {
@@ -178,19 +179,21 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
 }
 
 /**
- * One call to the OpenAI-compatible provider, and the only place that makes
- * one: URL join, headers, the timeout and its name, the status attached, the
- * error body capped, the JSON parsed. The server's embedding, blurb and
- * metadata calls and the bulk passes' all come through here, so the next
- * request-level concern — a Retry-After read, a request id — is added once.
- * Before this the timeout rewrap was hand-written three times with three try
- * scopes, and the one that closed after fetch() let a deadline passing during
- * the body read escape as the bare "The operation timed out" (second review
- * of SMD-1021). The whole exchange, headers and body, is bounded here.
+ * One call to the OpenAI-compatible provider: URL join, headers, the timeout
+ * and its name, the status attached, the error body capped, the JSON parsed.
+ * The server's embedding, blurb and metadata calls and the bulk passes' all
+ * come through here, so the next request-level concern — a Retry-After read, a
+ * request id — is added once. Before this the timeout rewrap was hand-written
+ * three times with three try scopes, and the one that closed after fetch() let
+ * a deadline passing during the body read escape as the bare "The operation
+ * timed out" (second review of SMD-1021). The whole exchange, headers and
+ * body, is bounded here.
  *
- * Not every call in the repository: db/extract-entities.ts's model call has
- * its own bound (--timeout, per model call) and preflight's probes are one
- * interactive shot; both keep their own fetch.
+ * Not every call in the repository: extraction's (entities.ts), the judge's
+ * (consolidate.ts), decide mode's writer (consolidate-decide.ts), the decide
+ * tier's (jev.ts), a worker's probe (db/worker-bootstrap.ts) and preflight's
+ * probes keep their own fetch. Every one goes through the model-call seam
+ * (model-call.ts, SMD-3379 PR 2a), this one too.
  *
  * Every call names its SUBJECT — whose text this is, and what is known about
  * it — and the egress gate (egress.ts, SMD-1903) reads it against the
@@ -223,11 +226,14 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   const gate = mayLeaveBox(subject, at, cfg.egress);
   if (!gate.allowed) throw refuseEgress(what, at.base, gate);
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
-  return withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
-    const answer = await exchange<T>(cfg, path, body, at, what, signal);
-    span.set(usageOf(answer));
-    return answer;
-  }, providerErrorType);
+  // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it, so a refused call waits for no slot,
+  // and the span inside it, so the span times the call and not a wait; the deadline starts in exchange.
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, purpose: subject.kind, ...(signal ? { signal } : {}) },
+    () => withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
+      const answer = await exchange<T>(cfg, path, body, at, what, signal);
+      span.set(usageOf(answer));
+      return answer;
+    }, providerErrorType));
 }
 
 /**

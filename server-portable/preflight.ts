@@ -30,6 +30,7 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
+import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
@@ -5506,11 +5507,12 @@ const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SE
  */
 async function probed(operation: "embeddings" | "chat", model: string, base: string, call: () => Promise<Response>): Promise<Response> {
   probes += 1;
-  return withProviderSpan(operation, model, base, async (span) => {
+  // Through the model-call seam (SMD-3379 PR 2a), to the answer's headers: the caller reads its small body at once.
+  return modelCall({ type: operation === "embeddings" ? "embed" : "chat", model, base, purpose: "probe" }, () => withProviderSpan(operation, model, base, async (span) => {
     const r = await call();
     if (!r.ok) span.end("error", statusType(r.status));
     return r;
-  }, undefined, { "ob1.probe": "preflight" });
+  }, undefined, { "ob1.probe": "preflight" }));
 }
 
 if (!deep) {
