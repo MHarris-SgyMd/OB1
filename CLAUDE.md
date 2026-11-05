@@ -1,10 +1,10 @@
-# CLAUDE.md — Agent Instructions for Open Brain
+# CLAUDE.md — Agent Instructions for Daemonic Brain
 
 This file helps AI coding tools (Claude Code, Codex, Cursor, etc.) work effectively in this repo.
 
 ## What This Repo Is
 
-Open Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. This repo contains the extensions, recipes, schemas, integrations, skills and plugins that the community builds on top of the core Open Brain setup.
+Daemonic Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. It grew out of Open Brain and is a project in its own right (`FORK.md` records where it came from). This repo holds the brain itself — the compose stack, its servers and schema — and the extensions, recipes, schemas, integrations, skills and plugins built on it.
 
 **License:** FSL-1.1-MIT. No commercial derivative works. Keep this in mind when generating code or suggesting dependencies.
 
@@ -169,13 +169,14 @@ Do this only while the key holds no live claims.
 - **Title format:** `[category] Short description` (e.g., `[recipes] Email history import via Gmail API`, `[skills] Panning for Gold standalone skill pack`)
 - **Branch convention:** `contrib/<github-username>/<short-description>`
 - **Commit prefixes:** `[category]` matching the contribution type
-- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-fork-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run on this fork)
+- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-fork-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run here)
 - See `CONTRIBUTING.md` for the full review process, metadata.json template, and README requirements
 
 ## Key Files
 
 - `CONTRIBUTING.md` — Source of truth for contribution rules, metadata format, and the review process
-- `.github/workflows/fork-checks.yml` — The fork's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
+- `MAINTAINING.md` — The version scheme, cutting a release, the one deployment, CI and its checks, and how a review pass records what it caught
+- `.github/workflows/fork-checks.yml` — The project's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template
 - `LICENSE.md` — FSL-1.1-MIT terms
@@ -186,5 +187,5 @@ This repo also has a maintainer-local GSD layer in `.planning/`.
 
 - If `.planning/` exists, use it for local brownfield planning and phased execution.
 - Start with `.planning/STATE.md`, then read `.planning/PROJECT.md`, `.planning/ROADMAP.md`, and the relevant `.planning/codebase/*.md` documents.
-- Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract or upstream PR scope.
+- Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract.
 - Public contributor rules still come from `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and the committed repo files.

@@ -1,23 +1,23 @@
 #!/usr/bin/env bun
 /**
- * fork-index.ts — renders FORK.md's index of numbered changes from changes/
- * (SMD-1917).
+ * fork-index.ts — renders changes/README.md's index of numbered changes from
+ * changes/ (SMD-1917; in FORK.md until SMD-3765).
  *
- * FORK.md is the front door: the pin, what the fork is for, the 1–17 table, the
- * standing sections. Every numbered change from 18 on is one file,
- * changes/NNN-<slug>.md, and this writes the one-line-per-change index FORK.md
- * carries between two marker comments, so the count and the list are never kept
- * by hand. check-fork-consistency.ts (check 15) renders the same block in memory
- * and fails when the committed one differs — the round-trip tools.json has.
+ * Changes 1–17 are FORK.md's table, the record of the fork era. Every numbered
+ * change from 18 on is one file, changes/NNN-<slug>.md, and this writes the
+ * one-line-per-change index changes/README.md carries between two marker
+ * comments, so the count and the list are never kept by hand.
+ * check-fork-consistency.ts (check 15) renders the same block in memory and
+ * fails when the committed one differs — the round-trip tools.json has.
  *
- *   bun scripts/fork-index.ts        # rewrite the block in FORK.md
+ *   bun scripts/fork-index.ts        # rewrite the block in changes/README.md
  *
  * A change file's first line is `# N. <title>`; the index shows the part of the
  * title before " — " (the house shape is "Thing — consequence") and the ticket
  * its title ends with. A changes/smd-NNNN.md file is SMD-1804's release
  * fragment — a change that has landed and takes its number at the next release —
  * and is not listed: the block is the numbered table and one fixed sentence
- * pointing at the fragments, so a PR that adds a fragment leaves FORK.md alone
+ * pointing at the fragments, so a PR that adds a fragment leaves the index alone
  * and two such PRs never conflict on it. The block moves when a numbered file
  * does — at a release cut, when scripts/assemble-release.ts numbers the
  * fragments and re-renders it, or at a numbered record's retitle (SMD-2084).
@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 export const CHANGES_DIR = "changes";
+/** The file the index lives in, from the repository's root; its links are relative to changes/. */
+export const INDEX_FILE = `${CHANGES_DIR}/README.md`;
 /** The first numbered change with a file; 1–17 are FORK.md's table. */
 export const FIRST_FILED = 18;
 export const START = "<!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->";
@@ -162,7 +164,7 @@ export function readChanges(root: string): ClassifiedChanges {
  * lists them, not the index, so adding one moves nothing between the markers
  * (SMD-2084).
  */
-export const FRAGMENTS_LINE = `Changes landed since the last release, if any, are the [\`${CHANGES_DIR}/smd-*.md\`](${CHANGES_DIR}/) files, numbered at the next cut (SMD-1804).`;
+export const FRAGMENTS_LINE = "Changes landed since the last release, if any, are the `smd-*.md` files in this directory, numbered at the next cut (SMD-1804).";
 
 /**
  * The index block, markers excluded. One definition for the writer and the
@@ -173,18 +175,18 @@ export function renderIndex(numbered: NumberedChange[]): string {
   const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
   const lines = [
     numbered.length
-      ? `**${hi} numbered changes** on top of the pin: 1–${FIRST_FILED - 1} are the table above; ` +
-        `${FIRST_FILED}–${hi} are one file each under [\`changes/\`](changes/README.md), newest last. ` +
+      ? `**${hi} numbered changes** since the pin: 1–${FIRST_FILED - 1} are [FORK.md's table](../FORK.md#what-we-changed); ` +
+        `${FIRST_FILED}–${hi} are one file each in this directory, newest last. ` +
         "A change's record is its file; the review-pass prose behind it is in the commits " +
         "(`(caught: …)` tags, read by `scripts/mechanism-yield.ts`)."
-      : `**${FIRST_FILED - 1} numbered changes** on top of the pin, all in the table above; no change has a file under [\`changes/\`](changes/README.md) yet.`,
+      : `**${FIRST_FILED - 1} numbered changes** since the pin, all in [FORK.md's table](../FORK.md#what-we-changed); no change has a file in this directory yet.`,
     "",
     "| # | Change | Ticket |",
     "| --- | --- | --- |",
   ];
   for (const c of numbered) {
     const title = c.heading?.title ?? c.name;
-    lines.push(`| ${c.n} | [${cell(headOf(title))}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title) || "—"} |`); // 18–41 predate the ticket tail
+    lines.push(`| ${c.n} | [${cell(headOf(title))}](${c.name}) | ${ticketOf(title) || "—"} |`); // 18–41 predate the ticket tail; a link relative to changes/, where the index lives
   }
   lines.push("", FRAGMENTS_LINE);
   return lines.join("\n") + "\n";
@@ -192,22 +194,22 @@ export function renderIndex(numbered: NumberedChange[]): string {
 
 /**
  * Where the generated block sits: `{ s, e }` — the offsets just after START and
- * at END. Throws when FORK.md does not carry exactly one pair in order; the check
- * and the writer use the same test.
+ * at END. Throws when the index file does not carry exactly one pair in order;
+ * the check and the writer use the same test.
  */
-export function indexSpan(forkText: string): { s: number; e: number } {
-  const s = forkText.indexOf(START);
-  const e = forkText.indexOf(END);
-  if (s < 0 || e < 0 || e < s || forkText.indexOf(START, s + 1) >= 0 || forkText.indexOf(END, e + 1) >= 0) {
-    throw new Error(`FORK.md must carry exactly one \`${START.slice(0, 27)}…\` / \`${END}\` pair`);
+export function indexSpan(indexText: string): { s: number; e: number } {
+  const s = indexText.indexOf(START);
+  const e = indexText.indexOf(END);
+  if (s < 0 || e < 0 || e < s || indexText.indexOf(START, s + 1) >= 0 || indexText.indexOf(END, e + 1) >= 0) {
+    throw new Error(`${INDEX_FILE} must carry exactly one \`${START.slice(0, 27)}…\` / \`${END}\` pair`);
   }
   return { s: s + START.length, e };
 }
 
-/** FORK.md with the block between the markers replaced. */
-export function spliceIndex(forkText: string, block: string): string {
-  const { s, e } = indexSpan(forkText);
-  return forkText.slice(0, s) + "\n" + block + forkText.slice(e);
+/** The index file's text with the block between the markers replaced. */
+export function spliceIndex(indexText: string, block: string): string {
+  const { s, e } = indexSpan(indexText);
+  return indexText.slice(0, s) + "\n" + block + indexText.slice(e);
 }
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -216,8 +218,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // while argv[1] keeps the spelling it was given, so compare real paths.
 const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } })();
 if (isMain) {
-  const fork = join(ROOT, "FORK.md");
+  const index = join(ROOT, INDEX_FILE);
   const changes = readChanges(ROOT);
-  writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes.numbered)));
-  console.log(`wrote the index into FORK.md (${changes.numbered.length} numbered changes; ${changes.fragments.length} fragments pending, not listed — the release step numbers them)`);
+  writeFileSync(index, spliceIndex(readFileSync(index, "utf8"), renderIndex(changes.numbered)));
+  console.log(`wrote the index into ${INDEX_FILE} (${changes.numbered.length} numbered changes; ${changes.fragments.length} fragments pending, not listed — the release step numbers them)`);
 }
