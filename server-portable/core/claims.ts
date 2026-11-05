@@ -219,7 +219,7 @@ export async function releaseClaim(ctx: Ctx, principal: Principal, input: Input<
   switch (a.outcome === "refused" ? a.code : null) {
     case "CLAIM_NOT_FOUND": return refuse({ code: "CLAIM_NOT_FOUND", retryable: false, id: input.id });
     case "CLAIM_NOT_YOURS":
-      // 115 answers an ended claim already_released before it reads the holder, so a claim here is live.
+      // 115 answers an ended claim already_released before it reads the holder, so a claim here is unreleased, live or lapsed: a release gives no `lapsedAt`, since dropping a claim needs none.
       if (await ownWhileAway(ctx, principal, a.claim, token)) return unattributedRefusal(principal, input.id, false);
       // A force judged without the id that classifies an operator: said as that, to retry once the registry answers.
       if (input.force === true && principal.agentId === undefined) return unattributedRefusal(principal, input.id, true);
