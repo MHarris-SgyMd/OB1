@@ -62,7 +62,7 @@ not_code() {
 # workflow when the one path off the list is an edit of WORKFLOW, a regular
 # file before and after, which answer then reads by job.
 decide() {
-  local event=$1 file=$2 meta f n=0 wf=0 modes
+  local event=$1 file=$2 meta f n=0 wf=0 oldmode newmode
   if [ "$event" != pull_request ]; then printf 'true\ta %s run runs every job\n' "$event"; return; fi
   if [ ! -s "$file" ]; then printf 'true\tno change read from HEAD^1..HEAD\n'; return; fi
   while IFS= read -r -d '' meta; do
@@ -76,8 +76,8 @@ decide() {
     case " ${meta#:} " in
       *' 120000 '* | *' 160000 '*) printf 'true\t%s is a symlink or a submodule\n' "$f"; return ;;
     esac
-    modes=${meta#:}; modes="${modes%% *} $(m=${modes#* }; printf '%s' "${m%% *}")"
-    if [ "$f" = "$WORKFLOW" ] && [ "$modes" = '100644 100644' ]; then wf=1; continue; fi
+    read -r oldmode newmode _ <<< "${meta#:}"
+    if [ "$f" = "$WORKFLOW" ] && [ "$oldmode $newmode" = '100644 100644' ]; then wf=1; continue; fi
     if ! not_code "$f"; then printf 'true\t%s can affect the code jobs\n' "$f"; return; fi
   done < "$file"
   if [ "$n" = 0 ]; then printf 'true\tno path read from HEAD^1..HEAD\n'; return; fi
@@ -159,9 +159,11 @@ by_job() {
     case " $changed " in
       *' .top '*) printf 'true\t\t%s is edited outside its jobs\n' "$WORKFLOW"; rc=1 ;;
     esac
-    for id in $RUN_ALL_JOBS; do
-      if [ "$rc" = 0 ]; then case " $changed " in *" $id "*) printf 'true\t\t%s edits job %s, which every skip relies on\n' "$WORKFLOW" "$id"; rc=1 ;; esac; fi
-    done
+    if [ "$rc" = 0 ]; then
+      for id in $RUN_ALL_JOBS; do
+        case " $changed " in *" $id "*) printf 'true\t\t%s edits job %s, which every skip relies on\n' "$WORKFLOW" "$id"; rc=1; break ;; esac
+      done
+    fi
   fi
   if [ "$rc" = 0 ]; then
     for f in "$d"/head/*; do
