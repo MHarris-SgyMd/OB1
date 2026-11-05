@@ -33,6 +33,7 @@
  */
 
 import { withSpan, type HistogramSpec, type WorkSpan } from "./spans.ts";
+import { asBackground } from "./model-call.ts";
 
 /** Who owns a job — the fields auth.ts's Principal carries that this module needs. */
 export interface JobPrincipal {
@@ -443,8 +444,10 @@ export function startJob(
   // Detached, but tracked: the SIGTERM drain waits on it up to its bound
   // (index.ts wires toolCalls.track in), then markRunningLost cuts it. Wrapped
   // in Promise.resolve so a `track` that returns void (a test's) is fine too;
-  // exec routes every throw to finish(), so this only guards the wrapper.
-  void Promise.resolve(track(exec)).catch(() => {});
+  // exec routes every throw to finish(), so this only guards the wrapper. Its
+  // model calls are background, though a request started it: nobody waits on
+  // them (SMD-3379 PR 2a, model-call.ts).
+  void Promise.resolve(asBackground(() => track(exec))).catch(() => {});
 
   return { jobId: id, status: "accepted", poll: `/jobs/${id}`, stream: `/jobs/${id}/stream` };
 }

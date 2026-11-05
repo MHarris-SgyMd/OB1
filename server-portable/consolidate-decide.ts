@@ -23,6 +23,7 @@
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
+import { modelCall } from "./model-call.ts";
 import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, REASON_MAX, relationConfidence, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
@@ -422,7 +423,13 @@ export function verdictDistribution(probabilities: Record<string, number>): Reco
  * One call to the writer, the judge's model at its chat endpoint: the raw answer. Throws on a transport or provider
  * error, with its status, so the worker classifies it as it does the judge's.
  */
-async function askWriter(cfg: EmbedConfig, messages: { role: "user"; content: string }[], signal?: AbortSignal): Promise<string> {
+function askWriter(cfg: EmbedConfig, messages: { role: "user"; content: string }[], signal?: AbortSignal): Promise<string> {
+  // Through the model-call seam (SMD-3379 PR 2a): the request and the answer's read, as one call.
+  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, purpose: "writer", ...(signal ? { signal } : {}) }, () => writerExchange(cfg, messages, signal));
+}
+
+/** askWriter's exchange, once the seam lets it run. */
+async function writerExchange(cfg: EmbedConfig, messages: { role: "user"; content: string }[], signal?: AbortSignal): Promise<string> {
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
