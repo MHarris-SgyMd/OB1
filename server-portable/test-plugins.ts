@@ -21,6 +21,7 @@ import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
+import { currentCallClass } from "./model-call.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
@@ -1033,6 +1034,8 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   let undone = 0;
   let nestedRan = 0;
   let lateTried = false;
+  /** The model-call class each part ran under (SMD-3379 PR 2a). */
+  const classes: string[] = [];
   const probe = definePlugin({ name: "probe-defer", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
     hooks: {
       later: { description: "Answers at once, its work failing afterwards.", handler: async (ctx) => { ctx.defer(async () => { await gate; ran++; throw new Error("embedder\n  timed out"); }); return { status: 202, body: { accepted: true } }; } },
@@ -1051,6 +1054,9 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
       stringy: { description: "Answers an object whose toJSON is a string.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }); return { status: 202, body: { toJSON: () => "a string" } as never }; } },
       shifty: { description: "Answers an object read differently twice.", handler: async () => { let reads = 0; return { get status() { return reads++ ? 418 : 202; }, body: { get x() { if (reads++ > 1) throw new Error("read again"); return 1; } } } as never; } },
       odd: { description: "Defers work that fails with a message that is no string.", handler: async (ctx) => { ctx.defer(async () => { throw Object.assign(new Error(), { message: 42 }); }); return { status: 202 }; } },
+      classed: { description: "Records the model-call class its handler and its deferred work run under.", handler: async (ctx) => { classes.push(`handler ${currentCallClass()}`); ctx.defer(async () => { classes.push(`work ${currentCallClass()}`); }); return { status: 202 }; } },
+      unclassed: { description: "Records the class its discard runs under, then fails.", handler: async (ctx) => { ctx.defer(async () => { classes.push("work ran"); }, async () => { classes.push(`discard ${currentCallClass()}`); }); throw new Error("after the claim"); } },
+      "late-classed": { description: "Fails, leaving a timer that defers with a discard recording its class.", handler: async (ctx) => { setTimeout(() => { ctx.defer(async () => { classes.push("work ran"); }, async () => { classes.push(`late discard ${currentCallClass()}`); }); }, 5); throw new Error("before the timer"); } },
     } });
   const deferApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, log: () => {}, faultLog: (l) => faults.push(l),
     track: (run) => { const p = run(); tracked.push(p); return p; },
@@ -1104,6 +1110,19 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   await Promise.all(tracked);
   assert(r.status === 500 && undoneAtFailure === undoneBefore + 1 && faults.at(-2) === "api hook /hooks/probe-defer/sloppy deferred fault: discard: could not undo" && faults.at(-1) === "api hook /hooks/probe-defer/sloppy fault: after both",
     `a failed handler's discards run before its 500 is in hand — their lines before its own — and a discard's failure is told as a discard's (${undoneAtFailure - undoneBefore}, ${JSON.stringify(faults.slice(-2))})`);
+  // A delivery is a request, its handler's model calls live; work deferred past the answer is background, as a job's
+  // body is — nobody waits on it — and a discard, which runs before the 500, stays the request's (SMD-3379 PR 2a).
+  r = await post("classed");
+  await Promise.all(tracked);
+  const classedStatus = r.status;
+  r = await post("unclassed");
+  await Promise.all(tracked);
+  r = await post("late-classed");
+  const lateStatus = r.status;
+  await Bun.sleep(50);
+  await Promise.all(tracked);
+  assert(classedStatus === 202 && lateStatus === 500 && JSON.stringify(classes) === JSON.stringify(["handler live", "work background", "discard live", "late discard background"]),
+    `a hook's handler and its discard run live, inside the delivery's request; its deferred work background, and a discard deferred after the handler failed (${JSON.stringify(classes)})`);
   const ranAtStringy = ran;
   r = await post("stringy");
   await Promise.all(tracked);
