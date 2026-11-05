@@ -1100,6 +1100,11 @@ it, each over REST and MCP alike:
   most 20, from that thought and by the capturing key; a re-capture proposes none, and the
   capture never fails for it. `db/backfill-open-items.ts` does the same for thoughts
   captured before, and for a capture whose items were not proposed.
+- **Plugins keep their rows' items** (SMD-3665 PR 3b). home-maintenance's tasks and
+  family-calendar's one-time dates still to come are `proposed` items standing for their
+  rows, due at the task's `next_due` or the date's day, kept by the SDK's `keepRowItem`
+  through `ctx.call`: a logged one-time task settles its item done, and each plugin's
+  `sync_open_items` keeps every row's at once (plugins/README.md).
 - **Opening.** An item read from a thought (`origin_thought`) is noted at that thought's
   capture time, so an old to-do reads as old. The same thought and text again is the item
   already there (`unchanged`, nothing written), and so is a plugin's row. `proposed: true`
