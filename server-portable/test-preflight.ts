@@ -57,22 +57,24 @@ const { assert } = sections;
 /**
  * The suite's shards (SMD-3468), as test-live.ts's SHARDS: the sections each
  * runs, by the id in its header. A section no shard here lists is the rest's,
- * so a new section runs in CI unless it is listed. Split by section time: [5]
- * was most of the suite, so it ends at its full re-apply and [5b] goes on from
- * a fresh one; first takes [5] and [9], whose local endpoints wait out
- * their timeouts, and the rest the others, [5b] and [12] the long ones among
- * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
- * in a job of its own and ends well before the first (its job 103 s, against
- * the data layer's 184 s, one run), so the split no longer evens two legs:
- * [9], about 16 s of waits, could go to the rest and take that off the first
- * (SMD-3710).
+ * so a new section runs in CI unless it is listed. The split was by section
+ * time at first: [5] was most of the suite, so it ends at its full re-apply
+ * and [5b] goes on from a fresh one; first took [5] and [9], whose local
+ * endpoints wait out their timeouts, and the rest the others, [5b] and [12]
+ * the long ones among them. Since SMD-3691 the rest runs in a job of its
+ * own, so the split no longer evens two legs: first is the data layer's,
+ * beside db/test-upgrade.ts and that job's foreground suites, and [9] went
+ * to the rest (SMD-3710), so first is [5] alone. [9] took 15-19 s in the
+ * data layer, about 11 s of it four cases that wait out a 2.5 s probe
+ * timeout and most of the rest some 40 preflight runs. On an AMD EPYC 7763, in eight main runs to
+ * 87240d21, first ended 15-20 s after the later of test-upgrade and those
+ * suites, so it was the data layer's floor by about [9].
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  first: ["5", "9"],
+  first: ["5"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -3188,12 +3190,14 @@ else {
       await claims.unsafe("DROP TABLE IF EXISTS schema_migrations");
     }
   }
-  // [5] leaves a brain preflight passes, as [5b] checks at its own end: [9]
-  // reads it, after [5] in the first shard and after [5b] in a full run.
+  // [5] leaves a brain preflight passes, as [5b] checks at its own end. [9]
+  // runs after [5b] and reads the brain [5b] leaves, not this one, in the
+  // rest shard and in a full run (SMD-3710); this check holds [5]'s fixtures
+  // to cleaning up after themselves.
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
   const left = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
-  assert(left.ok === true, `[5] leaves a brain preflight passes, the state [9] reads after it (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
+  assert(left.ok === true, `[5] leaves a brain preflight passes, its fixtures cleaned up (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
 }
 
 if (want("5b")) console.log("\n[5b] Against a real database, from a fresh apply: the capturing role, the fingerprint backfill, the version and ledger rows as other roles read them, the tier and the workers' heartbeats");
@@ -5055,6 +5059,8 @@ else {
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
   }
 
+  // [9]'s degraded-start case reads the brain this leaves, after it in
+  // either run that has both: the rest shard and a full run (SMD-3710).
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
 
@@ -5231,7 +5237,7 @@ if (want("8")) {
   // The upgrade case: a loopback endpoint nothing declared. The policy row
   // says deny is the default; the endpoint row warns with the one-line fix.
   const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
-  const sourceTerm = await run({ ...BASE_OK, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
+  const sourceTerm = await run({ ...BASE_OK, ...DB_DOWN, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
   assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) do NOT gate a capture/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
          "a source: term is warned about — it does not gate a capture, whose source is the caller's claim (SMD-1941)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),

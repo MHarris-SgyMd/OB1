@@ -16,6 +16,7 @@ import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHoo
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { failure } from "./refusal.ts";
 import { withSpan } from "../spans.ts";
+import { asBackground } from "../model-call.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -401,7 +402,7 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
   // The core's settings as this delivery finds them, read only by a hook that asks.
   const core = deps.core;
   const deferredFault = deps.deferredFault ?? ((message: string) => console.error(`hook ${hook.path} deferred fault: ${message}`));
-  const start = (work: () => Promise<unknown>, what: "work" | "discard" = "work"): Promise<void> => {
+  const start = (work: () => Promise<unknown>, what: "work" | "discard" = "work", late = false): Promise<void> => {
     // The next turn, not a microtask: one queued now would run before the
     // answer is written, and work that spins before its first await would
     // hold the sender's 2xx (review pass 1, measured on Bun 1.4.0). What the
@@ -409,9 +410,12 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     // still wait on work that spins (review pass 2).
     // Work, which runs after the answer, starts a trace of its own linked to the delivery's request, as a job's body
     // does; a discard runs before a failed delivery's 500, inside its request, so it stays that request's child (SMD-1849 PR 2d).
+    // So too its model calls: work's are background, as a job's are, though the request's context started it — nobody
+    // waits on them — and a discard's stay the request's, live, but for one deferred after the handler failed, from a
+    // timer it left (`late`), which the 500 does not wait on (SMD-3379 PR 2a, review passes 1 and 2).
     const run = () =>
       new Promise<void>((resolve) => setImmediate(resolve))
-        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => work()))
+        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => (what === "work" || late ? asBackground(work) : work())))
         .then(
           () => undefined,
           (err) => {
@@ -435,7 +439,7 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     if (outcome === "held") pending.push({ work, discarded });
     else if (outcome === "answered") void start(work);
     // Deferred after its handler failed (a timer it left): never its work.
-    else if (discarded) void start(discarded, "discard");
+    else if (discarded) void start(discarded, "discard", true);
   };
   let reply: HookReply;
   try {

@@ -28,7 +28,7 @@
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
+ * (SHARDS below). Brain Checks runs the four side by side, one matrix cell each,
  * every one on a database of its own (SMD-3048, SMD-3169), and so does
  * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
  * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
@@ -79,6 +79,7 @@ import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
 import { linearClient } from "./linear-api.ts";
 import { resolveEgressPolicy } from "../server-portable/egress.ts";
+import { setModelCallHook } from "../server-portable/model-call.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -6474,6 +6475,35 @@ if (want("10")) {
   assert(abortCode <= 1 && (await statusOf(firstNote)) === "succeeded" && (await statusOf(behindNote)) === "succeeded" && /, 1 set back in the queue, the call in hand aborted by the pass's caller/.test(abortSummary),
          `…and the worker goes on in the same run: both notes extracted, the summary counting the one set back (exit ${abortCode}: ${abortSummary.trim().slice(0, 200)})`);
   for (const id of [firstNote, behindNote]) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // The model-call seam (SMD-3379 PR 2a, review pass 3): a pass's calls carry
+  // its label, and a call waiting on the seam's hook for a slot is no call in
+  // hand — abortInHand passes it over, its time counted from when it runs.
+  const waitNote = await seed("Kenji's note whose call waits on the seam.");
+  const passes: string[] = [];
+  let holding = false;
+  const hookBefore = setModelCallHook(async (call, run) => {
+    passes.push(`${call.pass}/${call.purpose}`);
+    if (call.purpose !== "extraction") return run();
+    holding = true;
+    await Bun.sleep(1500);
+    holding = false;
+    return run();
+  });
+  let waitAbort: InHandAbort | undefined;
+  let duringWait = -1;
+  let waitCode = -9;
+  try {
+    const waitRun = runExtract({ url: URL_!, env, workers: 1, onPass: (_st, a) => { waitAbort = a; }, writer: { out: () => {}, err: () => {} } });
+    await pollUntil(async () => holding, 10_000);
+    await Bun.sleep(1100);
+    duringWait = waitAbort?.(1000) ?? -1;
+    waitCode = await waitRun;
+  } finally {
+    setModelCallHook(hookBefore);
+  }
+  assert(duringWait === 0 && waitCode <= 1 && (await statusOf(waitNote)) === "succeeded" && passes.includes("extract/extraction") && passes.every((x) => x.startsWith("extract/")),
+         `a call waiting 1.1 s on the seam's hook is no call in hand: abortInHand(1000) passes it over, the thought extracted; every call of the pass labelled extract (${duringWait} aborted; exit ${waitCode}; ${JSON.stringify([...new Set(passes)])})`);
+  await sql`SELECT delete_thought(${waitNote}::uuid, NULL::jsonb)`;
   // …and one deleted while its call is in hand, then aborted: not the
   // worker's to set back, so counted deleted, not set back (review pass 1).
   const vanishing = await seed(ledgerOf("vanishing", "vanished"));

@@ -16,7 +16,7 @@ import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
 import { JWT_SHAPE, UNREACHABLE_RETRY_AFTER_SECONDS } from "../oauth-edge.ts";
 import type { TokenCheck } from "../oauth-token.ts";
-import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
+import { asLive, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -217,6 +217,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       fields: pathFields(op.path),
     })));
   let doc: Record<string, unknown> | null = null;
+
+  // Every model call made while a request is served is live, unless run asBackground — a detached job, a hook's deferred
+  // work (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
+  app.use("*", (_c, next) => asLive(() => next()));
 
   // One JSON line per request (SMD-1849, telemetry.ts): the method, the
   // route's template — never the path it was given (an id), the query string,
