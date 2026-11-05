@@ -20281,8 +20281,13 @@ if (want("38")) {
     const acWholeDrain = new AbortController();
     const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
     lines.length = 0;
-    /** newestLive's query (db/sleep.ts), the scheduler's read of the newest live write: what this case and the next count. */
-    const isLiveRead = (text: string) => text.includes("FROM thought_audit WHERE created_at >");
+    /**
+     * newestLive's query (db/sleep.ts), the scheduler's read of the newest live
+     * write: what this case and the next count. By its max(created_at): SMD-3379
+     * PR 1d's vector marks read thought_audit's created_at too, one before
+     * every whole read, a one-shot's first among them.
+     */
+    const isLiveRead = (text: string) => text.includes("SELECT max(created_at) FROM thought_audit WHERE created_at >");
     let noneReads = 0;
     const counting = intercept((text, run) => {
       if (isLiveRead(text)) noneReads++;
