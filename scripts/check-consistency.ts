@@ -4197,6 +4197,10 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Notes\nkept nowhere\n\n## Record\nA title (SMD-1)\n\nbody\n", "a section between the Changelog and `## Record`"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\n", "an empty `## Record`"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n", "no record section at all"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title (SMD-1)\n\n### 103. A numbered heading\n", "a numbered heading in a `## Record` body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title that\nwraps (SMD-1)\n\nbody\n", "a `## Record` title wrapped onto a second line"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\n### A title (SMD-1)\n\nbody\n", "a heading as the `## Record` body's title"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Record\nA title (SMD-1)\n\nbody\n\n## Changelog\nx (SMD-1)\n", "a Changelog after the `## Record` body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nIts sibling `changes/smd-2.md` says why.\n", "a path to another fragment, which points at nothing once the cut numbers it (SMD-2047)"],
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
