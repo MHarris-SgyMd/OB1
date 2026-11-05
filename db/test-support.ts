@@ -489,7 +489,7 @@ export type SchemaOptions = {
    * suites exercise the schema a stock deployment gets. Read from config rather
    * than written as a literal here: SMD-944 flipped that default from off to on
    * and a hardcoded copy would have silently kept the old one, which is the
-   * defined-twice failure this fork keeps removing.
+   * defined-twice failure Daemonic Brain keeps removing.
    */
   trgm?: boolean;
   /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */

@@ -1,14 +1,13 @@
-# Fork-local CI.
+# Daemonic Brain's CI.
 #
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
 # workflow invokes any of them. That is how upstream's server/test-stateless.mjs
 # came to assert the opposite of production for three months without anyone
-# noticing (the Edge Function build and its three mirror suites left this fork
-# with SMD-1800; server-portable/ is the server, and its suites import it).
+# noticing (the Edge Function build and its three mirror suites left
+# Daemonic Brain with SMD-1800; server-portable/ is the server, and its
+# suites import it).
 #
-# This workflow exists so the fork's patch series cannot rot the same way. It is
-# additive — it touches no upstream workflow — so it survives a rebase onto
-# upstream/main untouched.
+# This workflow exists so Daemonic Brain's code cannot rot the same way.
 name: Brain Checks
 
 on:
@@ -1422,7 +1421,7 @@ jobs:
 
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
-      # each is driven as deployed against this database — the fork's schema
+      # each is driven as deployed against this database — Daemonic Brain's schema
       # plus the three sidecars and the log table the writers assume, dropped again at the end —
       # and the row it leaves is compared with the row update_thought leaves
       # for the same edit. Late in the job because it applies those sidecars.

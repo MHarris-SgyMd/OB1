@@ -3,7 +3,7 @@
 The Daemonic Brain REST core (`api.ts`) and the core every brain operation runs
 in. It began as a runtime-neutral build of the MCP server, so the runtime could
 be chosen last, with the same tools and wire behaviour as upstream's Edge
-Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
+Function build (`server/index.ts`, in this tree until SMD-1800). The runtime
 chosen was Bun: the brain runs as the compose stack (`SETUP.md`). That MCP
 server, this directory's `index.ts`, retired in SMD-2287 PR 6b, and `/mcp` is
 `mcp-server/`, a client of this REST core. The
@@ -230,10 +230,10 @@ informational and may be stale, as for the other failure reasons). An edit is
 judged on the row's own metadata; a capture is judged before the write, on
 the actor and the text alone. A refused search names `search_thoughts_keyword`, which makes no
 model call. Every dialler — `providerCall`, the judge, the entity extractor —
-asks the gate itself before the request, so no call the fork makes is ungated;
-a refusal there is a `ProviderError` of kind `egress`. Deny is the default and
-"local" is declared, never guessed: a stack from before the gate that points
-at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
+asks the gate itself before the request, so no call Daemonic Brain makes is
+ungated; a refusal there is a `ProviderError` of kind `egress`. Deny is the
+default and "local" is declared, never guessed: a stack from before the gate that
+points at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
 egress` row says so with the line.
 
 A local endpoint — local by its hostname, the credential rule's sense and not
@@ -1454,7 +1454,7 @@ to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 `test-server.ts` **imports the real server.** That is the point of this directory.
 
-Upstream's Edge Function build, `server/index.ts` (in this fork until SMD-1800),
+Upstream's Edge Function build, `server/index.ts` (in this tree until SMD-1800),
 could not be imported by a test runner — it read `Deno.env` at module scope and
 imported from `jsr:` — so the suites beside it reimplemented the server inline and
 asserted against the copy. That is precisely how upstream's auth assertions came
@@ -1462,9 +1462,9 @@ to claim HTTP 401 for three months after the server started returning HTTP 200
 ([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)). The copy
 kept passing.
 
-The fork's first answer over there was a drift guard that grepped `index.ts` as
-text, which detected the divergence but did not prevent it. Here there is nothing
-to diverge from, so the guards are unnecessary and absent.
+Daemonic Brain's first answer over there was a drift guard that grepped
+`index.ts` as text, which detected the divergence but did not prevent it. Here
+there is nothing to diverge from, so the guards are unnecessary and absent.
 
 `test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE` unset —
 the default store is what it drives — and `SUPABASE_URL` deleted from the

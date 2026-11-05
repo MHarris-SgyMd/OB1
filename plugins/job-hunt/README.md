@@ -56,7 +56,7 @@ Five tables of its own, in the schema `plugin_job_hunt`, made by `migrations/001
   - Any input out of its form or range: `400`, before anything is stored.
 - **MCP hints.** Every tool is closed-world, and a read is read-only. The five `update_` operations, `log_interview_notes` and the link overwrite what was there, so they are marked destructive; the adds are not.
 
-**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02). `DEFAULT_USER_ID` is gone.
+**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. Daemonic Brain is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02). `DEFAULT_USER_ID` is gone.
 
 ## Prerequisites
 

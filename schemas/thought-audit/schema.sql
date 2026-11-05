@@ -101,13 +101,13 @@ CREATE INDEX IF NOT EXISTS thought_audit_session_id_idx
 CREATE INDEX IF NOT EXISTS thought_audit_created_at_idx
   ON thought_audit (created_at DESC);
 
--- This fork (SMD-1796): upstream's file here ENABLEd ROW LEVEL SECURITY on the
--- table ("service role bypasses RLS automatically") and GRANTed SELECT, INSERT
--- TO service_role. Those are Supabase's: on plain Postgres the GRANT stops the
--- file (`role "service_role" does not exist`), and RLS with no policy for the
--- role you connect as denies it every row — 008's audit trigger included.
--- Removed. On a brain built by db/migrate.ts this table is migration 008's.
--- Grant the role your server connects as instead — from db/:
+-- Daemonic Brain (SMD-1796): upstream's file here ENABLEd ROW LEVEL SECURITY on
+-- the table ("service role bypasses RLS automatically") and GRANTed SELECT,
+-- INSERT TO service_role. Those are Supabase's: on plain Postgres the GRANT
+-- stops the file (`role "service_role" does not exist`), and RLS with no policy
+-- for the role you connect as denies it every row — 008's audit trigger
+-- included. Removed. On a brain built by db/migrate.ts this table is migration
+-- 008's. Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
 -- SELECT, INSERT (merged with the `capture` group's INSERT). Row-level

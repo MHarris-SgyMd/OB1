@@ -2,7 +2,8 @@
 /**
  * bench-stats.ts — thought_stats aggregated in SQL (migration 024's
  * thought_stats_summary()) against the application page walk it replaces, at the
- * corpus sizes we have, measured rather than argued (the fork's rule, SMD-925).
+ * corpus sizes we have, measured rather than argued (Daemonic Brain's rule,
+ * SMD-925).
  *
  * SMD-1249. The tool used to page store.pageThoughtMeta(offset, 1000) and tally
  * type/topic/people counts in JS, up to a 100,000-row ceiling past which it

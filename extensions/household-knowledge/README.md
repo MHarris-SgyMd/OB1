@@ -19,7 +19,7 @@ You're at the paint store and can't remember what shade of blue is in the living
 
 A store of household facts — paint colors, appliance details, vendor contacts, measurements, warranty info, and anything else about your home and family that you'd otherwise forget.
 
-On this fork the knowledge base is a **plugin**: [`plugins/household-knowledge`](../../plugins/household-knowledge/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_household_knowledge`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the knowledge base is a **plugin**: [`plugins/household-knowledge`](../../plugins/household-knowledge/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_household_knowledge`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `household_items` — Facts about things in your home, with their particulars (brand, model, colour code) as a flexible JSON object

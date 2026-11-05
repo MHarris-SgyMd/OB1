@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # disable-upstream-workflows.sh — turn off the eleven workflows inherited from
-# upstream, keeping only this fork's own `brain-checks.yml`.
+# upstream, keeping only Daemonic Brain's own `brain-checks.yml`.
 #
 # WHY THIS EXISTS
 #   Being a fork suppresses several Actions triggers: `pull_request_target`,
@@ -9,9 +9,9 @@
 #   suppression and they all become live at once:
 #
 #     ob1-gate-v2.yml               enforces upstream's contribution rules
-#                                   (metadata.json, category folders) which this
-#                                   fork deliberately does not follow — every
-#                                   internal PR would go red
+#                                   (metadata.json, category folders) which
+#                                   Daemonic Brain deliberately does not follow —
+#                                   every internal PR would go red
 #     update-readme-contributions   runs on a schedule and rewrites README
 #     auto-label / welcome-…        fire on every PR and issue
 #     claude-issue-triage           needs ANTHROPIC_API_KEY we do not set

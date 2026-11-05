@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
  * store-compare.ts — SMD-1037, the real-corpus arm: does the store change the
- * rows retrieval returns, or the time to return them, on the corpus the fork's
- * other numbers come from (the Linear issues, whole-content vector plus bare
- * windows, at the shipped 1024 width)?
+ * rows retrieval returns, or the time to return them, on the corpus
+ * Daemonic Brain's other numbers come from (the Linear issues, whole-content
+ * vector plus bare windows, at the shipped 1024 width)?
  *
  * SMD-1038 (changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") pre-registered the
  * bar this run is read against: a recall gap at a used filter tier, a latency

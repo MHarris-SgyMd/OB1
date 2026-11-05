@@ -46,7 +46,7 @@ AGENT KEYS (raw values are shown once, then stored only in your secret manager)
 ## Steps
 
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (Daemonic Brain, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
 3. Open **Table Editor** and confirm two new tables exist: `openbrain_agents` and `agent_memory_keys`.
 4. Open **Database > Functions** and confirm `lookup_agent_memory_key` exists.
 5. Create one row in `openbrain_agents` for each runtime agent.

@@ -1,6 +1,6 @@
 {
   "name": "Weekly Digest",
-  "description": "Retired on this fork (SMD-2239): the weekly synthesis to Telegram now lives in db/weekly-digest.ts, a db/ verb behind the egress gate. This directory is a pointer; the weekly-digest.mjs PostgREST script is gone.",
+  "description": "Retired in Daemonic Brain (SMD-2239): the weekly synthesis to Telegram now lives in db/weekly-digest.ts, a db/ verb behind the egress gate. This directory is a pointer; the weekly-digest.mjs PostgREST script is gone.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",

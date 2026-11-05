@@ -2,7 +2,7 @@
 /**
  * suite-sections.ts — a suite's bracketed sections by wall time, slowest first (SMD-3305).
  *
- * The fork's suites print each section's header as a line that starts with a bracketed number or name ("[12] The
+ * Daemonic Brain's suites print each section's header as a line that starts with a bracketed number or name ("[12] The
  * REST core's spans …", "[8e2] …", "[file]", "[where the key may travel]"); a suite that prints none
  * (db/test-cli.ts) reads as one "(start)" span, which the output says. This runs a suite, stamps each stdout line as
  * it arrives, and gives each section the time from its header to the next one's; the time from the launch to the first
