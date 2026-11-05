@@ -10,8 +10,7 @@
 // choice from a default, is unknown. Upstream's `importance` has no row: it is
 // retired (decision 8).
 
-/** The scale's points by level: 0 none … 5 critical. */
-export const PRIORITY_LEVELS = ["none", "low", "medium", "high", "urgent", "critical"] as const;
+/** A level on the scale: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. */
 export type PriorityLevel = 0 | 1 | 2 | 3 | 4 | 5;
 
 /**

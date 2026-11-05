@@ -1206,7 +1206,6 @@ export type PriorityMove = { issue: string; act: "assert"; level: PriorityLevel;
 export type PriorityTally = { asserted: number; cleared: number; refused: string[] };
 export type PriorityStep = { run: (opts: { dryRun: boolean }) => Promise<PriorityTally> };
 
-
 /**
  * The moves for the heads, pure: a known level not already stated as it stands — the level, the due day, the
  * reason, and the tier the tool's declaration gives it now (`declared`) — is stated; an unknown one with a statement

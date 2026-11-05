@@ -13,7 +13,7 @@ import type { SQL } from "bun";
 import { ROLE_GRANTS } from "./config.mjs";
 
 /** 116's two writers, by signature. */
-export const PRIORITY_WRITERS = ["assert_priority(text, text, integer, timestamptz, timestamptz, text, text, text, boolean, jsonb)", "clear_priority(text, text, jsonb)"] as const;
+const PRIORITY_WRITERS = ["assert_priority(text, text, integer, timestamptz, timestamptz, text, text, text, boolean, jsonb)", "clear_priority(text, text, jsonb)"] as const;
 
 /** The priority grant group's privileges, table by table, as config.mjs grants them. */
 const GROUP = ROLE_GRANTS.priority as readonly { table: string; privileges: readonly string[] }[];
