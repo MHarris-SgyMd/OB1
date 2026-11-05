@@ -3125,6 +3125,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (c.state === "covered-long") return err(`Refused: SMD-9001 is covered by 6 live claims: ${Array.from({ length: 5 }, (_, i) => `SMD-9001 piece "PR ${i}" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8960 + i)})`).join("; ")}; SMD-9001 piece "PR 9" by your own key (claude-code) since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8084)}). A whole ticket and any of its pieces are the same work. Your claim lapsed before another covered its work.`, { code: "WORK_CLAIMED", heldBy: [] });
     // The registry away, in render.ts's words: a claim that had lapsed says when (SMD-3705), past markerSaid's cut (SMD-3807).
     if (c.state === "unattributed" || c.state === "unattributed-final") return err(unattributedText(args.id, c.state === "unattributed" ? "registry_away" : "registry_misconfigured", c.lapsedAt), { code: "CLAIM_UNATTRIBUTED", retryable: c.state === "unattributed", cause: c.state === "unattributed" ? "registry_away" : "registry_misconfigured", id: args.id, forced: false, ...(c.lapsedAt ? { lapsedAt: c.lapsedAt } : {}) });
+    if (c.state === "bare-error") return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32603: Internal error" }] } })); // no facts: an SDK's error, or another server's
     if (c.state === "badinput") return err(`Refused: the claim's input is malformed.`, { code: "REFUSED_CLAIM_INPUT", problem: "token" });
     if (c.state === "echo") return err(`Refused: could not renew ${JSON.stringify(args)}`, { code: "SOMETHING_ODD" }); // a misbehaving server that echoes the call
     if (c.state === "echo-escaped") return err(`Refused: could not renew ${args.token.replace("wc_", "wc\\_")}`, { code: "SOMETHING_ODD" }); // …as markdown escapes it
@@ -3932,53 +3933,68 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(!renews().length && /kept: .* list_claims for SMD-9001 doesn't list it/.test(logText().split("\n").filter(Boolean).pop()), "…and one list_claims doesn't list is kept, not renewed blind");
   clearClaims();
 
-  // CLAIM_UNATTRIBUTED saying the claim had lapsed, with no expiry on the hook's record (SMD-3807): the lapse recorded,
-  // so the next run's lapse check lists the claims made since and marks one, the registry still away.
+  // CLAIM_UNATTRIBUTED saying the claim had lapsed, with no expiry on the hook's record (SMD-3807): the lapse recorded
+  // and checked at once (review pass 1: at the next renewal, up to an hour off), the registry still away.
   const coveringSince = (id) => ({ id, piece: null, holder: "codex", claimedAt: new Date(Date.now() - 1_800_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), state: "live" });
+  const pastRe = past.replace(/\./g, "\\.");
   putClaim(88, {}, "unattributed");
   claims.get(C(88)).lapsedAt = past;
   listed.set("SMD-9001", [listEntry(88), coveringSince(uuid(8994))]);
   calls.length = 0;
   await claimsHook();
-  assert(renews().length === 1 && stateOf(88)?.expiresAt === past && !revivedMarker(88)
-    && new RegExp(`claims: kept: SMD-9001 \\(claim ${C(88)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry; it had lapsed at ${past.replace(/\./g, "\\.")}, .* and marks one$`).test(lastLine()),
-    `the hook's renewal refused CLAIM_UNATTRIBUTED with the claim's lapse records it, the line giving the cause and the lapse whole, where the brain's words run past the cut (${lastLine()?.slice(0, 160)})`);
-  age(88, 61);
-  calls.length = 0;
-  await claimsHook();
   const unattributedCovered = revivedMarker(88);
-  assert(!renews().length && calls.some((c) => c.name === "list_claims") && unattributedCovered?.blocked?.code === "CLAIMED_WHILE_LAPSED" && new RegExp(`^CLAIMED_WHILE_LAPSED: not renewed; lapsed at .*codex claimed SMD-9001 at .* \\(now live, claim ${uuid(8994)}\\)`).test(unattributedCovered.blocked.message),
-    "…and at the next run, the registry still away, a claim made on its work since gets a CLAIMED_WHILE_LAPSED marker");
+  assert(renews().length === 1 && calls.some((c) => c.name === "list_claims") && stateOf(88)?.expiresAt === past
+    && unattributedCovered?.blocked?.code === "CLAIMED_WHILE_LAPSED" && new RegExp(`^CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${pastRe}; since then codex claimed SMD-9001 at .* \\(now live, claim ${uuid(8994)}\\)`).test(unattributedCovered.blocked.message),
+    "the hook's renewal refused CLAIM_UNATTRIBUTED with the claim's lapse records it and checks at once: a claim made on its work since gets a CLAIMED_WHILE_LAPSED marker, the registry still away");
   clearClaims();
   putClaim(89, {}, "unattributed");
   claims.get(C(89)).lapsedAt = past;
   listed.set("SMD-9001", [listEntry(89)]);
+  calls.length = 0;
   await claimsHook();
+  const quietKept = new RegExp(`claims: kept: SMD-9001 \\(claim ${C(89)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry; it had lapsed at ${pastRe}, and until a renewal lands a claim on exactly its work can take it over; no other claim was made or renewed on its work since, and each renewal checks again$`);
+  assert(renews().length === 1 && calls.some((c) => c.name === "list_claims") && !revivedMarker(89) && stateOf(89)?.expiresAt === past && quietKept.test(lastLine()),
+    `…with no claim since, no marker, and the line gives the cause, the lapse and the check whole, where the brain's words run past the cut (${lastLine()?.slice(0, 160)})`);
   age(89, 61);
   calls.length = 0;
   await claimsHook();
-  assert(renews().length === 1 && !revivedMarker(89) && stateOf(89)?.expiresAt === past && /claims: kept: .* CLAIM_UNATTRIBUTED \(registry_away\)/.test(lastLine()),
-    "…with no claim since, no marker: the renewal is tried again, and kept");
+  assert(calls[0]?.name === "list_claims" && renews().length === 1 && !revivedMarker(89) && quietKept.test(lastLine()),
+    "…and the next run checks again before the renewal it tries, and keeps it");
   clearClaims();
-  // Final: the line says the user is told. Live (no lapse in the reply): nothing recorded.
+  // Final: the line says the user is told. Live (no lapse in the reply): nothing recorded. No ticket: not checked, and said.
   putClaim(90, {}, "unattributed-final");
   claims.get(C(90)).lapsedAt = past;
   putClaim(91, {}, "unattributed");
+  putClaim(59, { ticket: undefined }, "unattributed");
+  claims.get(C(59)).lapsedAt = past;
+  listed.set("SMD-9001", [listEntry(90)]);
   await claimsHook();
-  const finalLine = logText().split("\n").find((l) => l.includes(`(claim ${C(90)})`));
-  assert(/CLAIM_UNATTRIBUTED \(registry_misconfigured\): the agent registry cannot give the claim key's agent id until an operator acts \(the server's log says why\): tell the user; it had lapsed at /.test(finalLine ?? "") && stateOf(90)?.expiresAt === past,
-    `…the registry set up wrong, the line says an operator must act and the user be told, and the lapse is recorded (${finalLine?.slice(0, 160)})`);
-  assert(stateOf(91) && stateOf(91).expiresAt === undefined && logText().split("\n").some((l) => new RegExp(`kept: SMD-9001 \\(claim ${C(91)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry$`).test(l)),
-    "…and a live claim's CLAIM_UNATTRIBUTED, saying no lapse, records none");
+  const lineOf = (n) => logText().split("\n").find((l) => l.includes(`(claim ${C(n)})`));
+  assert(/CLAIM_UNATTRIBUTED \(registry_misconfigured\): the agent registry cannot give the claim key's agent id until an operator acts \(the server's log says why\): tell the user; it had lapsed at /.test(lineOf(90) ?? "") && stateOf(90)?.expiresAt === past,
+    `…the registry set up wrong, the line says an operator must act and the user be told, and the lapse is recorded (${lineOf(90)?.slice(0, 160)})`);
+  assert(stateOf(91) && stateOf(91).expiresAt === undefined && new RegExp(`kept: SMD-9001 \\(claim ${C(91)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): the agent registry did not give the claim key's agent id just now; renewals retry$`).test(lineOf(91) ?? ""),
+    "…a live claim's CLAIM_UNATTRIBUTED, saying no lapse, records none");
+  assert(/its token file names no ticket, so claims made while it lapsed at \S+ were not checked\)$/.test(lineOf(59) ?? "") && !/no other claim/.test(lineOf(59) ?? ""),
+    `…and one whose token file names no ticket says it was not checked, promising no check (${lineOf(59)?.slice(-120)})`);
   clearClaims();
-  // The agent's own call, seen by the claims hook: from the reply's words alone (all a harness may hand it), or its facts.
+  // An error with no facts at all (an SDK's, another server's) is kept, and the claims after it are still renewed (review pass 1: it threw).
+  putClaim(98, {}, "bare-error");
+  putClaim(99);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 2 && /kept: .*MCP error -32603: Internal error$/.test(lineOf(98) ?? "") && /claims: renewed SMD-9001 \(claim /.test(lineOf(99) ?? ""),
+    `an error result with no structuredContent is kept, and the claim after it renewed (${lineOf(98)?.slice(-80)})`);
+  clearClaims();
+  // The agent's own call, seen by the claims hook: from the reply's words alone, or its facts, checked in the same run.
   putClaim(92);
   putClaim(93, { piece: "PR 3" });
   putClaim(94);
   putClaim(95);
   putClaim(96);
   putClaim(97);
-  for (const n of [92, 93, 94, 95, 96, 97]) age(n, 0); // not due: only the agent's call records them
+  putClaim(58, { ticket: undefined });
+  for (const n of [92, 93, 94, 95, 96, 97, 58]) age(n, 0); // not due: only the agent's call makes them so
+  listed.set("SMD-9001", [listEntry(92), listEntry(93, { piece: "PR 3" }), coveringSince(uuid(8993))]);
   calls.length = 0;
   const factsCall = (n, sc) => claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(n), token: tok(n) }, tool_response: { content: [{ type: "text", text: unattributedText(C(n), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(n), forced: false, ...sc } } });
   await agentCall("renew_claim", { id: C(92), token: tok(92) }, unattributedText(C(92), "registry_away", past));
@@ -3991,14 +4007,13 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(97), token: tok(97) }, tool_response: JSON.stringify({ result: { content: [{ type: "text", text: unattributedText(C(97), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(97), forced: false, lapsedAt: past } } }) });
   assert(stateOf(97)?.expiresAt === past, "the agent's own call's lapse is read from facts inside a result, handed over as JSON");
   assert(!renews().length && stateOf(92)?.expiresAt === past && stateOf(93)?.expiresAt === past && [94, 95, 96].every((n) => stateOf(n)?.expiresAt === undefined)
-    && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at `).test(logText()),
+    && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at ${pastRe}; the claims made or renewed on its work since are checked now$`, "m").test(logText()),
     "the agent's own call refused CLAIM_UNATTRIBUTED with its claim's lapse records it, read off the words or the facts; another claim's lapse records nothing");
-  listed.set("SMD-9001", [listEntry(92), listEntry(93, { piece: "PR 3" }), listEntry(94), coveringSince(uuid(8993))]);
-  age(92, 61); age(93, 61);
-  calls.length = 0;
-  await claimsHook();
-  assert(!renews().some((c) => c.args.id === C(92) || c.args.id === C(93)) && revivedMarker(92)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && revivedMarker(93)?.blocked?.code === "CLAIMED_WHILE_LAPSED",
-    "…and the next run, the registry still away, marks the claim made on its work since");
+  assert(revivedMarker(92)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && revivedMarker(93)?.blocked?.code === "CLAIMED_WHILE_LAPSED",
+    "…and the same run, the registry still away, marks the claim made on its work since");
+  await agentCall("renew_claim", { id: C(58), token: tok(58) }, unattributedText(C(58), "registry_away", past));
+  assert(new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: \\(claim ${C(58)}\\) had lapsed at ${pastRe}; its token file names no ticket, so the claims made since are not checked$`, "m").test(logText()),
+    "…one whose token file names no ticket says the claims since are not checked");
   clearClaims();
   claimsBrain.stop(true);
 }
