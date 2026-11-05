@@ -190,7 +190,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -1674,7 +1674,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                const kind = classifyError(e, { maxTokensFatal: true });
+                // Under --follow through followClassify's split (followerFault, SMD-3311): a 408 is
+                // the provider's, paused for, not the request's; a 429, a 503 or the model not served
+                // makes no suspect of the thought in hand.
+                const { kind, suspect } = FOLLOW ? followerFault(e, { maxTokensFatal: true }) : { kind: classifyError(e, { maxTokensFatal: true }), suspect: true };
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599): a transient error past the pauses,
@@ -1692,7 +1695,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
                   const begins = outage.reason === null;
-                  if (outage.begin(msg, b.thought_id) === "outage") {
+                  if (outage.begin(msg, suspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     // The escalation model gone since the start: the outage probes it (review pass 2).
                     if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;

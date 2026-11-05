@@ -4883,8 +4883,11 @@ if (want("10")) {
    * calls so a follower's start costs no counted call.
    */
   let downUntil = 0;
-  let down: "503" | "404" | "hang" = "503";
+  let down: "503" | "404" | "408" | "hang" = "503";
   let probes = 0;
+  /** While set, a call that arrives while another is in flight answers 429, as a provider's concurrency limit does; the one in flight takes 600 ms (SMD-3311). Probes are exempt. */
+  let limitConcurrent = false;
+  let callsInFlight = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
   let probesAsked = 0;
   /** An outage paced by probes, not the clock (SMD-3048): `down` answers each request while it lasts. */
@@ -4903,6 +4906,7 @@ if (want("10")) {
       if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
+        if (down === "408") return new Response(JSON.stringify({ error: { message: "request timeout" } }), { status: 408 });
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
           : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -4918,6 +4922,12 @@ if (want("10")) {
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       // A thought that draws a 500 every time, whatever the provider's state (SMD-2599).
       if (prompt.includes("poison-500")) return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
+      if (limitConcurrent) {
+        if (callsInFlight > 0) return new Response(JSON.stringify({ error: { message: "too many concurrent requests" } }), { status: 429 });
+        callsInFlight++;
+        await Bun.sleep(600);
+        callsInFlight--;
+      }
       if (refuseCalls > 0) {
         refuseCalls--;
         // A beat late, so another worker's call is in hand by then.
@@ -5602,6 +5612,66 @@ if (want("10")) {
     }
   }
 
+
+  // SMD-3311: the follower reads the provider's errors through followClassify's
+  // split (followerFault). A 429 past the pauses says nothing about the thought
+  // in hand: two workers under a concurrency limit — a second call in flight
+  // answered 429, probes exempt — record nothing failed, where the thought in
+  // hand was a suspect and, re-claimed, met the limit again right after the
+  // probe answered and was failed as its own. A 408 mid-pass is the provider's,
+  // paused for and waited out, where it stopped every worker as the request's
+  // (exit 2).
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const statusOf = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+    const created: string[] = [];
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let settled = false;
+    let followCode = -1;
+    const running = runExtract({ url: URL_!, env, workers: 2, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+    try {
+      const startProbes = probes;
+      await pollUntil(async () => probes > startProbes, 10_000);
+      await Bun.sleep(500);
+      limitConcurrent = true;
+      const limited: string[] = [];
+      try {
+        for (let i = 0; i < 6; i++) limited.push(await seed(`Rhea filed rate-limit note number ${i} for the concurrency case.`));
+        created.push(...limited);
+        await pollUntil(async () => (await Promise.all(limited.map(statusOf))).every((s) => s === "succeeded" || s === "failed"), 40_000);
+      } finally {
+        limitConcurrent = false;
+      }
+      const limitedStatus = await Promise.all(limited.map(statusOf));
+      const limitedFailed = limitedStatus.filter((s) => s === "failed").length;
+      const limitedDone = limitedStatus.filter((s) => s === "succeeded").length;
+      const limitedOutages = lines.filter((l) => /the provider is not answering \(Extraction request to [^)]*429/.test(l)).length;
+      assert(limitedFailed === 0 && limitedDone === 6 && limitedOutages >= 1 && !settled,
+             `two extract workers under a 429 for any second call in flight, past the pauses: an outage with no suspect, no thought recorded failed, all six extracted (${limitedFailed} failed, ${limitedDone} done, ${limitedOutages} outage(s); settled ${settled})`);
+
+      down = "408";
+      outage.arm(1);
+      const timedOut408 = await seed("Ines moved the request-timeout runbook to the wiki.");
+      created.push(timedOut408);
+      const waited = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*408/.test(l)), 10_000);
+      const done408 = await pollUntil(async () => (await statusOf(timedOut408)) === "succeeded", 25_000);
+      assert(waited && done408 && !settled && !lines.some((l) => /refuses the request itself/.test(l)),
+             `a 408 mid-pass is the provider's outage: paused for, waited out, the thought extracted after — not the request's, every worker stopped and exit 2 (waited ${waited}, done ${done408}, settled ${settled})`);
+    } finally {
+      limitConcurrent = false;
+      down = "503";
+      outage.clear();
+      ac.abort();
+      await running;
+      restoreOutage();
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+    assert(followCode === 0, `…and the follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /refuse|rejected/.test(l)).join(" | ").slice(0, 200)})`);
+  }
 
   // A follower whose provider stays down (SMD-2261's heartbeat under
   // SMD-2599): past the pauses the thought goes back to the pool and the
@@ -14769,8 +14839,11 @@ if (want("16")) {
   let judgeUnavailable = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
-  /** What the judge, and a follower's probe, answer in an outage: a 503, or nothing at all (SMD-2599). */
-  let judgeDown: "503" | "hang" = "503";
+  /** What the judge, and a follower's probe, answer in an outage: a 503, a 408 (SMD-3311), or nothing at all (SMD-2599). */
+  let judgeDown: "503" | "408" | "hang" = "503";
+  /** While set, a judge call that arrives while another is in flight answers 429, as a provider's concurrency limit does; the one in flight takes 600 ms (SMD-3311). Probes are exempt. */
+  let judgeLimitConcurrent = false;
+  let judgeCallsInFlight = 0;
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
@@ -14790,7 +14863,10 @@ if (want("16")) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
       // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599).
-      if (judgeOutage.down(isProbe)) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      if (judgeOutage.down(isProbe)) {
+        if (judgeDown === "hang") return neverAnswers();
+        return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "request timeout" } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      }
       // A follower's one-token probe, answered apart: no judge call counted.
       if (isProbe) {
         judgeProbes++;
@@ -14802,6 +14878,12 @@ if (want("16")) {
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      if (judgeLimitConcurrent) {
+        if (judgeCallsInFlight > 0) return new Response(JSON.stringify({ error: { message: "too many concurrent requests" } }), { status: 429 });
+        judgeCallsInFlight++;
+        await Bun.sleep(600);
+        judgeCallsInFlight--;
+      }
       if (judgeUnavailable > 0) {
         judgeUnavailable--;
         if (judgeUnavailableMs) await Bun.sleep(judgeUnavailableMs);
@@ -16142,6 +16224,62 @@ if (want("16")) {
       restorePauses();
     }
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+  }
+
+  // SMD-3311: consolidate's follower reads the judge's errors as extract's does
+  // in [10] (followerFault): two workers under a concurrency limit — a second
+  // judge call in flight answered 429, probes exempt — record no pair's thought
+  // failed past the pauses, and a 408 mid-pass is waited out, not exit 2.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const statusOf = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+    const lines: string[] = [];
+    const ac = new AbortController();
+    let settled = false;
+    let followCode = -1;
+    const startJudgeProbes = judgeProbes;
+    const running = runConsolidate({ url: URL_!, env, workers: 2, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
+    try {
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      await Bun.sleep(500);
+      judgeLimitConcurrent = true;
+      const newer: string[] = [];
+      try {
+        for (let i = 0; i < 6; i++) {
+          await seed(`Rate pair ${i}: the quota sheet lists the weekly cap.`, 60 + i, 3, [`ratepair-${i}`]);
+          newer.push(await seed(`Rate pair ${i}: the quota sheet lists the daily cap now.`, 60 + i, 0, [`ratepair-${i}`]));
+        }
+        await pollUntil(async () => (await Promise.all(newer.map(statusOf))).every((s) => s === "succeeded" || s === "failed"), 40_000);
+      } finally {
+        judgeLimitConcurrent = false;
+      }
+      const limitedStatus = await Promise.all(newer.map(statusOf));
+      const limitedFailed = limitedStatus.filter((s) => s === "failed").length;
+      const limitedDone = limitedStatus.filter((s) => s === "succeeded").length;
+      const limitedOutages = lines.filter((l) => /the provider is not answering \(Judge request to [^)]*429/.test(l)).length;
+      assert(limitedFailed === 0 && limitedDone === 6 && limitedOutages >= 1 && !settled,
+             `two consolidate workers under a 429 for any second judge call in flight, past the pauses: an outage with no suspect, no pair's thought recorded failed, all six judged (${limitedFailed} failed, ${limitedDone} done, ${limitedOutages} outage(s); settled ${settled})`);
+
+      judgeDown = "408";
+      judgeOutage.arm(1);
+      await seed("The timeout table names the judge's request limit.", 67, 3, ["timeout-table"]);
+      const newer408 = await seed("The timeout table names the judge's new request limit.", 67, 0, ["timeout-table"]);
+      const waited = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*408/.test(l)), 10_000);
+      const judged408 = await pollUntil(async () => (await statusOf(newer408)) === "succeeded", 25_000);
+      assert(waited && judged408 && !settled && !lines.some((l) => /refuses the request itself/.test(l)),
+             `a 408 mid-pass is the judge's outage: paused for, waited out, the pair judged after — not the request's, every worker stopped and exit 2 (waited ${waited}, judged ${judged408}, settled ${settled})`);
+    } finally {
+      judgeLimitConcurrent = false;
+      judgeDown = "503";
+      judgeOutage.clear();
+      ac.abort();
+      await running;
+      restoreOutage();
+      restorePauses();
+    }
+    assert(followCode === 0, `…and the consolidate follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
 
   // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —
