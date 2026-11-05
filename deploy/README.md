@@ -2225,15 +2225,25 @@ extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
-thought in the subject pool given its own subject; on a brain with no pool
-named, the first period names one and pools every thought with no current
-subject, each then asked of the judge model (a median of 71 s a call for the
-27B with its reasoning on), so `bun db/extract-entities.ts --subjects
---dry-run` says how many first. The scheduler never switches a pool: another
-one named — a rule's, the question's or `OB1_SUBJECT_REASONING`'s change —
-holds the sweep until `--subjects --switch-key` is run by hand in the stack,
-and a garbage-judge alarm's trip holds it until a `--judge-checked` run by
-hand; preflight's `sleep` row gives each command. A migration run beside it — `migrate.ts`' lock held
+thought in the subject pool given its own subject, the rules' or the judge
+model's: started once a period, its claims bounded by the period's start plus
+30 days, so a thought it sets back waits for a later period. On a brain with
+no pool named, the first period names one and pools every thought with no
+current subject, the rules keying what they can and the judge model asked the
+rest, one call at a time — a median of 71 s for the 27B with its reasoning
+on, about 1,200 a day, so weeks on a brain of tens of thousands of thoughts.
+Count them first in the stack: `podman compose -f deploy/compose.yaml run
+--rm --no-deps coordinator db/coordinator.ts run extract --subjects
+--dry-run`, with the -f files and -p the stack was started with. A judge
+model not yet measured on the question is kept out by naming the rules' pool
+first, the same one-off with `--subjects rules --limit 1`: the scheduler then
+follows it, asking no model. The scheduler never switches a pool: another one
+named — a rule's, the question's or `OB1_SUBJECT_REASONING`'s change — holds
+the sweep until `--subjects --switch-key` is run by hand in the stack, and a
+garbage-judge alarm's trip holds it until a `--judge-checked` run by hand;
+preflight's `sleep` row gives each command. Anything else that ends the
+sweep sets it down for the period alone, said on `heartbeat:sleep`, the other
+passes running on. A migration run beside the scheduler — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
 (SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses
@@ -2253,15 +2263,18 @@ the coordinator, which read them once. On the next live call it pauses them
 within `OB1_SLEEP_POLL` seconds (unset, 5): they wait between thoughts and go
 on once `OB1_SLEEP_CAPTURE` seconds pass with no live call, a model call in
 hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
-its thought set back (SMD-3379 PR 1c-3b). One during the sweep ends the period
+its thought set back (SMD-3379 PR 1c-3b) — consolidation's and the subject
+sweep's at most three a period's hour, their later calls run to their end. A
+live call during the re-derive sweep ends the period
 there (its call in hand given 2 s, then cancelled). A period ends once its
 pools drain, however long that takes (SMD-3379 PR 1c-4b), and the next begins
 once there is work again: a capture's claim, read each poll, or what the
 idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
 (unset, 3600), and within about a minute and a poll of a vector arriving —
 the vector mender's, say, which gives consolidation a thought to judge
-(SMD-3379 PR 1d). Each pass's cost is the same as under `workers`, spent
-only while nobody is writing to the brain.
+(SMD-3379 PR 1d). Each pass's cost is the same as under `workers`, the
+subject sweep's as its hand run's, spent while nobody is writing to the
+brain but for the calls in hand a pause lets run.
 `db/README.md`, "Sleep", has the full rules.
 
 **What pauses it.** A live write: one through a key that is not classified
@@ -2327,7 +2340,8 @@ its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
-`OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
+`OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep
+runs one),
 digits only (`deploy/.env.example`). The budget (SMD-2679), each pass's
 session settings:
 `OB1_SLEEP_STATEMENT_TIMEOUT` in seconds (0–86400, unset 300; 0 leaves the

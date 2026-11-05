@@ -16,7 +16,7 @@
  *   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
  *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
  *   --quiet and --budget were removed in 2.0.0: either given is refused (2), naming what replaced it; OB1_SLEEP_QUIET and OB1_SLEEP_BUDGET are read by nothing
- *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
+ *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
  *
  * ── Work ────────────────────────────────────────────────────────────────────
  * A period begins once a pass has work and no live write has landed for
@@ -24,16 +24,18 @@
  * the quiet and the clock). The work is read whole at the process's start —
  * the baseline: each pass's pool, re-embed's backlog and extraction's
  * thoughts not yet in its pool among them, the subject sweep's pooling due,
- * and the sweep's orphans — and every --rescan seconds after; between, each
+ * and the re-derive sweep's orphans — and every --rescan seconds after; between, each
  * poll reads one EXISTS a claim pass, a row pending or in hand under its key,
  * which a capture queues in its own transaction (016; 113 the subject
- * sweep's, its pool named). The subject sweep's claims are read forward
- * (SMD-3306 PR 6b-2, the maintainer's choice): one in hand is work at any
- * date, the probe after a timeout dating its claim ahead as it begins, but a
- * thought set back behind the rest — 30 days ahead, after an outage it made
- * or a hang — is none, nor a lease run out so dated, which its reaping makes
- * pending at that date: set-backs alone begin no period, and wait for other
- * work or their date. A vector come since the last whole read — an audited
+ * sweep's, its pool named). The subject sweep's claims are read by date
+ * (SMD-3306 PR 6b-2, the maintainer's choice): idle, one a claim would take
+ * — pending, or a lease run out under its attempts, as its reaping makes it —
+ * dated at or before now() is work, so a thought set back behind the rest —
+ * 30 days ahead, after an outage it did not make, or a hang — begins no
+ * period alone, and is asked in the next period other work begins, or at its
+ * date (Working); a claim in hand is the sweep's work in a period alone, its
+ * run's in this process, so another run's lease, or a gone scheduler's,
+ * begins none and holds none open. A vector come since the last whole read — an audited
  * update whose diff says embedding_present true, the mender's or a re-embed's
  * — brings the next forward, at most once a VECTOR_FLOOR_S (60) after the end
  * of the last whole read or a period's end read, so within that and a poll; a
@@ -43,16 +45,17 @@
  * a raw delete of a window or a replay leaves, re-embed's backlog — waits for
  * the rescan, or goes with a period other work begins (a thought's delete
  * leaves none: its lineage rows go with it, thoughts_drop_derivations); the
- * next poll reads whole after a live write or its limit cut the sweep, a
- * retried start refusal's wait, and a set-aside cleared. The sweep's census
+ * next poll reads whole after a live write or its limit cut the re-derive
+ * sweep, a retried start refusal's wait, and a set-aside cleared. That sweep's census
  * reads one window of 10,001 lineage rows a whole read, an empty one moving
  * the place on, so on an idle brain an orphan k windows in is found at the
  * k-th whole read; a one-shot run, and the dry run, walk up to 100 windows,
  * having no later read. A pass held begins none: one a statement held
  * (Budget), re-embed set aside or down, the subject sweep held or set down
  * (Working) — a set-down re-armed at the next period's start, or by the next
- * rescan, so one refused again begins no period every poll; the sweep's hold
- * read again each idle poll. Without --follow, a read that finds no work exits 0 —
+ * rescan (the subject sweep's at its start's check by a rescan after the first whole
+ * read, so the row says it), so one refused again begins no period every
+ * poll; the subject sweep's hold read again each idle poll. Without --follow, a read that finds no work exits 0 —
  * at once, or once what it found has gone. The live write is read after the
  * work, so one landing during a whole read holds the gate. With work and a
  * live write inside the capture time the row reads `paused`, since the gate
@@ -116,7 +119,7 @@
  * provider not answering (the embedding endpoint can be down while chat
  * serves) — said, on the row (`aside`, its kind; the row's outcome failed for
  * a cause the operator mends, not for an outage; a thrown error's reason in
- * the log), extraction and consolidation running on; the next period tries it
+ * the log), the other passes running on; the next period tries it
  * again (Work). A statement past its timeout holds it until a restart, as it
  * holds any pass (Budget).
  * Before this, sleep needed no embedding endpoint, and a refused one would
@@ -199,36 +202,49 @@
  * set down instead).
  * The subject sweep (SMD-3306 PR 6b-2), a following run of
  * db/subject-sweep.ts, gives each thought in the subject pool its own
- * subject, the rules' or the judge model's. It runs beside consolidation,
- * once extraction has drained or been joined past, its turn read at each
- * open poll: started while its pool has a thought due or its pooling is due,
- * stopped after the thought in hand once it has neither — a thought set back
- * behind the rest waits for other work or its date, so a period the other
- * passes keep open does not ask the set-backs back to back (the maintainer's
- * choice; the one the sweep takes up as the stop lands is asked). Where no
- * pool is named, its first period names one at this stack's key — the judge
- * model's question, with OB1_SUBJECT_REASONING as the sweep reads it — and
- * pools every thought with no current subject, each then asked of the judge
- * model; a pooling broken off is pooled again by the next. The scheduler
- * never switches a pool (the maintainer's choice): while ob1_config names
- * another — a rule's, the question's or the reasoning's change, or
- * `--subjects rules` named by hand — the sweep is held (`key`), said with the
- * ways out, a --switch-key run by hand in the stack or, where the reasoning
- * alone tells the two apart, OB1_SUBJECT_REASONING set back; while a
- * garbage-judge alarm's trip holds the scheduler's runs of this stack's judge
- * model (judgeHeld), it is held (`judge`) until a --judge-checked run by hand
- * lifts that. Each hold is read after the start's check, at each idle poll,
- * each period's start and as the sweep ends, and said when it changes; a
- * held sweep's pool is no work. Anything else that ends it sets it down for
- * the period alone (the maintainer's choice), as re-embed's set-down does: a
+ * subject, the rules' or the judge model's. It starts beside consolidation,
+ * once extraction has drained or been joined past, once a period, and is not
+ * stopped until the period ends (the maintainer's choice): its claims are
+ * bounded by the period's start plus SET_BACK_AHEAD_MS (its claimsBy), so it
+ * asks the thoughts pooled since and, once each, the thoughts it set back
+ * before the period — 30 days ahead, after an outage they did not make, or a
+ * hang — then waits as at an empty pool, a thought it sets back in the period
+ * left for the next one other work begins, or for its date; the period's
+ * drain reads its pool by that bound, its run's own claims in hand at any
+ * date (review pass 1: a turn that stopped it once nothing was due stopped it
+ * with its last due thought in hand, which then ran under a stopping run's
+ * rules — N12's aborts and the probe after a timeout off, a transient error
+ * after the stop asked again by a run begun afresh). Where no pool is named,
+ * its first period names one at this stack's key — the judge model's
+ * question, with OB1_SUBJECT_REASONING as the sweep reads it — and pools
+ * every thought with no current subject, the rules first, then the judge
+ * model for the rest; a pooling broken off is pooled again by the next. While
+ * ob1_config names the rules' pool, the stack's other (`--subjects rules`, by
+ * hand), it follows that, asking no model — the way to keep a judge model not
+ * yet measured on the question out (the maintainer's choice). It never
+ * switches a pool: while ob1_config names one that is neither, after a
+ * rule's, the question's or the reasoning's change, the sweep is held
+ * (`key`), said with the ways out — a --switch-key run by hand in the stack
+ * to the judge model's pool, which its dry run counts first, or to the rules'
+ * pool, or, where the reasoning alone tells the two apart,
+ * OB1_SUBJECT_REASONING set back; while a garbage-judge alarm's trip holds
+ * the scheduler's runs of this stack's judge model (judgeHeld), it is held
+ * (`judge`) until a --judge-checked run by hand lifts that. Each hold, and
+ * the pool it follows, is read before the start's check (no check runs
+ * under a hold), at each idle poll, each period's start and as the sweep
+ * ends, and said when it changes; a held sweep's pool is no work, and a
+ * switch between the stack's two pools under a running sweep starts it again
+ * under the one named. Anything else that ends it sets it down for the
+ * period alone (the maintainer's choice), as re-embed's set-down does: a
  * refusal at its start, the scheduler's check's or a period's, by its kind;
- * the provider refusing it mid-pass (`provider`); the database lost past its
- * start, its naming or pooling broken off, another judge model's trip, a 0
- * unasked or a throw (`failed`) — said, the period's outcome failed, the
- * other passes running on, and the next period or rescan tries it again. A
- * statement past its timeout holds it until a restart, as any pass (Budget).
- * Its waits for the provider stamp no failed: the row's waits say them, its
- * pool not drained meanwhile, so the period stays open.
+ * any other end of its own `failed`, its lines saying why — the provider
+ * refusing a question, a grant refused, the pool's name blanked, the
+ * database lost past its start, its naming or pooling broken off, another
+ * judge model's trip, a 0 unasked, a throw — said, the period's outcome
+ * failed, the other passes running on, and the next period or rescan tries
+ * it again. A statement past its timeout holds it until a restart, as any
+ * pass (Budget). Its waits for the provider stamp no failed: the row's waits
+ * say them, its pool not drained meanwhile, so the period stays open.
  *
  * ── Pausing ─────────────────────────────────────────────────────────────────
  * Every --poll seconds in a period the logs are read for a live write newer
@@ -259,7 +275,7 @@
  * work comes with no claim row as extraction finishes a thought (029) — the
  * passes stopping once every pass with work has drained or is held, the
  * subject sweep's pool read forward (Work), a held or set-down sweep's none. A live
- * write during the sweep ends the period, the passes not yet started. The
+ * write during the re-derive sweep ends the period, the passes not yet started. The
  * first live call is not spared: it is recorded after the model work it does,
  * so on a one-slot model it can queue behind the call in hand to that call's
  * end — nothing pauses the period before the call is recorded; N12's bound
@@ -314,11 +330,12 @@
  * pool's name. A refusal there ends it with 2 at once — a bad worker key, a
  * model not served, the judge's included, which a period would meet only once
  * extraction's backlog drained — but the subject sweep's, which sets it down
- * alone, or another pool named, which holds it (SMD-3306 PR 6b-2, Working;
- * the check reads no trip's hold, the scheduler reads it after). A provider that does not answer is no refusal: each pass waits for
+ * alone (SMD-3306 PR 6b-2, Working): its hold and the pool it follows read
+ * first, its check runs in that pool's mode, and none under a hold. A provider that does not answer is no refusal: each pass waits for
  * it at its own start. The passes each period starts leave their banner to it,
  * and their end-of-run summary out (the counts and graph, scans the
- * scheduler would wait for at a period's end).
+ * scheduler would wait for at a period's end) — but the subject sweep, whose
+ * summary line says what it asked in the period.
  * Every period starts its passes afresh, so each meets its start's refusals
  * again. Each says which it is (worker-bootstrap.ts's StartRefusal), and one
  * rule reads that and whether the pass got through its start in this process
@@ -402,10 +419,12 @@
  * tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
  * latency under a period at 1M and 10M rows (SMD-1500's harness).
  * Of the subject sweep (SMD-3306 PR 6b-2): a setting that keeps it out —
- * the scheduler runs it on every brain whose sweep is not held; its failed
- * claims, said in its log alone, not on the row; a hold lifted mid-period,
- * read at the next period's start; and the thought it takes up as its turn's
- * stop lands, a set-back among them, which is asked.
+ * the rules' pool, named by hand, keeps the judge model out, the rules still
+ * run; its failed claims, said in its log alone, not on the row; a hold
+ * lifted mid-period, read at the next period's start; the kind of an end of
+ * its own past its start, which the row carries as `failed`, its log naming
+ * the cause; and the scheduler's dry run's count of the first pooling, which
+ * the sweep's own dry run gives.
  */
 
 import type { SQL } from "bun";
@@ -418,7 +437,7 @@ import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_HOLD_WHY, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type ReembedDown, type SleepAside, type SleepHeld, type SleepHold, type SleepHoldWhy } from "../server-portable/brain-info.ts";
 import { run as runExtract, STALL_FLOOR_MS } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
-import { JUDGE_WINDOW_KEY, judgeHeld, readJudgeWindow, sweepSubjects } from "./subject-sweep.ts";
+import { JUDGE_WINDOW_KEY, judgeHeld, MAX_ATTEMPTS as SUBJECT_MAX_ATTEMPTS, readJudgeWindow, SET_BACK_AHEAD_MS, sweepSubjects } from "./subject-sweep.ts";
 import { subjectPoolKey, subjectReasoningOn } from "../server-portable/subject.ts";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";
 import { reembedBacklog, run as runReembed } from "./reembed.ts";
@@ -442,7 +461,7 @@ const REMOVED_FLAGS: Record<string, string> = {
   quiet: "--quiet (OB1_SLEEP_QUIET) was removed in v2.0.0: a work period begins once a pass has work and no live write has landed for --capture seconds (OB1_SLEEP_CAPTURE)",
   budget: "--budget (OB1_SLEEP_BUDGET) was removed in v2.0.0: a work period runs until its pools drain, and a live write pauses it; each pass's statement_timeout, work_mem and maintenance_work_mem stay",
 };
-/** How often a period's work is read whole while idle — the pools, re-embed's backlog, the sweep — beyond the claims each poll reads (`--rescan`, OB1_SLEEP_RESCAN, SMD-3379 PR 1c-4b). */
+/** How often a period's work is read whole while idle — the pools, re-embed's backlog, the re-derive sweep's orphans — beyond the claims each poll reads (`--rescan`, OB1_SLEEP_RESCAN, SMD-3379 PR 1c-4b). */
 const DEFAULT_RESCAN_S = 3600;
 /**
  * The least time between two whole reads a vector's arrival brings forward
@@ -651,8 +670,8 @@ export const statementTimedOut = (e: unknown): boolean => (e as { errno?: unknow
  * lease a scheduler gone left — on another host, or this container before a
  * restart — is no thought this one holds. `unlabelled`, re-embed's alone
  * (reembedBacklog's): of the unpooled, the vectors that carry no model.
- * `later`, the subject sweep's alone: its thoughts set back behind the rest,
- * which are no work (subjectsPool).
+ * `later`, the subject sweep's alone: its claims past the bound it is read
+ * by, no work (subjectsPool).
  */
 type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number; unlabelled?: number; later?: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
@@ -668,6 +687,8 @@ const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claime
 const MINE = `extract-${hostname()}-${process.pid}-`;
 /** Re-embed's worker ids in this process (reembed.ts's `workerId`). */
 const REEMBED_MINE = `reembed-${hostname()}-${process.pid}-`;
+/** The subject sweep's worker ids in this process (subject-sweep.ts's `workerId`, SMD-3306 PR 6b-2). */
+const SUBJECTS_MINE = `subjects-${hostname()}-${process.pid}-`;
 /** The work extraction has that no stall holds back: rows pending that are not stalled, and thoughts not yet in the pool (none in a claims-only read). */
 const newerWork = (p: Pool): number => p.pending - p.stalledPending + p.unpooled;
 /**
@@ -712,10 +733,13 @@ async function orphansFrom(sql: SQL, after: string | null, signal?: AbortSignal)
 }
 
 /**
- * A subject pool's claim that a claim would take now: pending, or claimed with its lease run out, which claim_thoughts
- * reaps back to pending with its date (015) — a scheduler killed mid-thought leaves one (SMD-3306 PR 6b-2).
+ * A subject pool's claim that a claim would take: pending, or claimed with its lease run out under its attempts, which
+ * claim_thoughts reaps back to pending with its date (015) — a scheduler killed mid-thought leaves one; one run out at
+ * its last attempt the reaping fails, no work (SMD-3306 PR 6b-2, review pass 1).
  */
-const takeable = (sql: SQL) => sql`(status = 'pending' OR (status = 'claimed' AND ttl_expires_at < now()))`;
+const takeable = (sql: SQL) => sql`(status = 'pending' OR (status = 'claimed' AND ttl_expires_at < now() AND attempt_count < ${SUBJECT_MAX_ATTEMPTS}))`;
+/** The instant a subject pool's claims are read by: `bound` (the database's clock, as text), or now(). */
+const byWhen = (sql: SQL, bound?: string) => (bound === undefined ? sql`now()` : sql`${bound}::timestamptz`);
 
 /**
  * The subject sweep's pooling due (SMD-3306 PR 6b-2): its pool not named, or named and its pooling unmarked, which
@@ -725,17 +749,23 @@ const poolingDue = (sql: SQL, job: string) => sql`(COALESCE((SELECT value FROM o
     OR COALESCE((SELECT value FROM ob1_config WHERE key = 'subject_pool_filled'), '') <> ${job})`;
 
 /**
- * The subject sweep's pool as a period reads it (SMD-3306 PR 6b-2, the maintainer's choices): a claim pending dated
- * past now() is no work — a thought set back behind the rest, 30 days ahead, after an outage it made or a hang, waits
- * for other work or its date, never begins a period alone nor holds one open — nor is a lease run out so dated, what
- * its reaping makes it; a claim in hand is work at any date, since the probe after a timeout dates its claim ahead as
- * it begins; a pooling due counts 1 unpooled. `later`, those set back.
+ * The subject sweep's pool, read by an instant (SMD-3306 PR 6b-2, the maintainer's choices): a claim a claim would take
+ * dated at or before it is work, one dated later none (`later`). Idle the instant is now(): a thought set back behind
+ * the rest — 30 days ahead, after an outage it did not make, or a hang — begins no period alone, and waits for one other
+ * work begins, or for its date. In a period it is the period's bound (its start plus SET_BACK_AHEAD_MS), the sweep's
+ * claims bounded alike: each thought set back before the period is asked once in it, one set back in it waits for the
+ * next. A claim in hand is work at any date, the probe after a timeout dating its claim ahead as it begins — with
+ * `mineSince`, the claims this process's sweep took since then alone, so another run's lease, or a lease a scheduler
+ * gone left, holds no period open (review pass 1, run-it: one held the next period open its lease's 20 minutes). A
+ * pooling due counts 1 unpooled.
  */
-async function subjectsPool(sql: SQL, job: string): Promise<Pool> {
+async function subjectsPool(sql: SQL, job: string, at: { bound?: string; mineSince?: Date } = {}): Promise<Pool> {
+  const by = byWhen(sql, at.bound);
+  const mine = at.mineSince === undefined ? sql`` : sql` AND starts_with(worker_id, ${SUBJECTS_MINE}) AND claimed_at >= ${at.mineSince}::timestamptz`;
   const [r] = (await sql`
-    SELECT count(*) FILTER (WHERE ${takeable(sql)} AND enqueued_at <= now())::int AS pending,
-           count(*) FILTER (WHERE status = 'claimed' AND NOT COALESCE(ttl_expires_at < now(), false))::int AS claimed,
-           count(*) FILTER (WHERE ${takeable(sql)} AND enqueued_at > now())::int AS later,
+    SELECT count(*) FILTER (WHERE ${takeable(sql)} AND enqueued_at <= ${by})::int AS pending,
+           count(*) FILTER (WHERE status = 'claimed' AND NOT COALESCE(ttl_expires_at < now(), false)${mine})::int AS claimed,
+           count(*) FILTER (WHERE ${takeable(sql)} AND enqueued_at > ${by})::int AS later,
            count(*) FILTER (WHERE status = 'failed')::int AS failed, ${poolingDue(sql, job)}::int AS n
       FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; later: number; failed: number; n: number }[];
   return { pending: Number(r.pending), claimed: Number(r.claimed), failed: Number(r.failed), unpooled: Number(r.n), later: Number(r.later), stalled: 0, stalledPending: 0, stalledRead: false, mine: 0, stalledMine: 0 };
@@ -748,7 +778,7 @@ async function subjectsPool(sql: SQL, job: string): Promise<Pool> {
  * subjectsPool's.
  */
 async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date): Promise<Pool> {
-  if (pass === "subjects") return subjectsPool(sql, job);
+  if (pass === "subjects") return subjectsPool(sql, job, { mineSince });
   // Re-embed's is its own backlog read (reembed.ts): the rows pending or in
   // flight, and what a first pool would add — the thoughts not at the model,
   // and the finished rows whose thought has moved (SMD-2679 PR 4b).
@@ -1158,6 +1188,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // The subject sweep's is its own run's, the judge model's question with OB1_SUBJECT_REASONING as it reads it (SMD-3306 PR 6b-2).
   const JOBS: Record<PassName, string> = { reembed: reembedKey(EMBED.model, EMBED.dim), extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg), subjects: subjectPoolKey(true, subjectReasoningOn(cfg)) };
   /**
+   * The subject sweep's two pools for this stack (SMD-3306 PR 6b-2): the judge model's, which the scheduler names when
+   * none is, and the rules', which it follows when an operator names it — its sweep then asks no model, a brain whose
+   * judge model is not measured on the question kept to the rules (the maintainer's choice, review pass 1).
+   * JOBS.subjects is whichever the brain names, read with the sweep's hold.
+   */
+  const SUBJECTS_MODEL_POOL = JOBS.subjects;
+  const SUBJECTS_RULES_POOL = subjectPoolKey(false, subjectReasoningOn(cfg));
+  /**
    * Why this stack's embedding model and width form no re-embed key its row
    * carries, or null: such a key keeps re-embed out of sleep, said once. A
    * width that is no positive whole number crashed the first sleep (review
@@ -1328,12 +1366,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const statementHeld = new Set<PassName>();
   /**
-   * The subject sweep held, read from the brain (SMD-3306 PR 6b-2): `key` while ob1_config names another subject pool
-   * than this stack's — a rule's, the question's or OB1_SUBJECT_REASONING's change, or `--subjects rules` named by
-   * hand — for the scheduler names a pool when none is and never switches one, a --switch-key run by hand's to do (the
-   * maintainer's choice); `judge` while a garbage-judge alarm's trip holds the scheduler's runs of this stack's judge
-   * model (judgeHeld), until a hand run lifts it. Read after the start's check, each idle poll, each period's start and
-   * as the sweep ends; null while neither stands.
+   * The subject sweep held, read from the brain (SMD-3306 PR 6b-2): `key` while ob1_config names a subject pool that is
+   * neither of this stack's two (SUBJECTS_MODEL_POOL, SUBJECTS_RULES_POOL) — a rule's, the question's or
+   * OB1_SUBJECT_REASONING's change since it was named — for the scheduler names a pool when none is and never switches
+   * one, a --switch-key run by hand's to do (the maintainer's choice); `judge` while a garbage-judge alarm's trip holds
+   * the scheduler's runs of this stack's judge model (judgeHeld), until a hand run lifts it, the rules' pool asking no
+   * model. Read after the start's check, at each idle poll, each period's start and as the sweep ends; null while
+   * neither stands.
    */
   let subjectsHeld: "key" | "judge" | null = null;
   /** The pool ob1_config named at that read, for the key hold's words. */
@@ -1341,22 +1380,40 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * The subject sweep set down for this period (SMD-3306 PR 6b-2, the maintainer's choice: a refusal holds the sweep
    * alone, the others running on, as re-embed's set-down does): its start refused, at the scheduler's check or a
-   * period's, by its kind; the provider refusing it mid-pass, `provider`; any other end of its own, `failed`. Re-armed
-   * at the next period's start or the next rescan, as re-embed's set-down is.
+   * period's, by its kind; any other end of its own `failed`, its lines saying why — the provider's refusal of the
+   * question, a grant refused, the pool's name blanked, the database lost (review pass 1, cold read: read as the
+   * provider's alone). Re-armed at the next period's start or a later rescan, as re-embed's set-down is.
    */
   let subjectsDown: SleepHoldWhy | null = null;
-  /** The subject sweep held or set down in this period, or idle in a one-shot run: its pool left, so a one-shot run exits 1. */
+  /** The subject sweep held or set down in this period, or idle in a one-shot run: its pool left, so a one-shot run exits 1, said with why. */
   let subjectsLeft = false;
+  let subjectsLeftWhy = "";
+  /**
+   * The period's bound on the subject sweep's claims (SMD-3306 PR 6b-2, the maintainer's choice): the period's start,
+   * on the database's clock, plus SET_BACK_AHEAD_MS, so each thought set back before the period is asked once in it and
+   * one set back in it waits for the next; the drain reads the sweep's pool by it. Set as each period begins.
+   */
+  let subjectsBound: string | null = null;
+  /**
+   * The pool the period's sweep was started under, null until it starts: once a period, never stopped in it; another
+   * of this stack's pools named under it, an operator's switch, starts it again under that one.
+   */
+  let sweepJob: string | null = null;
   /** Whether the subject sweep may run: one of the passes, and neither held, set down nor held by a statement (N9). */
   const subjectsRuns = (): boolean => SUBJECTS && subjectsHeld === null && subjectsDown === null && !statementHeld.has("subjects");
-  /** The subject pool's name and its pooling's mark, and the sweep's hold they and the judge's window make: one read (SMD-3306 PR 6b-2). */
-  const subjectsHoldNow = async (): Promise<{ held: "key" | "judge" | null; named: string | null; filled: string | null }> => {
+  /**
+   * The subject pool's name and its pooling's mark, and the sweep's hold and pool they and the judge's window make: one
+   * read (SMD-3306 PR 6b-2). `rules` while the rules' pool is named, which the scheduler follows.
+   */
+  const subjectsHoldNow = async (): Promise<{ held: "key" | "judge" | null; named: string | null; filled: string | null; rules: boolean }> => {
     const rows = (await sql`SELECT key, value FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`) as { key: string; value: string | null }[];
     // Blank is none, as the sweep reads its name.
     const value = (key: string): string | null => rows.find((r) => r.key === key)?.value || null;
     const named = value("subject_pool_key");
-    const held = named !== null && named !== JOBS.subjects ? "key" : judgeHeld(readJudgeWindow(value(JUDGE_WINDOW_KEY), JOBS.subjects), cfg.judgeModel) ? "judge" : null;
-    return { held, named, filled: value("subject_pool_filled") };
+    const rules = named === SUBJECTS_RULES_POOL;
+    const held = named !== null && named !== SUBJECTS_MODEL_POOL && !rules ? "key"
+      : !rules && judgeHeld(readJudgeWindow(value(JUDGE_WINDOW_KEY), SUBJECTS_MODEL_POOL), cfg.judgeModel) ? "judge" : null;
+    return { held, named, filled: value("subject_pool_filled"), rules };
   };
   /**
    * A hand run of the sweep in the stack, as the coordinator runs it — its settings, network and version, deploy/.env
@@ -1364,23 +1421,34 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const handSweep = (flags: string): string => `podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects ${flags}, with the -f files and -p the stack was started with (docker compose alike; up -d coordinator first after a change to deploy/.env)`;
   /**
-   * The key hold in words: both pools, and the ways out — the switch by hand, which pools again, and, where only the
-   * reasoning tells them apart, OB1_SUBJECT_REASONING set back as the named pool was asked.
+   * The key hold in words: both pools, and the ways out — the judge model's pool by hand, which pools again every
+   * thought whose subject is not current under it, counted first by its dry run; the rules' pool, which the scheduler
+   * follows, to keep the judge model out (review pass 1, walkthrough); and, where only the reasoning tells the named
+   * pool from this stack's, OB1_SUBJECT_REASONING set back as it was asked.
    */
   const subjectsKeyLine = (named: string): string => {
     const shown = cleanForDisplay(named);
     const back = named === subjectPoolKey(true, !subjectReasoningOn(cfg))
-      ? `; to keep ${shown}, set OB1_SUBJECT_REASONING=${subjectReasoningOn(cfg) ? "off" : "on"} in deploy/.env and recreate the coordinator (up -d coordinator)`
+      ? `; or, to keep ${shown}, set OB1_SUBJECT_REASONING=${subjectReasoningOn(cfg) ? "off" : "on"} in deploy/.env and recreate the coordinator (up -d coordinator)`
       : "";
-    return `  the subject sweep held (key): ob1_config names subject pool ${shown}, this stack's is ${JOBS.subjects} — the scheduler names a pool when none is, and never switches one: to sweep under ${JOBS.subjects}, which pools again every thought with no current subject, run ${handSweep("--switch-key --limit 1")}, the scheduler's runs taking the rest${back}. Read again each poll; the other passes run on`;
+    return `  the subject sweep held (key): ob1_config names subject pool ${shown}, and this stack's are ${SUBJECTS_MODEL_POOL}, the judge model's, and ${SUBJECTS_RULES_POOL}, the rules' — the scheduler names a pool when none is, and never switches one. To sweep under ${SUBJECTS_MODEL_POOL}, run ${handSweep("--switch-key --limit 1")}, the scheduler's runs taking the rest: it pools again every thought whose subject is not current under it — those found with the reasoning off, or keyed by no rule, among them — which ${handSweep("--switch-key --dry-run")} counts first; to keep the judge model out, name the rules' pool, which the scheduler follows, asking no model: ${handSweep("rules --switch-key --limit 1")}${back}. Read again at each idle poll and each period's start; the other passes run on`;
   };
   const subjectsJudgeLine = (): string =>
-    `  the subject sweep held (judge): the garbage-judge alarm's trip holds the scheduler's runs of ${cleanForDisplay(cfg.judgeModel)} — check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, ${handSweep("--judge-checked --limit 1")} lifts the hold. Read again each poll; the other passes run on`;
+    `  the subject sweep held (judge): the garbage-judge alarm's trip holds the scheduler's runs of ${cleanForDisplay(cfg.judgeModel)} — check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, ${handSweep("--judge-checked --limit 1")} lifts the hold. Read again at each idle poll and each period's start; the other passes run on`;
   /**
    * The subject sweep's hold as just read: said when it changes — held, or lifted, the next period with work sweeping —
-   * and its pool left while it stands (SMD-3306 PR 6b-2). True when it changed, for the row's next write (sayAside).
+   * and its pool left while it stands; and the pool it follows, the rules' or the judge model's, said when that changes
+   * (SMD-3306 PR 6b-2). True when either changed, for the row's next write (sayAside).
    */
-  const noteSubjectsHold = (now: { held: "key" | "judge" | null; named: string | null }): boolean => {
+  const noteSubjectsHold = (now: { held: "key" | "judge" | null; named: string | null; rules: boolean }): boolean => {
+    const job = now.rules ? SUBJECTS_RULES_POOL : SUBJECTS_MODEL_POOL;
+    const followed = job !== JOBS.subjects;
+    JOBS.subjects = job;
+    if (followed) {
+      out(now.rules
+        ? `  the subject sweep follows the rules' pool ${job}, which ob1_config names: it asks no model, the rules keying what they can`
+        : `  the subject sweep follows the judge model's pool ${job}${now.named === null ? ", which its next run names" : ", which ob1_config names"}`);
+    }
     const changed = now.held !== subjectsHeld || (now.held === "key" && now.named !== subjectsNamed);
     if (changed && now.held === "key") err(subjectsKeyLine(now.named as string));
     else if (changed && now.held === "judge") err(subjectsJudgeLine());
@@ -1392,20 +1460,24 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     }
     subjectsHeld = now.held;
     subjectsNamed = now.named;
-    if (now.held !== null) subjectsLeft = true;
-    return changed;
+    if (now.held !== null) {
+      subjectsLeft = true;
+      subjectsLeftWhy = `the subject sweep is held (${now.held})`;
+    }
+    return changed || followed;
   };
   /** A start refusal's kind as the sweep's set-down carries it on the row: `failed` for one it does not. */
   const downKind = (kind: StartRefusal | undefined): SleepHoldWhy => (kind !== undefined && (SLEEP_HOLD_WHY as readonly string[]).includes(kind) ? (kind as SleepHoldWhy) : "failed");
   /**
    * The subject sweep set down, in words: its own lines name the cause; this says what the scheduler does about it
-   * (SMD-3306 PR 6b-2). `when`: " for this period", or nothing at the start's check, which the first whole read re-arms.
+   * (SMD-3306 PR 6b-2), and that a setting mended in deploy/.env reaches it once the coordinator is recreated (review
+   * pass 1, walkthrough). `when`: " for this period", or nothing at the start's check.
    */
   const subjectsDownLine = (kind: SleepHoldWhy, when: string): string => {
     const cause = kind === "failed" ? "it ended by itself, its lines above saying why"
-      : kind === "provider" ? "the provider refused it, its lines above saying why (a key, credit, or the request itself)"
       : `its start is refused, its lines above naming the cause${kind === "identity" ? `; ${startRefusalRemedy(kind)}` : ""}`;
-    return `  the subject sweep set down${when} (${kind}) — ${cause}; the other passes run on, and the next period — begun by other work, or the next rescan of its pools — tries it again`;
+    subjectsLeftWhy = `the subject sweep was set down (${kind})`;
+    return `  the subject sweep set down${when} (${kind}) — ${cause}, a setting mended in deploy/.env reaching it once the coordinator is recreated (up -d coordinator); the other passes run on, and the next period — begun by other work, or a later rescan of its pools — tries it again`;
   };
   /**
    * The row's `holds` (SMD-3379 PR 1c-4a, brain-info's SleepHold): re-embed
@@ -1444,20 +1516,29 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     for (const pass of PASSES) {
       if (pass === "reembed" && !REEMBED_OK) continue;
       if (pass === "subjects" && !SUBJECTS) continue;
-      const p = await poolOf(sql, pass, JOBS[pass], SIG);
-      // The subject sweep's pool is no work while it is held (SMD-3306 PR 6b-2), said with the hold.
+      // The subject sweep's: the pool the brain names, the rules' or the judge model's, its claims read as an idle
+      // poll reads them; held, its pool is no work, and under another pool named its counts are no pool's the
+      // scheduler would sweep, so the hold alone is said (SMD-3306 PR 6b-2, review pass 1, walkthrough).
       const su = pass === "subjects" ? await subjectsHoldNow() : null;
-      if (!drained(p) && !(pass === "reembed" && switched(recorded)) && !su?.held) hasWork = true;
+      if (su?.held === "key") {
+        out(subjectsKeyLine(su.named as string));
+        continue;
+      }
+      const job = su === null ? JOBS[pass] : su.rules ? SUBJECTS_RULES_POOL : SUBJECTS_MODEL_POOL;
+      const p = await poolOf(sql, pass, job, SIG);
+      // A claim in hand is another run's here, none the scheduler's: no work, as an idle poll reads it.
+      const work = su === null ? !drained(p) : p.pending + p.unpooled > 0;
+      if (work && !(pass === "reembed" && switched(recorded)) && !su?.held) hasWork = true;
       if (su === null) {
-        out(`  ${pass} (${JOBS[pass]}): ${p.claimed} in flight, ${p.pending} pending, ${p.unpooled} not yet in the pool, ${p.failed} failed${drained(p) ? " — drained" : joinsPast(p) ? ` — only ${p.stalled} stalled thought(s), which consolidation would join past` : ""}`);
+        out(`  ${pass} (${job}): ${p.claimed} in flight, ${p.pending} pending, ${p.unpooled} not yet in the pool, ${p.failed} failed${drained(p) ? " — drained" : joinsPast(p) ? ` — only ${p.stalled} stalled thought(s), which consolidation would join past` : ""}`);
       } else {
-        const pooling = su.named === null ? " — no subject pool named yet: the first period names it and pools every thought with no current subject, each then asked of the judge model"
-          : su.named === JOBS.subjects && su.filled !== JOBS.subjects ? " — its pooling unfinished, which the next period pools again" : drained(p) ? " — drained" : "";
-        out(`  subjects (${JOBS.subjects}): ${p.claimed} in flight, ${p.pending} pending, ${p.later} set back behind newer work (no work until other work comes or their date does), ${p.failed} failed${pooling}`);
+        const asked = su.rules ? "the rules keying what they can, no model asked" : "the rules first, then the judge model for the rest";
+        const pooling = su.named === null ? ` — no subject pool named yet: the first period names it and pools every thought with no current subject, ${asked} (the sweep's own dry run, --subjects --dry-run, counts them)`
+          : su.filled !== job ? " — its pooling unfinished, which the next period pools again" : !work && p.claimed === 0 ? " — drained" : "";
+        out(`  subjects (${job}${su.rules ? ", the rules'" : ""}): ${p.claimed} in flight, ${p.pending} pending, ${p.later} set back behind the rest (asked once in the next period other work begins, or at their date), ${p.failed} failed${pooling}`);
       }
       if (pass === "reembed" && p.unlabelled) out(`  reembed: ${p.unlabelled} of those not yet in the pool are unlabelled — vectors from before migration 021, which the first periods re-embed and label`);
       if (pass === "reembed" && switched(recorded)) out(asideLine(recorded));
-      if (su?.held === "key") out(subjectsKeyLine(su.named as string));
       if (su?.held === "judge") out(subjectsJudgeLine());
     }
     // The re-derive sweep's pool, as the first period would read it (SMD-2679): its orphans are work too (review pass 1 of PR 1c-4b).
@@ -1518,13 +1599,24 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       url, env, workers: WORKERS, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: opts.signal, check: true, session: SESSION,
       onStart: (r: StartResult) => { result = r; }, writer: tagged(pass, () => false),
     };
-    // The subject sweep's check, refused or throwing, sets the sweep down alone, the others running on (SMD-3306 PR
-    // 6b-2, the maintainer's choice), as re-embed's set-down; another pool named is its key hold, read below.
+    // The subject sweep's hold read first, so its check runs in the pool the brain names — the rules' asking no model —
+    // and none runs while it is held; then its check, refused or throwing, sets the sweep down alone, the others
+    // running on (SMD-3306 PR 6b-2, the maintainer's choice), as re-embed's set-down; another pool named since the
+    // read is its key hold, read again.
     if (pass === "subjects") {
-      const swept = await sweepSubjects(checking).then((code) => ({ code, why: null }), (e: unknown) => ({ code: 1, why: e instanceof Error ? e.message : String(e) }));
+      const held = await atStart(subjectsHoldNow);
+      if (held === null) { err(STOPPED_EARLY); return 130; }
+      noteSubjectsHold(held);
+      if (subjectsHeld !== null) continue;
+      const swept = await sweepSubjects({ ...checking, model: JOBS.subjects !== SUBJECTS_RULES_POOL })
+        .then((code) => ({ code, why: null }), (e: unknown) => ({ code: 1, why: e instanceof Error ? e.message : String(e) }));
       if (swept.code === 130) return 130;
       const kind = result && !result.ok ? result.refused : undefined;
-      if (swept.code !== 0 && kind !== "key") {
+      if (swept.code !== 0 && kind === "key") {
+        const again = await atStart(subjectsHoldNow);
+        if (again === null) { err(STOPPED_EARLY); return 130; }
+        noteSubjectsHold(again);
+      } else if (swept.code !== 0) {
         if (swept.why !== null) err(`  subjects: ${swept.why.split("\n")[0]}`);
         subjectsDown = downKind(kind);
         subjectsLeft = true;
@@ -1552,13 +1644,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     err(STOPPED_EARLY);
     return 130;
   }
-  // The subject sweep's hold, read once its check is through, which reads no trip's (SMD-3306 PR 6b-2).
-  if (SUBJECTS) {
-    const held = await atStart(subjectsHoldNow);
-    if (held === null) { err(STOPPED_EARLY); return 130; }
-    noteSubjectsHold(held);
-  }
-
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one period leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
@@ -1771,10 +1856,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       writer: tagged(name, () => p.hushed),
     };
     const ended = passEnded;
-    // Extraction's stall floor is its own (consolidation counts no stall). The subject sweep takes common as it stands,
-    // its workers and summary read by none of it (SMD-3306 PR 6b-2).
+    // Extraction's stall floor is its own (consolidation counts no stall). The subject sweep takes common, its workers
+    // and summary read by none of it, under the pool the brain names — the rules' asking no model — its claims bounded
+    // by the period's (SMD-3306 PR 6b-2).
     p.done = (name === "reembed" ? runReembed(common) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
-      : name === "subjects" ? sweepSubjects(common) : runConsolidate(DUMP ? { ...common, dump: DUMP } : common)).then((code) => {
+      : name === "subjects" ? sweepSubjects({ ...common, model: JOBS.subjects !== SUBJECTS_RULES_POOL, ...(subjectsBound === null ? {} : { claimsBy: subjectsBound }) })
+      : runConsolidate(DUMP ? { ...common, dump: DUMP } : common)).then((code) => {
       p.settled = true;
       p.code = code;
       ended.abort();
@@ -1931,14 +2018,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * Whether a pass's claims hold work — a row pending or in hand under its
    * key, one index read (SMD-3379 PR 1c-4b): what an idle poll reads, a scan
    * of no table. A capture queues extraction's in its own transaction (016),
-   * and the subject sweep's, its pool named (113). The sweep's by its
-   * forward rule (subjectsPool, SMD-3306 PR 6b-2): a claim in hand, or one a
-   * claim would take now dated at or before now().
+   * and the subject sweep's, its pool named (113). The sweep's as
+   * subjectsPool reads them (SMD-3306 PR 6b-2): one a claim would take dated
+   * at or before `bound` — the period's, or now() idle — or one its run in
+   * this process holds, at any date.
    */
-  const claimsBusy = async (pass: PassName): Promise<boolean> =>
+  const claimsBusy = async (pass: PassName, bound?: string): Promise<boolean> =>
     ((await (pass === "subjects"
       ? sql`SELECT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${JOBS.subjects} AND status IN ('pending', 'claimed')
-                             AND (enqueued_at <= now() OR (status = 'claimed' AND NOT COALESCE(ttl_expires_at < now(), false)))) AS busy`
+                             AND ((${takeable(sql)} AND enqueued_at <= ${byWhen(sql, bound)})
+                                  OR (status = 'claimed' AND NOT COALESCE(ttl_expires_at < now(), false) AND starts_with(worker_id, ${SUBJECTS_MINE}) AND claimed_at >= ${startedAt}::timestamptz))) AS busy`
       : sql`SELECT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${JOBS[pass]} AND status IN ('pending', 'claimed')) AS busy`))[0] as { busy: boolean }).busy;
   /**
    * The passes that may begin a period (PR 1c-4b): none a statement holds
@@ -1954,7 +2043,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * The work a period's start would read, whole (PR 1c-4b): each pass's pool
    * — re-embed's backlog, extraction's claims and the thoughts not yet in its
    * pool, consolidation's, the subject sweep's by its forward rule and its
-   * pooling due (SMD-3306 PR 6b-2) — and the sweep's orphans. At the process's start,
+   * pooling due (SMD-3306 PR 6b-2) — and the re-derive sweep's orphans. At the process's start,
    * the baseline, every RESCAN after, and as a vector come brings it forward
    * (PR 1d): what no claim row shows, a vector come for a thought extracted
    * already, the orphans a raw delete of a window or a replay leaves, a hand
@@ -1995,14 +2084,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       }
       // Re-embed's backlog with this process's leases alone, another's live lease none of its work (review pass 2 of PR 1c-4b);
       // one of its own an earlier period stranded counts until its TTL, where a period reads only its own period's (review pass 3).
+      // The subject sweep's alike: another run's claim in hand, or a gone scheduler's live lease, begins no period
+      // (SMD-3306 PR 6b-2, review pass 1).
       const p = pass === "extract" ? await poolOf(sql, pass, JOBS[pass], SIG, stalledUnread, false, startedAt)
-        : pass === "reembed" ? await poolOf(sql, pass, JOBS[pass], undefined, undefined, false, startedAt) : await poolOf(sql, pass, JOBS[pass]);
+        : pass === "reembed" || pass === "subjects" ? await poolOf(sql, pass, JOBS[pass], undefined, undefined, false, startedAt) : await poolOf(sql, pass, JOBS[pass]);
       if (!drained(p)) return true;
     }
     if (!sweeps) return false;
     if (!FOLLOW) return walkedFound;
     // A database not answering is waited out by the read around this one (review pass 2: one swallowed read a
-    // one-shot run's "no work"); any other refusal is the sweep's to meet and say.
+    // one-shot run's "no work"); any other refusal is the re-derive sweep's to meet and say.
     const census = await orphanCensus(sql, { after: sweepAfter }).catch((e: unknown) => { if (databaseUnavailable(e)) throw e; return null; });
     if (census === null) return false;
     // A window with no orphans moves the sweep's place on, as a sweep of it would, so each whole read reads the next
@@ -2057,14 +2148,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
       }
       // The subject sweep's hold, read each poll (SMD-3306 PR 6b-2): a hand run's lift or switch writes no audited row.
-      // Lifted, the next read is whole: a pooling due shows in no claim row.
+      // Lifted, or another of its pools followed, the next read is whole: a pooling due shows in no claim row.
       if (SUBJECTS) {
         const held = await reading(subjectsHoldNow);
         if (held === null) return null;
         const was = subjectsHeld;
+        const jobWas = JOBS.subjects;
         if (noteSubjectsHold(held)) {
           sayAside();
-          if (was !== null && subjectsHeld === null) lastWhole = 0;
+          if ((was !== null && subjectsHeld === null) || jobWas !== JOBS.subjects) lastWhole = 0;
         }
       }
       const due = Date.now() - lastWhole >= RESCAN * 1000;
@@ -2073,8 +2165,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         reembedDown = null;
         sayAside();
       }
-      // And a set-down subject sweep (SMD-3306 PR 6b-2), whose statement hold is apart.
-      if (due && subjectsDown !== null) {
+      // And a set-down subject sweep (SMD-3306 PR 6b-2), whose statement hold is apart — by a rescan after a whole read,
+      // not the baseline's, so a refusal at the start's check reaches the row before the next period or rescan tries
+      // the sweep again (review pass 1, cold read: the first read cleared it before the row's first write).
+      if (due && lastWhole !== 0 && subjectsDown !== null) {
         subjectsDown = null;
         sayAside();
       }
@@ -2293,10 +2387,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The database's now() at the period's last read: the end of its `slept` mark (SMD-2678). */
   let sleptUntil = new Date(0);
   /**
-   * A work period from `since` (SMD-3379 PR 1c-4b): the sweep, then re-embed
+   * A work period from `since` (SMD-3379 PR 1c-4b): the re-derive sweep, then re-embed
    * alone while it has work, then extraction alone until its pool drains,
-   * then consolidation beside it, a live write pausing them. Returns one of:
-   * "woken" on a live write during the sweep; "done" once its pools drain, or
+   * then consolidation beside it and the subject sweep beside that (SMD-3306
+   * PR 6b-2), a live write pausing them. Returns one of:
+   * "woken" on a live write during the re-derive sweep; "done" once its pools drain, or
    * every pass with work is held; "stopped" on a stop, the passes
    * stopped before it returns, inside the heartbeat's `during`; or, for a pass
    * that ended by itself (a refusal), its name, its code and whether it had
@@ -2305,7 +2400,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const asleep = async (since: Moment): Promise<"woken" | "done" | "stopped" | "outside" | { pass: PassName; code: number; started: boolean; refused?: StartRefusal }> => {
     for (const k of PASSES) delete words[k];
-    // The last period's set-down gone before the sweep, whose clock reads it (review pass 4: the row kept its word).
+    // The last period's set-down gone before the re-derive sweep, whose clock reads it (review pass 4: the row kept its word).
     reembedLeft = false;
     subjectsLeft = false;
     // Not a statement's hold, which lasts until a restart (N9; review pass 1 of PR 1c-4b).
@@ -2324,12 +2419,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       await stopPasses(hardStopped);
       return "stopped";
     };
-    // Its hold read again as the period begins, said once it changes (SMD-3306 PR 6b-2).
+    // Its hold read again as the period begins, said once it changes, and the period's bound on its claims taken from
+    // the period's start (SMD-3306 PR 6b-2).
     if (SUBJECTS) {
       const held = await reading(subjectsHoldNow);
       if (held === null) return stopped();
       if (noteSubjectsHold(held)) sayAside();
     }
+    subjectsBound = usText(since.us + SET_BACK_AHEAD_MS * 1000);
+    sweepJob = null;
     out(`  working: a pass has work and no live write has landed for ${CAPTURE} s — ${sweeps ? "the re-derive sweep, then " : ""}extracting, then consolidating${subjectsRuns() ? " and the subject sweep beside it" : ""}, until the pools drain${REEMBED_OK ? ", re-embed first when it has work" : ""}`);
     sleptUntil = since.at;
     // An audit row carries its transaction's start: a capture begun before the
@@ -2557,43 +2655,34 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (kind === "outage") delete words.reembed;
       else words.reembed = "failed";
       err(kind === "statement"
-        ? `  re-embed held until a restart — ${downCause[kind]}; extraction and consolidation run on`
-        : `  re-embed set down for this period — ${downCause[kind]}; extraction and consolidation run on, and the next period — begun by other work, or the next rescan of its pools — tries re-embed again`);
+        ? `  re-embed held until a restart — ${downCause[kind]}; the other passes run on`
+        : `  re-embed set down for this period — ${downCause[kind]}; the other passes run on, and the next period — begun by other work, or the next rescan of its pools — tries re-embed again`);
       await sayReembed();
     };
     /**
-     * The subject sweep's turn beside consolidation (SMD-3306 PR 6b-2), once extraction has drained or been joined past,
-     * at each open poll: started while its pool has a thought due — a claim a claim would take now, dated at or before
-     * now() — or its pooling is due; stopped after the thought in hand once it has neither, so a period the other passes
-     * keep open does not ask the thoughts set back behind the rest back to back (about 96 asks an hour each in the
-     * consumer's prototype, PR 6b-1's review pass 8; the maintainer's choice). False when a stop ended the read.
+     * The subject sweep's start beside consolidation (SMD-3306 PR 6b-2), once extraction has drained or been joined past:
+     * once a period, and never stopped in it, its claims bounded by the period's (claimsBy), so it waits as at an empty
+     * pool once nothing at or before the bound is left — a thought set back in the period not asked again in it — and
+     * the period's end stops it holding no claim (review pass 1, cold read and run-it, the maintainer's choice: a turn
+     * that stopped it once no thought was due stopped it with its last due thought in hand, which then ran under a
+     * stopping run's rules — N12's aborts and the probe after a timeout off, a transient error after the stop asked
+     * again by a run begun afresh, 30 times in 90 s — and a set-back was asked at its date alone).
      */
-    const sweepTurn = async (): Promise<boolean> => {
-      if (!subjectsRuns()) return true;
-      const su = running.find((r) => r.name === "subjects");
-      // Its end is read at the next poll's top, and a stop asked of it already is under way.
-      if (su?.settled || su?.hushed) return true;
-      const due = await reading(async () => (await sql`
-        SELECT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${JOBS.subjects} AND ${takeable(sql)} AND enqueued_at <= now()) AS claims,
-               ${poolingDue(sql, JOBS.subjects)} AS pooling`)[0] as { claims: boolean; pooling: boolean });
-      if (due === null) return false;
-      if (!su && (due.claims || due.pooling)) {
-        out(`  the subject sweep starts beside consolidation: ${due.pooling ? `pool ${JOBS.subjects} to name or pool` : "its pool has thoughts due"}`);
-        start("subjects");
-      } else if (su && !due.claims && !due.pooling) {
-        out("  the subject sweep's pool has no thought due — it stops after the thought in hand");
-        softStop(su);
-      }
-      return true;
+    const startSweep = (): void => {
+      if (!subjectsRuns() || sweepJob !== null) return;
+      out(`  the subject sweep starts beside consolidation, under ${JOBS.subjects}${JOBS.subjects === SUBJECTS_RULES_POOL ? ", the rules' pool: no model asked" : ""}`);
+      sweepJob = JOBS.subjects;
+      start("subjects");
     };
     /**
      * The subject sweep ended (SMD-3306 PR 6b-2), which ends no period and no scheduler, as re-embed's end does not:
-     * stopped by its turn or a stop with nothing of its own to say (0, or 130 at a hard stop), it is done; else its hold read again — another
-     * pool named (its 2), a trip holding its judge model (its 3) — and held, said, or set down for this period, said: its
-     * start's refusal by its kind, the provider refusing it mid-pass (2), anything else `failed` — the database lost past
-     * its start or its naming or pooling broken off (1), another judge model's trip (3, which holds it not), a 0 unasked,
-     * or a throw, its reason said, which the pass does not say itself (re-embed's rule). The row is written now. False
-     * when a stop ended the read.
+     * stopped with nothing of its own to say (0, or 130 at a hard stop), it is done; else its hold read again — another
+     * pool named (its 2), a trip holding its judge model (its 3) — and held, said; or the other of this stack's pools
+     * named, an operator's switch, which it starts again under; or set down for this period, said: its start's refusal
+     * by its kind, anything else `failed`, its lines saying why — the provider's refusal of a question, a grant refused,
+     * the pool's name blanked, the database lost past its start, its naming or pooling broken off, another judge model's
+     * trip, a 0 unasked, or a throw, whose reason is said here, as the pass says none (re-embed's rule). The row is
+     * written now. False when a stop ended the read.
      */
     const subjectsEnded = async (su: Running): Promise<boolean> => {
       const why = await su.done.then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
@@ -2602,14 +2691,20 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const held = await reading(subjectsHoldNow);
       if (held === null) return false;
       noteSubjectsHold(held);
-      if (subjectsHeld === null) {
-        const refused = su.start && !su.start.ok ? su.start.refused : undefined;
-        subjectsDown = refused !== undefined ? downKind(refused) : su.code === 2 ? "provider" : "failed";
-        subjectsLeft = true;
-        err(subjectsDownLine(subjectsDown, " for this period"));
+      if (subjectsHeld === null && sweepJob !== null && JOBS.subjects !== sweepJob) {
+        // Named away to the other of this stack's pools: no failure of its own, the sweep started again under it.
+        delete words.subjects;
+        sweepJob = null;
+      } else {
+        if (subjectsHeld === null) {
+          const refused = su.start && !su.start.ok ? su.start.refused : undefined;
+          subjectsDown = downKind(refused);
+          subjectsLeft = true;
+          err(subjectsDownLine(subjectsDown, " for this period"));
+        }
+        // Its run ended failed on its own word; a throw or a 0 unasked says none, so the period's outcome is set here.
+        words.subjects = "failed";
       }
-      // Its run ended failed on its own word; a throw or a 0 unasked says none, so the period's outcome is set here.
-      words.subjects = "failed";
       sayAside();
       await sayOutcome();
       return true;
@@ -2972,12 +3067,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         // pending or in hand the pools whole — consolidation's work comes with
         // no claim row as extraction finishes a thought (029) — the passes
         // stopping once every pass with work has drained or is held. The
-        // subject sweep's by its forward rule, its thoughts set back no work,
-        // and none while it is held or set down (SMD-3306 PR 6b-2).
+        // subject sweep's by the period's bound, a thought set back in the
+        // period no work, and none while it is held or set down (SMD-3306 PR
+        // 6b-2).
         const exHeld = statementHeld.has("extract");
         const coHeld = statementHeld.has("consolidate");
         const suOut = !subjectsRuns();
-        const busy = await reading(async () => (!exHeld && (await claimsBusy("extract"))) || (!coHeld && (await claimsBusy("consolidate"))) || (!suOut && (await claimsBusy("subjects"))));
+        const bound = subjectsBound ?? undefined;
+        const busy = await reading(async () => (!exHeld && (await claimsBusy("extract"))) || (!coHeld && (await claimsBusy("consolidate"))) || (!suOut && (await claimsBusy("subjects", bound))));
         if (busy === null) return stopped();
         if (!busy) {
           // The vectors' mark taken first: the pools read whole after it, the vectors come in the period are read
@@ -2985,7 +3082,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           const at = await reading(() => vectorMark(sql, WAKE_SLACK));
           if (at === null) return stopped();
           const empty = await reading(async () => (exHeld || drained(await extractPool())) && (coHeld || drained(await poolOf(sql, "consolidate", JOBS.consolidate)))
-            && (suOut || drained(await subjectsPool(sql, JOBS.subjects))));
+            && (suOut || drained(await subjectsPool(sql, JOBS.subjects, { bound, mineSince: startedAt }))));
           if (empty === null) return stopped();
           if (empty) {
             vectorsAt = { ...at, atMs: Date.now() };
@@ -2995,8 +3092,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           }
         }
       }
-      // The subject sweep's turn, beside consolidation once it has joined (SMD-3306 PR 6b-2).
-      if (consolidating && !(await sweepTurn())) return stopped();
+      // The subject sweep beside consolidation once it has joined, started once a period (SMD-3306 PR 6b-2).
+      if (consolidating) startSweep();
       await sleepUnless(POLL * 1000, wake);
     }
   };
@@ -3092,6 +3189,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // down (SMD-3306 PR 6b-2).
       if (since === "none") {
         out("  idle: no work — nothing to do");
+        // Said last, where it was said once at the start (review pass 1, walkthrough).
+        if (subjectsLeft) err(`  exit 1: ${subjectsLeftWhy}, its line above saying why`);
         return reembedLeft || subjectsLeft ? 1 : 0;
       }
       // The row says when this period began, and once it is over when it ended,
@@ -3186,7 +3285,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // One period, under no --follow (draft 5's §3): 0 drained; 1 when a pass ended held — re-embed set down or
       // aside, its pool left, or a statement past its timeout (review passes 1 and 3 of SMD-2679 PR 4b; N9), or the
       // subject sweep held or set down (SMD-3306 PR 6b-2).
-      if (!FOLLOW) return !reembedLeft && !subjectsLeft && statementHeld.size === 0 ? 0 : 1;
+      if (!FOLLOW) {
+        if (subjectsLeft) err(`  exit 1: ${subjectsLeftWhy}, its line above saying why`);
+        return !reembedLeft && !subjectsLeft && statementHeld.size === 0 ? 0 : 1;
+      }
     }
     await endRow("stopped", malformed ?? undefined);
     return FOLLOW && !hardStopped ? 0 : 130;

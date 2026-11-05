@@ -357,12 +357,14 @@ const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = fals
 /**
  * What mends the cause that set the sleep scheduler's subject sweep down for a
  * period (heartbeat:sleep's `holds`, SMD-3306 PR 6b-2): its start refusal's
- * remedy, the chat endpoint's for the provider's refusal mid-pass, and the
- * scheduler's own words for an end of its own.
+ * remedy — the judge model's and the chat endpoint's in the sweep's own words,
+ * not extraction's (review pass 1, walkthrough) — and the scheduler's for an
+ * end of its own, whose cause its log names.
  */
 const subjectsDownRemedy = (kind: string): string =>
-  kind === "failed" ? "it ended by itself — the database lost past its start, or its naming or pooling broken off, most likely — and its log gives the reason"
-  : kind === "provider" ? "the provider refused it: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402; its log names the refusal"
+  kind === "failed" ? "it ended by itself — the provider refusing a question, a grant refused, the pool's name blanked, the database lost past its start, or its naming or pooling broken off — and its log gives the reason"
+  : kind === "model" ? "the judge model is not served: pull the model its log names, or set OB1_JUDGE_MODEL to one the provider serves"
+  : kind === "provider" ? "the provider refused the judge model's one-token call: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402"
   : startRefusalRemedy(kind);
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
@@ -5228,7 +5230,7 @@ if (configFailed) {
             // With no clock, `stops` counts the passes a statement past its timeout holds (N9, PR 1c-4b); an older row's, its sleeps stopped on its budget.
             const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.minutes ? `${b.stops} sleep(s) stopped on it` : `${b.stops} pass(es) held by a statement past its timeout`} since ${down ? "it last started" : "it started"}` : "";
             // Re-embed set aside or down by the scheduler, by its own word
-            // (SMD-2679 PR 4b): extraction and consolidation run on. A set-down
+            // (SMD-2679 PR 4b): the other passes run on. A set-down
             // speaks of one period, so an ended row's is its last word, its cause
             // to mend before the restart; a model switch stays until the record
             // matches. Its failed outcome may be another pass's too, which the
@@ -5262,8 +5264,8 @@ if (configFailed) {
                 ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
                 : down ? (set.kind === "outage" ? null : `Its last period ${set.kind === "statement" ? "held re-embed" : "set re-embed down"} (${set.kind}) — ${reembedDownRemedy(set.kind, true, b?.statementTimeoutS === 0)}; mend that before it starts again, or its first period ${set.kind === "statement" ? "holds it again" : "sets re-embed down again"}.`)
                 : set.kind === "statement"
-                  ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind, false, b?.statementTimeoutS === 0)}; extraction and consolidation run on meanwhile.${otherPass}`
-                  : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next period with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
+                  ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind, false, b?.statementTimeoutS === 0)}; the other passes run on meanwhile.${otherPass}`
+                  : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; the other passes run on, and the next period with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
             // Under a model name that forms no key its row carries, the
             // scheduler keeps re-embed out, as its start said, and the row
             // says so: a row with no key, or a stopped one, whose restart takes
@@ -5381,11 +5383,12 @@ if (configFailed) {
             // maintainer's choice): it names a pool when none is and never switches one, which is a hand run's, in the
             // stack as the judge hold's lift is. The pools are its log's: the row carries neither.
             if (subjectsHold?.why === "key") {
-              fixes.push(`The subject sweep is held: ob1_config names another subject pool than the scheduler's — a rule's, the question's or OB1_SUBJECT_REASONING's change since it was named, or --subjects rules run by hand — and the scheduler names a pool only when none is, never switching one; its log names both. To sweep under the scheduler's, which pools again every thought with no current subject, switch it by hand in the stack as the coordinator runs, recreated first after a change to deploy/.env (up -d coordinator) — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with (docker compose alike) — the scheduler's runs taking the rest; or, where OB1_SUBJECT_REASONING alone tells them apart, set it back in deploy/.env and recreate the coordinator.${subjectsTail()}`);
+              fixes.push(`The subject sweep is held: ob1_config names a subject pool that is neither of the scheduler's — the judge model's or the rules' — after a rule's, the question's or OB1_SUBJECT_REASONING's change since it was named, and the scheduler names a pool only when none is, never switching one; its log names the pools. Switch it by hand in the stack as the coordinator runs, recreated first after a change to deploy/.env (up -d coordinator) — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with (docker compose alike) — to the judge model's pool, the scheduler's runs taking the rest: it pools again every thought whose subject is not current under it, those found with the reasoning off or keyed by no rule among them, which the same command with --dry-run in place of --limit 1 counts first; or to the rules' pool (--subjects rules --switch-key --limit 1), which the scheduler follows asking no model, for a judge model not yet measured on the question; or, where OB1_SUBJECT_REASONING alone tells them apart, set it back in deploy/.env and recreate the coordinator.${subjectsTail()}`);
             }
-            // Set down for a period, by its word (SMD-3306 PR 6b-2): re-armed at each, as re-embed's set-down is.
+            // Set down for a period, by its word (SMD-3306 PR 6b-2): re-armed at each, as re-embed's set-down is; a
+            // setting mended in deploy/.env reaches it once the coordinator is recreated (review pass 1, walkthrough).
             if (subjectsDown !== null) {
-              fixes.push(`The subject sweep was set down for ${h.running && !down ? "this" : "its last"} period (${subjectsDown}) — ${subjectsDownRemedy(subjectsDown)}; ${down ? "mend that before the scheduler starts again, or its next period sets the sweep down again" : "the next period with work tries it again"}.${subjectsTail()}`);
+              fixes.push(`The subject sweep was set down for ${h.running && !down ? "this" : "its last"} period (${subjectsDown}) — ${subjectsDownRemedy(subjectsDown)}; ${down ? "mend that before the scheduler starts again, a setting in deploy/.env reaching it once the coordinator is recreated (up -d coordinator), or its next period sets the sweep down again" : "a setting mended in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), and the next period with work tries the sweep again"}.${subjectsTail()}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

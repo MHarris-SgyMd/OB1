@@ -242,7 +242,7 @@ export interface WorkerHeartbeat {
   resting?: true;
   /**
    * The sleep scheduler's re-embed pass set aside or down (SMD-2679 PR 4b),
-   * while extraction and consolidation run on: aside on a model switch it
+   * while the other passes run on: aside on a model switch it
    * will not make — the embedding model the brain records unlike the stack's,
    * re-read at each sleep's start and each poll while aside, so a record put
    * right clears it — or down

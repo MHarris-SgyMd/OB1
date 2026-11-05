@@ -22308,6 +22308,8 @@ async function sleepScaffold(sql: SQL) {
     subjectHolds: [] as { aborted?: boolean }[],
     /** Subject questions answered with an empty subject, naming nothing: the garbage-judge alarm's answers. */
     subjectNothing: false,
+    /** Subject questions about a thought holding this text: answered 503, the provider holding calls back (review pass 1 of PR 6b-2). */
+    subjectDown: null as string | null,
   };
   const stub = Bun.serve({
     port: 0,
@@ -22340,6 +22342,7 @@ async function sleepScaffold(sql: SQL) {
       // subject, or none (subjectNothing), held as slowJudge holds a judgement.
       if (prompt.startsWith("Each item is one stored thought.")) {
         modelCalls.push({ kind: "subject", at: Date.now() });
+        if (sw.subjectDown !== null && prompt.includes(sw.subjectDown)) return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
         if (sw.slowSubject) {
           sw.subjectsHeld++;
           const hold: { aborted?: boolean } = {};
@@ -26104,7 +26107,7 @@ if (want("38b")) {
 }
 
 if (want("38s")) {
-  console.log("\n[38s] db/sleep.ts: the subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-2) — beside consolidation once extraction has drained, a first period naming the pool at the scheduler's key and pooling the backlog; a thought set back behind the rest, or a lease run out so dated, no work, beginning no period, the sweep stopped after the thought in hand once its pool has none due; another pool named holding it, never switched, and the garbage-judge alarm's trip, each read again each idle poll, a one-shot run exiting 1; a refusal at its start setting it down alone, the other passes running on; the alarm tripping mid-period holding it; its stop lines hushed; N12's aborts of its calls capped as consolidation's; the dry run's pool line");
+  console.log("\n[38s] db/sleep.ts: the subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-2) — started once a period beside consolidation once extraction has drained, a first period naming the pool at the scheduler's key and pooling the backlog; a thought set back behind the rest, or a lease run out so dated, beginning no period, asked once in a period other work begins, one set back in the period left for the next; another pool named holding it, never switched, the rules' pool followed with no model asked, and the garbage-judge alarm's trip, each read again each idle poll, a one-shot run exiting 1 and saying why; a refusal at its start setting it down alone, the other passes running on; the alarm tripping mid-period holding it; its stop lines hushed; N12's aborts of a lone thought's call, capped as consolidation's; the dry run's pool line");
   const sql = new SQL({ url: URL_, max: 4 });
   // The extraction key a section before may leave, which the scaffold sets aside: put back at the end, as [38b] does.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
@@ -26112,6 +26115,7 @@ if (want("38s")) {
   /** The scheduler's pool key, as its sweep's own run forms it (OB1_SUBJECT_REASONING unset: on), and the other reasoning's. */
   const POOL = subjectPoolKey(true, subjectReasoningOn(resolveEmbedConfig(env as never)));
   const OTHER = subjectPoolKey(true, !subjectReasoningOn(resolveEmbedConfig(env as never)));
+  const RULES = subjectPoolKey(false, subjectReasoningOn(resolveEmbedConfig(env as never)));
   const unpool = async () => {
     await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
@@ -26124,7 +26128,7 @@ if (want("38s")) {
   const alarmWas = { ...JUDGE_ALARM };
   try {
     // The first period names the pool at the scheduler's key, pools the backlog and asks each thought, beside
-    // consolidation once extraction has drained; the sweep's own stop line, as the turn stops it, left out.
+    // consolidation once extraction has drained; the sweep's own stop line, as the period's end stops it, left out.
     const first = await capture("A synced note on the sleep case's work, the first.", "sync-sleep", 0, 21);
     const second = await capture("A synced note on the sleep case's work, the second.", "sync-sleep", 0, 22);
     lines.length = 0;
@@ -26132,17 +26136,19 @@ if (want("38s")) {
     const filled = ((await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_filled'`)[0] as { value: string } | undefined)?.value;
     const firstClaims = await claims(POOL);
     const drainedAt = lines.findIndex((l) => /^ {2}extraction drained — consolidating beside it/.test(l));
-    const startedAt = lines.indexOf(`  the subject sweep starts beside consolidation: pool ${POOL} to name or pool`);
+    const startedAt = lines.indexOf(`  the subject sweep starts beside consolidation, under ${POOL}`);
     assert(firstCode === 0 && (await named()) === POOL && filled === POOL && firstClaims.succeeded === 2 && !firstClaims.pending && !firstClaims.claimed && asked() === 2 && (await recorded()) === 2
         && drainedAt >= 0 && startedAt > drainedAt && ended() && lines.some((l) => /^ {2}working: .*extracting, then consolidating and the subject sweep beside it, until the pools drain/.test(l))
         && lines.some((l) => /\[subjects\] {2}2 thought\(s\) in /.test(l)) && !lines.some((l) => /stopped after \d+ thought\(s\)/.test(l)),
       `the first period names the pool at the scheduler's key, pools the backlog and asks each thought beside consolidation once extraction drains, its stop line hushed (exit ${firstCode}; named ${await named()}; ${JSON.stringify(firstClaims)}; asked ${asked()}; joined at ${drainedAt}, swept at ${startedAt})`);
 
-    // A thought set back behind the rest, and a lease run out dated so, is no work: the dry run counts them apart, a
-    // claim in hand at any date counted in flight, and a one-shot run alone with them begins no period.
+    // A thought set back behind the rest, and a lease run out dated so, is no work idle: the dry run counts them apart,
+    // a claim in hand at any date counted in flight, and a one-shot run alone with them begins no period.
     await sql`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, enqueued_at = now() + interval '30 days' WHERE work_type = ${POOL} AND thought_id = ${first}::uuid`;
     await sql`UPDATE thought_work_claims SET status = 'claimed', finished_at = NULL, worker_id = 'subjects-gone-1', claimed_at = now() - interval '1 hour', ttl_expires_at = now() - interval '1 minute', enqueued_at = now() + interval '30 days'
                WHERE work_type = ${POOL} AND thought_id = ${second}::uuid`;
+    // Their subjects closed, so a period asks them again rather than finding them current.
+    await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'subject' AND valid_until IS NULL AND thought_id IN (${first}::uuid, ${second}::uuid)`;
     const dryLines: string[] = [];
     const dryCode = await runSleep({ url: URL_!, env, capture: 1, poll: 1, dryRun: true, writer: { out: (l) => dryLines.push(l), err: (l) => dryLines.push(l) } });
     await sql`UPDATE thought_work_claims SET ttl_expires_at = now() + interval '1 hour' WHERE work_type = ${POOL} AND thought_id = ${second}::uuid`;
@@ -26150,36 +26156,67 @@ if (want("38s")) {
     await runSleep({ url: URL_!, env, capture: 1, poll: 1, dryRun: true, writer: { out: (l) => inHandLines.push(l), err: (l) => inHandLines.push(l) } });
     await sql`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${POOL} AND thought_id = ${second}::uuid`;
     const poolLine = (ls: string[]) => ls.find((l) => l.startsWith(`  subjects (${POOL}): `)) ?? "";
-    assert(dryCode === 0 && poolLine(dryLines) === `  subjects (${POOL}): 0 in flight, 0 pending, 2 set back behind newer work (no work until other work comes or their date does), 0 failed — drained`
-        && dryLines.some((l) => /^ {2}idle: no work/.test(l)) && /^ {2}subjects \(.*\): 1 in flight, 0 pending, 1 set back behind newer work/.test(poolLine(inHandLines)),
+    assert(dryCode === 0 && poolLine(dryLines) === `  subjects (${POOL}): 0 in flight, 0 pending, 2 set back behind the rest (asked once in the next period other work begins, or at their date), 0 failed — drained`
+        && dryLines.some((l) => /^ {2}idle: no work/.test(l)) && /^ {2}subjects \(.*\): 1 in flight, 0 pending, 1 set back behind the rest/.test(poolLine(inHandLines)),
       `the dry run counts a thought set back and a lease run out dated ahead as set back, no work, and a claim in hand dated ahead in flight (${poolLine(dryLines)} | ${poolLine(inHandLines)})`);
     lines.length = 0;
     const askedBefore = asked();
     const aloneCode = await sleepRun({ ...ONE_SHOT, subjects: true });
     assert(aloneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && asked() === askedBefore,
       `…and alone they begin no period: a one-shot run asks nothing and exits 0 (exit ${aloneCode}; asked ${asked() - askedBefore})`);
-    // Beside a capture the sweep asks the capture, then stops after it, its pool having none due, though the thoughts
-    // set back are pending — its answer held past a poll, so the turn reads it in hand.
+    // Other work begins a period: the sweep asks the capture, and each thought set back before the period once, the
+    // lease run out reaped and asked with them (the maintainer's choice, review pass 1).
     const third = await capture("A synced note on the sleep case's work, the third.", "sync-sleep", 0, 23);
-    sw.slowSubject = 3000;
     lines.length = 0;
-    const besideCode = await sleepRun({ ...ONE_SHOT, subjects: true }).finally(() => { sw.slowSubject = 0; });
-    const states = Object.fromEntries(((await sql`SELECT thought_id::text AS id, status, enqueued_at > now() AS ahead FROM thought_work_claims WHERE work_type = ${POOL}`) as { id: string; status: string; ahead: boolean }[]).map((r) => [r.id, `${r.status}${r.ahead ? " ahead" : ""}`]));
-    assert(besideCode === 0 && asked() === askedBefore + 1 && states[third] === "succeeded" && states[first] === "pending ahead" && states[second] === "pending ahead"
-        && lines.includes("  the subject sweep's pool has no thought due — it stops after the thought in hand") && ended() && !lines.some((l) => /stopped after \d+ thought\(s\)/.test(l)),
-      `…and beside a capture the sweep asks it alone, stopped after it once its pool has none due, the period ending with the thoughts set back still pending ahead, the lease run out reaped so (exit ${besideCode}; asked ${asked() - askedBefore}; ${JSON.stringify(states)})`);
+    const besideCode = await sleepRun({ ...ONE_SHOT, subjects: true });
+    // Each claim's status, and whether it is dated a day or more ahead, a set-back's; a claim finished keeps its date.
+    const stateOf = async () => Object.fromEntries(((await sql`SELECT thought_id::text AS id, status, enqueued_at > now() + interval '1 day' AS ahead FROM thought_work_claims WHERE work_type = ${POOL}`) as { id: string; status: string; ahead: boolean }[]).map((r) => [r.id, `${r.status}${r.ahead && r.status === "pending" ? " ahead" : ""}`]));
+    const states = await stateOf();
+    assert(besideCode === 0 && asked() === askedBefore + 3 && states[third] === "succeeded" && states[first] === "succeeded" && states[second] === "succeeded" && ended()
+        && !lines.some((l) => /stopped after \d+ thought\(s\)/.test(l)),
+      `…and when other work begins a period the sweep asks it and each thought set back before the period once, the lease run out reaped and asked (exit ${besideCode}; asked ${asked() - askedBefore}; ${JSON.stringify(states)})`);
+    // A thought the period sets back — its questions held back past the sweep's pauses (503), the provider answering its
+    // probe — goes behind the rest past the period's bound: not asked again in it, the period ending; the next period
+    // other work begins asks it once (the maintainer's choice).
+    const flaky = await capture("A synced note the provider holds back, flaky-subject.", "sync-sleep", 0, 25);
+    sw.subjectDown = "flaky-subject";
+    const restorePauses = shortenPauses(100);
+    const restoreOutageS = shortenOutage(200);
+    lines.length = 0;
+    const askedFlaky = asked();
+    let flakyCode = -1;
+    try {
+      flakyCode = await sleepRun({ ...ONE_SHOT, subjects: true });
+    } finally {
+      sw.subjectDown = null;
+      restorePauses();
+      restoreOutageS();
+    }
+    const flakyAsks = asked() - askedFlaky;
+    const flakyState = (await stateOf())[flaky];
+    const later = await capture("A synced note on the sleep case's work, the fourth.", "sync-sleep", 0, 26);
+    lines.length = 0;
+    const askedNext = asked();
+    const nextCode = await sleepRun({ ...ONE_SHOT, subjects: true });
+    const nextStates = await stateOf();
+    assert(flakyCode === 0 && flakyAsks >= 2 && flakyState === "pending ahead" && ended()
+        && nextCode === 0 && asked() - askedNext === 2 && nextStates[flaky] === "succeeded" && nextStates[later] === "succeeded",
+      `…and a thought the period sets back waits past its bound, the period ending, then is asked once in the next period other work begins (exit ${flakyCode}, asked ${flakyAsks} time(s), ${flakyState}; next exit ${nextCode}, asked ${asked() - askedNext}, ${nextStates[flaky]})`);
 
-    // Another pool named holds the sweep (key), never switched: a one-shot run's check refuses it once, the hold's line
-    // names both pools and the ways out, the other passes run their period, and it exits 1.
+    // Another pool named holds the sweep (key), never switched: no check runs under the hold, its line names the pools
+    // and the ways out — the judge model's pool counted first, or the rules' — the other passes run their period, and
+    // a one-shot run exits 1, saying why last (review pass 1, walkthrough).
     await sql`UPDATE ob1_config SET value = ${OTHER} WHERE key = 'subject_pool_key'`;
     await capture("A synced note captured while another pool is named.", "sync-sleep", 0, 24);
     lines.length = 0;
     const keyCode = await sleepRun({ ...ONE_SHOT, subjects: true });
     const keyLine = lines.find((l) => l.startsWith("  the subject sweep held (key): ")) ?? "";
-    assert(keyCode === 1 && keyLine.includes(`ob1_config names subject pool ${OTHER}, this stack's is ${POOL} — the scheduler names a pool when none is, and never switches one`)
-        && keyLine.includes("run extract --subjects --switch-key --limit 1") && keyLine.includes(`to keep ${OTHER}, set OB1_SUBJECT_REASONING=off in deploy/.env`)
-        && lines.filter((l) => /Refusing to sweep under a pool other than the one ob1_config names/.test(l)).length === 1 && ended() && !lines.some((l) => /the subject sweep starts/.test(l)) && (await named()) === OTHER,
-      `another pool named holds the sweep, never switched: the check refuses it once, the hold's line names both pools and the ways out, the other passes run their period, and a one-shot run exits 1 (exit ${keyCode}; ${keyLine.slice(0, 160)})`);
+    assert(keyCode === 1 && keyLine.includes(`ob1_config names subject pool ${OTHER}, and this stack's are ${POOL}, the judge model's, and ${RULES}, the rules' — the scheduler names a pool when none is, and never switches one`)
+        && keyLine.includes("run extract --subjects --switch-key --limit 1") && keyLine.includes("run extract --subjects --switch-key --dry-run")
+        && keyLine.includes("run extract --subjects rules --switch-key --limit 1") && keyLine.includes(`to keep ${OTHER}, set OB1_SUBJECT_REASONING=off in deploy/.env`)
+        && !lines.some((l) => /Refusing to sweep under a pool other than the one ob1_config names/.test(l)) && ended() && !lines.some((l) => /the subject sweep starts/.test(l)) && (await named()) === OTHER
+        && lines.at(-1) === "  exit 1: the subject sweep is held (key), its line above saying why",
+      `another pool named holds the sweep, never switched: no check under the hold, its line names the pools and the ways out, the other passes run their period, and a one-shot run exits 1 saying why (exit ${keyCode}; ${keyLine.slice(0, 160)}; last ${lines.at(-1)})`);
     // …and a --follow scheduler reads its hold again each idle poll, on its row: the scheduler's pool named again lifts
     // it, a trip holding its judge model holds it again, and the trip's lift lifts that.
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
@@ -26204,6 +26241,20 @@ if (want("38s")) {
       `…and --follow reads the hold again each idle poll, on its row: the scheduler's pool named again lifts it, a trip holding its judge model holds it again, the trip's lift lifts that (key ${keyRow}, lifted ${keyLifted}; judge ${judgeRow}, lifted ${judgeLifted}; exit ${holdsCode})`);
     await sql`DELETE FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY}`;
 
+    // The rules' pool named by hand is followed, no hold: the scheduler's sweep asks no model, the rules keying a
+    // thought filed under a ticket (the maintainer's choice, review pass 1: a brain whose judge model is not measured
+    // on the question kept to the rules).
+    const rulesRun = await sweepSubjects({ url: URL_!, env, model: false, switchKey: true, writer: { out: () => {}, err: () => {} } });
+    const filedId = ((await sql`SELECT upsert_thought(${"A synced ticket row's text, its id in its metadata alone."}, ${{ metadata: { source: "live", issue: "SMD-9701" }, embedding_model: "stub-embed", actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, ${unit(27)}::vector) AS r`)[0].r as { id: string }).id;
+    lines.length = 0;
+    const askedRules = asked();
+    const rulesCode = await sleepRun({ ...ONE_SHOT, subjects: true });
+    const [filedSubject] = (await sql`SELECT payload->>'key' AS key FROM thought_facets WHERE thought_id = ${filedId}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { key: string }[];
+    assert(rulesRun === 0 && (await named()) === RULES && rulesCode === 0 && asked() === askedRules && filedSubject?.key === "ticket:SMD-9701"
+        && lines.includes(`  the subject sweep follows the rules' pool ${RULES}, which ob1_config names: it asks no model, the rules keying what they can`)
+        && lines.includes(`  the subject sweep starts beside consolidation, under ${RULES}, the rules' pool: no model asked`) && !lines.some((l) => /held \(key\)/.test(l)) && ended(),
+      `the rules' pool named by hand is followed, no hold: the sweep asks no model, the rules keying a filed thought (exit ${rulesCode}; named ${await named()}; asked ${asked() - askedRules}; ${filedSubject?.key})`);
+
     // A refusal at the sweep's start sets it down alone, the other passes running on: the scheduler's check, then the
     // period's start, each said, a one-shot run exiting 1 — here the first naming, refused while a login role can
     // capture but not write the claims 113's trigger writes as it.
@@ -26220,7 +26271,7 @@ if (want("38s")) {
         await capture("A synced note captured while a capturing role lacks the claims' grants.", "sync-sleep", 0, 25);
         lines.length = 0;
         const downCode = await sleepRun({ ...ONE_SHOT, subjects: true });
-        const checkDown = lines.findIndex((l) => l.startsWith("  the subject sweep set down (tables) — its start is refused, its lines above naming the cause; the other passes run on"));
+        const checkDown = lines.findIndex((l) => l.startsWith("  the subject sweep set down (tables) — its start is refused, its lines above naming the cause, a setting mended in deploy/.env reaching it once the coordinator is recreated (up -d coordinator); the other passes run on"));
         const periodDown = lines.findIndex((l) => l.startsWith("  the subject sweep set down for this period (tables) — its start is refused"));
         assert(downCode === 1 && checkDown >= 0 && periodDown > checkDown && ended() && (await named()) === null
             && lines.filter((l) => /Refusing to name a subject pool: naming the pool would fail the captures of ob1_live_sleep_capturer/.test(l)).length === 2,
@@ -26245,7 +26296,11 @@ if (want("38s")) {
     await sql`DELETE FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY}`;
 
     // N12 aborts the sweep's call in hand while paused, its thought set back, at most subjectsAborts a period's hour
-    // (here one), as consolidation's: the next pause's call runs through and answers, the cap said once.
+    // (here one), as consolidation's: the next pause's call runs through and answers, the cap said once. A lone
+    // thought, so its call is its period's last due one, which a turn that stopped the sweep once nothing was due left
+    // unaborted (review pass 1, run-it).
+    await sql`DELETE FROM thoughts`;
+    await unpool();
     await capture("A synced note the sweep's call is held on.", "sync-sleep", 0, 30);
     sw.slowSubject = 3000;
     sw.subjectHolds.length = 0;

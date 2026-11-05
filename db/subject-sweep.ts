@@ -300,8 +300,11 @@ const ROLLED_BACK = Symbol("rolled back");
 /** The least thought id: a cursor before every page. */
 const NIL_ID = "00000000-0000-0000-0000-000000000000";
 
-/** Leases a thought may take and lose, its worker gone, before its claim fails (claim_thoughts's p_max_attempts). */
-const MAX_ATTEMPTS = 3;
+/**
+ * Leases a thought may take and lose, its worker gone, before its claim fails (claim_thoughts's p_max_attempts): a
+ * lease run out at it is failed by the next claim's reaping, no work (sleep.ts reads it so, SMD-3306 PR 6b-2).
+ */
+export const MAX_ATTEMPTS = 3;
 
 /**
  * How long a run's hand-back of its claims waits under a scheduler's session (releaseHeld), whatever the budget: past a
@@ -543,6 +546,16 @@ export interface SubjectSweepOptions {
    * `follow`, and not a dry run's.
    */
   check?: boolean;
+  /**
+   * A following run's claims bounded by date (SMD-3306 PR 6b-2): an instant on the database's clock, as text, past
+   * which the run claims nothing — a claim pending, or a lease run out under its attempts, dated later is left, and with
+   * none at or before it the run waits as at an empty pool. Sleep's bound is its period's start plus SET_BACK_AHEAD_MS,
+   * so each thought set back before the period is asked once in it and one set back in it waits for the next (the
+   * maintainer's choice, 2026-11-05), and the scheduler never stops the run mid-thought. One claimed past it, another
+   * run having taken those before it between the read and the claim, goes back unasked, its date and attempt kept.
+   * With `follow` alone.
+   */
+  claimsBy?: string;
 }
 
 /** A dry run's pages, of the pool's claims or of the thoughts with no current subject. */
@@ -629,6 +642,8 @@ async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null,
   }
   // A following run's start alone, as the claim passes take it (PR 6b-1).
   if (opts.check === true && (FOLLOW_S <= 0 || DRY_RUN)) return refused("usage", "check is a following run's start: pass follow beside it, and no dry run.");
+  // A scheduler's bound on the claims, a following run's alone (PR 6b-2).
+  if (opts.claimsBy !== undefined && (FOLLOW_S <= 0 || DRY_RUN)) return refused("usage", "claimsBy bounds a following run's claims: pass follow beside it, and no dry run.");
   if (opts.session !== undefined && opts.sql != null) return refused("usage", "session settings reach a client the sweep opens itself: pass url without sql, or set them on your client.");
   // The gate before the pool hears the caller's signal alone, the run's stop not handed out yet (review pass 1, cold
   // read: without one it waited on a signal that never aborts).
@@ -670,7 +685,7 @@ async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null,
       try {
         return await sweep(sql, cfg, {
           MODEL, DRY_RUN, LIMIT, RETRY_FAILED, SWITCH_KEY, JUDGE_CHECKED, FOLLOW_S, env, url: opts.url ?? "", session: opts.session, signal: opts.signal,
-          onPass: opts.onPass, admit: opts.admit, stamper, banner: opts.banner !== false && first, claimsEnd, waits, onStart: opts.onStart,
+          onPass: opts.onPass, admit: opts.admit, stamper, banner: opts.banner !== false && first, claimsEnd, waits, onStart: opts.onStart, claimsBy: opts.claimsBy,
           check: opts.check === true, through, startSaid, keyFound, refused, out, err,
         });
       } catch (e) {
@@ -716,7 +731,7 @@ async function sweep(
   o: {
     MODEL: boolean; DRY_RUN: boolean; LIMIT: number; RETRY_FAILED: boolean; SWITCH_KEY: boolean; JUDGE_CHECKED: boolean; FOLLOW_S: number;
     env: Record<string, string | undefined>; url: string; session?: SessionSettings; signal?: AbortSignal; onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
-    admit?: Admit; stamper: PassStamper | null; banner: boolean; claimsEnd: { v: boolean }; waits: { provider: boolean }; onStart?: (r: StartResult) => void; check: boolean;
+    admit?: Admit; stamper: PassStamper | null; banner: boolean; claimsEnd: { v: boolean }; waits: { provider: boolean }; onStart?: (r: StartResult) => void; check: boolean; claimsBy?: string;
     through: { v: boolean; pinned: boolean }; startSaid: { down: boolean }; keyFound: { v: { agentId: string | null; actor: string | undefined } | null; unresolved: boolean };
     refused: (kind: StartRefusal, line: string) => number; out: Writer["out"]; err: Writer["err"];
   },
@@ -2559,7 +2574,21 @@ async function sweep(
         try {
           if (claimedSince === null) claimedSince = ((await sql`SELECT clock_timestamp()::text AS at`)[0] as { at: string }).at;
           moved = await poolMoved(sql, false);
-          got = moved === null ? (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[] : [];
+          // A scheduler's bound (claimsBy, PR 6b-2): nothing at or before it to take, no claim, the run waiting as at an
+          // empty pool; one claimed past it — another run took those before it between the read and the claim — goes
+          // back unasked, its later date, its attempt and any hang's mark kept (setBack).
+          const inBound = moved !== null || o.claimsBy === undefined ? true
+            : ((await sql`SELECT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${POOL} AND enqueued_at <= ${o.claimsBy}::timestamptz
+                 AND (status = 'pending' OR (status = 'claimed' AND ttl_expires_at < now() AND attempt_count < ${MAX_ATTEMPTS}))) AS any`)[0] as { any: boolean }).any;
+          got = moved === null && inBound ? (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[] : [];
+          if (got.length > 0 && o.claimsBy !== undefined) {
+            const [past] = (await sql`SELECT enqueued_at > ${o.claimsBy}::timestamptz AS later FROM thought_work_claims
+                                       WHERE thought_id = ${got[0].thought_id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed'`) as { later: boolean }[];
+            if (past?.later) {
+              await setBack(sql, POOL, workerId, got[0].thought_id, 0, true);
+              got = [];
+            }
+          }
           if (got.length > 0 && hardStop.signal.aborted) claimedPastHard = true;
           // Another run's trip since this run began, read once the claim is taken, so one that landed before the claim
           // is seen and the thought goes back unasked, as the run ends (review pass 3, cold read: read before the

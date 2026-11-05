@@ -3624,7 +3624,8 @@ its predecessor named nothing for: the pool's key names whether a model is asked
 not which. Nothing asks them again yet, but the garbage-judge alarm (below) hands
 back those a judge it stops named nothing for.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today); its counts follow
+been measured on the question (the stable brain's, today), and the sleep
+scheduler follows the rules' pool it names, asking no model (PR 6b-2); its counts follow
 `OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
 out of date while it is on. On a brain upgraded
 from version 1 it finds every filed ticket again, unchanged, under the metadata
@@ -4789,7 +4790,7 @@ A model switch it will not make —
 the brain recording an embedding model other than the stack's
 `OB1_EMBEDDING_MODEL` — sets it aside, said and on the row, which reads
 failed (briefly at each later period; idle too, a one-shot run with no other
-work exiting 1), extraction and consolidation running on; the record is read
+work exiting 1), the other passes running on; the record is read
 again at each period's start and each poll while it is aside, so running
 `reembed.ts --switch-model` clears it — re-embed runs in that period if read
 at its start, else in the next period with work. Putting the variable back
@@ -4861,44 +4862,60 @@ so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
 
 **The subject sweep** (SMD-3306 PR 6b-2). `extract-entities.ts --subjects`'s
-following run ([the subject pool](#extract-entitiests), above) runs beside
-consolidation, once extraction has drained or been joined past: started at
-an open poll while its pool has a thought due or its pooling is due, and
-stopped after the thought in hand once it has neither. A thought it set back
-behind the rest — after an outage the thought made, or a hang — waits for
-other work or its date: it begins no period and holds none open, so a period
-the other passes keep open does not ask it back to back (the maintainer's
-choice); the one the sweep takes up as its stop lands is asked. A claim in
-hand is work at any date, and a lease run out counts as what its reaping
-makes it, by its date. Where no pool is named, the first period names one
-at the stack's key — the judge model's question with `OB1_SUBJECT_REASONING`
-— and pools every thought with no current subject, each then asked of the
-judge model, a median of 71 s a call for the 27B with its reasoning on (the
-question's own reasoning, above): on a large brain the first periods ask for
-days, and `--subjects --dry-run` says how many first.
-The scheduler never switches a pool (the maintainer's choice): while
-`ob1_config` names another — a rule's, the question's or the reasoning's
-change since it was named, or `--subjects rules` by hand — the sweep is held
-(`key`), its log naming both pools and the ways out: `--subjects
---switch-key --limit 1` run by hand in the stack, which pools again, the
-scheduler's runs taking the rest, or `OB1_SUBJECT_REASONING` set back where
-the reasoning alone tells them apart. While a garbage-judge alarm's trip
-holds the scheduler's runs of the stack's judge model it is held (`judge`)
-until a `--judge-checked --limit 1` run by hand lifts it. Each hold is read
-at the start, each idle poll, each period's start and as the sweep ends; a
-held sweep's pool is no work, and a one-shot run exits 1. A refusal at its
-start — the scheduler's check's, a period's — sets it down for the period
-alone, as re-embed's set-down does (the maintainer's choice), and so does
-any other end of its own (the provider refusing it mid-pass, the database
-lost, its naming or pooling broken off, another judge model's trip, a
-throw): said, on the row, the period's outcome failed, the others running
-on; the next period or rescan tries it again. A statement past its timeout
-holds it until a restart, as any pass. N12 aborts its calls in hand, at
-most three a period's hour, as consolidation's: its median call runs past
-the minute. Its stop lines are left out of the log, as the claim passes'
-are, and its waits for the provider stamp no failed word: the row says them.
-Not here: a setting that keeps it out of sleep, and its failed claims on
-the row (its log names them).
+following run ([the subject pool](#extract-entitiests), above) starts beside
+consolidation, once extraction has drained or been joined past, once a
+period, and runs until the period ends (the maintainer's choice). Its claims
+are bounded by the period's start plus 30 days: it asks the thoughts pooled
+since and, once each, those it set back before the period — 30 days ahead,
+after an outage they did not make, or a hang — then waits as at an empty
+pool, so a period the other passes keep open does not ask them back to back.
+One it sets back in the period waits for the next period other work begins,
+or for its date: set-backs alone begin no period. The period ends once the
+sweep's pool by that bound has drained, its own claims in hand at any date;
+another run's lease, or one a gone scheduler left, holds none open. Where no
+pool is named, the first period names one at the stack's key — the judge
+model's question with `OB1_SUBJECT_REASONING` — and pools every thought with
+no current subject, the rules keying what they can and the judge model asked
+the rest, one call at a time at a median of 71 s for the 27B with its
+reasoning on (the question's own reasoning, above): about 1,200 a day, so
+weeks on a brain of tens of thousands of thoughts. Count it first in the
+stack — `podman compose -f deploy/compose.yaml run --rm --no-deps coordinator
+db/coordinator.ts run extract --subjects --dry-run`, with the -f files and
+-p the stack was started with — whose `ask <model> about N` is the number.
+`OB1_SUBJECT_REASONING=off` before the first period is about 8x faster a
+call. **A judge model not yet measured on the question** (the metadata
+model's default judges when `OB1_JUDGE_MODEL` is unset, and agreed with the
+27B on 60 of 99; above) is kept out by naming the rules' pool first — the
+same one-off with `--subjects rules --limit 1` — which the scheduler then
+follows, asking no model. The scheduler never switches a pool: while
+`ob1_config` names one that is neither the stack's judge model's nor its
+rules', after a rule's, the question's or the reasoning's change since it was
+named, the sweep is held (`key`), its log naming the pools and the ways out:
+`--subjects --switch-key --limit 1` by hand in the stack, which pools again
+every thought whose subject is not current under the stack's key (those found
+with the reasoning off, or keyed by no rule, among them; `--switch-key
+--dry-run` counts them), the scheduler's runs taking the rest; `--subjects
+rules --switch-key --limit 1`, to the rules' pool; or `OB1_SUBJECT_REASONING`
+set back where the reasoning alone tells them apart. While a garbage-judge
+alarm's trip holds the scheduler's runs of the stack's judge model it is
+held (`judge`) until a `--judge-checked --limit 1` run by hand lifts it.
+Each hold, and the pool it follows, is read before the start's check, at
+each idle poll, each period's start and as the sweep ends; a held sweep's
+pool is no work, and a one-shot run exits 1, saying why last. A refusal at
+its start — the scheduler's check's, a period's — sets it down for the
+period alone, as re-embed's set-down does (the maintainer's choice), and so
+does any other end of its own (`failed`, its log naming the cause: the
+provider refusing a question, a grant refused, the database lost, its naming
+or pooling broken off, another judge model's trip, a throw): said, on the
+row, the period's outcome failed, the others running on; the next period or
+rescan tries it again, a setting mended in `deploy/.env` reaching it once
+the coordinator is recreated. A statement past its timeout holds it until a
+restart, as any pass. N12 aborts its calls in hand, at most three a period's
+hour, as consolidation's: its median call runs past the minute. Its stop
+lines are left out of the log, as the claim passes' are, and its waits for
+the provider stamp no failed word: the row says them. Not here: a setting
+that keeps it out of sleep (the rules still run under the rules' pool), and
+its failed claims on the row (its log names them).
 
 **Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
 from the brain's size) — its session settings; the clock went in 2.0.0:

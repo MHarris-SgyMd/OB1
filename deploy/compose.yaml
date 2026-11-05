@@ -1385,8 +1385,9 @@ services:
   #   (029, 084, 102); start a backlog's extraction alone first
   #   (deploy/README.md).
   # - `sleep`, the sleep scheduler (SMD-1794, SMD-2678): `sleep.ts --follow`,
-  #   the re-derive sweep, re-embed, extraction and consolidation while the
-  #   brain is quiet, its OB1_SLEEP_* settings as deploy/.env.example says.
+  #   the re-derive sweep, re-embed, extraction, consolidation and the subject
+  #   sweep (SMD-3306) while the brain is quiet, its OB1_SLEEP_* settings as
+  #   deploy/.env.example says.
   #   An alternative to `workers`: named together, sleep runs and the log says
   #   so. OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps writes its verdict dumps
   #   to the `sleep-dumps` volume (SMD-3203); copy them out with `compose cp`.
