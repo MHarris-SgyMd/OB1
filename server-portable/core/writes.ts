@@ -8,6 +8,7 @@
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
+import { writerScope } from "./caller.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
@@ -957,7 +958,7 @@ const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(
  * Review pass 1: moved here from core/items.ts (an import cycle), deduplicated and capped as 117 reads the texts.
  */
 async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<void> {
-  const scope = principal.scope === "write" ? "write" : principal.scope === "capture" ? "capture" : undefined;
+  const scope = writerScope(principal);
   const raw = metadata.action_items;
   if (!scope || !Array.isArray(raw)) return;
   const seen = new Set<string>();
