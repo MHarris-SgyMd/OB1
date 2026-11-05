@@ -10,7 +10,8 @@
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
-import { ClaimRefused, UUID_RE, type ClaimAnswer, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
+import { ClaimRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
+import { asked, unattributedAs } from "./caller.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type HeldClaim, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -67,16 +68,6 @@ const notYoursRefusal = (principal: Principal, id: string, c: WorkClaim | null, 
 /** A token as claim_work mints it: lower-case hex. One a model upper-cased is the same token. */
 const tokenOf = (t: string | undefined) => t?.toLowerCase();
 
-/** A store call, or the refusal 115 raised for an argument or an ingested key; any other throw stays a fault. */
-async function asked(run: () => Promise<ClaimAnswer>): Promise<ClaimAnswer | ClaimRefused> {
-  try {
-    return await run();
-  } catch (e) {
-    if (e instanceof ClaimRefused) return e;
-    throw e;
-  }
-}
-
 /**
  * 115's own words for an argument it refused: never a token (it names the token's rule, not its value) — with a hint
  * for the two swaps an agent makes: a claim id where the token goes, a piece inside the ticket.
@@ -98,10 +89,9 @@ async function ownWhileAway(ctx: Ctx, principal: Principal, claim: WorkClaim | n
   if (principal.agentId !== undefined || !claim || token === undefined || claim.holder !== principal.name || claim.holderAgentId === null) return false;
   return (await ctx.store()).claimTokenIs(claim.id, token);
 }
+/** Its callers hold no agent id. With no registry failure named either, the cause is registry_unknown. */
 const unattributedRefusal = (principal: Principal, id: string, forced: boolean) =>
-  principal.agentUnresolved === "unreachable"
-    ? refuse({ code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id, forced })
-    : refuse({ code: "CLAIM_UNATTRIBUTED", retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : principal.agentUnresolved === "refused" ? "registry_refused" : "registry_unknown", id, forced });
+  unattributedAs("CLAIM_UNATTRIBUTED", principal, { id, forced }) ?? refuse({ code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_unknown", id, forced });
 
 /**
  * The lease a token's claim had before a renewal (SMD-3654): 115's writers answer
@@ -157,7 +147,7 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
   if (before && before !== "unread" && before.releasedAt !== null && before.ownOnThisWork === true) {
     return refuse({ code: "CLAIM_RELEASED", retryable: false, id: before.id, releasedAt: before.releasedAt, takenOver: before.releaseReason === TAKEN_OVER, releasedBy: before.releasedBy, reason: before.releaseReason, ticketClosed: closedBySync(before.issue, before.releaseReason, before.releasedByKind) });
   }
-  const a = await asked(async () => (await ctx.store()).claimWork({
+  const a = await asked(ClaimRefused, async () => (await ctx.store()).claimWork({
     issue: input.ticket, piece: input.piece, label: input.label, leaseSeconds: input.lease_seconds, token: tokenOf(input.token), actor: actorOf(ctx, principal),
   }));
   if (a instanceof ClaimRefused) {
@@ -185,7 +175,7 @@ export async function renewClaim(ctx: Ctx, principal: Principal, input: Input<"r
   if (!UUID_RE.test(input.id)) return refuse({ code: "CLAIM_NOT_FOUND", retryable: false, id: input.id });
   const token = tokenOf(input.token)!;
   const before = await leaseBefore(ctx, token, input.id);
-  const a = await asked(async () => (await ctx.store()).renewClaim({ id: input.id, token, leaseSeconds: input.lease_seconds, actor: actorOf(ctx, principal) }));
+  const a = await asked(ClaimRefused, async () => (await ctx.store()).renewClaim({ id: input.id, token, leaseSeconds: input.lease_seconds, actor: actorOf(ctx, principal) }));
   if (a instanceof ClaimRefused) return argumentRefused(a, { token: input.token });
   if (a.outcome === "renewed" && a.claim) {
     const lapsed = await lapseOf(ctx, principal, before, a.claim);
@@ -210,7 +200,7 @@ export async function renewClaim(ctx: Ctx, principal: Principal, input: Input<"r
 export async function releaseClaim(ctx: Ctx, principal: Principal, input: Input<"release_claim">): Promise<Outcome<ReleaseClaimResult, ReleaseClaimCode>> {
   if (!UUID_RE.test(input.id)) return refuse({ code: "CLAIM_NOT_FOUND", retryable: false, id: input.id });
   const token = tokenOf(input.token);
-  const a = await asked(async () => (await ctx.store()).releaseClaim({ id: input.id, token, reason: input.reason, force: input.force, actor: actorOf(ctx, principal) }));
+  const a = await asked(ClaimRefused, async () => (await ctx.store()).releaseClaim({ id: input.id, token, reason: input.reason, force: input.force, actor: actorOf(ctx, principal) }));
   if (a instanceof ClaimRefused) return argumentRefused(a, { token: input.token });
   if ((a.outcome === "released" || a.outcome === "already_released") && a.claim) return ok({ outcome: a.outcome, claim: a.claim });
   switch (a.outcome === "refused" ? a.code : null) {
