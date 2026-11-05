@@ -2977,6 +2977,7 @@ const quietLapse = (at) => `${QUIET_LAPSE_HEAD}${at}; no other claim was made or
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
 /** A time as the server writes one, and nothing else: it goes into the log and the hook's record. */
 const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const isTime = (v) => typeof v === "string" && ISO_TIME_RE.test(v) && Number.isFinite(Date.parse(v));
 /**
  * When CLAIM_UNATTRIBUTED says the claim `id` had lapsed (SMD-3705): its
  * `lapsedAt`, from the reply's facts, else from its words, which are all a
@@ -2989,7 +2990,7 @@ function unattributedLapse(sc, text, id) {
     const m = new RegExp(`^Refused: claim (${UUID}) was made under this key's agent id\\b.*? It had lapsed at (\\S+?), and stays lapsed until a renewal lands\\b`, "i").exec(text);
     at = m && m[1].toLowerCase() === id ? m[2] : undefined;
   }
-  return typeof at === "string" && ISO_TIME_RE.test(at) ? at : undefined;
+  return typeof at === "string" && isTime(at) && Date.parse(at) <= Date.now() + 300_000 ? at : undefined;
 }
 /** CLAIM_UNATTRIBUTED in the log, from the reply's facts: the brain's words run past markerSaid's cut once a lapse is in them (SMD-3807). */
 const unattributedSaid = (cause, lapsedAt) => `CLAIM_UNATTRIBUTED (${cause}): the agent registry ${cause === "registry_away" ? "did not give the claim key's agent id just now; renewals retry" : "cannot give the claim key's agent id until an operator acts (the server's log says why): tell the user"}${lapsedAt ? `; it had lapsed at ${lapsedAt}, and until a renewal lands a claim on exactly its work can take it over` : ""}`;
@@ -3023,8 +3024,9 @@ export async function renewClaim(cfg, claim) {
   }
   const text = textOfResult(result);
   if (!result?.isError) {
-    const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
-    const o = { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
+    // A time, or none: a brain's words go into the state and the log unmasked (review pass 3).
+    const at = [result?.structuredContent?.claim?.expiresAt, /\buntil (\S+)/.exec(text)?.[1]].find(isTime);
+    const o = { ok: true, expiresAt: at, line: `renewed ${what}${at ? ` until ${at}` : ""}` };
     // Renewed, but it had lapsed and claims were made on its work meanwhile (or they, or whether it had lapsed, couldn't be read) — the server
     // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
     const lapsed = result?.structuredContent?.lapsed;
@@ -3138,7 +3140,7 @@ function ownPieceNote(text, root, claimId) {
  * for WORK_CLAIMED, naming each claim's id and its state so the agent can
  * match it against the claim named after the user's decision. Can't tell: `keep`.
  */
-async function lapseCheck(cfg, claim, knownExpiry) {
+async function lapseCheck(cfg, claim, knownExpiry, why = "") {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
   // `why` alone too, for a kept line of renewOne's own to carry (SMD-3807 review pass 2: a " — " in a piece split it).
   const unchecked = (why) => ({ keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and ${why}`, why });
@@ -3156,7 +3158,7 @@ async function lapseCheck(cfg, claim, knownExpiry) {
   // Lapsed with nothing since: renewed, and the log says it had lapsed, as a brain since SMD-3654 says it (review pass 3: on an older brain it was a plain renewal).
   if (!since.length) return { quiet: quietLapse(mine.expiresAt) };
   // "not renewed" in the marker itself: the agent reads the file, not the log, to know it must renew after a carry-on (review pass 3).
-  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
+  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed${why}; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
 }
 
@@ -3180,10 +3182,10 @@ async function renewOne(b, path, claim) {
   // agent id, so a claim made on its work since is marked while the registry is still away (review pass 1: a next
   // renewal up to an hour off let a push go first).
   if (o.lapsedAt && !check) {
-    check = await lapseCheck(b.cfg, claim, o.lapsedAt);
-    // Waiting on an operator, the line says so too: the user must hear it whatever they decide (review pass 2).
-    if (check.blocked) o = { blocked: check.blocked, line: `${check.line}${o.cause === "registry_away" ? "" : `; the renewal it tried met CLAIM_UNATTRIBUTED (${o.cause}): the agent registry cannot give the claim key's agent id until an operator acts, so tell the user that too`}`, lapsedAt: o.lapsedAt };
-    else if (check.keep) o.line += `; the claims made since were not checked: ${check.why}`;
+    // Waiting on an operator, the marker says so too, ahead of its cut: the user must hear it whatever they decide (review passes 2 and 3).
+    check = await lapseCheck(b.cfg, claim, o.lapsedAt, o.cause === "registry_away" ? "" : ` (and the agent registry cannot give the claim key's agent id until an operator acts, ${o.cause}: tell the user that too)`);
+    if (check.blocked) o = { blocked: check.blocked, line: check.line, lapsedAt: o.lapsedAt };
+    else if (check.keep) o.line += `; the claims made since were not checked (${check.why}), and the hook renews it only once they are`;
   }
   if (check && !check.blocked && !check.keep) {
     if (check.note) o.line += check.note;
@@ -3234,7 +3236,8 @@ function noteAgentClaimCall(hook, brains) {
   // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
-    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
+    const until = isTime(renewed[1]) ? renewed[1] : undefined; // a time, or none (review pass 3)
+    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: until, last: `the agent renewed ${claimLabel(f.claim)}${until ? ` until ${until}` : ""}` });
     // A renewal that revived a lapsed claim after claims were made or renewed on its work meanwhile, or couldn't read them or the lapse (the server says so since SMD-3654): marked as a covered claim is.
     if (REVIVED_COVERED_RE.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
       const said = markerSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
