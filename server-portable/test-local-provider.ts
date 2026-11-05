@@ -2123,17 +2123,19 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     closer.stop(true);
   }
   await watch.close();
-  // The pair's bound pauses while its calls wait: 300 ms, paused from about 200 to 700, fires about 100 ms after the resume.
-  const d = pausableTimeout(300);
+  // The pair's bound pauses while its calls wait: 600 ms, paused from about 400 to 900, fires about 200 ms after the
+  // resume. Bounded tight on its early side, with room on its late one for a loaded runner's timer (review pass 4):
+  // resumed in full it would fire 400 ms late, never paused 500 ms early.
+  const d = pausableTimeout(600);
   const tFire = Date.now();
   let pausedAt = 0, resumedAt = 0;
-  setTimeout(() => { pausedAt = Date.now() - tFire; d.waits.waiting(); }, 200);
-  setTimeout(() => { resumedAt = Date.now() - tFire; d.waits.running(); }, 700);
+  setTimeout(() => { pausedAt = Date.now() - tFire; d.waits.waiting(); }, 400);
+  setTimeout(() => { resumedAt = Date.now() - tFire; d.waits.running(); }, 900);
   await new Promise<void>((resolve) => d.signal.addEventListener("abort", () => resolve(), { once: true }));
   const firedAt = Date.now() - tFire;
   d.dispose();
-  const expected = resumedAt + (300 - pausedAt);
-  assert(Math.abs(firedAt - expected) < 80 && (d.signal.reason as Error).name === "TimeoutError",
+  const expected = resumedAt + (600 - pausedAt);
+  assert(firedAt >= expected - 20 && firedAt < expected + 250 && (d.signal.reason as Error).name === "TimeoutError",
     `a pausable deadline stops while its calls wait and goes on with what was left: paused at ${pausedAt}, resumed at ${resumedAt}, fired at ${firedAt} ms (expected ${expected}), a TimeoutError`);
 }
 

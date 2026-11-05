@@ -15056,8 +15056,10 @@ if (want("16")) {
     setModelCallHook(hookBeforeSlot);
   }
   const slotStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${slotNewer}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+  // Only the run's lines that name this case's pair: the run prints the earlier cases' failed rows too (review pass 4).
+  const slotLines = `${slotRun?.stdout}${slotRun?.stderr}`.split("\n").filter((l) => l.includes(slotNewer.slice(0, 8)) || l.includes(slotOlder.slice(0, 8))).join(" | ");
   assert(heldJudge >= 1 && slotStatus === "succeeded" && !/timed out/.test(`${slotRun?.stdout}${slotRun?.stderr}`),
-         `a judge call held 1.5 s before it runs, under a 1 s pair bound: the wait pauses the bound, the pair judged, nothing timed out (${heldJudge} held; ${slotStatus}; ${`${slotRun?.stdout}${slotRun?.stderr}`.trim().split("\n").slice(-2).join(" | ")})`);
+         `a judge call held 1.5 s before it runs, under a 1 s pair bound: the wait pauses the bound, the pair judged, nothing timed out (${heldJudge} held; ${slotStatus}; ${slotLines || "no line names the pair"})`);
   for (const id of [slotOlder, slotNewer]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
