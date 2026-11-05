@@ -6501,12 +6501,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce. Each suite's
 assertion total, and each shard's, as main's last run counted them, is on the
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
-page, which Fork Checks writes on every push to main (SMD-3614).
+page, which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-schema.ts                          # PGlite, no container
 ./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's

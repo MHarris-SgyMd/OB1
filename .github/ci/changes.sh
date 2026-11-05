@@ -1,5 +1,5 @@
 #!/bin/bash
-# Whether a Fork Checks run's change can affect its code jobs (SMD-2435).
+# Whether a Brain Checks run's change can affect its code jobs (SMD-2435).
 # `changes.sh EVENT BASE_REF DEFAULT_BRANCH` writes code=true|false, skip= and
 # why= to $GITHUB_OUTPUT (and says them); `changes.sh --self-check` runs its
 # cases; `changes.sh --not-code` prints which of the paths on stdin skip (check
@@ -22,7 +22,7 @@
 # No error here stops the step, so the job succeeds with an answer, and a job
 # that fails anyway makes every gated job run (their `if:`) and the aggregate red.
 #
-# fork-checks.yml is read by job (PR 2): a pull request whose only change off
+# brain-checks.yml is read by job (PR 2): a pull request whose only change off
 # the list is an edit of that file runs the jobs whose block it changed, and
 # skip= names the gated jobs whose block is the same byte for byte. The file
 # is cut at its job keys (cut_blocks); an edit above `jobs:` or to the changes
@@ -30,7 +30,7 @@
 # to Bun's reading of the file: each block parses alone to its job as the
 # whole file does, so no anchor, alias or flow style crosses a block.
 set -uo pipefail
-WORKFLOW=.github/workflows/fork-checks.yml
+WORKFLOW=.github/workflows/brain-checks.yml
 # The jobs an edit of which runs every job: the changes job, whose answer the
 # gates read, and the job that runs the checker, whose check 51 is what makes
 # an unchanged block a safe skip (review pass 2). Check 51 holds this list.
@@ -240,14 +240,14 @@ self_check() {
   OLDMODE=100644 MODE=000000 check false pull_request docs/gone.md
   MODE=100755 check false pull_request docs/now-executable.md
   # The workflow read by job (PR 2): an edit of it alone, or beside docs; anything else of it is code.
-  check workflow pull_request .github/workflows/fork-checks.yml
-  check workflow pull_request docs/a.md .github/workflows/fork-checks.yml README.md
-  check true pull_request .github/workflows/fork-checks.yml server-portable/api.ts
+  check workflow pull_request .github/workflows/brain-checks.yml
+  check workflow pull_request docs/a.md .github/workflows/brain-checks.yml README.md
+  check true pull_request .github/workflows/brain-checks.yml server-portable/api.ts
   check true pull_request .github/workflows/release.yml
-  OLDMODE=000000 check true pull_request .github/workflows/fork-checks.yml
-  MODE=000000 check true pull_request .github/workflows/fork-checks.yml
-  MODE=100755 check true pull_request .github/workflows/fork-checks.yml
-  MODE=120000 check true pull_request .github/workflows/fork-checks.yml
+  OLDMODE=000000 check true pull_request .github/workflows/brain-checks.yml
+  MODE=000000 check true pull_request .github/workflows/brain-checks.yml
+  MODE=100755 check true pull_request .github/workflows/brain-checks.yml
+  MODE=120000 check true pull_request .github/workflows/brain-checks.yml
   # Two names where a record and its path should be (--name-only's shape, or a rename's third field): code.
   printf 'docs/a.md\0docs/b.md\0' > "$dir/c"; got=$(decide pull_request "$dir/c"); got=${got%%$'\t'*}
   if [ "$got" != true ]; then echo "changes.sh: a record not in --raw form is code=$got, not true" >&2; fails=$((fails + 1)); fi
@@ -300,7 +300,7 @@ jobs:
     steps:
       - run: bun scripts/check-consistency.ts
 EOF
-  local WF=.github/workflows/fork-checks.yml
+  local WF=.github/workflows/brain-checks.yml
   # sub FROM TO: an edit of the workflow in the scratch repository, as BSD and GNU sed both take it.
   # shellcheck disable=SC2317,SC2329 # called from the cases' OPS, which run() evals (SC2317 to CI's shellcheck 0.9, SC2329 to later ones)
   sub() { sed -i.bak "s/$1/$2/" "$WF" && rm -f "$WF.bak"; }

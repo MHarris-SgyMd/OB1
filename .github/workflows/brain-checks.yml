@@ -9,7 +9,7 @@
 # This workflow exists so the fork's patch series cannot rot the same way. It is
 # additive — it touches no upstream workflow — so it survives a rebase onto
 # upstream/main untouched.
-name: Fork Checks
+name: Brain Checks
 
 on:
   push:
@@ -43,22 +43,22 @@ defaults:
 # repository public), so the token has no reason to stay in the workspace.
 
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
-# lease, deadlock or container wait would otherwise hold the one required
-# check, "Fork Checks passed", pending for six hours. Each is at least three
-# times the job's longest successful run in the newest 400 Fork Checks runs
-# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
-# on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
-# 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
-# them one bun install, and auth-poc 302 s: portable-server's limit is 30,
-# over the rule's 20, so that run is held, if barely, and auth-poc's 10
-# holds its. A job at its limit is cancelled with its step in hand, which
-# names where it hung, and the aggregate fails; the run then reads
-# "cancelled", as a superseded one does, and the job's annotation says it hit
-# its limit. The limits count a job's own run, not its wait for a runner
+# lease, deadlock or container wait would otherwise hold the one required check,
+# "Brain Checks passed", pending for six hours. Each is at least three times the
+# job's longest successful run in the newest 400 Fork Checks runs (this
+# workflow's name then) on any branch as of 2026-11-02 (back to 10-22), outside
+# a registry slowdown on 10-28 15:00-16:30 UTC, rounded up to the next five
+# minutes: deploy-stack's 505 s the longest. In that slowdown portable-server
+# took 29 minutes, 19 of them one bun install, and auth-poc 302 s:
+# portable-server's limit is 30, over the rule's 20, so that run is held, if
+# barely, and auth-poc's 10 holds its. A job at its limit is cancelled with its
+# step in hand, which names where it hung, and the aggregate fails; the run then
+# reads "cancelled", as a superseded one does, and the job's annotation says it
+# hit its limit. The limits count a job's own run, not its wait for a runner
 # (check 48, SMD-2094).
 
 concurrency:
-  group: fork-checks-${{ github.ref }}
+  group: brain-checks-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -157,7 +157,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
       # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, the change files and their index, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, commitlint's categories, and the checker's own check numbers
         run: bun scripts/check-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -923,7 +923,7 @@ jobs:
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
     # SHARDS lists, split by their CI times into cells about equally long
     # (SMD-3469); rest is [1] and every section SHARDS does not list. One
-    # job, not four copies of it, since the ruleset requires "Fork Checks
+    # job, not four copies of it, since the ruleset requires "Brain Checks
     # passed" alone and not the cells' names (SMD-3168, SMD-3169).
     strategy:
       fail-fast: false
@@ -5223,7 +5223,7 @@ jobs:
           cat Test-counts.md >> "$GITHUB_STEP_SUMMARY"
 
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
-  # Both are required, as every job is, through "Fork Checks passed"
+  # Both are required, as every job is, through "Brain Checks passed"
   # (SMD-3168); commit-lint is the one lint job MAY_SKIP lets skip, beside
   # publish-test-counts.
   commit-lint:
@@ -5294,8 +5294,8 @@ jobs:
   # when it succeeded, those its skip names (SMD-2435), so a cancelled run's
   # unstarted jobs never pass. The step is
   # held verbatim by check 20, which runs it against its own cases.
-  fork-checks-passed:
-    name: Fork Checks passed
+  brain-checks-passed:
+    name: Brain Checks passed
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
