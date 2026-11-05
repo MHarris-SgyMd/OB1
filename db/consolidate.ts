@@ -175,7 +175,8 @@ import { reviewersOf, reviewProposal, type Reviewer } from "../server-portable/p
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits } from "../server-portable/model-call.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -483,6 +484,12 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
  * dump always showed; run()'s own client is closed first.
  */
 export async function run(opts: ConsolidateOptions): Promise<number> {
+  // Its model calls labelled with the pass, for the model-call seam's hook (SMD-3379 PR 2a).
+  return asPass("consolidate", () => runPass(opts));
+}
+
+/** run's body, inside its pass's label. */
+async function runPass(opts: ConsolidateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
   /** A refusal of the options themselves: said, reported as the start's `usage`, 2. */
   const usage = (line: string): number => {
@@ -2066,7 +2073,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId, asked);
+                // A wait for a slot on the model-call seam is not the call's time (review pass 3).
+                outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => processRow(row, workerId, asked));
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
                 // The admit gate's own error, not the thought's: the pass ends with it.
