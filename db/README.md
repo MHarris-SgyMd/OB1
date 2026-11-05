@@ -361,7 +361,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | This fork |
 | `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s row lock wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
-Migrations 024 onward are described in `FORK.md`, one numbered change each
+Migrations 024 onward are described in `changes/`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
@@ -389,7 +389,7 @@ that writes its version as the last file of the range it freezes: 048 writes
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
-their ticket (FORK.md's "Versioning" and "Cutting a release", SMD-1804, SMD-1860).
+their ticket (MAINTAINING.md's "Versioning" and "Cutting a release", SMD-1804, SMD-1860).
 
 The decision that `thought_audit` is the write-side source of truth and the
 `thoughts` row its projection — the write functions appending the event first
@@ -2561,7 +2561,9 @@ role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
 change 93 (SMD-1796) cut them; the extension and recipe schemas carried them
 too, with per-user policies on `auth.uid()`, until SMD-1810. Their tables are
-the **community**, **extensions** and **recipes** groups there.
+the **community** and **recipes** groups there. The **extensions** group,
+the learning path's schemas, retired in 2.0.0 when the six became plugins
+(SMD-2311): `--groups` refuses its name.
 
 ## Grants for a capturing role
 
@@ -2684,8 +2686,6 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): two of the six files, job-hunt's and professional-crm's, whose tables job-hunt's link writes into until it is a plugin too (SMD-2311 PR 4b); the professional CRM and the other four are plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
 | | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2739,7 +2739,7 @@ entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
 claim work (115), **priority** for a role whose clients state priorities
 (116), and **items** for a role whose clients open items (117). The
-**community**, **extensions** and **recipes** groups are issued for whichever
+**community** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
 a schema with `psql "$DATABASE_URL" -f <its path>`, as its README says. Presence is
@@ -4606,19 +4606,26 @@ work is read whole at the scheduler's start — each pass's pool, re-embed's
 backlog among them, and the sweep's orphans — and every `--rescan` seconds
 after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
-lands. So what no claim row shows — a vector come for a thought extracted
-already, a delete's orphans, re-embed's backlog — waits for the rescan, or
-goes with a period other work begins; the next poll reads it whole after a
+lands. A vector arriving queues no claim, yet consolidation judges only a
+thought with one: so a vector come since the last whole read — an audited
+update whose diff says `embedding_present` true, the vector mender's or a
+re-embed's — brings the next whole read forward, at most once a minute after
+the end of the last whole read or a period's end read (so within that and a
+`--poll`), and a vector read once is not read again; the rescan keeps its own
+clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+delete of a window or a replay leaves, re-embed's backlog — waits for the
+rescan, or goes with a period other work begins (deleting a thought leaves
+none: its lineage rows go with it); the next poll reads it whole after a
 live write or its limit cut the sweep, a retried start refusal's wait, or a
 re-embed set-aside cleared. The sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
-an orphan far into a large table is found one rescan a window later — a
+an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
-pass held begins none: one a statement held
-(**Its budget**, below), re-embed set aside or set down (a set-down is tried
-again at the next period's start, or by the next rescan). A one-shot run
-exits 0 once a read finds no work — at once, or when what it found has been
-done elsewhere; `--dry-run` says whether a period would begin, and when.
+pass held begins none: one a statement held (**Its budget**, below), re-embed
+set aside or set down (a set-down is tried again at the next period's start, or
+by the next rescan). A one-shot run exits 0 once a read finds no work — at
+once, or when what it found has been done elsewhere; `--dry-run` says whether a
+period would begin, and when.
 
 **What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -4774,10 +4781,12 @@ beat the role's and the database's own: a timeout of 0 is left out, so theirs
 stands); the start's check runs under them. The scheduler's own two
 connections take the memory settings and statement_timeout 0, beating a
 role's or database's own — its poll reads the pools, a scan of every thought,
-and a timeout there would end the scheduler. The settings go out as startup
-parameters, which a transaction pooler (PgBouncer, a managed host's pooled
-endpoint) refuses: connect the scheduler to Postgres directly, as the compose
-stack does.
+and a timeout there would end the scheduler — and `plan_cache_mode =
+force_custom_plan`, so a prepared read of `thought_audit` each poll is planned
+for its values, not by a generic plan that scans the table (SMD-3379 PR 1d).
+The settings go out as startup parameters, which a transaction pooler
+(PgBouncer, a managed host's pooled endpoint) refuses: connect the scheduler
+to Postgres directly, as the compose stack does.
 A statement past its timeout — a start-of-pass scan the brain has outgrown,
 most likely — holds its pass until a restart (N9, SMD-3379 PR 1c-4b): said,
 with `OB1_SLEEP_STATEMENT_TIMEOUT` to raise and the coordinator to recreate;
@@ -4803,8 +4812,9 @@ its pools drain, where the clock stopped it after `OB1_SLEEP_BUDGET` minutes,
 so a backlog drains in one period, paused by each live write. A statement
 past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
-whole. A row a scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`,
-`resting` — is still read, for a rollback.
+whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
+scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
+still read, for a rollback.
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -6802,7 +6812,7 @@ orthogonal corpus and none of a random one, and every row the decoder calls
 unreachable is one the walk misses. A random, production-shaped corpus is fully
 reachable; `REINDEX` does not clear the degenerate case (a rebuild of an
 equidistant graph is no more reachable), so it is not the remedy the finding
-first assumed. See FORK.md's SMD-1632 section.
+first assumed. See change 85 (SMD-1632) and MAINTAINING.md's known issues.
 
 ### What only the live suite can catch
 
@@ -7315,6 +7325,7 @@ default — are unaffected.
 
 ## Related
 
-- `../FORK.md` — what this fork changes and why
+- `../MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `../FORK.md` — the fork era: where Daemonic Brain came from
 - `../server-portable/` — the runtime-neutral server (Phase 3)
 - `docs/01-getting-started.md` — the original prose the schema was extracted from

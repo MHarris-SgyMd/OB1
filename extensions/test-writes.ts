@@ -158,8 +158,8 @@ const sql = new SQL({ url: URL_, max: 2 });
 
 const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql", "schemas/smart-ingest/schema.sql"];
 // The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
-// suite still created the three, and since CI runs it before test-tools.ts on one Postgres, test-tools' "no
-// Supabase role" probe met them on every run.
+// suite still created the three, and since CI ran it before test-tools.ts on one Postgres (until SMD-2311 retired
+// that suite), test-tools' "no Supabase role" probe met them on every run.
 /** What the sidecars create and the shared reset does not know: dropped before they are applied and at the end. */
 async function dropSidecars() {
   for (const file of SIDECARS) {

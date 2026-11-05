@@ -1,22 +1,21 @@
 {
   "name": "Job Hunt Pipeline",
-  "description": "Complete job search management — companies, applications, interviews, and pipeline analytics with CRM integration.",
+  "description": "Complete job search management — companies, applications, interviews, and pipeline analytics with CRM integration. On this fork it is the job-hunt plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",
     "github": "NateBJones"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Bun 1.4+"]
+    "tools": []
   },
-  "requires_primitives": ["deploy-remote-mcp", "remote-mcp", "rls"],
   "learning_order": 6,
-  "tags": ["job-hunt", "career", "pipeline", "interviews", "applications", "rls"],
+  "tags": ["job-hunt", "career", "pipeline", "interviews", "applications"],
   "difficulty": "advanced",
-  "estimated_time": "1 hour",
+  "estimated_time": "15 minutes",
   "created": "2026-03-12",
-  "updated": "2026-03-12"
+  "updated": "2026-11-03"
 }

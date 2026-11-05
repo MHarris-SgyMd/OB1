@@ -1,23 +1,19 @@
-# FORK.md — what diverges from upstream, and why
+# FORK.md — the fork era: where Daemonic Brain came from
 
-This is a fork of [NateBJones-Projects/OB1](https://github.com/NateBJones-Projects/OB1)
-(Open Brain). It is **not** a hard fork. Upstream is alive and we intend to keep
-taking from it; this file exists so the delta stays small, legible, and easy to
-rebase.
+Daemonic Brain began as a fork of
+[NateBJones-Projects/OB1](https://github.com/NateBJones-Projects/OB1) (Open
+Brain), whose guide builds the brain on supabase.com. The fork was for running it
+without Supabase, on infrastructure you control. It is a project in its own right
+(decided 2026-11-04, SMD-3765): the pin was frozen on 2026-10-25 (SMD-1256),
+nothing further is taken from upstream, and no parity is kept.
 
-**What this fork is for:** running Open Brain without Supabase. Upstream assumes a
-supabase.com project — hosted Postgres, an Edge Function, SQL pasted into a
-dashboard, `supabase secrets set`. This fork runs the same MCP tools and the
-same schema on infrastructure you control.
-
-There is **no Supabase project to migrate from** here; this was built as a
-greenfield alternative, not a data migration. Nothing in this fork moves rows out
-of Supabase, and there is no cutover step. **Start at [`SETUP.md`](SETUP.md).**
-
-The upstream Supabase path is upstream's: this fork no longer carries `server/`,
-the Deno Edge Function build, nor anything that ran on Deno (SMD-1800; the last
-of SMD-1795's runtime items). Read this file before changing anything under the
-vendored directories.
+This file is the record of that era — the pin, changes 1–17, the files the fork
+owned, the detach, and how rebases ran — in the voice it was written in: "this
+fork", "we" and "upstream" are that voice. How the project is versioned,
+released, deployed and checked now is [`MAINTAINING.md`](MAINTAINING.md). Every
+change from 18 on is one file under [`changes/`](changes/README.md), indexed
+there. A section that moved keeps its heading here with a pointer, so a citation
+of it still lands. **Start at [`SETUP.md`](SETUP.md).**
 
 ---
 
@@ -28,213 +24,27 @@ vendored directories.
 | Upstream baseline | `9543c29a3e44a210ce278392b9fac11248997461` |
 | Upstream date | 2026-08-30 |
 | Git tag | `upstream-pin-9543c29` |
-| Patch branch | `siggymd/fork-baseline` |
+| Patch branch | `siggymd/fork-baseline`, until the fork shipped from `main` |
 
 Upstream publishes **no releases and no tags** — there is no stable version to
 track, and the setup guide has users `curl` `main` straight into production. The
 tag above is our substitute for a release: it is the exact upstream tree our
 patches apply to.
 
-**Never deploy from upstream `main`.** Deploy from this branch.
+The fork deployed from that branch, never from upstream `main`. Daemonic Brain
+deploys as the compose stack: [`MAINTAINING.md`, "Deploying"](MAINTAINING.md#deploying).
 
 ### Versioning
 
-The fork ships continuously from `main`, so for a long time nothing named what
-shipped: one tag (the pin above), no releases, and a brain identified only by the
-highest migration its ledger recorded. The version scheme (SMD-1804) gives it a
-name:
-
-```
-MAJOR.MINOR.PATCH
-```
-
-Plain SemVer from 2.0.0 (SMD-3317). The releases before it, 1.0.0 to 1.9.0,
-carried the upstream pin as build metadata (`1.0.0+upstream.9543c29`). The pin is
-frozen now (SMD-1256), so the version no longer spells it: "The pin" above names it
-once, and each release goes on recording it as data, in `releases.json`'s
-`upstream` key and the release notes' "upstream pin" line. The two forms order by
-their cores (build metadata takes no part). The bump is chosen by the
-contracts the fork already enforces — the rules are here, and checked, not
-remembered:
-
-- **MAJOR** — a change a client sees. One of these:
-  - A migration changes a shipped function's signature or return shape so that
-    a positional call resolves to another form or to none, or a reader that
-    takes columns by position reads something else (020's `match_thoughts`,
-    014's sentinel).
-  - A shipped table, column or index a client can see is dropped or renamed.
-  - The MCP tool surface changes incompatibly: a tool removed, or an argument's
-    meaning changed.
-  - A command a shipped image runs loses a flag or a named value, or one changes
-    meaning: `ob1-migrate`'s `migrate.ts` flags and its `--groups` names, for
-    example (SMD-3325 retires `--baseline` this way).
-  - A URL, route, port, transport or setting stops answering, where something
-    inside the version contract (below) gives it to a configured client. The
-    origin root that the proxy's `/mcp` replaced closed this way with 2.0.0
-    (SMD-2306, SMD-2532).
-
-  A client written against `N.x` keeps working on `N.y`. A URL it was given goes
-  only after a release has said so on every answer, in a `Deprecation` header,
-  and a cut removes it no sooner than two weeks after that release (SMD-3057).
-- **MINOR** — an additive migration (a new function; a new column with
-  `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
-  worker, a new preflight check, or a surface marked deprecated (SemVer §7;
-  the root URL's `Deprecation` header, SMD-2306). A shipped function changed
-  only additively is a MINOR too — a trailing parameter with a default, a
-  trailing output column, or an older form dropped and created anew — when
-  every caller in the tree resolves the new signature and every reader keys
-  its columns by name (046, 058, 059, 061 and 070 each argued this before the
-  rule said it: SMD-2324). So is a removal outside the version contract, with
-  an upgrade line in its fragment.
-- **PATCH** — no schema change: server, docs, evals, tests, or a migration that
-  only re-comments (028, 043).
-
-**What the version contract covers** (SMD-2687). A version speaks for what a
-release ships, and for nothing else:
-- **Its two images.** `ob1-server` (`server-portable/Dockerfile`: the MCP server,
-  the REST core, the operator GUI and the plugins). `ob1-migrate`
-  (`db/Dockerfile`: `migrate.ts` and the migrations).
-- **The files it attaches** (`scripts/release-artifacts.ts`, `ASSETS`):
-  - `deploy/compose.yaml` with its profiles;
-  - the digest-pinned `compose.release.yaml`;
-  - the settings `.env.example` names;
-  - the four opt-in overlays: `compose.api-public.yaml` (`/api`),
-    `compose.hooks-public.yaml`, `compose.grafana-port.yaml` and
-    `compose.grafana-public.yaml`.
-
-The authorization server (`deploy/auth/`) is inside through `compose.yaml`'s
-`auth` profile. It ships as source, not as an image, so that profile needs a
-checkout until SMD-3328 publishes one.
-
-A URL, route, port or setting that any of these gives a client falls under the
-MAJOR rule. Outside the contract nothing is a MAJOR: a removal there is a
-MINOR, with an upgrade line. Two things sit outside it:
-- **Maintainer tooling**, which a release neither attaches nor builds into an
-  image: `deploy/compose.host-ports.yaml`, the edge (`deploy/edge/`), the
-  scripts under `deploy/` (`canary.sh`, `tier.sh`, `instance.ts`, `smoke.sh`)
-  and the `db/` scripts the migrator does not carry.
-- **Vendored code**: `integrations/`, `extensions/` and the `recipes/` servers,
-  which no image carries.
-
-The cuts decided this before it was written here:
-- v1.6.0 stayed a minor though SMD-2294 dropped the tier stack's own ports and
-  settings, since `compose.tiers.yaml` was the maintainer's promotion pipeline,
-  not a client's setup.
-- v1.7.0 stayed a minor though SMD-1931 deleted six vendored integrations.
-- SMD-2878's retirement of `compose.tiers.yaml` ships in 2.0.0 as a minor change.
-
-A fragment that removes a URL, port or setting from a shipped file, or deletes
-vendored code, says in one sentence which side of this line it falls on
-(`changes/README.md`).
-
-**The brain reports its version.** Migration 044 writes `schema_version` into
-`ob1_config`; `preflight` prints it beside the ledger's highest migration and
-warns, by name, when a brain is past its version's range or a server is older than
-the brain it serves. `db/version.mjs` is the one definition of the current version
-(`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
-migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
-baseline; each cut appends the migration that writes its version as the last file
-of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
-051 writes `1.1.0+upstream.9543c29`, the second; from 2.0.0 the stamp is the plain
-version (`2.0.0`). The server reports its own at
-runtime — the MCP `initialize` reply, the `brain_info` tool and `GET /health` with a
-key — from `server-portable/version.ts`, generated from `db/version.mjs`,
-`releases.json` and `db/migrations/` by `scripts/gen-version.ts` and round-tripped
-by check-fork's 17e (SMD-2041).
-
-**A release is a tag naming three things**: the migration range it closes
-(the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin
-(recorded as data beside the version, not in it, from 2.0.0). The committed
-`releases.json` is the machine-readable mirror CI reads with no network. Migrations
-inside a released range are **frozen** — the ledger's sha check already refuses
-drift at apply time; `check-fork-consistency` adds the rule that a renumber or
-edit of a released migration fails at review time (a released migration is
-append-only; add a new file).
-
-**The change counter is retired.** Numbered `### N.` sections were assigned by
-hand at PR time, so every merge of `main` while a PR was in review renumbered a
-section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
-(front matter — `type`, `bump`, `tickets`, `migrations` — and a `## Changelog`
-and a `## FORK` body), with no change number; the release step assigns the
-numbers once, at assembly, writing each fragment as the next
-`changes/NNN-<slug>.md` in merge order and regenerating the index below
-(SMD-1804, SMD-1917). A fragment needs no edit to this file: the index lists
-numbered changes alone, so adding a fragment never moves it — a cut does, or a
-numbered record's retitle (SMD-2084). Changes 1–103 keep their numbers — the
-code comments cite them — as the table and the files they are.
-
-`CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
-design record: `## [Unreleased]` first, one dated section per release with entries
-under the six headings, each entry ending in its ticket and migration numbers. The
-release step writes it and the change files from the same fragments in one commit,
-and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
-adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
-and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
-upstream leftover no workflow ran, is removed so there is one release mechanism.)
+Moved to [`MAINTAINING.md`, "Versioning"](MAINTAINING.md#versioning) (SMD-3765), with "What the version contract covers".
 
 ### Cutting a release
 
-A cut closes a capability, not a date, and carries everything merged to `main`
-before it. Its version is the last release's, bumped by the strongest `bump` among
-the `changes/` fragments it carries (`scripts/assemble-release.ts`'s `nextVersion`);
-once `main` holds a `bump: major` fragment, the next cut is a major. A patch can
-ship at any time for an urgent fix, but carries no migration.
-
-**Two commits, on one branch, in this order** (SMD-1804, SMD-1860;
-`scripts/assemble-release.ts --write` enforces it):
-1. **The version.** Run `bun scripts/assemble-release.ts` (a dry run that touches
-   nothing) for the version it proposes. Bump `db/version.mjs`'s `FORK_VERSION` to
-   it, and add the migration that writes it: a new `NNN_schema_version.sql`
-   upserting `ob1_config.schema_version`, the highest migration on disk, so the
-   range the cut freezes ends on the migration that names the release (check 17d
-   holds the two equal). Move `db/README.md`'s migration map and the suites'
-   migration counts with it, and run `bun scripts/gen-version.ts` to regenerate
-   `server-portable/version.ts` (17e). The stamp takes the next migration number,
-   so a branch adding a migration renumbers past it when it merges `main` after
-   the cut.
-2. **The release.** `bun scripts/assemble-release.ts --write`, which refuses a
-   tree whose `FORK_VERSION` or highest migration does not say the version it is
-   about to record, or one that is not clean. It writes each fragment as the next
-   numbered `changes/NNN-<slug>.md`, regenerates this file's index, writes the
-   `CHANGELOG.md` section and the `releases.json` entry (its `upstream` key the
-   pin, as data), and regenerates `server-portable/version.ts`.
-
-The PR lands the two. If `main` moves under an open cut, rebuild the cut on the
-new tip rather than merging, so `releases.json`'s server commit carries what
-shipped. The maintainer tags the merge commit `v<MAJOR.MINOR.PATCH>` and pushes
-the tag, and `.github/workflows/release.yml` publishes the images and the release
-from it (`scripts/release-artifacts.ts`).
-
-**The soak.** Before a cut is tagged, the canary runs it as the canary is: an
-in-place writer fed stable's inputs (`deploy/canary.sh up`, which keeps its
-database since SMD-3155), not a refreshed copy of stable's data (decided
-2026-10-25; SMD-2541, SMD-1806). The cutover release, which changes how
-clients reach the brain, soaks at least 24 hours.
+Moved to [`MAINTAINING.md`, "Cutting a release"](MAINTAINING.md#cutting-a-release) (SMD-3765).
 
 ### Deploying
 
-The brain deploys one way: the compose stack, `deploy/compose.yaml` — the proxy,
-the REST core, the MCP server at `/mcp`, Postgres and the profiles beside them
-(SMD-2282's decision 6, SMD-2288). [`SETUP.md`](SETUP.md) brings it up, and
-`docs/01-getting-started.md` is the same stack at a beginner's pace. Clients
-reach `/mcp` through a TLS proxy or tunnel in front of the stack's proxy, or at
-`http://127.0.0.1:8000/mcp` on its own machine (`docs/01-getting-started.md`,
-Steps 6 and 7). There is no single-process, lone-container, Workers or
-Kubernetes deployment, and no Supabase Edge Function build: `server/` left
-with SMD-1800, the Workers target with SMD-3152.
-
-The stack's `migrate` service applies every migration under `db/migrations/`
-before `api` starts, and the servers assume the whole set. Nothing degrades
-around a missing one: `capture_thought` is one call to `upsert_thought`, with
-no two-step fallback (`server-portable/store-sql.ts`), and preflight's
-"migration ledger" row warns of a brain behind the tree.
-
-A vendored extension, recipe or integration server under the category
-directories is not the brain. It is one HTTP process beside the stack,
-`bun <file>`, behind the same TLS proxy, never stdio
-(`primitives/deploy-remote-mcp/`). A contribution that adds operations to the
-brain is a plugin (`plugins/<name>/`, SMD-2310), which the brain's own servers
-serve.
+Moved to [`MAINTAINING.md`, "Deploying"](MAINTAINING.md#deploying) (SMD-3765).
 
 ---
 
@@ -250,9 +60,10 @@ something.
 The table below covers changes 1–17, which landed before this file grew prose
 sections. Every change from 18 on is **one file under
 [`changes/`](changes/README.md)** — `NNN-<slug>.md`, a fixed shape, a 150-line
-cap — and the index after the table is generated from that directory by
-`scripts/fork-index.ts`; check 15 holds the sizes, the numbering and the index,
-and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
+cap — and their index is generated into [`changes/README.md`](changes/README.md)
+by `scripts/fork-index.ts` (into this file, until SMD-3765); check 15 holds the
+sizes, the numbering and the index, and fails a "FORK.md change N" citation
+with no file behind it (SMD-1917).
 
 | # | Commit | What | Upstream status |
 | --- | --- | --- | --- |
@@ -273,342 +84,6 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 15 | `[fork] db + server: the embedding contract is configurable` | `vector(1536)` was hard-coded in four migrations. Migrations are now templates, `OB1_EMBEDDING_DIM`/`OB1_EMBEDDING_MODEL` choose the pair, the choice is recorded in `ob1_config`, and preflight fails on a mismatch. Catches `text-embedding-3-large` at 3072, which exceeds pgvector's HNSW limit and would silently make every search a full scan. | **Unfiled** |
 | 16 | `[fork] server: the model provider is configurable, including fully local` | Both per-capture calls (embedding, metadata extraction) now go to `OB1_LLM_BASE_URL` with `OB1_EMBEDDING_MODEL` and `OB1_METADATA_MODEL`; the credential is omitted for a loopback endpoint. A `local-models` compose profile runs Ollama so nothing about a captured thought leaves the host. | **Unfiled** |
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
-
-<!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**344 numbered changes** on top of the pin: 1–17 are the table above; 18–344 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
-
-| # | Change | Ticket |
-| --- | --- | --- |
-| 18 | [Long captures stay searchable](changes/018-long-captures-stay-searchable.md) | — |
-| 19 | [Default embedding model → `qwen3-embedding:4b` at 1024 dimensions](changes/019-default-embedding-model-to-qwen3-embedding-4b.md) | — |
-| 20 | [Shared scaffolding, and pure logic lifted out of `index.ts`](changes/020-shared-scaffolding-and-pure-logic-lifted-out.md) | — |
-| 21 | [Every mutation is recorded](changes/021-every-mutation-is-recorded.md) | — |
-| 22 | [`update_thought` and `delete_thought`](changes/022-update-thought-and-delete-thought.md) | — |
-| 23 | [A stable agent identity](changes/023-a-stable-agent-identity.md) | — |
-| 24 | [A trigram index on `thoughts.content`](changes/024-a-trigram-index-on-thoughts-content.md) | — |
-| 25 | [The benchmark corpus was truncated, and nobody knew](changes/025-the-benchmark-corpus-was-truncated-and-nobody.md) | — |
-| 26 | [Keyword search](changes/026-keyword-search.md) | — |
-| 27 | [Contextual retrieval, measured](changes/027-contextual-retrieval-measured.md) | — |
-| 28 | [A filtered search reaches the index](changes/028-a-filtered-search-reaches-the-index.md) | — |
-| 29 | [A lease per thought, and the re-embed that proves it](changes/029-a-lease-per-thought-and-the-re-embed.md) | — |
-| 30 | [Entities and relationships](changes/030-entities-and-relationships.md) | — |
-| 31 | [GraphRAG, measured](changes/031-graphrag-measured.md) | — |
-| 32 | [Hybrid ranking](changes/032-hybrid-ranking.md) | — |
-| 33 | [An unchanged edit is never a duplicate](changes/033-an-unchanged-edit-is-never-a-duplicate.md) | — |
-| 34 | [The head window is recorded on the row](changes/034-the-head-window-is-recorded-on-the-row.md) | — |
-| 35 | [Preflight sees an unfinished re-embed](changes/035-preflight-sees-an-unfinished-re-embed.md) | — |
-| 36 | [`match_thoughts` reaches the index at the shipped width](changes/036-match-thoughts-reaches-the-index-at-the-shipped.md) | — |
-| 37 | [`match_thoughts` blends recency into its ranking](changes/037-match-thoughts-blends-recency-into-its-ranking.md) | — |
-| 38 | [A vector carries its model](changes/038-a-vector-carries-its-model.md) | — |
-| 39 | [The operator's way to say "I know"](changes/039-the-operator-s-way-to-say-i-know.md) | — |
-| 40 | [A re-capture's windows stay while the label vouches for them](changes/040-a-re-capture-s-windows-stay-while-the-label.md) | — |
-| 41 | [003's missing half](changes/041-003-s-missing-half.md) | — |
-| 42 | [OAuth discovery is a 404](changes/042-oauth-discovery-is-a-404.md) | SMD-1246 |
-| 43 | [pgvector off the search path](changes/043-pgvector-off-the-search-path.md) | SMD-1247 |
-| 44 | [The read tools print the thought id, so `update_thought` and `delete_thought` can reach what a search found](changes/044-the-read-tools-print-the-thought-id-so-update.md) | SMD-1248 |
-| 45 | [`thought_stats` aggregates in SQL](changes/045-thought-stats-aggregates-in-sql.md) | SMD-1249 |
-| 46 | [Derivation and supersession: what a thought was built from, and which it replaces](changes/046-derivation-and-supersession-what-a-thought.md) | SMD-1253 |
-| 47 | [`trace_provenance` bounds its work, not only its output](changes/047-trace-provenance-bounds-its-work.md) | SMD-1288 |
-| 48 | [`search_thoughts` no longer floors long captures out of the results](changes/048-search-thoughts-no-longer-floors-long-captures.md) | SMD-1300 |
-| 49 | [The caveat rule is stated at the table](changes/049-the-caveat-rule-is-stated-at-the-table.md) | SMD-1052 |
-| 50 | [The chunk limit follows the model's window, not a constant](changes/050-the-chunk-limit-follows-the-model-s-window.md) | SMD-1305 |
-| 51 | [Two vendored recipes stop handing untrusted content a shell](changes/051-two-vendored-recipes-stop-handing-untrusted.md) | SMD-1251 |
-| 52 | [The PostgREST store maps every row it returns](changes/052-the-postgrest-store-maps-every-row-it-returns.md) | SMD-1040 |
-| 53 | [The post-floor recall levers, measured](changes/053-the-post-floor-recall-levers-measured.md) | SMD-1301, SMD-1302, SMD-1304 |
-| 54 | [A pass that proposes which thoughts supersede which](changes/054-a-pass-that-proposes-which-thoughts-supersede.md) | SMD-1294 |
-| 55 | [Query decomposition, measured](changes/055-query-decomposition-measured.md) | SMD-1318 |
-| 56 | [The migrator owns the re-run](changes/056-the-migrator-owns-the-re-run.md) | SMD-1193 |
-| 57 | [A lease outlasts a missed heartbeat, not a batch](changes/057-a-lease-outlasts-a-missed-heartbeat-not-a-batch.md) | SMD-1023 |
-| 58 | [Vendored SQL stops replacing what the migrations own](changes/058-vendored-sql-stops-replacing-what.md) | SMD-1250 |
-| 59 | [Decompose-then-rerank, measured on two corpora](changes/059-decompose-then-rerank-measured-on-two-corpora.md) | SMD-1420 |
-| 60 | [`update_thought` takes provenance](changes/060-update-thought-takes-provenance.md) | SMD-1323 |
-| 61 | [021's evidence backfill runs with the operator's acceptances out of its sight](changes/061-021-s-evidence-backfill-runs-with-the-operator.md) | SMD-1421 |
-| 62 | [A capturing role's grants are documented and checked for the whole capture path, not `thoughts` alone](changes/062-a-capturing-role-s-grants-are-documented.md) | SMD-1226 |
-| 63 | [A capture takes the fingerprint lock too](changes/063-a-capture-takes-the-fingerprint-lock-too.md) | SMD-1043 |
-| 64 | [The vendored extensions authenticate the way the core server does](changes/064-the-vendored-extensions-authenticate-the-way.md) | SMD-1252 |
-| 65 | [An opt-in query log turns real use into a replayable eval, and a CI gate holds a recall floor against the searches people actually ran](changes/065-an-opt-in-query-log-turns-real-use.md) | SMD-1295 |
-| 66 | [A re-capture writes no provenance](changes/066-a-re-capture-writes-no-provenance.md) | SMD-1453 |
-| 67 | [The vendored recipes and integrations authenticate the way the extensions do](changes/067-the-vendored-recipes-and-integrations.md) | SMD-1455 |
-| 68 | [delete_thought joins the writers' lock order, closing a deadlock between an accept and a delete of the superseded thought](changes/068-delete-thought-joins-the-writers-lock-order.md) | SMD-1462 |
-| 69 | [The vendored writers of a thought's content and vector go through the functions that own them](changes/069-the-vendored-writers-of-a-thought-s-content.md) | SMD-1228 |
-| 70 | [The routing count is gated by a sample of the heap](changes/070-the-routing-count-is-gated-by-a-sample.md) | SMD-1463 |
-| 71 | [The vendored captures that inserted a thought go through the 3-argument `upsert_thought`](changes/071-the-vendored-captures-that-inserted-a-thought.md) | SMD-1524 |
-| 72 | [A loaded bench corpus outlives the run](changes/072-a-loaded-bench-corpus-outlives-the-run.md) | SMD-1493 |
-| 73 | [The SQL shim takes PostgREST's JSON-path column and hands a timestamp back as a string](changes/073-the-sql-shim-takes-postgrest-s-json-path-column.md) | SMD-1544 |
-| 74 | [The servers on the SQL shim run under Bun](changes/074-the-servers-on-the-sql-shim-run-under-bun.md) | SMD-1480 |
-| 75 | [The MCP endpoint answers GET with 405 before `authenticate()`](changes/075-the-mcp-endpoint-answers-get-with-405-before.md) | SMD-1259 |
-| 76 | [The kept bench corpus answers the exact oracle from its marker](changes/076-the-kept-bench-corpus-answers-the-exact-oracle.md) | SMD-1562 |
-| 77 | [The SQL shim reads the catalog](changes/077-the-sql-shim-reads-the-catalog.md) | SMD-1588 |
-| 78 | [Every vendored MCP server is built for the request, or the session, it answers](changes/078-every-vendored-mcp-server-is-built.md) | SMD-1497 |
-| 79 | [The store measured against pgvector, and the second store not built](changes/079-the-store-measured-against-pgvector.md) | SMD-1037 |
-| 80 | [The gate's sample is drawn by TID range](changes/080-the-gate-s-sample-is-drawn-by-tid-range.md) | SMD-1526 |
-| 81 | [Quantised vector indexes at the shipped width, measured on real vectors](changes/081-quantised-vector-indexes-at-the-shipped-width.md) | SMD-1501 |
-| 82 | [LanceDB, the embedded store, measured too](changes/082-lancedb-the-embedded-store-measured-too.md) | SMD-1662 |
-| 83 | [The `@hono/mcp` pin moves from 0.1.1 to 0.1.5](changes/083-the-hono-mcp-pin-moves-from-0-1-1-to-0-1-5.md) | SMD-1607 |
-| 84 | [The MCP stack moves together](changes/084-the-mcp-stack-moves-together.md) | SMD-1643, SMD-1616 |
-| 85 | [A live row an HNSW walk cannot reach is the geometry, not the vacuum](changes/085-a-live-row-an-hnsw-walk-cannot-reach.md) | SMD-1632 |
-| 86 | [The read model, measured](changes/086-the-read-model-measured.md) | SMD-1696 |
-| 87 | [The composed match, measured](changes/087-the-composed-match-measured.md) | SMD-1707 |
-| 88 | [The knowledge-update slice was already reported and is the best one](changes/088-the-knowledge-update-slice-was-already-reported.md) | SMD-1720 |
-| 89 | [GraphRAG as an expansion/rerank stage, measured on the *typed* graph and beyond recall](changes/089-graphrag-as-an-expansion-rerank-stage-measured.md) | SMD-1738 |
-| 90 | [A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips](changes/090-a-capture-that-cites-a-returned-id-is-logged.md) | SMD-1719 |
-| 91 | [`match_thoughts` runs with `jit = off`](changes/091-match-thoughts-runs-with-jit-off.md) | SMD-1624 |
-| 92 | [A NULL `created_at` is `null`, not the fabricated epoch, and a timestamp with no ISO form renders as its own text](changes/092-a-null-created-at-is-null-not-the-fabricated.md) | SMD-1328 |
-| 93 | [The community schemas apply on plain Postgres](changes/093-the-community-schemas-apply-on-plain-postgres.md) | SMD-1796 |
-| 94 | [`match_thoughts` pins the two planner paths its statements are built around](changes/094-match-thoughts-pins-the-two-planner-paths.md) | SMD-1677, SMD-1703 |
-| 95 | [A thought cited as a source cannot be deleted from under the citation](changes/095-a-thought-cited-as-a-source-cannot-be-deleted.md) | SMD-1712 |
-| 96 | [The two `created_at` mappers change 92 scoped out take the same rule](changes/096-the-two-created-at-mappers-change-92-scoped-out.md) | SMD-1803 |
-| 97 | [The SQL store is the default](changes/097-the-sql-store-is-the-default.md) | SMD-1797 |
-| 98 | [The cite shape is stated at the table](changes/098-the-cite-shape-is-stated-at-the-table.md) | SMD-1749 |
-| 99 | [The stack publishes one port, on loopback](changes/099-the-stack-publishes-one-port-on-loopback.md) | SMD-1844 |
-| 100 | [Two counted surfaces read one typed source instead of drifting by hand](changes/100-two-counted-surfaces-read-one-typed-source.md) | SMD-1805, SMD-1471 |
-| 101 | [The chat calls can have an endpoint of their own](changes/101-the-chat-calls-can-have-an-endpoint-of-their.md) | SMD-1902 |
-| 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
-| 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
-| 104 | [A version for the fork, reported by the brain, with a changelog beside the design record](changes/104-a-version-for-the-fork-reported-by-the-brain.md) | SMD-1804 |
-| 105 | [The supersession judge has a model of its own](changes/105-the-supersession-judge-has-a-model-of-its-own.md) | SMD-1901 |
-| 106 | [Two fork conventions become checks](changes/106-two-fork-conventions-become-checks.md) | SMD-1808 |
-| 107 | [Nothing decided which content may leave the box for a model call](changes/107-nothing-decided-which-content-may-leave-the-box.md) | SMD-1903 |
-| 108 | [FORK.md is the front door, and every change is one file](changes/108-fork-md-is-the-front-door-and-every-change.md) | SMD-1917 |
-| 109 | [The stable brain is a derived view over the records, rebuilt by one tool](changes/109-the-stable-brain-is-a-derived-view-over.md) | SMD-1806 |
-| 110 | [The workers, benches, suites and evals are type-checked](changes/110-the-workers-benches-suites-and-evals-are-type.md) | SMD-1932 |
-| 111 | [The query log's column set: a filter that is finally written, the arm that served a query, and the tier that wrote it](changes/111-the-query-log-s-column-set-a-filter.md) | SMD-1490 |
-| 112 | [The connector taxonomy](changes/112-the-connector-taxonomy.md) | SMD-1933 |
-| 113 | [`thought_audit` becomes the log of record](changes/113-thought-audit-becomes-the-log-of-record.md) | SMD-1730 |
-| 114 | [The scripts are TypeScript, type-checked where they run](changes/114-the-scripts-are-typescript-type-checked-where.md) | SMD-1870 |
-| 115 | [The entity graph answers "what is central about X" from one command](changes/115-the-entity-graph-answers-what-is-central-about-x.md) | SMD-1938 |
-| 116 | [A seekable prune index on the query log, and the awaited write measured and kept](changes/116-a-seekable-prune-index-on-the-query-log.md) | SMD-1492 |
-| 117 | [Every thought in the dogfood brain labelled by kind](changes/117-every-thought-in-the-dogfood-brain-labelled.md) | SMD-1951 |
-| 118 | [`main`'s ruleset becomes a file the tree holds to the workflow](changes/118-main-s-ruleset-becomes-a-file-the-tree-holds.md) | SMD-1856 |
-| 119 | [The SQL-safety guard rail is a check](changes/119-the-sql-safety-guard-rail-is-a-check.md) | SMD-1936 |
-| 120 | [A landing that changes the fork records itself, and the merge queue is built but refused](changes/120-a-landing-that-changes-the-fork-records-itself.md) | SMD-1857 |
-| 121 | [Three shared modules for the tools beside the server](changes/121-three-shared-modules-for-the-tools-beside.md) | SMD-1985 |
-| 122 | [The board reaches the brain by a sweep that runs itself](changes/122-the-board-reaches-the-brain-by-a-sweep-that-runs.md) | SMD-1954 |
-| 123 | [A release publishes what it names](changes/123-a-release-publishes-what-it-names.md) | SMD-1860 |
-| 124 | [Was the confidence earned](changes/124-was-the-confidence-earned.md) | SMD-1809 |
-| 125 | [A key that may only add](changes/125-a-key-that-may-only-add.md) | SMD-1298 |
-| 126 | [A session leaves one thought behind](changes/126-a-session-leaves-one-thought-behind.md) | SMD-1989, SMD-1298 |
-| 127 | [check-fork compares the grants table both ways, and the commit grammar reads a thirteenth pass](changes/127-check-fork-compares-the-grants-table-both-ways.md) | SMD-1990 |
-| 128 | [A wrong `OB1_TIER` is caught at boot instead of silently emptying the query log](changes/128-a-wrong-ob1-tier-is-caught-at-boot-instead.md) | SMD-1953 |
-| 129 | [The tool-call stream is kept alive for as long as the tool runs, and a client that leaves is logged](changes/129-the-tool-call-stream-is-kept-alive-for-as-long.md) | SMD-1864 |
-| 130 | [Retrieval tells what the operator said from what an agent concluded](changes/130-retrieval-tells-what-the-operator-said-from-what.md) | SMD-1726 |
-| 131 | [enhanced-mcp's read tools address a thought by its UUID](changes/131-enhanced-mcp-s-read-tools-address-a-thought.md) | SMD-1525 |
-| 132 | [The SQL shim answers what PostgREST answers](changes/132-the-sql-shim-answers-what-postgrest-answers.md) | SMD-1602 |
-| 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
-| 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
-| 135 | [A resuming agent asks what changed since it was last here](changes/135-a-resuming-agent-asks-what-changed-since.md) | SMD-1296 |
-| 136 | [The extractor's hedge, graded blind](changes/136-the-extractor-s-hedge-graded-blind.md) | SMD-1982 |
-| 137 | [The third layer measured](changes/137-the-third-layer-measured.md) | SMD-1713 |
-| 138 | [The session hook captures at checkpoints](changes/138-the-session-hook-captures-at-checkpoints.md) | SMD-2012 |
-| 139 | [Bun-native entrypoints](changes/139-bun-native-entrypoints.md) | SMD-1799 |
-| 140 | [Every capture source maps to the same five things, the source form is kept and the text and edges are derived from it](changes/140-every-capture-source-maps-to-the-same-five.md) | SMD-1867 |
-| 141 | [One renderer and one merge rule for a Linear ticket, whichever tool writes it](changes/141-one-renderer-and-one-merge-rule-for-a-linear.md) | SMD-1958 |
-| 142 | [A runaway extraction call ran to its answer budget before it was known to be one](changes/142-a-runaway-extraction-call-ran-to-its-answer.md) | SMD-1960 |
-| 143 | [Preflight passed a local model endpoint it never dialled](changes/143-preflight-passed-a-local-model-endpoint-it-never.md) | SMD-1875 |
-| 144 | [A ticket's dated sections are thoughts of their own](changes/144-a-ticket-s-dated-sections-are-thoughts-of-their.md) | SMD-2059 |
-| 145 | [enhanced-mcp's search tools stop sending the tier and the dates as containment keys](changes/145-enhanced-mcp-s-search-tools-stop-sending.md) | SMD-1986 |
-| 146 | [Retire the Edge Function build](changes/146-retire-the-edge-function-build.md) | SMD-1800 |
-| 147 | [The incremental replay measured](changes/147-the-incremental-replay-measured.md) | SMD-1998 |
-| 148 | [graph-centrality reads the ticket lifecycle board-sync already stamps](changes/148-graph-centrality-reads-the-ticket-lifecycle.md) | SMD-1994 |
-| 149 | [A brain says what it is at runtime](changes/149-a-brain-says-what-it-is-at-runtime.md) | SMD-2041 |
-| 150 | [FORK.md's index lists numbered changes alone](changes/150-fork-md-s-index-lists-numbered-changes-alone.md) | SMD-2084 |
-| 151 | [Three vendored MCP servers' CORS allow-lists name the two headers a browser client sends after initialize](changes/151-three-vendored-mcp-servers-cors-allow-lists-name.md) | SMD-1668 |
-| 152 | [The dashboards off Supabase](changes/152-the-dashboards-off-supabase.md) | SMD-1801 |
-| 153 | [rest-api's `POST /search` drops restricted thoughts by the column and reads its date bounds as instants, and `GET /recent` takes the tier filter its siblings had](changes/153-rest-api-s-post-search-drops-restricted-thoughts.md) | SMD-2054 |
-| 154 | [A typed-decision tier the Jev spikes share](changes/154-a-typed-decision-tier-the-jev-spikes-share.md) | SMD-2050 |
-| 155 | [The registry lookup's lock waits are capped and a timed-out lookup is retried briefly, a key it still cannot confirm is refused with a retry, and a revocation the server has read stands through any failure](changes/155-the-registry-lookup-s-lock-waits-are-capped.md) | SMD-2072 |
-| 156 | [The writable projection prototyped](changes/156-the-writable-projection-prototyped.md) | SMD-1999 |
-| 157 | [Docs and policy off Supabase](changes/157-docs-and-policy-off-supabase.md) | SMD-1802 |
-| 158 | [A session's end steps aside for the checkpoint its child is still posting, and supersedes it](changes/158-a-session-s-end-steps-aside-for-the-checkpoint.md) | SMD-2035 |
-| 159 | [The workflows name their runner image and pin every action to a commit; Dependabot moves the pins and check 23 holds them](changes/159-the-workflows-name-their-runner-image-and-pin.md) | SMD-2093 |
-| 160 | [rest-api sets the request's CORS headers once, on every response the main handler returns, and answers an unlisted origin with no allow-origin header](changes/160-rest-api-sets-the-request-s-cors-headers-once.md) | SMD-2079 |
-| 161 | [The event log is the source of truth](changes/161-the-event-log-is-the-source-of-truth.md) | SMD-1997 |
-| 162 | [resolve_agent writes a key's row only when the write says something, and a revocation that commits during its wait is answered REVOKED](changes/162-resolve-agent-writes-a-key-s-row-only-when.md) | SMD-2090 |
-| 163 | [The extension and recipe schemas apply on plain Postgres](changes/163-the-extension-and-recipe-schemas-apply-on-plain.md) | SMD-1810 |
-| 164 | ["Schema migrations" runs test-schema.ts at both embedding widths at once, not one after the other](changes/164-schema-migrations-runs-test-schema-ts-at-both.md) | SMD-2092 |
-| 165 | [One thought per episode of a session, not per session](changes/165-one-thought-per-episode-of-a-session-not-per.md) | SMD-2013 |
-| 166 | [rest-api's ingest proxy and smart-ingest's extraction trigger read their upstream from a URL variable of their own, http(s) only](changes/166-rest-api-s-ingest-proxy-and-smart-ingest.md) | SMD-2110 |
-| 167 | [`deploy/tier.sh` + `db/tier.Dockerfile` make `tier.ts --refresh` runnable; refresh marks its targets and refuses its source, a brain, or a stranger](changes/167-deploy-tier-sh-db-tier-dockerfile-make-tier-ts.md) | SMD-2036 |
-| 168 | [test-schema.ts loads its match_thoughts fixtures without the HNSW index and builds it after](changes/168-test-schema-ts-loads-its-match-thoughts-fixtures.md) | SMD-2097 |
-| 169 | [The PostgREST-speaking recipe scripts are decided](changes/169-the-postgrest-speaking-recipe-scripts-are.md) | SMD-2126 |
-| 170 | [smart-ingest's write path is the fork's](changes/170-smart-ingest-s-write-path-is-the-fork.md) | SMD-2128 |
-| 171 | [A typed-decision gate after the entity extractor, measured on the cases a regex cannot judge](changes/171-a-typed-decision-gate-after-the-entity-extractor.md) | SMD-1937 |
-| 172 | [An opt-in model-written session summary](changes/172-an-opt-in-model-written-session-summary.md) | SMD-2014 |
-| 173 | [test-live.ts stops waiting on clocks it does not test](changes/173-test-live-ts-stops-waiting-on-clocks-it-does.md) | SMD-2135 |
-| 174 | [graph-centrality reads the dependency edges 053 already stores](changes/174-graph-centrality-reads-the-dependency-edges-053.md) | SMD-2061 |
-| 175 | [The capture event carries the payload](changes/175-the-capture-event-carries-the-payload.md) | SMD-2115 |
-| 176 | [The pipeline takes ingestion-contract items from a file](changes/176-the-pipeline-takes-ingestion-contract-items-from.md) | SMD-2136 |
-| 177 | [Tool refusals carry a machine-readable code; the session hook reads the code, not the server's prose](changes/177-tool-refusals-carry-a-machine-readable-code.md) | SMD-1978 |
-| 178 | [The orchestration tool is n8n](changes/178-the-orchestration-tool-is-n8n.md) | SMD-1863 |
-| 179 | [The entity graph refuses a number or a type word the extractor names and retypes an identifier-shaped person or place, at the writer and over the rows before it; the people facet takes the same rule](changes/179-the-entity-graph-refuses-a-number-or-a-type-word.md) | SMD-1935 |
-| 180 | [graph-centrality --decay-blocked sinks a blocked open thought to a pre-registered 0.25 instead of dropping it, and names its blockers](changes/180-graph-centrality-decay-blocked-sinks-a-blocked.md) | SMD-2181 |
-| 181 | [The session-capture hook blanks a secret and sends the summary, where one key refused the whole episode](changes/181-the-session-capture-hook-blanks-a-secret.md) | SMD-2127 |
-| 182 | [`deploy/canary.sh` stands a canary beside a running stack and takes it down again; a refresh copies the source's database settings](changes/182-deploy-canary-sh-stands-a-canary-beside.md) | SMD-2038, SMD-2037 |
-| 183 | [A `source:` egress term gates a row's stored label, not who may capture](changes/183-a-source-egress-term-gates-a-row-s-stored-label.md) | SMD-1941 |
-| 184 | [The Obsidian vault import recipe retires](changes/184-the-obsidian-vault-import-recipe-retires.md) | SMD-2137 |
-| 185 | [A --grant role can run the entity writer and a structured pass](changes/185-a-grant-role-can-run-the-entity-writer.md) | SMD-2216 |
-| 186 | [The session-capture hook records how many secrets it blanked on the thought itself, in `metadata.redactions`, where before the count lived only in the log and the text's markers](changes/186-the-session-capture-hook-records-how-many.md) | SMD-2168 |
-| 187 | [graph-centrality's dependency read gates only on a system that states a lifecycle](changes/187-graph-centrality-s-dependency-read-gates.md) | SMD-2218 |
-| 188 | [The data-layer job runs test-upgrade and test-preflight side by side](changes/188-the-data-layer-job-runs-test-upgrade-and-test.md) | SMD-2219 |
-| 189 | [The local-Ollama embedding recipe retires](changes/189-the-local-ollama-embedding-recipe-retires.md) | SMD-2138 |
-| 190 | [The MCP route answers a refused notification per spec: 202/503 with no body, not a dropped 200 envelope](changes/190-the-mcp-route-answers-a-refused-notification-per.md) | SMD-2106 |
-| 191 | [`tier.ts --diff` exits 3 on a window it replayed nothing from, and says which side failed to connect](changes/191-tier-ts-diff-exits-3-on-a-window-it-replayed.md) | SMD-2182 |
-| 192 | [a cross-brain compare](changes/192-a-cross-brain-compare.md) | SMD-2109 |
-| 193 | [Preflight reads a table off the role's path in one row, not the block](changes/193-preflight-reads-a-table-off-the-role-s-path.md) | SMD-2062 |
-| 194 | [rest-api holds every paging parameter to a finite integer, and a non-object body to a 400](changes/194-rest-api-holds-every-paging-parameter.md) | SMD-2083 |
-| 195 | [test-live.ts sizes \[5d\]'s and \[5f\]'s tables to what their planner decisions need](changes/195-test-live-ts-sizes-5d-s-and-5f-s-tables-to-what.md) | SMD-2135 |
-| 196 | [node_state: a thought's lifecycle, blockers and supersession are one SQL read every ranking surface shares, and graph-centrality is its first reader](changes/196-node-state-a-thought-s-lifecycle-blockers.md) | SMD-2074 |
-| 197 | [`list_thought_ids`](changes/197-list-thought-ids.md) | SMD-2244 |
-| 198 | [A thought over the extraction bound is extracted over its prefix, not failed](changes/198-a-thought-over-the-extraction-bound-is-extracted.md) | SMD-2240 |
-| 199 | [n8n as an opt-in `orchestration` profile](changes/199-n8n-as-an-opt-in-orchestration-profile.md) | SMD-2210 |
-| 200 | [preflight's ledger row, and `migrate.ts --baseline`, no longer offer to baseline an empty database](changes/200-preflight-s-ledger-row-and-migrate-ts-baseline.md) | SMD-2237 |
-| 201 | [`list_logged_searches`](changes/201-list-logged-searches.md) | SMD-2245 |
-| 202 | [The two read-only recipe scripts move onto the SQL shim](changes/202-the-two-read-only-recipe-scripts-move-onto.md) | SMD-2144 |
-| 203 | [search_thoughts' prefer_current ranks finished and replaced work below live work, opt-in, priced before it was built](changes/203-search-thoughts-prefer-current-ranks-finished.md) | SMD-2255 |
-| 204 | [The server and the Kubernetes image stop on SIGTERM, finishing what is in flight](changes/204-the-server-and-the-kubernetes-image-stop.md) | SMD-2250 |
-| 205 | [The write functions append then project](changes/205-the-write-functions-append-then-project.md) | SMD-2116 |
-| 206 | [`worker_status`](changes/206-worker-status.md) | SMD-2131 |
-| 207 | [Preflight's `schema` row prints the exact search-path statement](changes/207-preflight-s-schema-row-prints-the-exact-search.md) | SMD-2242 |
-| 208 | [The extractor's precision on long documents is now measured against a real labelled set, not the three-document planted one](changes/208-the-extractor-s-precision-on-long-documents.md) | SMD-1961 |
-| 209 | [decider-4b behind the one typed-decision contract, and the tooling to compare Jev-class models on the same client](changes/209-decider-4b-behind-the-one-typed-decision.md) | SMD-2052 |
-| 210 | [A runaway extraction call escalates to a larger local model instead of the penalised retry](changes/210-a-runaway-extraction-call-escalates-to-a-larger.md) | SMD-2000 |
-| 211 | [A malformed window is left out of a windowed thought, not the thought](changes/211-a-malformed-window-is-left-out-of-a-windowed.md) | SMD-2260 |
-| 212 | [`retry_failed` and `release_stale_leases`](changes/212-retry-failed-and-release-stale-leases.md) | SMD-2132 |
-| 213 | [The full-stack job builds the three dashboards in the background while the stack comes up, not in series after it](changes/213-the-full-stack-job-builds-the-three-dashboards.md) | SMD-2251 |
-| 214 | [The thought-enrichment backfills move onto the SQL shim](changes/214-the-thought-enrichment-backfills-move-onto.md) | SMD-2139 |
-| 215 | [Lineage for every derived artifact, with its recipe: the `derivations` table every producer writes in its artifact's transaction](changes/215-lineage-for-every-derived-artifact.md) | SMD-1731 |
-| 216 | [Preflight's remedies for a refusal or a hidden column: the `schema` row reads the SQLSTATE, three column checks read `pg_attribute`, the `vector extension` row prints the `schema` row's statement](changes/216-preflight-s-remedies-for-a-refusal-or-a-hidden.md) | SMD-2238 |
-| 217 | [`rebuild_derived`](changes/217-rebuild-derived.md) | SMD-1732 |
-| 218 | [The first n8n templates](changes/218-the-first-n8n-templates.md) | SMD-2212 |
-| 219 | [One flag scanner for every db/ script](changes/219-one-flag-scanner-for-every-db-script.md) | SMD-2134, SMD-2015 |
-| 220 | [The page store](changes/220-the-page-store.md) | SMD-1812 |
-| 221 | [server-portable moves to the MCP TypeScript SDK v2](changes/221-server-portable-moves-to-the-mcp-typescript-sdk.md) | SMD-2278 |
-| 222 | [The entity name gate as a good-shape allowlist: a high-precision identifier shape (migration 065) overrides the model's type for any type, not just a person or place](changes/222-the-entity-name-gate-as-a-good-shape-allowlist.md) | SMD-2300 |
-| 223 | [A derivation and its inputs are never paired for judgement](changes/223-a-derivation-and-its-inputs-are-never-paired.md) | SMD-2292 |
-| 224 | [The consolidation pass settles a stale proposal it no longer finds in conflict, and a pass-settled row is the pass's to reopen](changes/224-the-consolidation-pass-settles-a-stale-proposal.md) | SMD-2297 |
-| 225 | [node_state reads two tables kept current on write, so prefer_current costs its window, not the corpus](changes/225-node-state-reads-two-tables-kept-current.md) | SMD-2256 |
-| 226 | [server-portable can return a job handle instead of blocking](changes/226-server-portable-can-return-a-job-handle-instead.md) | SMD-2273 |
-| 227 | [The propose→decide spike: a deterministic entity proposer and the three-shape comparison](changes/227-the-propose-to-decide-spike-a-deterministic.md) | SMD-2017 |
-| 228 | [the async job registry survives a restart](changes/228-the-async-job-registry-survives-a-restart.md) | SMD-2318 |
-| 229 | [Hybrid entity extraction](changes/229-hybrid-entity-extraction.md) | SMD-2321 |
-| 230 | [The grading report's proposal dates go through one day renderer, `isoDay`: `2026-09-09`, not `Wed Sep 09`](changes/230-the-grading-report-s-proposal-dates-go-through.md) | SMD-1842 |
-| 231 | [One connection module for every db/ script](changes/231-one-connection-module-for-every-db-script.md) | SMD-2302, SMD-2134 |
-| 232 | [The migrator and the tier refresh read a search_path with preflight's parser](changes/232-the-migrator-and-the-tier-refresh-read-a-search.md) | SMD-2247 |
-| 233 | [A run whose model looks at fault says so and exits 3](changes/233-a-run-whose-model-looks-at-fault-says.md) | SMD-2266 |
-| 234 | [Thought genre at capture](changes/234-thought-genre-at-capture.md) | SMD-2323 |
-| 235 | [A proposal standing on a lineage pair is visible as such](changes/235-a-proposal-standing-on-a-lineage-pair-is-visible.md) | SMD-2313 |
-| 236 | [`run_worker` dry_run](changes/236-run-worker-dry-run.md) | SMD-2272 |
-| 237 | [The import runner's hardening](changes/237-the-import-runner-s-hardening.md) | SMD-2289 |
-| 238 | [The reset guards ask the connection, not the URL, and the libpq tools never parse it](changes/238-the-reset-guards-ask-the-connection-not-the-url.md) | SMD-2317 |
-| 239 | [Reference-list windows: measure the failure shape and the two candidate fixes](changes/239-reference-list-windows-measure-the-failure-shape.md) | SMD-2269 |
-| 240 | [migrate.ts and extract-entities.ts are engines: import one and call run()](changes/240-migrate-ts-and-extract-entities-ts-are-engines.md) | SMD-2304, SMD-2134 |
-| 241 | [node_state's dependency columns read the ids asked for: the gate stored, the links probed](changes/241-node-state-s-dependency-columns-read-the-ids.md) | SMD-2267 |
-| 242 | [The authorization server's proof of concept: oidc-provider on Bun proves criteria 1–5. Its outbound fetches go through a guard of our own, because the library's SSRF protection does not load under Bun, and the library's open defaults are closed](changes/242-the-authorization-server-s-proof-of-concept-oidc.md) | SMD-2285 |
-| 243 | [consolidate.ts and reembed.ts are engines: import one and call run(); the workers' numbers held to what the database takes](changes/243-consolidate-ts-and-reembed-ts-are-engines-import.md) | SMD-2304, SMD-2134 |
-| 244 | [The weekly-digest sink becomes a `db/` verb behind the egress gate](changes/244-the-weekly-digest-sink-becomes-a-db-verb-behind.md) | SMD-2239 |
-| 245 | [The authorization server's proof of concept, second leg: the runner-up, Better Auth 1.7.6, through the same 32 checks as oidc-provider, the winner's pages made unframeable, and the winning server moved to `deploy/auth/` and deployed as the `auth` compose profile with a SQLite store, its registration capped and purged](changes/245-the-authorization-server-s-proof-of-concept.md) | SMD-2285 |
-| 246 | [brain-smoke-test retires into deploy/smoke.sh, whose first check now reads the refusal instead of trusting the 200](changes/246-brain-smoke-test-retires-into-deploy-smoke-sh.md) | SMD-2103 |
-| 247 | [The content's trust on the row, read back on every thought a tool returns](changes/247-the-content-s-trust-on-the-row-read-back.md) | SMD-1724 |
-| 248 | [Every tool runs on a transport-free core and answers a typed result beside its text](changes/248-every-tool-runs-on-a-transport-free-core.md) | SMD-2283 |
-| 249 | [The SIGTERM steps judge the stop, not the runner's `docker stop`](changes/249-the-sigterm-steps-judge-the-stop-not-the-runner.md) | SMD-2316 |
-| 250 | [One origin for the stack](changes/250-one-origin-for-the-stack.md) | SMD-1846 |
-| 251 | [A stop during a provider-error pause returns the thought to the pool, not as a failed row](changes/251-a-stop-during-a-provider-error-pause-returns.md) | SMD-2401 |
-| 252 | [Blank options and the hard-stop lapse in extract and consolidate, as reembed since SMD-2304 PR 4](changes/252-blank-options-and-the-hard-stop-lapse-in-extract.md) | SMD-2425 |
-| 253 | [The pass's report beside a review is refused](changes/253-the-pass-s-report-beside-a-review-is-refused.md) | SMD-2405 |
-| 254 | [A thought's text is fenced in the prose read tools, so it cannot forge a result block](changes/254-a-thought-s-text-is-fenced-in-the-prose-read.md) | SMD-2483 |
-| 255 | [A REST core answers every MCP operation as JSON over the same core, authorized by the key, internal unless the operator opens /api](changes/255-a-rest-core-answers-every-mcp-operation-as-json.md) | SMD-2284 |
-| 256 | [Abuse limits: the authorization server sets its own, and `/mcp` takes none by design](changes/256-abuse-limits-the-authorization-server-sets.md) | SMD-2309 |
-| 257 | [A thought's metadata prints on one line in every reply, so it cannot forge a result block](changes/257-a-thought-s-metadata-prints-on-one-line-in-every.md) | SMD-2510 |
-| 258 | [prefer_current reads the tickets a thought is about, not only its own lifecycle](changes/258-prefer-current-reads-the-tickets-a-thought.md) | SMD-2271 |
-| 259 | [The root connector URL gets a compatibility window that closes with 2.0.0](changes/259-the-root-connector-url-gets-a-compatibility.md) | SMD-2306 |
-| 260 | [A supersession proposal's judge reason and review note print on one line each, so neither can forge an `ID:` line](changes/260-a-supersession-proposal-s-judge-reason.md) | SMD-2533 |
-| 261 | [The judge's reason is stored on one line, by the rule the replies print it with](changes/261-the-judge-s-reason-is-stored-on-one-line.md) | SMD-2536 |
-| 262 | [The MCP server's half of the public origin](changes/262-the-mcp-server-s-half-of-the-public-origin.md) | SMD-2382 |
-| 263 | [Two tickets Linear links are never paired for judgement](changes/263-two-tickets-linear-links-are-never-paired.md) | SMD-2448 |
-| 264 | [A capture-only key's supersedes is no existence oracle](changes/264-a-capture-only-key-s-supersedes-is-no-existence.md) | SMD-2473 |
-| 265 | [The board-sync watermark reaches the record and the compare, and long-running workers report their liveness](changes/265-the-board-sync-watermark-reaches-the-record.md) | SMD-2261 |
-| 266 | [Ollama's repeat limit is a runaway, not a provider outage](changes/266-ollama-s-repeat-limit-is-a-runaway.md) | SMD-2449 |
-| 267 | [The tier stack on proxy paths](changes/267-the-tier-stack-on-proxy-paths.md) | SMD-2294 |
-| 268 | [A `Host` the URL parser refuses, or none](changes/268-a-host-the-url-parser-refuses-or-none.md) | SMD-2535 |
-| 269 | [A capture-only key's re-capture leaves the row it lands on](changes/269-a-capture-only-key-s-re-capture-leaves-the-row.md) | SMD-2539 |
-| 270 | [The seven vendored servers that read their URL answer a `Host` the URL parser refuses, or none, as `localhost` gets answered, not with a 500; a hang-up mid-upload no longer leaves a request pending](changes/270-the-seven-vendored-servers-that-read-their-url.md) | SMD-2595 |
-| 271 | [Preflight's pass rows read the leases and the heartbeats](changes/271-preflight-s-pass-rows-read-the-leases.md) | SMD-2423 |
-| 272 | [A capture-only key cannot state a ticket's lifecycle](changes/272-a-capture-only-key-cannot-state-a-ticket.md) | SMD-2617 |
-| 273 | [A `--follow` worker outlasts a database or provider outage](changes/273-a-follow-worker-outlasts-a-database-or-provider.md) | SMD-2599 |
-| 274 | [The authorization server answers an absolute-form request target 400 instead of stopping, and a throw in a request is that request's 500](changes/274-the-authorization-server-answers-an-absolute.md) | SMD-2615 |
-| 275 | [Extraction and consolidation run as opt-in services](changes/275-extraction-and-consolidation-run-as-opt.md) | SMD-2424 |
-| 276 | [A capture-only key's thought stops being its own once another key or board-sync takes it, a pointer it wrote onto it lapses, and its pointer is re-checked at its own write](changes/276-a-capture-only-key-s-thought-stops-being-its-own.md) | SMD-2638 |
-| 277 | [A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end](changes/277-a-peer-s-odd-status-can-no-longer-stop.md) | SMD-2665 |
-| 278 | [The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it](changes/278-the-mcp-tools-and-the-rest-core-s-operations-are.md) | SMD-1931 |
-| 279 | [A capture-only key is refused `metadata.ticket`](changes/279-a-capture-only-key-is-refused-metadata-ticket.md) | SMD-2657 |
-| 280 | [A vendored MCP server's slow tool call is answered, not reset](changes/280-a-vendored-mcp-server-s-slow-tool-call.md) | SMD-2001 |
-| 281 | [The consolidation judge stops proposing related tickets as supersessions](changes/281-the-consolidation-judge-stops-proposing-related.md) | SMD-1873 |
-| 282 | [The proxy's route tables carry no comment and are held byte for byte](changes/282-the-proxy-s-route-tables-carry-no-comment.md) | SMD-2658 |
-| 283 | [The sleep scheduler, `db/sleep.ts`: extraction and consolidation while the brain is quiet, yielding on the first live call](changes/283-the-sleep-scheduler-db-sleep-ts-extraction.md) | SMD-1794 |
-| 284 | [canary.sh reads a port's bound address from the binding's JSON, which both runtimes spell `HostIp`, so `--runtime podman` stands a path-mode canary](changes/284-canary-sh-reads-a-port-s-bound-address-from.md) | SMD-2677 |
-| 285 | [kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, and a failed chat call costs a capture its tags, not the capture, as on the core server](changes/285-kubernetes-deployment-s-provider-calls-end.md) | SMD-2692 |
-| 286 | [canary.sh names a connector at the root of the canary's own port as on the deprecated root, not as one the canary no longer answers](changes/286-canary-sh-names-a-connector-at-the-root.md) | SMD-2661 |
-| 287 | [Each request to either server but the keyless liveness probe leaves one JSON line, from an allow-list, and a span, a metric point and a log record where a collector is named, and no container's log grows without bound](changes/287-each-request-to-either-server-but-the-keyless.md) | SMD-1849 |
-| 288 | [The session-capture hook's --check warns while its url is on the deprecated root](changes/288-the-session-capture-hook-s-check-warns-while.md) | SMD-2686 |
-| 289 | [Plugins in the REST core](changes/289-plugins-in-the-rest-core.md) | SMD-2310 |
-| 290 | [Only the proxy's backends answer it](changes/290-only-the-proxy-s-backends-answer.md) | SMD-2685 |
-| 291 | [recipes/ and integrations/ resolve extensions/' pinned install through committed node_modules links, and test-auth starts their servers under --no-install](changes/291-recipes-and-integrations-resolve-extensions.md) | SMD-1991 |
-| 292 | [bench-hnsw.ts section F: `match_thoughts` under concurrency](changes/292-bench-hnsw-ts-section-f-match-thoughts-under.md) | SMD-1500 |
-| 293 | [The session-capture hook's url: the slash on the path, a ?key= refused unechoed, query values masked when printed](changes/293-the-session-capture-hook-s-url-the-slash.md) | SMD-2743 |
-| 294 | [A capture-only key's stamp yields to the first classified key that can read to re-capture the text, at a higher trust](changes/294-a-capture-only-key-s-stamp-yields-to-the-first.md) | SMD-2664 |
-| 295 | [A plugin's webhook refuses replays: a timestamped signature, and a delivery's id run once](changes/295-a-plugin-s-webhook-refuses-replays-a-timestamped.md) | SMD-2755 |
-| 296 | [The network move](changes/296-the-network-move.md) | SMD-2583 |
-| 297 | [The compose stack comes back after a reboot: Postgres and Ollama restart unless-stopped, every policy held, podman's boot unit documented](changes/297-the-compose-stack-comes-back-after-a-reboot.md) | SMD-2760 |
-| 298 | [brain_info, keyed /health and preflight report the proposal queue and the standing judged relations, so a sleep pass's findings are seen without a query](changes/298-brain-info-keyed-health-and-preflight-report.md) | SMD-2680 |
-| 299 | [The webhook delivery-id memory is the SDK's `onceById`, its lease sized from the core's own model-call deadline](changes/299-the-webhook-delivery-id-memory-is-the-sdk.md) | SMD-2768 |
-| 300 | [The server sized for the table](changes/300-the-server-sized-for-the-table.md) | SMD-1499 |
-| 301 | [The operator resets a capture-only key's settled or moved label](changes/301-the-operator-resets-a-capture-only-key-s-settled.md) | SMD-2744 |
-| 302 | [A plugin webhook answers before its capture finishes: `ctx.defer`, owned by the runtime, and `onceById`'s `defer`](changes/302-a-plugin-webhook-answers-before-its-capture.md) | SMD-2767 |
-| 303 | [Consolidation findings between two unlinked tickets are posted as one Linear comment on the newer ticket, opt-in, capped and through the egress gate](changes/303-consolidation-findings-between-two-unlinked.md) | SMD-2681 |
-| 304 | [Preflight's resident-memory row leaves out a staging index 039 is about to adopt, and says so](changes/304-preflight-s-resident-memory-row-leaves-out.md) | SMD-2871 |
-| 305 | [The sleep scheduler runs as an opt-in compose service, beside which the workers profile may not run, with its own preflight row and an opt-in grant for the query log it wakes on](changes/305-the-sleep-scheduler-runs-as-an-opt-in-compose.md) | SMD-2678 |
-| 306 | [Preflight's walk index remedy runs 039 through the migrator, after the steps 039's own decisions call for](changes/306-preflight-s-walk-index-remedy-runs-039-through.md) | SMD-2880 |
-| 307 | [The sleep scheduler survives a database restart at any sleep, checks each pass's start once before its first quiet, says each banner once, ends on a start refusal no retry mends, and says on its row a pass waiting for the provider and the refusal that ended it](changes/307-the-sleep-scheduler-survives-a-database-restart.md) | SMD-2752 |
-| 308 | [A base URL's user and password are its endpoint's Basic credential, on every Bun](changes/308-a-base-url-s-user-and-password-are-its-endpoint.md) | SMD-2885 |
-| 309 | [Bun 1.4.3 everywhere, every pin held to one version; brain-compare and n8n provisioning send a URL's user and password as Basic on every Bun](changes/309-bun-1-4-3-everywhere-every-pin-held-to-one.md) | SMD-2894 |
-| 310 | [Every suite is run: the weekly digest's and the job registry's suites in CI, and check 34 holds every `test-*` script to a workflow step or a stated reason](changes/310-every-suite-is-run-the-weekly-digest.md) | SMD-2895 |
-| 311 | [ci-parity.sh runs what CI runs, held to the workflow both ways by check 35](changes/311-ci-parity-sh-runs-what-ci-runs-held.md) | SMD-2903 |
-| 312 | [The REST core's typed client, and a forwarded refusal that carries its own words](changes/312-the-rest-core-s-typed-client-and-a-forwarded.md) | SMD-2287 |
-| 313 | [What became of each finding posted to the board, and the acceptance rate, from the brain alone](changes/313-what-became-of-each-finding-posted-to-the-board.md) | SMD-2682 |
-| 314 | [A re-capture says what it did to a capture-only key's label](changes/314-a-re-capture-says-what-it-did-to-a-capture.md) | SMD-2898 |
-| 315 | [A board-finding comment says each relation word once, in its best finding's direction, with how many row pairs back it and how many read it the other way](changes/315-a-board-finding-comment-says-each-relation-word.md) | SMD-2930 |
-| 316 | [The MCP server as a client of the REST core, and the REST core's keyed /health](changes/316-the-mcp-server-as-a-client-of-the-rest-core.md) | SMD-2287 |
-| 317 | [One env file is one brain: the scripts take the instance's project, not `open-brain`](changes/317-one-env-file-is-one-brain-the-scripts-take.md) | SMD-2873 |
-| 318 | [The board-findings poster skips pairs of closed tickets and comments on the open side](changes/318-the-board-findings-poster-skips-pairs-of-closed.md) | SMD-2932 |
-| 319 | [A settle by the pass survives 067's reopen](changes/319-a-settle-by-the-pass-survives-067-s-reopen.md) | SMD-2913 |
-| 320 | [An `observability` compose profile](changes/320-an-observability-compose-profile.md) | SMD-1849 |
-| 321 | [A ticket a thought no longer tells right, priced, given its inputs, then labelled on both searches: the eval, its verdict, migration 095 and the label](changes/321-a-ticket-a-thought-no-longer-tells-right-priced.md) | SMD-2540 |
-| 322 | [A capture-only key's thought is taken while its supersedes chain reaches another's](changes/322-a-capture-only-key-s-thought-is-taken-while.md) | SMD-2708 |
-| 323 | [A capture survives its provider's outage](changes/323-a-capture-survives-its-provider-s-outage.md) | SMD-2888 |
-| 324 | [A long thought's answered windows survive a stop](changes/324-a-long-thought-s-answered-windows-survive-a-stop.md) | SMD-2694 |
-| 325 | [A proposal's review names who wrote each side, and flags a capture-only key's or lower-trust side proposed to stand](changes/325-a-proposal-s-review-names-who-wrote-each-side.md) | SMD-2707, SMD-2480 |
-| 326 | [db/bench-live.ts](changes/326-db-bench-live-ts.md) | SMD-3024 |
-| 327 | [Tier tools without joining another brain's networks](changes/327-tier-tools-without-joining-another-brain.md) | SMD-2875 |
-| 328 | [The canary is a brain on a port of its own with keys of its own](changes/328-the-canary-is-a-brain-on-a-port-of-its-own.md) | SMD-2874, SMD-3032 |
-| 329 | [A capture made during a sleep goes ahead of the stalled thought](changes/329-a-capture-made-during-a-sleep-goes-ahead.md) | SMD-3008 |
-| 330 | [The edge proxy, its own project in front of several brains: routed by host, reaching each brain's published port, in one shape per runtime](changes/330-the-edge-proxy-its-own-project-in-front.md) | SMD-2876 |
-| 331 | [One definition for 082's lapse: the trigger clears what `ob1_lapse_walk` returns, and the review listing's read returns it](changes/331-one-definition-for-082-s-lapse-the-trigger.md) | SMD-3035 |
-| 332 | [Fork Checks' full-stack job split three ways by what each group of steps stands up](changes/332-fork-checks-full-stack-job-split-three-ways.md) | SMD-3051 |
-| 333 | [The servers give a thought saved without a vector its vector, by themselves](changes/333-the-servers-give-a-thought-saved-without.md) | SMD-2889 |
-| 334 | [Stable's tier routes deprecated before v2.0.0 removes them](changes/334-stable-s-tier-routes-deprecated-before-v2-0-0.md) | SMD-3057 |
-| 335 | [Fork Checks' live suite in four shards, one job each: "Schema against real Postgres" was the run's critical path](changes/335-fork-checks-live-suite-in-four-shards-one-job.md) | SMD-3048 |
-| 336 | [An unlink takes the review lock: `update_thought` takes `ob1:supersession-review` whenever its envelope names `supersedes`, a clear included](changes/336-an-unlink-takes-the-review-lock-update-thought.md) | SMD-3045 |
-| 337 | [The REST core accepts the authorization server's tokens](changes/337-the-rest-core-accepts-the-authorization-server.md) | SMD-2286 |
-| 338 | [The consolidation judge keeps every pair](changes/338-the-consolidation-judge-keeps-every-pair.md) | SMD-3058 |
-| 339 | [The thoughts with no vector by an index of their own](changes/339-the-thoughts-with-no-vector-by-an-index-of-their.md) | SMD-3056 |
-| 340 | [H2O decides supersession and an LLM writes only the proposal](changes/340-h2o-decides-supersession-and-an-llm-writes.md) | SMD-3114 |
-| 341 | [The sleep scheduler's own cuts of a stalled thought are counted apart from its stops, so the held word says the wakes and orders by them](changes/341-the-sleep-scheduler-s-own-cuts-of-a-stalled.md) | SMD-3060 |
-| 342 | [Consolidation's decide mode: the typed-decision tier gives each pair's verdict and the judge's model writes only the proposals it calls outdates, adopted from SMD-3114's measurement for review on the canary](changes/342-consolidation-s-decide-mode-the-typed-decision.md) | SMD-3115 |
-| 343 | [The consolidation judge's distinct is stored: 084's relation vocabulary gains `distinct`, so a pair the judge calls unrelated is a standing relation on the newer thought](changes/343-the-consolidation-judge-s-distinct-is-stored-084.md) | SMD-3117 |
-| 344 | [\[38\]'s mid-read stop is named and checked for where its pass is: in its start, before its probe; it no longer holds each probe 4 s](changes/344-38-s-mid-read-stop-is-named-and-checked.md) | SMD-3106 |
-
-Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
-<!-- changes-index:end -->
 
 ### Files we own
 
@@ -702,7 +177,7 @@ evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
 scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
-<7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
+<7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated); deleted by SMD-2311
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
 extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
@@ -719,7 +194,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim); deleted by SMD-1799 (the servers are Bun-native)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it); the line went with SMD-1799
-extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
+extensions/test-tools.ts         # change 77 (new file — every extension tool on the shim, against Postgres); deleted by SMD-2311
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
@@ -785,7 +260,8 @@ and the vendored servers are imported and started the same way by
 
 ## Checking CI on this fork
 
-Two traps, both of which cost real time.
+Moved to [`MAINTAINING.md`, "Checking CI"](MAINTAINING.md#checking-ci) (SMD-3765).
+One trap of the fork era stays here, as it was written:
 
 **`gh` defaults to the parent repo.** In a fork, `gh run list` resolves to
 `NateBJones-Projects/OB1` and reports nothing for our branches, which reads exactly
@@ -799,76 +275,6 @@ gh run list --branch siggymd/db-migrations          # now the fork
 Eight commits went out on a red CI because of this. Only `Fork Checks` ever runs
 here; the other eleven inherited workflows are PR- and issue-triggered against
 upstream and never fire on a branch push.
-
-**Running the suites individually cannot catch state leaking between them.**
-`db/with-postgres.sh` starts a fresh container per invocation, so anything one
-suite leaves behind is invisible; CI reuses one Postgres service across every
-step. That difference hid a real failure: `DROP TABLE thoughts CASCADE` removes the
-foreign-key constraint on `thought_chunks`, not the table, so a stale chunk table
-survived at the previous suite's vector width and the next suite died on a
-dimension mismatch. Every suite now drops `thought_chunks` first, and
-
-```bash
-./db/ci-parity.sh
-```
-
-runs them in CI's order on one shared database, test-live's shards and
-test-upgrade/preflight on their own. Use it before pushing. Beside them it runs
-the suites and self-checks of CI's jobs with no database (`DATABASE_URL` unset,
-as in CI) and every typecheck (SMD-3638). Check 35 holds it to the workflow,
-both ways: a script a step runs, from the same directory, with the same flags
-and environment, or an excuse with its reason (SMD-2903).
-
-**Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
-house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
-bullets) — `scripts/commitlint.config.ts`, which shares its tag parser with
-`scripts/mechanism-yield.ts` through `scripts/commit-grammar.ts`, so the check
-and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
-checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
-sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
-masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
-locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
-*required* on `main` with the other eight jobs since SMD-1856 (ten in all; twelve until SMD-1800 retired the two Deno jobs).
-
-**The runner image and every action are pinned (SMD-2093).** Every job runs on
-`ubuntu-24.04`, not `ubuntu-latest`, which GitHub moves to Ubuntu 26 from
-2026-10-19. Moving to the next image is a PR of its own, with the stack job's
-lines rerun and actionlint's pin moved too (1.7.7 refuses `ubuntu-26.04` as an
-unknown label). Every `uses:` is a full commit SHA with its tag in a trailing
-comment (`actions/checkout@<sha> # v7.0.1`), because the release job runs its
-actions with `packages: write` and a tag's owner can move it.
-`.github/dependabot.yml` opens a weekly PR that moves the pins, once a release
-is seven days old (a security update does not wait), grouping minor and patch
-releases and sending each major on its own. Read a major before it lands:
-actionlint looks an action's inputs up by tag, so it cannot check a SHA-pinned
-one's, and an input the new major dropped is ignored at run time with a
-warning. Dependabot's commits carry the house header, `[fork] Bump …`, through
-a prefix whose trailing space keeps it from writing `[fork]:`. Check 23 refuses
-a tag, a SHA with no tag comment, a `docker://` step image by tag, a `-latest`
-or expression-picked runner, and a `dependabot.yml` that Dependabot would refuse
-or that can open no PR. It holds a pin's shape, not its truth: a comment naming
-another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
-CI. Two images the release job's actions start by default, QEMU's binfmt and
-the BuildKit builder that pushes to GHCR, are pinned by digest through their
-inputs in `release-steps.yml`, and nothing moves those but a hand edit; nor
-does anything move the database jobs' pgvector image. The rehearsal runs as a
-job of its own whose token only reads (SMD-2111).
-
-**"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
-step runs the suite at the default width and at 768 in the background, each to
-its own log, and waits on both; nothing prints until both have exited. A
-passing run's log is folded under its width; a failing one is printed open
-under an error annotation naming the width. The two lines at the end of the
-step, each run's `N assertions: …` line, are the first thing to read. "No
-summary line" means the run died before its report, and its log says where;
-exit 124 means it hung past its 15-minute limit (137, that it ignored the stop
-and was killed, or ran out of memory). The self-checks after it run whether it
-passes or fails. `db/ci-parity.sh` runs both widths, one after the other; to
-reproduce a 768-only failure on its own:
-
-```bash
-cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
-```
 
 ## Detached from the fork network
 
@@ -909,7 +315,8 @@ by the annotated tag `upstream-pin-9543c29`, and the procedure below rebases ont
 
 ## Rebasing onto upstream
 
-Roughly quarterly, or when something lands that we want.
+No rebase runs now: the pin was frozen on 2026-10-25 (SMD-1256). This is how
+one ran, roughly quarterly, or when something landed that we wanted.
 
 ```bash
 git fetch upstream
@@ -944,37 +351,14 @@ Then update the pin table at the top of this file.
 
 ### Vendored content: audit once, hold the delta
 
-Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/` and `primitives/` is upstream's community tree,
-vendored wholesale at the pin, so we ship its worst advice with its best under
-this repository's name. The rule (SMD-1251, change 51): **audit the tree once
-and hold the delta** — a standing check carries each audit so a rebase cannot
-quietly undo it. Four rules are held today, each in
-`scripts/check-fork-consistency.ts` with counted, reasoned exceptions: shell
-safety (check 6, change 51), core ownership (check 7, change 58), credential
-compares (check 8, changes 64 and 67 — the exception list has been empty since
-67) and writes around the functions that own a thought's content and vector
-(check 10, changes 69 and 71). A rebase that brings a new hit fails CI, and the
-choice is the one made at the pin: fix the vendored file and record the delta in
-that change's file, or list the exception with its reason. Each rule's text and
-its measurements are in the change file named.
+Moved to [`MAINTAINING.md`, "Vendored content: audit once, hold the delta"](MAINTAINING.md#vendored-content-audit-once-hold-the-delta) (SMD-3765).
 
 ### Landing a rebase on `main`, which is protected
 
-`main` is the working default and carries a ruleset: one required check,
-"Fork Checks passed", on a head up to date with `main` and satisfied only by a
-run of the Actions app; changes only through a pull request; no deletion, **no
-force-push**, and no bypass actors — it applies to admins too. "Fork Checks
-passed" is `fork-checks.yml`'s job `fork-checks-passed`, which needs every other
-job, runs even when one failed, and fails unless each succeeded (or skipped: by
-its own `if:`, or as a docs-only PR's code job). So every job is required through
-it, and a job added, renamed, split or run as a matrix changes nothing in the
-ruleset (SMD-3168). The ruleset is a file, `.github/rulesets/main.json`, applied
-with `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
-and `check-fork-consistency` check 20 holds the file to that one context and the
-job to every other job in the workflow, so a job left out of its `needs:` fails
-CI by name (SMD-1856, SMD-3168). That is deliberate, and it interacts with a
-rebase in one specific way.
+`main` carries a ruleset — one required check, "Fork Checks passed", changes only
+through a pull request, no force-push and no bypass actor — described in
+[`MAINTAINING.md`, "Checking CI"](MAINTAINING.md#checking-ci). That is
+deliberate, and it interacts with a rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
@@ -1043,223 +427,31 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 ## Review passes: what caught a finding is written at the catch
 
-Measured 2026-09-18 with `bun scripts/mechanism-yield.ts` over the commit log
-as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
-adds this ticket's own passes to every figure: 221 review-pass commits across
-61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
-bodies. **None of the 511 says what found it.** Each says what was wrong and
-what changed. A keyword search for phrases that name a catcher ("mutant", "the
-reviewer", "found by driving it") turns up about twenty, and half of those are
-mentions, not catches — so nothing is inferred, and "which review mechanisms
-pay" cannot be answered from the record. A proposal to back-fill a corrections
-table from it (SMD-1711's origin) was dropped for that reason.
-
-What the record does say, by a keyword classifier whose samples were read
-(approximate by design: a defect in a checker that parses comments reads as
-record drift):
-
-- About a third of findings are record drift — this file, comments, READMEs.
-  A little under a third are code defects. A fifth are test teeth: a vacuous
-  assertion, a wrong fixture, a gate with no margin. The rest are confirmations
-  of no defect and tickets filed.
-- **The defect share does not fall with the pass number**: 44 / 43 / 51 / 51 %
-  at passes one to four, higher on the few tickets that went further. Fourteen
-  of 31 tickets found their last code or test defect at pass three or later,
-  and three of the four that ran five or more passes found one on their final
-  pass. Passes stop because the operator stops them. The stop signal — a pass
-  whose findings are the previous pass's own fixes — is a per-ticket judgement;
-  a pass count is no proxy for it.
-
-**The convention, from SMD-1711 on.** Every finding bullet in a review-pass
-commit body ends with a tag the script reads:
-
-```
-- <finding>. (caught: <mechanism>)
-- <finding>. (caught: <mechanism>; held: test-live [17])
-```
-
-`<mechanism>` is one of five: `cold-read` (a reviewer reading the diff or the
-record), `run-it` (running the suite, bench or tool and reading what it did),
-`mutant` (a deliberate break the suite should have failed on), `walkthrough`
-(following the documented procedure as an operator or deployer), `automated` (a
-gate fired on its own — CI, a check, preflight, typecheck; name it in `held`).
-Confirmations of no defect and record fixes carry the tag too: the mix per
-mechanism is the point. `held` is optional and names the test section, check
-or migration that now enforces the finding. An untagged bullet is counted as
-`implicit`, and the script says how many there were; a bullet that contains
-"(caught" but does not end in a readable tag is warned on, not counted as
-untagged. Bullets that only report a green run are not findings.
-
-**Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.ts
---since <first tagged commit>` — that commit and everything committed at or
-after it, so a branch begun earlier contributes only what it committed in the
-tagged era. That run was to decide SMD-1712, the citations facet that gives
-`delete_thought` its `CITED` refusal; the gate was re-decided at three tagged
-tickets under the epic's schedule caveat, the numbers are in change 95, and
-the ten-ticket run now judges the epic's Phase 3 instead. The script is a
-maintainer report, not a CI gate; it
-prints its rules and a sample per class so the tallies can be judged before
-anything is built on them. `--self-check` runs the parser's fixtures.
-
-**The window and the attribution, corrected (SMD-1728, PR #80).** A
-`--since YYYY-MM-DD` handed to the log was read as that day *at the current
-time*, and the two paths cut on two clocks — committer time and author date,
-which differ on 129 of the log's 1,351 commits — so a dump and a live run of one
-window tallied differently. Both are one rule now: every row carries the
-committer instant, and a `--since` day is resolved once to the instant it begins
-in `--zone` (a Region/City name, default `America/Chicago`) and cut by instant
-exactly as a `<sha>` anchor is. `ticketOf` took the first `SMD-nnnn` anywhere in
-a subject and credited 13 of the 221 baseline passes to a ticket the subject
-only mentioned; it reads the parenthetical the subject ends with first. The
-baseline figures above are re-read under both rules from the same dump — 221
-passes across **61** tickets, 511 findings in **31** — and the per-pass defect
-shares are unchanged. The fixtures, the pass-number reading and the
-dropped-bullet report are in that ticket's pass commits.
-
----
+Moved to [`MAINTAINING.md`, "Review passes: what caught a finding is written at the catch"](MAINTAINING.md#review-passes-what-caught-a-finding-is-written-at-the-catch) (SMD-3765).
 
 ## The recurring defect in this fork: a value defined twice
 
-Worth naming, because it has now caused five separate failures and every one
-looked different on the surface:
-
-| what was duplicated | how it failed |
-| --- | --- |
-| embedding prompts (harness vs `config.mjs`) | benchmark measured an instruction the server never sends |
-| truncation rule (`index.ts`, `preflight.ts`, `config.mjs`) | container crashlooped on a valid default |
-| schema reset across 9 test files | stale `thought_chunks` broke a later suite in CI only |
-| compose `${VAR:-fallback}` vs `config.mjs` | a stale fallback would silently override the code default |
-| **preflight's own copy of the defaults** | **the gate validated a configuration that was never going to run** |
-| `applyPrompt` (server vs `evals/lib.ts`) | introduced *while fixing* this same pattern, one commit earlier |
-
-The last one is the worst of them and survived until a deliberate look for it.
-`preflight.ts` exists to refuse to serve when misconfigured, and it held its own
-`"openai/text-embedding-3-small"` and `1536`, so after the default moved it checked
-`text-embedding-3-small @ 1536` while the server ran `qwen3-embedding:4b @ 1024`.
-Invisible in the container, because compose sets every one of those explicitly.
-
-The last row is the instructive one: it was introduced one commit after this
-section was written, by the person who wrote it, in a commit whose subject was
-removing duplication. Naming a pattern does not stop you repeating it — only a
-check does, which is why the row above it is now enforced by
-`scripts/check-fork-consistency.ts` rather than by intent.
-
-The pattern is consistent enough to be a rule: **a default that appears in two
-files will be wrong in one of them, and the copy that goes stale is the one nobody
-runs directly.** Everything provider-facing now resolves through `db/config.mjs`,
-and `scripts/check-fork-consistency.ts` fails the build when compose, the
-embedding model, the metadata model and the base URL stop agreeing.
-
-The same rule applies to the suites. Three of them read a shipped default instead
-of pinning their own, so changing the default broke tests that were testing
-something else entirely — `test-e2e-sql` matched a provider by the literal string
-`openrouter.ai`, `test-preflight` hardcoded `1536`, `test-embedding-dimensions`
-keyed a stub off exact input text. A suite should pin what it does not test.
-
----
+Moved to [`MAINTAINING.md`, "The recurring defect: a value defined twice"](MAINTAINING.md#the-recurring-defect-a-value-defined-twice) (SMD-3765).
 
 ## Known issues we did NOT fix
 
-Deliberate. Recorded so nobody assumes they were missed.
+Moved to [`MAINTAINING.md`, "Known issues we did NOT fix"](MAINTAINING.md#known-issues-we-did-not-fix)
+(SMD-3765). Three items stayed here, as they were written: two concern
+upstream's workflows, which the fork deleted, and one the Workers target, which
+SMD-3152 retired.
 
-- **The access key still rides in the URL** — but it is now scoped, named and
-  hashed (fix 14). `?key=` is kept because Claude Desktop connectors are URL-only,
-  so a key in a URL still reaches access logs and browser history. What changed is
-  what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
-  not even registered for it. Upstream
-  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
-  [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) were
-  the upstream answer; the fork has its own OAuth path now. The `auth` profile runs
-  an authorization server (SMD-2285), and on a stack configured with a stable
-  public origin the MCP server advertises it at that origin (SMD-2382).
-  `mcp-server/`, which serves `/mcp` since SMD-2287 PR 5b, trades the token it
-  issues at the hop (SMD-2286), and keys
-  keep working beside it (a claude.ai connector at that origin is asked to sign
-  in first). Change 42 is adjacent, not a substitute: it makes the claude.ai
-  connector *reach* the key path at all (upstream
-  [#340](https://github.com/NateBJones-Projects/OB1/issues/340)) by answering
-  OAuth discovery with 404 wherever OAuth is not advertised; it does not change
-  what the key is. **Still treat a connection URL as a credential**, and give
-  URL-embedded clients read scope.
 - **The upstream PR gate can be bypassed with a title.** A PR titled `[docs] …`
   (or touching no contribution directory) exits before the credential scan runs.
   Only matters if we start accepting PRs into this fork.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Overlapping dashboards: fixed.** The one canonical dashboard is the
-  operator GUI at `/dashboard` (`dashboard/README.md`). The other three and the
-  `dashboards/` category retired (SMD-3309, SMD-3310).
-- **`sensitivity-tiers` does not exist.** The `weekly-digest` recipe and its
-  code reference it as a primitive (both Next dashboards did, until SMD-3309).
-  [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
-  pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
   target is verified with the real bundler (`server-portable/README.md` has the
   size) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
-- **The eval sample is small.** Twenty retrieval queries and eight extraction
-  captures. Differences under ~0.05 MRR, or one point of a per-field score, are not
-  meaningful; the clear separations (the long-document slice, the structural
-  failures) are. The test sets also reflect one person's kind of notes.
-- **The local path is verified against real Ollama** (0.33.2, `nomic-embed-text` +
-  `llama3.2`): `preflight --deep` passes, including `llama3.2 honours JSON mode`,
-  and real thoughts capture and retrieve with no external service. Two caveats
-  remain: Ollama was installed **natively** (Homebrew), because a Linux container
-  on Apple Silicon gets no Metal passthrough and runs inference on CPU — the
-  compose `local-models` profile is for Linux hosts and CI. And a container
-  reaching a host-native Ollama needs
-  `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1` — and nothing
-  more: Ollama's loopback default is reachable through that name on podman
-  machine (measured in change 99's fourth review pass; `OLLAMA_HOST=0.0.0.0`,
-  which this bullet used to prescribe, put an unauthenticated model API on the
-  LAN for nothing).
-- **The codemod-migrated files are not individually tested.** Most need live
-  credentials (Gmail, Slack, Readwise). The shim itself is tested against
-  real Postgres, and CI checks every banner-carrying file still parses and that
-  the codemod round-trips byte-for-byte — but exercise the ones you actually run
-  before trusting them. The hand ports (`recipes/brain-backup` and
-  `recipes/lint-sweep`, SMD-2144; `recipes/thought-enrichment`'s three scripts,
-  SMD-2139) carry no banner and are driven instead, as deployed, by
-  `db/test-live.ts` [26] and [29].
-- **No file imports supabase-js at runtime any more.** The six servers that
-  used resource embedding and nested `.or()` moved with SMD-1798; the
-  dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check
-  22 holds the tree there; `bun scripts/migrate-to-sql-shim.ts` lists what a
-  rebase brings back and why.
-- **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
-  divergent content, and `AGENTS.md` mandates updating a private tracker.
-  [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
-  obvious fix, was endorsed in review, and was closed unmerged.
-- **An HNSW walk can miss a live row over near-equidistant vectors**
-  (pgvector 0.8.6). Investigated under SMD-1632 and now understood: over the
-  test suite's orthogonal unit axes (every pair at cosine distance 1.0)
-  pgvector's neighbour-selection heuristic keeps few edges and the graph is not
-  connected, so a search walking from the entry point misses a live row its own
-  vector matches — the flake behind `test-live.ts` [7], reproduced with no
-  vacuum. `db/hnsw-graph.ts` reads it from the index and [17] drives it; [4],
-  [7], [11] and [15]'s reads take `match_thoughts`' exact branch, which does not
-  walk. A **random, production-shaped corpus is fully reachable**, so this is
-  the test corpus's problem (and quantised or binary vectors', SMD-1501) rather
-  than a live brain's; no production check or capture-path verification is built
-  for it, and `REINDEX` is not a remedy (a rebuild of an equidistant graph is no
-  more connected). See change 85 (SMD-1632) for the measurements and the
-  decision.
 
 ## Before this touches anything sensitive
 
-Two constraints that are not engineering problems.
-
-**Data.** Open Brain's model is one static bearer key in a URL, one shared
-`thoughts` table with no per-user isolation, and every captured thought sent to
-OpenRouter for LLM metadata extraction. That is fine for personal notes. It is
-not an architecture to put regulated or patient-adjacent data into, and no patch
-in this series changes that.
-
-**Licence.** FSL-1.1-MIT, © Nate B. Jones. "Your internal use and access" is an
-explicitly Permitted Purpose, so a private fork for internal tooling is squarely
-allowed. A **Competing Use** — making it available to others in a commercial
-product with the same or substantially similar functionality — is not. Each
-version converts to MIT two years after upstream publishes it. Fine as internal
-tooling; get a legal read before any of it ships in a product.
+Moved to [`MAINTAINING.md`, "Before this touches anything sensitive"](MAINTAINING.md#before-this-touches-anything-sensitive) (SMD-3765).

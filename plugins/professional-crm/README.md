@@ -118,14 +118,14 @@ The standalone server kept its rows in `public.professional_contacts`, `public.c
    - **Tags** are copied lower-case, each once in the order first given. A blank text field is copied as none.
    - **Linked thoughts.** The old link appended the thought's text to the notes and recorded nothing else. The notes come across with those lines, and the plugin's own list of linked thoughts starts empty.
    - **The old search's column and function** are not copied: the plugin searches word by word.
-   - **job-hunt's link.** Until job-hunt is a plugin too (SMD-2311 PR 4b), its standalone server's link still writes contacts into `public.professional_contacts`. Run the block again to bring those across.
+   - **job-hunt's link.** The standalone job-hunt server's link wrote contacts into `public.professional_contacts` too, and recorded their ids. Copied here with their ids, they are the contacts the job-hunt plugin's copied links name ([its README](../job-hunt/README.md#moving-from-the-standalone-server)).
    - **A refused copy.** The plugin's tables check what the old ones did not:
      - a name or a title of 1 to 200 characters;
      - a summary of 1 to 5,000 characters;
      - a value of 0 or more.
 
      The old tables already checked the interaction types and stages. If a row breaks one of these, the copy names the check and nothing is copied. Fix that row in `public` and run the block again.
-   - **Leftover tables.** Once the plugin's answers look right, and job-hunt is a plugin, the old tables can be dropped by hand.
+   - **Leftover tables.** Once the plugin's answers look right, the old tables can be dropped by hand.
 
 ## Troubleshooting
 

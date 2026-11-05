@@ -2421,7 +2421,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
 
   // Compose appends `s` to OB1_STOP_GRACE for every server's stop_grace_period,
   // with its own fallback: held equal to the code's default, since check 14
-  // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
+  // reads environment forwards only (review pass 4 — MAINTAINING.md's value defined twice).
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
   const doc = Bun.YAML.parse(await Bun.file(new URL("../deploy/compose.yaml", import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; command?: string[]; stop_grace_period?: string }> };

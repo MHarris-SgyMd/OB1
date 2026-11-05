@@ -17,101 +17,80 @@ Job hunting is an emotional grinder. You think you're failing because you got 3 
 
 ## What It Does
 
-A complete job search management system — companies, postings, applications, interviews, and contacts. The most complex extension in the learning path, with 5 tables and sophisticated cross-extension integration to your Professional CRM (Extension 5). This extension demonstrates advanced multi-table relationships, pipeline tracking, and data analysis patterns.
+A complete job search management system — companies, postings, applications, interviews, and contacts. The most complex extension in the learning path, with 5 tables and a link into your Professional CRM (Extension 5).
+
+On this fork the job hunt is a **plugin**: [`plugins/job-hunt`](../../plugins/job-hunt/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_job_hunt`, which the brain's migrator makes when the plugin is turned on.
+
+**Tables:**
+- `companies` — The organizations in your search
+- `job_postings` — Specific roles at them
+- `applications` — What you applied to, and where each stands
+- `interviews` — Each interview, before and after
+- `job_contacts` — Recruiters, hiring managers, referrals and interviewers
+
+**Tools** (each also a REST route under `/v1/plugins/job-hunt/`):
+- `job_hunt_add_company` — Add a company to track
+- `job_hunt_list_companies` — Find companies, and their ids
+- `job_hunt_update_company` — Rename a company, or fix its details
+- `job_hunt_add_job_posting` — Add a role at a company, with its salary range and requirements
+- `job_hunt_list_job_postings` — Find postings, by company, words, still open, or closing soon
+- `job_hunt_update_job_posting` — Change a posting's salary, dates or requirements
+- `job_hunt_add_job_contact` — Add a recruiter, hiring manager, referral or interviewer
+- `job_hunt_search_job_contacts` — Find job contacts, or those not yet in your CRM
+- `job_hunt_update_job_contact` — Change a contact's details, or when you last spoke
+- `job_hunt_link_contact_to_professional_crm` — **The bridge:** record which CRM contact a job contact is
+- `job_hunt_submit_application` — Record an application
+- `job_hunt_list_applications` — Find applications by status, company or posting
+- `job_hunt_update_application` — Move an application on, from screening to an offer
+- `job_hunt_schedule_interview` — Schedule an interview for an application
+- `job_hunt_list_interviews` — Find interviews, past, cancelled or with no time yet
+- `job_hunt_update_interview` — Reschedule an interview, change its prep notes, or cancel it
+- `job_hunt_log_interview_notes` — Record how an interview went
+- `job_hunt_get_pipeline_overview` — **Your "how's it going?" tool:** every status counted, interviews coming up, and those still waiting for notes
+- `job_hunt_get_upcoming_interviews` — The interviews in the next N days, with their company and role
+
+The old server's ten tools keep their names under the plugin's prefix; the four lists and the five changes are new. The plugin's [README](../../plugins/job-hunt/README.md) gives each one's input, output and refusals.
 
 ## What You'll Learn
 
-- Most complex multi-table schema design (5 tables with cascading relationships)
+- Multi-table schema design (5 tables, each child naming its parent)
 - Pipeline/funnel tracking with status transitions
-- Cross-extension integration with Extension 5 (Professional CRM)
-- Advanced queries (conversion rates, timeline analysis, upcoming events)
-- Bridge tables for linking separate data domains
+- Cross-extension integration with Extension 5 (Professional CRM), with no plugin reaching into another's tables
+- Pipeline queries (status counts, upcoming interviews, interviews waiting for notes)
 - Handling nullable foreign keys and optional relationships
 
 ## Prerequisites
 
-- Working Open Brain setup
-- Extension 5 (Professional CRM) strongly recommended — cross-extension linking depends on it. The CRM is a plugin since SMD-2311, and this server's link still writes the old `professional_contacts` table of the CRM's `schema.sql`, which the plugin does not read, until job-hunt is a plugin too (SMD-2311 PR 4b)
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like, plus an access key — reuse one from your core setup or mint one for this server.
-
-```text
-JOB HUNT PIPELINE -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-MCP SERVER (new for this extension)
-  Default User ID:       ____________
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
-```
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Extension 5 (Professional CRM) recommended — the link into it needs the CRM plugin on
 
 ## Steps
 
-### 1. Set Up the Database Schema
+### 1. Turn on the Plugin
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/job-hunt/schema.sql`, or paste it into the SQL client you use. This creates five tables with foreign keys and cascading deletes (`companies`, `job_postings`, `applications`, `interviews`, `job_contacts`), each with a `user_id` column the server fills from `DEFAULT_USER_ID`. `link_contact_to_professional_crm` writes into Extension 5's `professional_contacts`, so apply [professional-crm's schema](../professional-crm/README.md) too before using that tool.
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
-
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
-
-```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+```
+OB1_PLUGINS=professional-crm,job-hunt
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
 ```
 
-Set it in the server's environment (Step 3):
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-export DEFAULT_USER_ID=your-generated-uuid-here   # or on the command line in Step 3
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-> If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
+The migrator makes the plugin's tables, and the servers start with its nineteen tools.
 
-### 3. Run the MCP Server
+### 2. Check Your AI Sees It
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server, whose three-level `applications!inner(…, job_postings!inner(…, companies!inner(*)))` embed and `company_id.in.(…)` search the shim did not read until then). From a checkout of this repository:
+Your MCP client lists the `job_hunt_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the seven that read. A write key sees all nineteen.
 
-```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/job-hunt/index.ts
-```
+### 3. Test It
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request.
-
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all ten against a real Postgres carrying this `schema.sql` and professional-crm's in CI — the pipeline and the upcoming interviews with their application, posting and company nested three deep, the contact search through a matched company, the link into Professional CRM (SMD-1798).
-
-### 4. Connect to Your AI
-
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Job Hunt Pipeline` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test the Extension
-
-Try these commands with Claude:
+Try these prompts:
 
 ```
 Add a company I'm tracking: TechCorp, enterprise software company, remote-first, San Francisco
@@ -138,10 +117,6 @@ Add a job contact at TechCorp: Jessica Lee, recruiter, jessica@techcorp.com
 ```
 
 ```
-Show me my TechCorp job contacts
-```
-
-```
 Link the TechCorp recruiter to my professional CRM
 ```
 
@@ -149,26 +124,22 @@ Link the TechCorp recruiter to my professional CRM
 
 **This is the most sophisticated cross-extension integration in the learning path.**
 
-### `link_contact_to_professional_crm` — The Bridge Tool
+### `job_hunt_link_contact_to_professional_crm` — The Bridge Tool
 
-A recruiter you're talking to during the job search is also a professional contact worth maintaining. Your agent can create the CRM record automatically — the recruiter's name, company, and interaction history carry over. When you land the job (or don't), those contacts don't disappear from your network. They're already in your CRM, ready for the long-term relationship.
+A recruiter you're talking to during the job search is also a professional contact worth maintaining. When you land the job (or don't), those contacts don't disappear from your network. They're already in your CRM, ready for the long-term relationship.
 
 **Example workflow:**
 
-1. You add a job contact with `add_job_contact`: "Jessica Lee, TechCorp recruiter, jessica@techcorp.com"
+1. You add a job contact: "Jessica Lee, TechCorp recruiter, jessica@techcorp.com"
 2. You have multiple interactions: phone screen, interview coordination, offer negotiation
-3. If you need to recover the contact later, your agent uses `search_job_contacts` to find the right `job_contact_id`
-4. Your agent uses `link_contact_to_professional_crm` to create a professional_contacts record in Extension 5
-5. The `professional_crm_contact_id` field is set, creating a bidirectional link
-6. After the job search ends, Jessica is already in your CRM with full context: company, role, all notes from the job search
+3. You ask to link her to your CRM. Your agent finds her `job_contact_id` with `job_hunt_search_job_contacts`
+4. It looks for her in the CRM with `professional_crm_search_contacts`, and adds her with `professional_crm_add_contact` only if she is not there (her name, TechCorp, her title and email, "Job search: recruiter" as how you met)
+5. It records that contact's id on her job contact with `job_hunt_link_contact_to_professional_crm`
+6. After the job search ends, Jessica is already in your CRM
 
 **How it works technically:**
 
-The bridge tool takes a `job_contact_id` from the `job_contacts` table. In normal use, your agent creates that row with `add_job_contact`, and if it needs to recover the UUID later it can call `search_job_contacts` first. Once it has the ID, it retrieves the contact details and creates a corresponding record in Extension 5's `professional_contacts` table. The `professional_crm_contact_id` field stores the link — this is application-managed rather than a database foreign key, because the two extensions live in separate table domains and you might install one without the other. This means:
-
-- Future interactions in the job hunt also appear in the CRM context
-- You can track the relationship long-term in Extension 5
-- Your networking doesn't restart from zero after the job search
+No plugin calls another or reads another's tables, so the link is two steps your agent takes, each through the brain's own tools: the CRM finds the contact, or adds it if it is not there, and the job hunt records its id in `professional_crm_contact_id`. That id is not a database foreign key — the two plugins' tables live in separate schemas, and you might turn on one without the other — so the job hunt cannot check the CRM has that contact. Linking again to the same id changes nothing; a job contact already linked to another is refused until you unlink it. `job_hunt_search_job_contacts` with `only_unlinked` lists who is not in your CRM yet.
 
 ### Integration with Extensions 1-4
 
@@ -181,19 +152,6 @@ Your agent has even more context when you're job hunting:
 
 This is the power of a fully interconnected Open Brain — context flows across domains.
 
-## Available Tools
-
-1. **`add_company`** — Add a company to track (name, industry, website, size, location, remote_policy, notes, glassdoor_rating)
-2. **`add_job_posting`** — Add a specific role at a company (company_id, title, url, salary_min, salary_max, requirements, nice_to_haves, source, posted_date)
-3. **`add_job_contact`** — Add a recruiter, hiring manager, referral, or interviewer to `job_contacts` (company_id, name, title, email, phone, linkedin_url, role_in_process, notes, last_contacted)
-4. **`submit_application`** — Record a submitted application (job_posting_id, status, applied_date, resume_version, cover_letter_notes, referral_contact)
-5. **`schedule_interview`** — Schedule an interview for an application (application_id, interview_type, scheduled_at, duration_minutes, interviewer_name, interviewer_title, notes)
-6. **`log_interview_notes`** — Add feedback/notes after an interview, update status to completed (interview_id, feedback, rating 1-5)
-7. **`get_pipeline_overview`** — Dashboard summary: counts by application status, upcoming interviews in next N days, recent activity. This is your "how's it going?" tool.
-8. **`get_upcoming_interviews`** — List interviews in the next N days with full company/role context
-9. **`search_job_contacts`** — Search or list job contacts to recover recruiter/interviewer records and IDs before linking or follow-up
-10. **`link_contact_to_professional_crm`** — **CROSS-EXTENSION BRIDGE** — Takes a job_contact_id, creates/links to a professional_contacts record in Extension 5, sets professional_crm_contact_id
-
 ## Expected Outcome
 
 After completing this extension, you should be able to:
@@ -202,32 +160,33 @@ After completing this extension, you should be able to:
 2. Manage application status through the pipeline (applied → screening → interviewing → offer → accepted/rejected)
 3. Schedule and log interviews with detailed notes and ratings
 4. Track contacts (recruiters, hiring managers, interviewers) with CRM integration
-5. Get pipeline analytics: conversion rates, stage distribution, interview performance
+5. See the pipeline at a glance: every status counted, interviews coming up, interviews waiting for notes
 6. Bridge job search contacts into your long-term professional network
 
 Your agent will be able to answer questions like:
 - "Show me my pipeline overview"
 - "What interviews do I have this week?"
-- "What's my conversion rate from phone screen to technical interview?"
-- "Which applications are in the proposal stage?"
+- "Which of my interviews haven't I written up yet?"
+- "Which postings close this week?"
+- "Which applications are at the offer stage?"
 - "Who's the recruiter at TechCorp and when did I last talk to them?"
 - "Link all my TechCorp contacts to my professional CRM"
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/job-hunt/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-**"Foreign key violation" errors**
-- Ensure parent records exist before creating child records (company → job_posting → application → interview)
-- Verify UUIDs are correct and belong to the same user_id
-- Deleting a company will cascade-delete all related postings, applications, and interviews
+**No `job_hunt_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `job-hunt`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
 
-**"Extension 5 not found" when linking contacts**
-- Verify Extension 5 (Professional CRM) is installed and its tables exist
-- Check that the `professional_contacts` table is accessible
-- Ensure both servers connect to the same database (the same `SUPABASE_URL`)
+**`NO_SUCH_COMPANY`, `NO_SUCH_POSTING` or `NO_SUCH_APPLICATION`**
+- Each child names its parent: a company before a posting, a posting before an application, an application before an interview. The list tools give each one's id
+
+**No `professional_crm_*` tools to link with**
+- The link's first step is the CRM's: turn on the `professional-crm` plugin too ([Extension 5](../professional-crm/README.md))
 
 ## Next Steps
 
@@ -246,10 +205,10 @@ All wired together through your Open Brain, with cross-extension tools that let 
 
 ### What's Next?
 
-1. **Audit and optimize your tools** — You now have ~40 MCP tool definitions across 6 extensions. That's a lot of context weight. Run the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify redundancies, merge CRUD tools, and scope your servers by workflow. This is the single highest-impact thing you can do to keep your AI performing well.
-2. **Build your own extensions** — Use these 6 as templates for domains specific to your life
-3. **Explore primitives** — Dive deeper into [Row Level Security](../../primitives/rls/), [Remote MCP](../../primitives/remote-mcp/), and other patterns
+1. **Audit and optimize your tools** — With all six plugins on, your AI holds ~56 tool definitions from them. That's a lot of context weight. Run the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify redundancies and turn on only the plugins a workflow needs. This is the single highest-impact thing you can do to keep your AI performing well.
+2. **Build your own** — Use these 6 as models for domains specific to your life: a new one is a plugin ([`plugins/`](../../plugins/), starting from `plugins/example/`)
+3. **Explore primitives** — Dive deeper into the [primitives](../../primitives/) and other patterns
 4. **Create compound queries** — Build tools that reason across multiple extensions simultaneously
-5. **Share your extensions** — Contribute back to the OB1 community
+5. **Share your work** — Contribute back to the OB1 community
 
 [Explore Primitives →](../../primitives/)
