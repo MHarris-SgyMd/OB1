@@ -210,7 +210,8 @@ export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
  * timeout is the thought's (retry it later); a 429 or 5xx is transient (pause and
  * retry the call); a 400 about the input's length (refusesLength, shared with
  * embed.ts) is the thought's; any other 4xx is fatal (stop the pass); a connection
- * error is transient; anything else is the thought's.
+ * error is transient; anything else is the thought's. Their followers read it
+ * through followerFault, followClassify's split (SMD-3311).
  *
  * `maxTokensFatal` (extract only): a 400 naming the answer budget
  * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
@@ -379,8 +380,20 @@ export function missingModelIs(e: unknown, model: string): boolean {
  *   (a TypeError, a SyntaxError) among them.
  * Pure, the worker's state apart: a stop is the caller's. Each verdict here
  * was met by a real error, Bun's SQL client's and embed.ts's (review pass 5).
+ * The extraction and judge calls keep their own fetch and throw an Error
+ * carrying the answer's `status` (entities.ts, consolidate.ts): read as an
+ * embed.ts `http` error of that status, its words providerWords'; and a
+ * call's deadline passing (timedOut) as embed.ts's `timeout` (SMD-3311).
  */
 export type FollowVerdict = "db-wait" | "db-end" | "db-moment" | "backpressure" | "maybe-poison" | "thought" | "probe-decides";
+
+/** The status of a provider's answer an error carries — an embed.ts `http` error's, or the extraction and judge calls' own Error's — else null: no answer (a deadline, no connection) or another kind (SMD-3311). */
+function answerStatus(e: unknown): number | null {
+  if (e instanceof ProviderError) return e.kind === "http" ? e.status ?? 0 : null;
+  const status = (e as { status?: unknown } | undefined)?.status;
+  return e instanceof Error && typeof status === "number" ? status : null;
+}
+
 export function followClassify(e: unknown): FollowVerdict {
   if (databaseUnavailable(e)) return "db-wait";
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
@@ -389,20 +402,45 @@ export function followClassify(e: unknown): FollowVerdict {
     if (/^(40|53)/.test(errno) || ["55P03", "25006", "25P02"].includes(errno)) return "db-moment";
     return "thought";
   }
-  if (e instanceof ProviderError) {
-    if (e.kind === "egress") return "thought";
-    if (e.kind === "timeout") return "maybe-poison";
-    if (e.kind === "http") {
-      const s = e.status ?? 0;
-      if (s === 429 || s === 503 || modelMissing(e)) return "backpressure";
-      if (s >= 500 || s === 408) return "maybe-poison";
-      if (refusesLength(s, e.body)) return "thought";
-    }
+  const http = answerStatus(e);
+  if (e instanceof ProviderError && e.kind === "egress") return "thought";
+  if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
+  if (http !== null) {
+    if (http === 429 || http === 503 || modelMissing(e)) return "backpressure";
+    if (http >= 500 || http === 408) return "maybe-poison";
+    if (refusesLength(http, e instanceof ProviderError ? e.body : providerWords(e))) return "thought";
     return "probe-decides";
   }
+  if (e instanceof ProviderError) return "probe-decides";
   // A runtime error with a connection's code: the provider not reached.
   if (providerDown(e)) return "maybe-poison";
   return "probe-decides";
+}
+
+/**
+ * A provider error as a claim follower that pauses before an outage reads it
+ * — extract-entities.ts's and consolidate.ts's — through followClassify's
+ * split (SMD-3311; re-embed's follower has no pauses and reads the verdict
+ * itself). `kind` is classifyError's, but two readings are transient —
+ * paused for, then an outage: a 4xx followClassify reads as the provider's
+ * outage, a 408, not the request's, which stopped every worker; and an
+ * answer classifyError called the thought's for its words saying "timed out"
+ * where followClassify reads its status as the provider's (a gateway's 408, a
+ * 504, a 429 or a 503 saying so: review passes 1 and 2). `suspect`: whether an outage it
+ * begins makes the thought in hand a suspect, recorded failed if it meets
+ * the provider again right after a probe answers. followClassify's
+ * backpressure — a 429, a 503, the model not served — says nothing about the
+ * thought and makes none; any other error does, as before.
+ */
+export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {}): { kind: ErrorKind; suspect: boolean } {
+  const verdict = followClassify(e);
+  const kind = classifyError(e, opts);
+  // An answer's status outranks classifyError's "timed out" in its words: a 408 whose body says
+  // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
+  // decides (review pass 1), and so is a 429 or a 503 saying so, backpressure, no suspect (review
+  // pass 2). A deadline with no status keeps "thought", which the probe decides.
+  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answerStatus(e) !== null && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
+  return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
 }
 
 /**
@@ -447,7 +485,7 @@ export const PROBE_PROMPT = "Reply with the word OK.";
 /**
  * What one probe found. `up`: the model answered, or the provider answered a
  * way the next real call will judge (a 400 for the probe's own `max_tokens`,
- * say). `out`: no answer, a timeout, a 429 or a 5xx — `unanswered`
+ * say). `out`: no answer, a timeout, a 408, a 429 or a 5xx — `unanswered`
  * (probeChat's) when no answer came within its limit or the answer's body
  * never arrived, the provider holding the call, not refusing it nor erring on
  * it (SMD-3306 PR 6b-1: the subject sweep reads a call aborted in hand, this
@@ -505,7 +543,9 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
   // (review pass 3).
   if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive`, unanswered: true };
   if (r.ok) return { state: "up" };
-  if (r.status === 429 || r.status >= 500) return { state: "out", why };
+  // A 408 is the provider's outage, as followClassify reads one (SMD-3311):
+  // read as up, the follower's next call met it again and failed its suspect.
+  if (r.status === 429 || r.status === 408 || r.status >= 500) return { state: "out", why };
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
   if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
   return { state: "up" };
@@ -515,7 +555,8 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
  * The typed-decision tier's probe, for consolidate's decide mode (SMD-3115): its /info, which sends no text.
  * `up` when it serves `model`; `missing` when it serves another (the pass key names the decider, so another
  * model's verdicts would be recorded under the wrong name); `out` when it does not answer (no answer, a timeout,
- * a 5xx); `refused` when the address answers as something else (a 4xx, or not ob1-jev/1).
+ * a 429 or a 5xx, and a 408 since SMD-3311); `refused` when the address answers as something else (any other 4xx, or not
+ * ob1-jev/1).
  */
 export async function probeTier(jev: JevConfig, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   try {
@@ -525,7 +566,9 @@ export async function probeTier(jev: JevConfig, model: string, timeoutMs: number
     if (wake?.aborted) return { state: "out", why: "the probe was stopped", tier: true };
     const why = `the tier at ${jev.endpoint.base}: ${((e as Error).message ?? "").slice(0, 200)}`;
     const err = e as { kind?: string; status?: number };
-    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429);
+    // A 408 is the tier's outage, as probeChat reads one (SMD-3311 review pass 1): read as refused, an
+    // outage over the decide call's 408 settled at once and its next 408 failed the suspect.
+    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429 && err.status !== 408);
     return { state: answeredAsOther ? "refused" : "out", why, tier: true };
   }
 }
