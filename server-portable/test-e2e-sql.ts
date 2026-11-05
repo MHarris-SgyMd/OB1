@@ -1457,7 +1457,7 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
     assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
 
     const undated = JSON.parse(await call("fetch", { id: undatedId }));
-    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(/^Daemonic Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Daemonic Brain …", not the epoch (${undated.title})`);
     assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
 
     const inf = JSON.parse(await call("fetch", { id: infinityId }));

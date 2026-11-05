@@ -7,7 +7,7 @@
 	const field = $derived(`\n${form?.content ?? data.thought.text ?? ''}`);
 </script>
 
-<svelte:head><title>Edit · {data.thought.title} · Open Brain</title></svelte:head>
+<svelte:head><title>Edit · {data.thought.title} · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<header>

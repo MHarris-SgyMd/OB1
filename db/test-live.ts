@@ -38,7 +38,7 @@
 
 import { SQL } from "bun";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, ROLE_GRANTS, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
@@ -68,7 +68,9 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, priorityStep, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
+import type { Ingested } from "./ingest-contract.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, vectorCome, vectorMark } from "./sleep.ts";
@@ -18345,7 +18347,7 @@ if (want("20")) {
     assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
     await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
     for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
-    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    assert((await refusalAt(canaryUrl)) === null, "a Daemonic Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
     // Another application's database, one name away from a tier.
     const foreignDb = "ob1_tier_foreign";
     const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
@@ -18361,10 +18363,10 @@ if (want("20")) {
       assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
       const foreign = new SQL({ url: foreignUrl, max: 1 });
       try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
-      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      assert(/not a Daemonic Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
       const railsLike = new SQL({ url: foreignUrl, max: 1 });
       try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
-      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
+      assert(/not a Daemonic Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
     } finally {
       await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
     }
@@ -19087,6 +19089,135 @@ if (want("23c")) {
     await cB.close();
     await watch.close();
     await store.close();
+  }
+}
+
+if (want("23d")) {
+  console.log("\n[23d] Every source states priority through one door (SMD-3666), on a real Postgres: board-sync's step states each ticket head's Linear priority and due day as board-sync, a dry run writing nothing and a second run nothing new; the operator's declaration moves its statements to the source tier; a moved level replaces the statement, history kept; No priority clears it. The pipeline states an item's own priority on its thought and a ticket's on the ticket, as the run's actor; the same again is unchanged, an unknown word clears it, and a brain the caller says cannot take them gets none");
+  const { store, writer, sync } = syncHarness(14);
+  const watch = new SQL({ url: URL_!, max: 1 });
+  type Statement = { level: number; due_at: string | null; reason: string | null; maker_name: string; maker_source: boolean; tier: number; closed: string | null };
+  const said = async (kind: string, key: string) => (await watch`
+    SELECT level::int AS level, to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS due_at, reason, maker_name, maker_source, tier::int AS tier, close_reason AS closed
+      FROM priority_assertions WHERE item_kind = ${kind} AND item_key = ${key} ORDER BY seq`) as Statement[];
+  const open = (rows: Statement[]) => rows.filter((r) => r.closed === null);
+  const issueOf = (n: number, priorityLabel: string, dueDate: string | null, updatedAt: string): LinearIssue =>
+    ({ ...SAMPLE_ISSUE, identifier: `SMD-${n}`, title: `[23d] ticket ${n}`, description: "The synced text.", project: null, labels: { nodes: [] }, state: { name: "Backlog", type: "backlog" }, priorityLabel, dueDate, updatedAt });
+  try {
+    const set = await priorityStep(watch, writer.actor);
+    const step = "step" in set ? set.step : null;
+    assert(step !== null, `as the database's owner the priority step is on (${"off" in set ? set.off : "on"})`);
+    const high = issueOf(90611, "High", "2026-12-01", "2026-11-05T01:00:00.000Z"), low = issueOf(90612, "Low", null, "2026-11-05T01:00:00.000Z"), none = issueOf(90613, "No priority", "2026-12-24", "2026-11-05T01:00:00.000Z");
+    // Another key states, on a fourth ticket, exactly what Linear says: board-sync still states its own, the other's being no statement of its.
+    const shared = issueOf(90615, "High", "2026-12-01", "2026-11-05T01:00:00.000Z");
+    for (const i of [high, low, none, shared]) await sync(i);
+    await watch`SELECT assert_priority('ticket', 'SMD-90615', 3, '2026-12-01T00:00:00Z'::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Linear priority: High', false, ${{ name: "live-23d-other", scope: "write" }}::jsonb)`;
+    const dry = step ? await step.run({ dryRun: true }) : null;
+    const afterDry = (await said("ticket", "SMD-90611")).length + (await said("ticket", "SMD-90612")).length;
+    const first = step ? await step.run({ dryRun: false }) : null;
+    const [h1, l1, n1] = [await said("ticket", "SMD-90611"), await said("ticket", "SMD-90612"), await said("ticket", "SMD-90613")];
+    assert((dry?.asserted ?? 0) >= 2 && afterDry === 0 && (first?.refused ?? ["none run"]).length === 0
+           && h1.length === 1 && h1[0].level === 3 && h1[0].due_at === "2026-12-01T00:00:00Z" && h1[0].reason === "Linear priority: High" && h1[0].maker_name === SYNC_ACTOR && h1[0].maker_source === false
+           && l1.length === 1 && l1[0].level === 1 && l1[0].due_at === null && n1.length === 0
+           && JSON.stringify((await said("ticket", "SMD-90615")).map((r) => r.maker_name)) === JSON.stringify(["live-23d-other", SYNC_ACTOR]),
+      `after a pass the dry run counts and writes nothing; the run states High due 2026-12-01 and Low with no day as board-sync, its reason Linear's word, not yet a source; No priority states nothing, its due day with it; another key's matching statement is not board-sync's own (${JSON.stringify([h1, l1, n1.length])})`);
+    const second = step ? await step.run({ dryRun: false }) : null;
+    assert((await said("ticket", "SMD-90611")).length === 1 && (await said("ticket", "SMD-90612")).length === 1 && (second?.refused ?? ["none run"]).length === 0,
+      `a second run over the same board writes nothing for them (${JSON.stringify(second)})`);
+    // The operator declares board-sync a priority source: its statements are stated again at the source tier.
+    const [declared] = (await watch`SELECT declare_priority_source(${SYNC_ACTOR}) AS r`) as { r: { ok: boolean } }[];
+    await step?.run({ dryRun: false });
+    const h2 = await said("ticket", "SMD-90611");
+    assert(declared.r.ok === true && h2.length === 2 && h2[0].closed === "replaced" && open(h2).length === 1 && open(h2)[0].maker_source === true && open(h2)[0].tier === 2 && open(h2)[0].level === 3,
+      `declared a source by the operator, board-sync states its tickets again at the source tier, the earlier statement closed as replaced (${JSON.stringify(h2.map((r) => [r.tier, r.closed]))})`);
+    // Linear moves the level and drops the day; then the other ticket to No priority.
+    await sync({ ...high, priorityLabel: "Urgent", dueDate: null, updatedAt: "2026-11-05T02:00:00.000Z" });
+    await sync({ ...low, priorityLabel: "No priority", updatedAt: "2026-11-05T02:00:00.000Z" });
+    const moved = step ? await step.run({ dryRun: false }) : null;
+    const [h3, l3] = [await said("ticket", "SMD-90611"), await said("ticket", "SMD-90612")];
+    assert(h3.length === 3 && open(h3).length === 1 && open(h3)[0].level === 4 && open(h3)[0].due_at === null && open(h3)[0].reason === "Linear priority: Urgent"
+           && l3.length === 2 && l3[0].closed === "replaced" && l3[1].closed === "cleared" && open(l3).length === 0 && (moved?.cleared ?? 0) >= 1,
+      `a level Linear moved replaces the statement, every earlier one kept; a ticket gone to No priority has its statement cleared (${JSON.stringify([h3.map((r) => [r.level, r.closed]), l3.map((r) => r.closed)])})`);
+
+    // The pipeline: an item's own priority on its own thought, as the run's actor; a ticket's on the ticket.
+    const actor = ingestActor("live-23d-ingester");
+    const note = (value: string): Ingested => ({ identity: { system: "notes23d", key: "a-note" }, scope: "notes23d:vault", canonical: { form: "a note", mediaType: "text/markdown" }, text: "[23d] a note that matters by December",
+      links: [], mentions: [], facets: {}, priority: { scale: "frontmatter", value, due: "2026-12-01" } });
+    const noteDoc = docOf(note("Urgent"));
+    const off = await upsertRecord(sql, noteDoc, "test-live@23d", actor);
+    const offSaid = (await said("thought", noteDoc.id)).length;
+    const stated = await upsertRecord(sql, noteDoc, "test-live@23d", actor, true);
+    const again = await upsertRecord(sql, noteDoc, "test-live@23d", actor, true);
+    const noteSaid = await said("thought", noteDoc.id);
+    const cleared = await upsertRecord(sql, docOf(note("whenever")), "test-live@23d", actor, true);
+    const ticketDoc = docOf(linearAdapter.map(issueOf(90614, "Medium", "2026-12-15", "2026-11-05T01:00:00.000Z")));
+    const ticket = await upsertRecord(sql, ticketDoc, "test-live@23d", actor, true);
+    const ticketSaid = await said("ticket", "SMD-90614");
+    assert(off.priority === undefined && offSaid === 0 && stated.priority === "asserted" && again.priority === "unchanged" && cleared.priority === "cleared"
+           && noteSaid.length === 1 && noteSaid[0].level === 4 && noteSaid[0].due_at === "2026-12-01T00:00:00Z" && noteSaid[0].reason === "frontmatter priority: Urgent" && noteSaid[0].maker_name === "live-23d-ingester"
+           && open(await said("thought", noteDoc.id)).length === 0 && ticket.priority === "asserted" && ticketSaid.length === 1 && ticketSaid[0].level === 2 && ticketSaid[0].due_at === "2026-12-15T00:00:00Z",
+      `the pipeline states a note's priority on its own thought as the run's actor, and nothing when told the brain cannot take it; the same again is unchanged, an unknown word clears it; a ticket's on the ticket (${JSON.stringify([off.priority, stated.priority, again.priority, cleared.priority, ticket.priority])})`);
+
+    // A role without the priority group is told what it lacks, not failed at its first write: 116's writers are
+    // PUBLIC's to EXECUTE, so EXECUTE says nothing (review pass 2). Granted the group's privileges, it may.
+    const NOPRI = "live_23d_nopriority";
+    const dropNoPri = () => watch.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${NOPRI}') THEN EXECUTE 'DROP OWNED BY ${NOPRI}'; EXECUTE 'DROP ROLE ${NOPRI}'; END IF; END $$`);
+    await dropNoPri();
+    await watch.unsafe(`CREATE ROLE ${NOPRI} NOLOGIN`);
+    const asNoPri = new SQL({ url: URL_!, max: 1 });
+    try {
+      await asNoPri.unsafe(`SET ROLE ${NOPRI}`);
+      const lacking = await priorityWritersProblem(asNoPri);
+      const stepOff = await priorityStep(asNoPri, writer.actor);
+      for (const { table, privileges } of ROLE_GRANTS.priority as readonly { table: string; privileges: readonly string[] }[]) await watch.unsafe(`GRANT ${privileges.join(", ")} ON ${table} TO ${NOPRI}`);
+      const granted = await priorityWritersProblem(asNoPri);
+      assert(lacking === "this role lacks SELECT on priority_assertions (the priority grant group: cd db && bun migrate.ts --url … --grant <role> --groups priority)"
+             && "off" in stepOff && stepOff.off === lacking && granted === null,
+        `a role without the priority group is told the privilege it lacks and board-sync's step is off, said once, not failed at a write; granted the group's privileges it may state them (${lacking} | ${granted})`);
+    } finally {
+      await asNoPri.close();
+      await dropNoPri();
+    }
+  } finally {
+    await watch`SELECT declare_priority_source(${SYNC_ACTOR}, false)`;
+    await watch.close();
+    await store.close();
+  }
+}
+
+if (want("23e")) {
+  console.log("\n[23e] A markdown note's frontmatter priority and due day, through the ingester's own command (SMD-3666 PR 2): a note saying priority high and due 2026-12-01 reads that way through priority_of, as the run's actor; a note saying none states nothing; the same vault again writes nothing; the line deleted clears the statement");
+  const vault = mkdtempSync(join(tmpdir(), "ob1-23e-"));
+  const watch = new SQL({ url: URL_!, max: 1 });
+  const ingest = () => {
+    const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", URL_!, "--source", "markdown", "--markdown", vault, "--allow", vault, "--actor", "live-23e-vault"],
+      { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+    return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+  };
+  const note = join(vault, "Passport renewal 23e.md");
+  const id = recordId("markdown", "passport renewal 23e");
+  const read = async () => ((await watch`SELECT level::int AS level, winner->>'due_at' AS due FROM priority_of((${JSON.stringify([{ kind: "thought", key: id }])}::text)::jsonb)`) as { level: number | null; due: string | null }[])[0];
+  const said = async () => (await watch`SELECT level::int AS level, reason, maker_name, close_reason AS closed FROM priority_assertions WHERE item_kind = 'thought' AND item_key = ${id} ORDER BY seq`) as { level: number; reason: string; maker_name: string; closed: string | null }[];
+  try {
+    writeFileSync(note, "---\npriority: high\ndue: 2026-12-01\n---\nRenew the passport before the trip.\n");
+    writeFileSync(join(vault, "Plain note 23e.md"), "Nothing to do here, a note of [23e].\n");
+    const first = ingest();
+    const of = await read();
+    const statements = await said();
+    assert(first.code === 0 && /priorities \(SMD-3666, as live-23e-vault\): asserted 1, nothing_to_clear 1/.test(first.out)
+           && of?.level === 3 && of.due !== null && Date.parse(of.due) === Date.parse("2026-12-01T00:00:00Z")
+           && statements.length === 1 && statements[0].reason === "frontmatter priority: high" && statements[0].maker_name === "live-23e-vault",
+      `a note saying priority high and due 2026-12-01 reads High due that day through priority_of, stated as the run's actor with its word as the reason; a note saying none states nothing (${first.code} ${first.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${JSON.stringify(of)} ${first.err.trim().slice(0, 200)})`);
+    const again = ingest();
+    writeFileSync(note, "---\ndue: 2026-12-01\n---\nRenew the passport before the trip.\n");
+    const deleted = ingest();
+    const after = await said();
+    assert(again.code === 0 && /priorities \(SMD-3666, as live-23e-vault\): unchanged 1, nothing_to_clear 1/.test(again.out) && (await said()).length === 1
+           && deleted.code === 0 && after.length === 1 && after[0].closed === "cleared" && (await read())?.level === null,
+      `the same vault again writes nothing; the priority line deleted clears the statement, the day alone stating nothing, and the note reads unknown (${again.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${deleted.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${JSON.stringify(after.map((r) => r.closed))})`);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+    await watch.close();
   }
 }
 

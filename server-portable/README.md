@@ -1,6 +1,6 @@
 # server-portable
 
-The Open Brain REST core (`api.ts`) and the core every brain operation runs
+The Daemonic Brain REST core (`api.ts`) and the core every brain operation runs
 in. It began as a runtime-neutral build of the MCP server, so the runtime could
 be chosen last, with the same tools and wire behaviour as upstream's Edge
 Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
@@ -520,8 +520,8 @@ Every suite that drives an MCP server (all but `test-rest.ts`, `test-thoughts.ts
 auto-install off, so without them the import fails, naming the package, rather than
 Bun fetching it (SMD-2978).
 
-`hono` and `zod` are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, and `extensions/test-auth.ts` fails if they
+`hono` and `zod` are pinned to the exact versions `../integrations/package.json`
+installs for the vendored servers, and `integrations/test-auth.ts` fails if they
 drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
 `@hono/mcp` there, until SMD-2279 and SMD-2281). **If you bump a shared package
 in one file, bump it in both in the same commit.**
@@ -1003,7 +1003,7 @@ calls does.
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
-| `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), which still holds. `forced: true`: a forced release, which needs the id to classify an operator. |
+| `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
 Each call is one statement, so its own READ COMMITTED transaction holding one ticket's
@@ -1516,8 +1516,7 @@ stored in the same write").
   until the client or a proxy gives up. A provider call is bounded by
   `OB1_LLM_TIMEOUT`, so a call that long is stuck in the database. The brain's
   servers serve with Bun's ceiling, 255 s, for their GETs (the idle timeout,
-  above), and keep the keepalive for the proxy in front and a call past 255 s;
-  the vendored MCP servers stay on the default (`sse.ts` says why, SMD-2931).
+  above), and keep the keepalive for the proxy in front and a call past 255 s.
   The two intervals are constants, not knobs: 5 s is inside any proxy read
   timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged

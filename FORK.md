@@ -178,10 +178,10 @@ evals/baselines.json             # fix 20  (new file — recorded results)
 scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated); deleted by SMD-2311
-extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack
-extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
-extensions/bun.lock              # change 64 (new file)
+extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal); deleted by SMD-3747
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack; moved to integrations/ by SMD-3747
+extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to); moved to integrations/ by SMD-3747
+extensions/bun.lock              # change 64 (new file); moved to integrations/ by SMD-3747
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
 recipes/_shared/auth.ts          # change 67 (new file — server-portable/auth.ts byte for byte); deleted with ob-graph and work-operating-model-activation by SMD-2920
 recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — the same)
@@ -189,7 +189,7 @@ recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (n
 integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
-extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
+extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's); moved to integrations/ by SMD-3747
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim); deleted by SMD-1799 (the servers are Bun-native)
@@ -254,7 +254,7 @@ read it as text (a silent mirror is how fix 1's bug happened) left with the file
 (SMD-1800). `server-portable/` never needed them: its env is read lazily, so
 `test-server.ts` imports the server and asserts against the running handler,
 and the vendored servers are imported and started the same way by
-`extensions/test-auth.ts` — there is nothing to drift from.
+`integrations/test-auth.ts` — there is nothing to drift from.
 
 ---
 

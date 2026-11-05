@@ -6,7 +6,7 @@
 	const testId = (label: string) => label.toLowerCase().replace(/\s+/g, '-');
 </script>
 
-<svelte:head><title>Status · Open Brain</title></svelte:head>
+<svelte:head><title>Status · Daemonic Brain</title></svelte:head>
 
 <section class="bg-bg-card border border-white/10 rounded-xl p-5">
 	<h1 class="text-sm text-text-muted mb-3">Status of this brain</h1>
