@@ -603,6 +603,11 @@
  *      when it does not, a need with no counts is named on every page as
  *      having none, and a name uploaded twice fails on main alone
  *      (SMD-3709). Its probe pins what it refuses and passes
+ *  51. scripts/commitlint.config.ts takes `[core]` for the project's own code
+ *      and `[fork]`, its name before SMD-3765, both held to ticket-ref, a
+ *      contribution category not; a mis-cased, unspaced or colon header fails.
+ *      CI's commit-lint lints only a PR's own commits, so nothing else reads
+ *      the config's categories
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
@@ -619,6 +624,7 @@ import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULE
 import { CHANGES_DIR, END as INDEX_END, INDEX_FILE, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./changes-index.ts";
 import { BRAIN_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
+import commitlintConfig from "./commitlint.config.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
 import { inlined as inlinedGrafana, INLINE_FILES } from "./inline-grafana.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./changes-index.ts";
@@ -4194,7 +4200,8 @@ function checkFragments() {
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
-    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## Record\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title (SMD-1)\n\nThe old shape, quoted:\n\n```markdown\n## FORK\nold\n```\n", "a record quoting `## FORK` in a fence (SMD-3765)"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nThe mutant lists are at `fbedb39c:changes/smd-1.md`, and SMD-2's record says why; `changes/smd-NNNN.md` is the pattern.\n", "a fragment path pinned to a commit, a ticket named instead of a path, and the pattern written with letters"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
@@ -11027,6 +11034,30 @@ function checkTestCountsPublished() {
   for (const msg of testCountsProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
 }
 checkTestCountsPublished();
+
+// ── 51: commitlint's categories — [core], and [fork] from before it (SMD-3765) ──
+//
+// commit-lint runs the config only over a PR's own commits, so a category
+// dropped from it, or one no longer held to ticket-ref, fails nothing until a
+// branch commits under it (a [fork] branch from before the rename, a quiet lost
+// warning). This reads the config itself.
+function checkCommitCategories() {
+  const header = commitlintConfig.parserPreset.parserOpts.headerPattern;
+  const ticketRef = commitlintConfig.plugins[0].rules["ticket-ref"];
+  const CONFIG = "scripts/commitlint.config.ts";
+  for (const [subject, type] of [["[core] A change (SMD-1)", "core"], ["[fork] A change (SMD-1)", "fork"], ["[recipes] A recipe", "recipes"]] as const) {
+    if (header.exec(subject)?.[1] !== type) fail(CONFIG, `its header pattern does not read ${JSON.stringify(subject)} as [${type}] — commit-lint would refuse it (check 51, SMD-3765)`);
+  }
+  for (const subject of ["[Core] A change (SMD-1)", "[core]A change (SMD-1)", "core: A change (SMD-1)"]) {
+    if (header.test(subject)) fail(CONFIG, `its header pattern takes ${JSON.stringify(subject)}, which the house grammar refuses (check 51)`);
+  }
+  for (const type of ["core", "fork"]) {
+    if (ticketRef({ type, header: `[${type}] A change` })[0] !== false) fail(CONFIG, `ticket-ref no longer warns on a [${type}] subject without its ticket (check 51, SMD-3765)`);
+    if (ticketRef({ type, header: `[${type}] A change (SMD-1)` })[0] !== true) fail(CONFIG, `ticket-ref warns on a [${type}] subject that ends in its ticket (check 51)`);
+  }
+  if (ticketRef({ type: "recipes", header: "[recipes] A recipe" })[0] !== true) fail(CONFIG, "ticket-ref holds a contribution category to an SMD ticket — a community PR carries none (check 51)");
+}
+checkCommitCategories();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //

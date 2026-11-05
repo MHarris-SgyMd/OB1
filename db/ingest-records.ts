@@ -668,6 +668,8 @@ function selfCheck(): number {
   ok(pending.content.startsWith("The title line (SMD-1806)") && /the record body/.test(pending.content) && !/## Changelog/.test(pending.content), "…and the content is the `## FORK` body alone");
   const pendingRecord = forkDocFromFile("smd-3765", "---\ntype: changed\nbump: patch\ntickets: [SMD-3765]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-3765)\n\n## Record\n\nThe title line (SMD-3765)\n\nthe record body.");
   ok(pendingRecord.content.startsWith("The title line (SMD-3765)") && !/## Changelog/.test(pendingRecord.content), "…and a fragment's `## Record`, the heading's name since SMD-3765, is read the same way");
+  const subRecord = forkDocFromFile("smd-1807", "---\ntype: added\nbump: minor\ntickets: [SMD-1807]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-1807)\n\n## FORK\n\nThe title line (SMD-1807)\n\nthe record body.\n\n## Record\n\nthe measured record.");
+  ok(subRecord.content.startsWith("The title line (SMD-1807)") && /the measured record/.test(subRecord.content), "…and one written under `## FORK` with a `## Record` sub-heading is read whole from its title, the first heading in the file, not from the sub-heading");
 
   const fm = memoryFrontmatter("---\nname: a-slug\ndescription: a one-line summary\nmetadata:\n  modified: 2026-09-22T03:00:00.000Z\n---\n\nthe body\nline two\n");
   ok(fm.name === "a-slug" && fm.description === "a one-line summary" && fm.modified === "2026-09-22T03:00:00.000Z", "frontmatter fields read");

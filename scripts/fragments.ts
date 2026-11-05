@@ -60,9 +60,14 @@ export function fragmentSection(body: string, name: string): string | null {
   return !toEnd && text.startsWith("## ") ? "" : text; // an empty section: the lazy capture ran into the next heading
 }
 
-/** The heading a fragment's record sits under — `Record`, or `FORK` in one written before SMD-3765 — or null with neither. */
+/**
+ * The heading a fragment's record sits under — `Record`, or `FORK` in one written
+ * before SMD-3765 — or null with neither. With both, the first in the file: a
+ * later one is the record's own sub-heading (refused, but read whole until then).
+ */
 export function recordHeading(body: string): string | null {
-  return RECORD_HEADINGS.find((h) => headingAt(body, h) >= 0) ?? null;
+  const at = RECORD_HEADINGS.map((h) => [h, headingAt(body, h)] as const).filter(([, i]) => i >= 0).sort((a, b) => a[1] - b[1]);
+  return at.length ? at[0][0] : null;
 }
 
 /** A fragment's record body: under `## Record`, or `## FORK` in one written before SMD-3765. */
@@ -71,9 +76,14 @@ export function fragmentRecord(body: string): string | null {
   return h === null ? null : fragmentSection(body, h);
 }
 
-/** Where a `## <name>` heading starts in a fragment's body, or -1. */
+/**
+ * Where a `## <name>` heading starts in a fragment's body, or -1. A fenced block
+ * is blanked first, offsets kept: a record that quotes a fragment's `## FORK`
+ * in a ``` fence has not got a second record heading.
+ */
 function headingAt(body: string, name: string): number {
-  return body.search(new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)`));
+  const unfenced = body.replace(/^```[\s\S]*?^```/gm, (m) => m.replace(/[^\n]/g, " "));
+  return unfenced.search(new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)`));
 }
 
 export const FRAGMENT_TYPES = new Set(["added", "changed", "deprecated", "removed", "fixed", "security"]);

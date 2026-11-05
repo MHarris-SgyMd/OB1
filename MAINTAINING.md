@@ -133,8 +133,8 @@ append-only; add a new file).
 hand at PR time, so every merge of `main` while a PR was in review renumbered a
 section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
 (front matter — `type`, `bump`, `tickets`, `migrations` — and a `## Changelog`
-and a `## Record` body, `## FORK` before SMD-3765), with no change number; the release step assigns the
-numbers once, at assembly, writing each fragment as the next
+and a `## Record` body, `## FORK` before SMD-3765), with no change number; the
+release step assigns the numbers once, at assembly, writing each fragment as the next
 `changes/NNN-<slug>.md` in merge order and regenerating the index in
 [`changes/README.md`](changes/README.md) (SMD-1804, SMD-1917). A fragment needs no
 edit to the index, which lists numbered changes alone, so adding a fragment
@@ -145,10 +145,11 @@ table and the files they are.
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside the
 record in `changes/`: `## [Unreleased]` first, one dated section per release with
 entries under the six headings, each entry ending in its ticket and migration
-numbers. The release step writes it and the change files from the same fragments in one commit,
-and `check-consistency` pairs the two both ways. Conventional Commits is **not**
-adopted — the fragment's fields give tooling what it needs, and the `[core]`
-prefix (`[fork]` until SMD-3765) and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
+numbers. The release step writes it and the change files from the same
+fragments in one commit, and `check-consistency` pairs the two both ways.
+Conventional Commits is **not** adopted — the fragment's fields give tooling
+what it needs, and the `[core]` prefix (`[fork]` until SMD-3765) and
+`(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
 upstream leftover no workflow ran, is removed so there is one release mechanism.)
 
 ## Cutting a release
