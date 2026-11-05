@@ -11436,6 +11436,15 @@ function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<stri
         if (runsIt.test(hashCommentsBlanked(lines.join("\n"), true))) problems.push(`job ${job}'s steps name ${rel}, which reads ${pattern}, but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${job}, or say in READER_RUNS why its run of ${rel} does not read ${pattern} (check 53, SMD-2435)`);
       }
     }
+    // A READER_RUNS exemption that excuses nothing is stale (review pass 2), so none waits to excuse a later run.
+    for (const [rel, byJob] of Object.entries(runs[pattern] ?? {})) {
+      if (!(rel in listed)) { problems.push(`READER_RUNS excuses ${rel}'s runs for ${pattern}, but JOB_MAP_READERS does not list ${rel} for it — take it off (check 53, SMD-2435)`); continue; }
+      const runsIt = chargesToken(rel);
+      for (const job of Object.keys(byJob)) {
+        const lines = blocks.get(job);
+        if (!gated.includes(job) || jobs.includes(job) || !lines || !runsIt.test(hashCommentsBlanked(lines.join("\n"), true))) problems.push(`READER_RUNS excuses job ${job}'s run of ${rel} for ${pattern}, but ${job} ${!gated.includes(job) ? "is no gated job" : jobs.includes(job) ? `is charged by ${pattern} already` : `does not run ${rel}`} — take it off (check 53, SMD-2435)`);
+      }
+    }
     // The codemod walks every file CODE matches outside SKIP_DIRS's top-level directories, by content: such a path charges compat-shim.
     if (walk && gated.includes(CODEMOD_JOB) && !jobs.includes(CODEMOD_JOB)) {
       const walked = (rel: string) => walk.code.test(rel) && !walk.skip.includes(rel.split("/")[0]);
@@ -11480,6 +11489,16 @@ function checkJobMap() {
   // An exemption for one path a reader names covers that path alone (review pass 1).
   const exempted = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "scripts/x.ts": { "scripts/rel.ts": { d: "elsewhere" } } });
   if (!exempted.some((m) => m.includes("job d's steps name scripts/rel.ts, which reads changes/*"))) fail(SELF, `check 53 lets an exemption for scripts/x.ts excuse a run of scripts/rel.ts reading changes/* (its own probe): ${JSON.stringify(exempted)} (SMD-2435)`);
+  // A stale exemption fails (review pass 2): [why, the runs, what its one problem says].
+  const staleRuns: [string, Record<string, Record<string, Record<string, string>>>, string][] = [
+    ["an exemption for a reader not listed", { "changes/*": { "scripts/gone.ts": { l: "x" } } }, "does not list scripts/gone.ts"],
+    ["an exemption for a job that does not run the reader", { "changes/*": { "scripts/rel.ts": { l: "x" } } }, "l does not run scripts/rel.ts"],
+    ["an exemption for a job charged already", { "changes/*": { "scripts/rel.ts": { d: "x" } } }, "is charged by changes/* already"],
+    ["an exemption for a job not gated", { "changes/*": { "scripts/rel.ts": { lint: "x" } } }, "is no gated job"],
+  ];
+  const staleWrong = staleRuns.map(([why, runs, says]) => ({ why, says, got: jobMapProblems(T, R, ["d", "l"], F({}), B, runs) }))
+    .filter((c) => c.got.length !== 1 || !c.got[0].includes(c.says));
+  if (staleWrong.length) fail(SELF, `check 53 no longer reads a stale READER_RUNS entry as written: ${JSON.stringify(staleWrong)} (SMD-2435)`);
   const probeWalk = { skip: ["scripts", "db"], code: /\.(ts|tsx|js|mjs)$/ };
   // [why, row, what its problems say]: the codemod's walk, whose job is gated in this probe as "compat-shim".
   const walkCases: [string, ChargesRow, string[]][] = [
