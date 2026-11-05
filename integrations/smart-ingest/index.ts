@@ -41,8 +41,8 @@
  * Dependencies:
  *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
  *   - append_thought_evidence(uuid, jsonb) RPC (from the smart-ingest schema)
- *   - match_thoughts RPC (base OB1)
- *   - upsert_thought(text, jsonb, vector) RPC (base OB1; db/migrations/004, last redefined by 046)
+ *   - match_thoughts RPC (base Daemonic Brain)
+ *   - upsert_thought(text, jsonb, vector) RPC (base Daemonic Brain; db/migrations/004, last redefined by 046)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 

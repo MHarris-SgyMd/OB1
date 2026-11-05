@@ -6,13 +6,13 @@
 
 ## What It Does
 
-Receives Readwise highlight webhooks and stores each highlight as a thought in your Open Brain — automatically embedded, classified as a reference, and tagged with book title, author, and location. Works for highlights made anywhere Readwise aggregates from: Kindle, Apple Books, Reader, Instapaper, Hypothesis, Airr/Snipd podcasts, and physical books via the Readwise OCR app.
+Receives Readwise highlight webhooks and stores each highlight as a thought in your brain — automatically embedded, classified as a reference, and tagged with book title, author, and location. Works for highlights made anywhere Readwise aggregates from: Kindle, Apple Books, Reader, Instapaper, Hypothesis, Airr/Snipd podcasts, and physical books via the Readwise OCR app.
 
 > **In Daemonic Brain (FORK.md change 71, SMD-1524):** the highlight is stored through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label in the same statement (no audit actor: the receiver holds a shared secret, not an access key, and 008 records a NULL actor for such a write); the raw insert this replaced left the fingerprint and the label NULL — the row invisible to dedup, its vector of unknown model to a re-embed pass. The `source_type`/`type` columns (the enhanced-thoughts schema's) follow by updates carrying neither content nor vector, each column where it is NULL — a fresh row's, or a row whose first write was interrupted before them, healed on the re-capture; a column already set, whichever writer set it, is left as it is (a passage another tool captured first and typed by hand keeps its type when the highlight arrives, and takes `source_type = 'readwise'` if it had none, so the dedupe sees it from then on; a row another tool labelled — `source_type = 'mcp'`, say — keeps that label, and since the dedupe looks for readwise rows only, every delivery of that highlight is re-sent to the function, which answers `existed` and re-merges the metadata: one row throughout, one audit row per delivery). A highlight whose text the brain already holds comes back `existed`: its metadata is merged and its vector replaced, not a second row — the book's `num_highlights` still counts it, as Readwise does. WIDTH: the function embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; Daemonic Brain's default is `qwen3-embedding:4b` at 1024, where the capture fails whole).
 
 ## Prerequisites
 
-- A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)), an OpenRouter API key — the function embeds through OpenRouter at 1536; see the width note above — and [Bun](https://bun.sh) 1.4+ with a checkout of this repository
+- A working Daemonic Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)), an OpenRouter API key — the function embeds through OpenRouter at 1536; see the width note above — and [Bun](https://bun.sh) 1.4+ with a checkout of this repository
 - The [readwise-books schema](../../schemas/readwise-books/) applied to your brain's database
 - Recommended: the [enhanced-thoughts schema](../../schemas/enhanced-thoughts/) applied, so highlights carry the top-level `source_type = 'readwise'` column that the `get_book_highlights` RPC filters on
 - A Readwise account (verified working on Free and paid plans — both expose webhook creation at [readwise.io/webhook](https://readwise.io/webhook))
@@ -129,7 +129,7 @@ Check the `readwise_books` table too — the book should appear there with title
 
 ## Expected Outcome
 
-Every new highlight you make across every Readwise-connected source automatically lands in your Open Brain as an embedded, searchable thought — joined to a book record with title, author, and cover image that any MCP-connected AI can query.
+Every new highlight you make across every Readwise-connected source automatically lands in your brain as an embedded, searchable thought — joined to a book record with title, author, and cover image that any MCP-connected AI can query.
 
 ---
 
@@ -164,7 +164,7 @@ That's expected for the webhook path — Readwise batches highlights in some sou
 
 ## What You Just Built
 
-A live feed from every Readwise-connected source directly into your Open Brain. The moment you highlight a line in Kindle, shortlist-and-annotate in Reader, or snip a podcast moment in Airr, that highlight is in your vector store — joined to a book record, tagged with location, and searchable by any AI tool connected to your MCP server.
+A live feed from every Readwise-connected source directly into your brain. The moment you highlight a line in Kindle, shortlist-and-annotate in Reader, or snip a podcast moment in Airr, that highlight is in your vector store — joined to a book record, tagged with location, and searchable by any AI tool connected to your MCP server.
 
 The webhook only catches new highlights. For everything you've ever highlighted before setting this up, pair it with the [readwise-import recipe](../../recipes/readwise-import/).
 

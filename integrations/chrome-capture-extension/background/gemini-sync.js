@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini "Sync All History" orchestrator (Phase C)
+ * Daemonic Brain Capture — Gemini "Sync All History" orchestrator (Phase C)
  *
  * Drives a one-shot full-history backfill by walking the Gemini sidebar,
  * navigating a dedicated background tab to each conversation, and waiting

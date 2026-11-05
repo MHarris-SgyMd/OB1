@@ -51,10 +51,10 @@ function persistSessionMetrics() {
   if (!chrome.storage.session) return;
   try {
     chrome.storage.session.set({ [SESSION_METRICS_KEY]: sessionMetrics }).catch((err) => {
-      console.warn('[Open Brain Capture] persistSessionMetrics failed', err);
+      console.warn('[Daemonic Brain Capture] persistSessionMetrics failed', err);
     });
   } catch (err) {
-    console.warn('[Open Brain Capture] persistSessionMetrics threw', err);
+    console.warn('[Daemonic Brain Capture] persistSessionMetrics threw', err);
   }
 }
 
@@ -68,13 +68,13 @@ async function restoreSessionMetrics() {
       }
     }
   } catch (err) {
-    console.warn('[Open Brain Capture] restoreSessionMetrics failed', err);
+    console.warn('[Daemonic Brain Capture] restoreSessionMetrics failed', err);
   }
   await refreshBadge();
 }
 
 const REDACTED_RESTRICTED_PREVIEW = '[restricted content blocked locally]';
-const NOT_CONFIGURED_ERROR = 'Open Brain is not configured. Click the extension icon and complete the Configure screen.';
+const NOT_CONFIGURED_ERROR = 'Daemonic Brain is not configured. Click the extension icon and complete the Configure screen.';
 
 function withStorageLock(fn) {
   _storageLock = _storageLock.then(fn, fn);
@@ -167,7 +167,7 @@ async function ensureSeenFpCache() {
         }
         await chrome.storage.local.set(buckets);
         await chrome.storage.local.remove(legacyKey);
-        console.log(`[Open Brain Capture] Migrated ${legacy.length} fingerprints to bucketed storage`);
+        console.log(`[Daemonic Brain Capture] Migrated ${legacy.length} fingerprints to bucketed storage`);
       }
 
       seenFpCache = cache;
@@ -220,7 +220,7 @@ async function rememberFingerprint(fingerprint) {
     } catch (err) {
       // Quota or IO failure: keep the in-memory entry so this SW lifetime
       // still dedups, but surface the problem instead of failing silently.
-      console.error('[Open Brain Capture] Failed to persist fingerprint bucket', err);
+      console.error('[Daemonic Brain Capture] Failed to persist fingerprint bucket', err);
       sessionMetrics.lastError = `Fingerprint store write failed: ${err.message}`;
       persistSessionMetrics();
     }
@@ -247,7 +247,7 @@ async function refreshBadge() {
     const config = await OBConfig.getConfig();
     updateBadge(config);
   } catch (err) {
-    console.error('[Open Brain Capture] Failed to refresh badge', err);
+    console.error('[Daemonic Brain Capture] Failed to refresh badge', err);
   }
 }
 
@@ -767,7 +767,7 @@ async function ensureGeminiSyncAlarm() {
       chrome.alarms.create(GEMINI_SYNC_ALARM_NAME, { periodInMinutes: s.autoSyncIntervalMinutes || 240 });
     }
   } catch (err) {
-    console.error('[Open Brain Capture] ensureGeminiSyncAlarm failed', err);
+    console.error('[Daemonic Brain Capture] ensureGeminiSyncAlarm failed', err);
   }
 }
 
@@ -882,7 +882,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RETRY_ALARM_NAME) {
     processRetryQueue(false).catch((error) => {
-      console.error('[Open Brain Capture] Retry queue processing failed', error);
+      console.error('[Daemonic Brain Capture] Retry queue processing failed', error);
     });
   }
   if (alarm.name === SYNC_ALARM_NAME) {
@@ -890,9 +890,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       captureHandler: processCaptureRequest,
       onProgress: null
     }).then((result) => {
-      console.log(`[Open Brain Capture] Claude auto-sync complete: ${result.synced} synced, ${result.skipped} skipped, ${result.errors} errors`);
+      console.log(`[Daemonic Brain Capture] Claude auto-sync complete: ${result.synced} synced, ${result.skipped} skipped, ${result.errors} errors`);
     }).catch((error) => {
-      console.error('[Open Brain Capture] Claude auto-sync failed', error);
+      console.error('[Daemonic Brain Capture] Claude auto-sync failed', error);
     });
   }
   if (alarm.name === CHATGPT_SYNC_ALARM_NAME) {
@@ -900,14 +900,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       captureHandler: processCaptureRequest,
       onProgress: null
     }).then((result) => {
-      console.log(`[Open Brain Capture] ChatGPT auto-sync complete: ${result.synced} synced, ${result.skipped} skipped, ${result.errors} errors`);
+      console.log(`[Daemonic Brain Capture] ChatGPT auto-sync complete: ${result.synced} synced, ${result.skipped} skipped, ${result.errors} errors`);
     }).catch((error) => {
-      console.error('[Open Brain Capture] ChatGPT auto-sync failed', error);
+      console.error('[Daemonic Brain Capture] ChatGPT auto-sync failed', error);
     });
   }
   if (alarm.name === GEMINI_SYNC_ALARM_NAME) {
     if (!self.OBGeminiSync || typeof self.OBGeminiSync.syncIncremental !== 'function') {
-      console.warn('[Open Brain Capture] Gemini auto-sync fired but OBGeminiSync is unavailable');
+      console.warn('[Daemonic Brain Capture] Gemini auto-sync fired but OBGeminiSync is unavailable');
       return;
     }
     // If the previous run is paused on a Google challenge (state=canceled
@@ -920,14 +920,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         const status = await self.OBGeminiSync.getStatus();
         const s = status && status.status;
         if (s && s.state === 'canceled' && Number(s.pending) > 0) {
-          console.log('[Open Brain Capture] Gemini auto-sync skipped: previous run paused (resume from popup)');
+          console.log('[Daemonic Brain Capture] Gemini auto-sync skipped: previous run paused (resume from popup)');
           return;
         }
         const result = await self.OBGeminiSync.syncIncremental({ trigger: 'alarm' });
-        console.log(`[Open Brain Capture] Gemini auto-sync complete:`,
+        console.log(`[Daemonic Brain Capture] Gemini auto-sync complete:`,
           result && (result.message || `captured=${result.totals?.captured || 0} completed=${result.completed || 0}`));
       } catch (error) {
-        console.error('[Open Brain Capture] Gemini auto-sync failed', error);
+        console.error('[Daemonic Brain Capture] Gemini auto-sync failed', error);
       }
     })();
   }
@@ -950,7 +950,7 @@ chrome.runtime.onInstalled.addListener((details) => {
     if (!OBConfig.isConfigured(config)) {
       chrome.tabs.create({ url: chrome.runtime.getURL('popup/config.html') });
     }
-  }).catch((err) => console.error('[Open Brain Capture] Install config check failed', err));
+  }).catch((err) => console.error('[Daemonic Brain Capture] Install config check failed', err));
 });
 
 // Rehydrate metrics (and repaint the badge) on every service-worker wake,

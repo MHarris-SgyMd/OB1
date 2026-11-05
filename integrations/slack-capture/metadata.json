@@ -1,6 +1,6 @@
 {
   "name": "Slack Capture",
-  "description": "Add Slack as a quick-capture interface for your Open Brain. Type thoughts in a channel, automatically embedded and stored.",
+  "description": "Add Slack as a quick-capture interface for your brain. Type thoughts in a channel, automatically embedded and stored.",
   "category": "integrations",
   "author": {
     "name": "Nate B. Jones",

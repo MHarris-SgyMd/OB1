@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini durable history capture via chrome.debugger
+ * Daemonic Brain Capture — Gemini durable history capture via chrome.debugger
  *
  * Phase B: attach chrome.debugger to https://gemini.google.com/* tabs, watch
  * for the batchexecute `rpcids=hNvQHb` request/response (Gemini's internal

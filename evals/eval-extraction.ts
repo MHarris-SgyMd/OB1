@@ -2,7 +2,7 @@
 /**
  * eval-meta.ts — score the metadata-extraction model on the task it actually does.
  *
- * This is the second call OB1 makes per capture, and its output is not decoration:
+ * This is the second call Daemonic Brain makes per capture, and its output is not decoration:
  * `type` drives list_thoughts filtering, `people` and `topics` drive the stats
  * tallies, `dates_mentioned` and `action_items` are what someone scans a week
  * later. Getting it wrong is not a crash — it is a brain that quietly cannot find
