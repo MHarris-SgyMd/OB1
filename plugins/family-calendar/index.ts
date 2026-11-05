@@ -48,9 +48,12 @@ const ADDS = { destructiveHint: false, openWorldHint: false } as const;
 /** A row's answer as the migration's views build it (activity_rows, important_date_rows): one jsonb object, the shape the output declares. */
 type Answer<T> = { answer: T };
 
-/** A one-time date as the open item it stands for: its title, due that day, its member (by name) the owner, or none for the whole family's. */
+/**
+ * A one-time date as the open item it stands for: its title, due that day, its member (by name) the owner. A whole
+ * family's date names no owner, so one a key gave its item is kept (review pass 1: a sync cleared it).
+ */
 const dateItem = (d: { id: string; title: string; date_value: string; family_member: { name: string } | null }): RowItem => ({
-  row: d.id, text: d.title, due: d.date_value, owner: d.family_member?.name ?? null,
+  row: d.id, text: d.title, due: d.date_value, ...(d.family_member ? { owner: d.family_member.name } : {}),
 });
 
 /** Whether a member is there: an activity or a date may name only one that is, and a read filters by one that is. */
@@ -346,7 +349,8 @@ export default definePlugin({
         for (const { answer: d } of dates) {
           const kept = await keepRowItem(ctx, dateItem(d));
           if (kept.did === "failed") failed.push({ important_date_id: d.id, code: kept.code });
-          else if (kept.did !== "settled") tally[kept.did]++;
+          // A date is never done and never comes round, so its item is neither settled nor reopened here.
+          else if (kept.did !== "settled" && kept.did !== "reopened") tally[kept.did]++;
         }
         return ok({ ...tally, failed });
       },

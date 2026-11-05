@@ -26,6 +26,7 @@ import { PLUGINS as REGISTRY } from "../plugins/registry.ts";
 import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/index.ts";
 import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { keepRowItem } from "./plugin-sdk.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -492,15 +493,16 @@ console.log("\n[family-calendar] its members, activities and dates");
   const [{ id: directPast }] = (await sql`INSERT INTO plugin_family_calendar.important_dates (title, date_value) VALUES ('Direct past deadline', ${await fromToday(-9)}::date) RETURNING id::text`) as { id: string }[];
   await sql`UPDATE plugin_family_calendar.important_dates SET title = 'Insurance renewal (home)' WHERE id = ${String(renewal.body.important_date?.id)}::uuid`;
   const dropped = await rest("POST", `/v1/items/${formItem?.id}/status`, { status: "dropped", reason: "the school sent it home" }, KEYS.writer);
+  const assigned = await rest("PATCH", `/v1/items/${renewalItem?.id}`, { owner: "Sam" }, KEYS.writer);
   await sql`UPDATE plugin_family_calendar.important_dates SET title = 'Ada''s school form, signed' WHERE id = ${String(form.body.important_date?.id)}::uuid`;
   const sync = await c("sync_open_items", {});
   dateItems = await itemsOf(P);
   const live = [...dateItems.values()].filter((i) => i.status !== "dropped").length;
   assert(sync.status === 200 && dropped.status === 200 && sync.body.opened === 1 && sync.body.updated === 1 && JSON.stringify(sync.body.failed) === "[]"
          && dueOn(dateItems.get(direct), await fromToday(9)) && dateItems.get(direct)?.status === "proposed" && !dateItems.has(directPast)
-         && dateItems.get(String(renewal.body.important_date?.id))?.text === "Insurance renewal (home)"
+         && dateItems.get(String(renewal.body.important_date?.id))?.text === "Insurance renewal (home)" && assigned.status === 200 && dateItems.get(String(renewal.body.important_date?.id))?.owner === "Sam"
          && dateItems.get(String(form.body.important_date?.id))?.status === "dropped" && dateItems.get(String(form.body.important_date?.id))?.text === "Ada's school form",
-    `sync_open_items opens the item of a date written past the operations, none for a past one, moves a changed title onto its item, and leaves a dropped item as it was dropped (${JSON.stringify(sync.body)} | ${live} live)`);
+    `sync_open_items opens the item of a date written past the operations, none for a past one, moves a changed title onto its item keeping the owner a key gave a whole family's date (review pass 1), and leaves a dropped item as it was dropped (${JSON.stringify(sync.body)} | ${live} live)`);
   const again = await c("sync_open_items", {}, { door: "mcp" });
   assert(again.status === 200 && again.body.opened === 0 && again.body.updated === 0 && again.body.unchanged === sync.body.opened + sync.body.updated + sync.body.unchanged && JSON.stringify(again.body.failed) === "[]",
     `…run again, it opens and moves nothing (${JSON.stringify(again.body)})`);
@@ -744,16 +746,26 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   const filterItem = taskItems.get(ids.filter);
   const droppedTask = await rest("POST", `/v1/items/${filterItem?.id}/status`, { status: "dropped", reason: "a fridge filter now" }, KEYS.writer);
   await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET next_due = ${await dayFromToday(44)}::date WHERE id = ${ids.filter}::uuid`;
+  const saltItem = taskItems.get(String(salt.body.task?.id));
+  const saltDone = await rest("POST", `/v1/items/${saltItem?.id}/status`, { status: "done", reason: "topped up" }, KEYS.writer);
   const synced = await c("sync_open_items", {});
   taskItems = await itemsOf(P);
   assert(synced.status === 200 && droppedTask.status === 200 && synced.body.opened === 1 && synced.body.updated === 1 && synced.body.settled === 1 && JSON.stringify(synced.body.failed) === "[]" && synced.body.items_truncated === false
+         && saltDone.status === 200 && synced.body.reopened === 1 && taskItems.get(String(salt.body.task?.id))?.status === "open"
          && taskItems.get(directTask)?.status === "proposed" && dueOn(taskItems.get(directTask), await dayFromToday(3)) && !taskItems.has(directDone)
          && taskItems.get(String(fromYesterday.body.task?.id))?.text === "Dryer vent and lint trap" && taskItems.get(sweep)?.status === "done"
          && taskItems.get(ids.filter)?.status === "dropped" && dueOn(taskItems.get(ids.filter), await dayFromToday(30)),
-    `sync_open_items opens a task's item written past the operations, none for a done task with none, moves a renamed task's text, settles a done one-time task's live item, and leaves a dropped item as it was (${JSON.stringify(synced.body)})`);
+    `sync_open_items opens a task's item written past the operations, none for a done task with none, moves a renamed task's text, settles a done one-time task's live item, reopens a recurring task's item a key settled done (review pass 1), and leaves a dropped item as it was (${JSON.stringify(synced.body)})`);
   const resynced = await c("sync_open_items", {}, { door: "mcp" });
-  assert(resynced.status === 200 && resynced.body.opened === 0 && resynced.body.updated === 0 && resynced.body.settled === 0 && JSON.stringify(resynced.body.failed) === "[]",
-    `…run again, it opens, moves and settles nothing (${JSON.stringify(resynced.body)})`);
+  assert(resynced.status === 200 && resynced.body.opened === 0 && resynced.body.updated === 0 && resynced.body.settled === 0 && resynced.body.reopened === 0 && JSON.stringify(resynced.body.failed) === "[]",
+    `…run again, it opens, moves, settles and reopens nothing (${JSON.stringify(resynced.body)})`);
+  // A recurring task's item a key settled done is reopened by its next log too, at its new due day (review pass 1).
+  const hingeItem = taskItems.get(hinge);
+  await rest("POST", `/v1/items/${hingeItem?.id}/status`, { status: "done", reason: "oiled it" }, KEYS.writer);
+  const hingeLog = await c("log_maintenance", { task_id: hinge, completed_on: utcToday });
+  const hingeAfter = (await itemsOf(P)).get(hinge);
+  assert(hingeLog.body.item?.status === "open" && hingeAfter?.status === "open" && dueOn(hingeAfter, await dayFromToday(30)),
+    `…and a log of a recurring task reopens its item a key settled done, at its new due day (${JSON.stringify(hingeLog.body.item)} ${hingeAfter?.dueAt})`);
 
   // Two logs at once, forced to race: a row lock held around both (FOR NO KEY UPDATE, which the logs' foreign-key
   // checks pass) stops each at its UPDATE after its statement has taken its snapshot, the newer queued first. Released,
@@ -791,6 +803,49 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
     if (!(newerWaits && bothWait && newerDone.status === 200 && olderDone.status === 200 && after.last === newerDay)) raceLost.push(`round ${round}: ${newerWaits}/${bothWait} ${newerDone.status}/${olderDone.status} kept ${after.last}, newer ${newerDay}`);
   }
   assert(raceLost.length === 0, `two logs at once, both waiting on a held row and released together, ten rounds: the task keeps the newer day every time (${raceLost.join("; ") || "every round"})`);
+}
+
+// ── keepRowItem against a stub core (SMD-3665 PR 3b) ─────────────────────────
+
+console.log("\n[keepRowItem] a row's item through a stub core: a refusal or a fault answered failed, never thrown; a dropped item untouched; a done one reopened only for a row that comes round");
+{
+  type Answer = unknown;
+  /** A ctx whose core answers each call by name, in turn, from `script` (an Error is thrown); the calls made, by name. */
+  const stub = (script: Record<string, Answer[]>) => {
+    const calls: string[] = [];
+    const ctx = { call: async (name: string) => { calls.push(name); const a = script[name]?.shift(); if (a instanceof Error) throw a; return a; } };
+    return { calls, ctx: ctx as unknown as Parameters<typeof keepRowItem>[0] };
+  };
+  const itemAs = (status: string, dueAt: string | null = null) => ({ id: "item-1", status, text: "Mow", owner: null, dueAt });
+  const okAs = (outcome: string, item: unknown) => ({ ok: true, value: { outcome, item } });
+  const refused = (code: string) => ({ ok: false, refusal: { code } });
+
+  const a = stub({ open_item: [refused("ITEM_UNATTRIBUTED")] });
+  const aKept = await keepRowItem(a.ctx, { row: "r", text: "Mow", due: null });
+  const b = stub({ open_item: [new Error("the store is away")] });
+  const realError = console.error;
+  console.error = () => {};
+  // A throw out of keepRowItem would fail the plugin's write after its commit: caught here, so it fails this row alone.
+  const bKept = await keepRowItem(b.ctx, { row: "r", text: "Mow", due: null }).catch((e: unknown) => ({ did: "threw", code: String(e), item: null })).finally(() => (console.error = realError));
+  assert(aKept.did === "failed" && aKept.code === "ITEM_UNATTRIBUTED" && aKept.item === null && a.calls.join() === "open_item"
+         && bKept.did === "failed" && bKept.code === "fault" && bKept.item === null,
+    `a refusal is answered failed with its code, a throw failed as a fault, neither thrown (${JSON.stringify([aKept, bKept])})`);
+  const c1 = stub({ open_item: [okAs("unchanged", itemAs("dropped"))] });
+  const c1Kept = await keepRowItem(c1.ctx, { row: "r", text: "Mow the lawn", due: "2030-01-01", reopenDone: { reason: "again" } });
+  const d = stub({ open_item: [okAs("unchanged", itemAs("done"))] });
+  const dKept = await keepRowItem(d.ctx, { row: "r", text: "Mow the lawn", due: "2030-01-01" });
+  assert(c1Kept.did === "unchanged" && c1.calls.join() === "open_item" && dKept.did === "unchanged" && d.calls.join() === "open_item",
+    `a dropped item is left as it is, even for a row that comes round, and a done one for a row that does not: no call past open_item (${c1.calls} | ${d.calls})`);
+  const e = stub({ open_item: [okAs("unchanged", itemAs("done", "2029-12-01T00:00:00.000Z"))], set_item_status: [okAs("changed", itemAs("open", "2029-12-01T00:00:00.000Z"))], update_item: [okAs("updated", itemAs("open", "2030-01-01T00:00:00.000Z"))] });
+  const eKept = await keepRowItem(e.ctx, { row: "r", text: "Mow", due: "2030-01-01", reopenDone: { reason: "again" } });
+  const f = stub({ open_item: [okAs("unchanged", itemAs("proposed", "2029-12-01T00:00:00.000Z"))], update_item: [refused("ITEM_NOT_FOUND")] });
+  const fKept = await keepRowItem(f.ctx, { row: "r", text: "Mow", due: "2030-01-01" });
+  const g = stub({ open_item: [okAs("unchanged", itemAs("proposed", "2029-12-01T00:00:00.000Z"))], set_item_status: [okAs("changed", itemAs("done", "2029-12-01T00:00:00.000Z"))] });
+  const gKept = await keepRowItem(g.ctx, { row: "r", text: "Mow", due: null, done: { reason: "logged" } });
+  assert(eKept.did === "reopened" && eKept.item?.status === "open" && e.calls.join() === "open_item,set_item_status,update_item"
+         && fKept.did === "failed" && fKept.code === "ITEM_NOT_FOUND" && f.calls.join() === "open_item,update_item"
+         && gKept.did === "settled" && g.calls.join() === "open_item,set_item_status",
+    `a row that comes round reopens a done item, then moves its due day; an update refused is failed; a done row settles its item and leaves its due day (${JSON.stringify([eKept, fKept, gKept])} | ${e.calls} | ${g.calls})`);
 }
 
 // ── plugins/household-knowledge ──────────────────────────────────────────────

@@ -40,9 +40,14 @@ type Answer<T> = { answer: T };
 const noSuchTask = (task_id: string) =>
   refuse(404, "NO_SUCH_TASK", { task_id, message: "no maintenance task has this id: list_maintenance_tasks gives each task's id, and add_maintenance_task adds one" });
 
-/** A task as the open item it stands for: its name, due at its next_due, settled done once a one-time task's work is logged. */
-const taskItem = (t: { id: string; name: string; next_due: string | null; done: boolean; last_completed: string | null }): RowItem => ({
-  row: t.id, text: t.name, due: t.next_due, ...(t.done ? { done: { reason: `home-maintenance: work logged on ${t.last_completed}` } } : {}),
+/**
+ * A task as the open item it stands for: its name, due at its next_due, settled done once a one-time task's work is
+ * logged. A recurring task comes round again: its item, settled done by a key, is reopened at its next due day.
+ */
+const taskItem = (t: { id: string; name: string; frequency_days: number | null; next_due: string | null; done: boolean; last_completed: string | null }): RowItem => ({
+  row: t.id, text: t.name, due: t.next_due,
+  ...(t.done ? { done: { reason: `home-maintenance: work logged on ${t.last_completed}` } } : {}),
+  ...(t.frequency_days !== null ? { reopenDone: { reason: `home-maintenance: a recurring task, due again on ${t.next_due}` } } : {}),
 });
 
 /** Whether a task is there. */
@@ -264,14 +269,14 @@ export default definePlugin({
     }),
     sync_open_items: operation({
       title: "Keep the tasks' open items",
-      description: "Keeps every task's open item in the brain as add_maintenance_task and log_maintenance do: opens the item of a task that has none (proposed), moves an item's text or due day to its task's, and settles done the item of a one-time task whose work is logged. A done task with no live item opens none, and an item a key dropped or settled is left so. Safe to run again; run it once after turning on items (SMD-3665), and after an add or a log whose item came back null. Answers how many items it opened, updated, settled and left unchanged, each task whose item the brain refused with its code, and items_truncated when more than 1000 live items were read (run it again).",
+      description: "Keeps every task's open item in the brain as add_maintenance_task and log_maintenance do: opens the item of a task that has none (proposed), moves an item's text or due day to its task's, settles done the item of a one-time task whose work is logged, and reopens a recurring task's item a key settled done, since the task comes round again. A done task with no live item opens none, and an item a key dropped is left so. Safe to run again; run it once after turning on items (SMD-3665), and after an add or a log whose item came back null. Answers how many items it opened, updated, settled, reopened and left unchanged, and each task whose item the brain refused with its code. items_truncated: the brain held more than 1000 live items of this plugin's, so a done one-time task's item past them may be left live.",
       scope: "write",
       annotations: { ...ADDS, idempotentHint: true },
       method: "POST",
       path: "/items/sync",
       input: {},
       output: {
-        opened: z.number().int(), updated: z.number().int(), settled: z.number().int(), unchanged: z.number().int(),
+        opened: z.number().int(), updated: z.number().int(), settled: z.number().int(), reopened: z.number().int(), unchanged: z.number().int(),
         failed: z.array(z.object({ task_id: z.string(), code: z.string() })), items_truncated: z.boolean(),
       },
       async handler(ctx) {
@@ -280,7 +285,7 @@ export default definePlugin({
         const live = await ctx.call("list_items", { plugin: "home-maintenance", status: "unsettled", limit: 1000 });
         if (!live.ok) return refuse(409, "ITEMS_UNREADABLE", { cause: live.refusal.code, message: `the brain's open items could not be read (${live.refusal.code}); nothing was kept` });
         const liveRows = new Set(live.value.items.map((i) => i.plugin?.row).filter((r): r is string => typeof r === "string"));
-        const tally = { opened: 0, updated: 0, settled: 0, unchanged: 0 };
+        const tally = { opened: 0, updated: 0, settled: 0, reopened: 0, unchanged: 0 };
         const failed: { task_id: string; code: string }[] = [];
         for (const { answer: t } of tasks) {
           if (t.done && !liveRows.has(t.id)) continue;
