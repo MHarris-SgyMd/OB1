@@ -1784,7 +1784,7 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
     `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
 }
 
-console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, noted at its capture time; a re-capture opens none; a capture key's own; at most 20, distinct; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts holding no item yet, classifying a new key an agent and leaving a known one, no thought's metadata changed, and a second run opens nothing");
+console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, noted at its capture time; a re-capture opens none; a capture key's own; at most 20, distinct; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts holding no item yet, classifying a new key an agent and stopping for a known one with no kind, no thought's metadata changed, and a second run opens nothing");
 {
   type I = { id: string; status: string; text: string; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null; trust: string | null } };
   const listed = async (thought: string, key?: string) => ((await rest("GET", `/v1/items?status=all&origin_thought=${thought}`, undefined, key)).body.items ?? []) as I[];
@@ -1819,6 +1819,8 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   // re-capture's rewording would have been opened beside the item its capture proposed).
   const b3 = await raw("rho backfill: a third ticket", ["fold the laundry tonight"]);
   const b3Own = await rest("POST", "/v1/items", { text: "fold the laundry", origin_thought: b3 });
+  // A thought holding no text 117 would take is never taken (review pass 2: it opened nothing and was taken again by every run).
+  await raw("rho backfill: a ticket of one long line", ["z".repeat(1100)]);
   const meta = async () => JSON.stringify(await sql`SELECT id, metadata, updated_at::text AS u FROM thoughts WHERE id IN (${b1}::uuid, ${b2}::uuid) ORDER BY id`);
   const itemCount = async () => Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
   const before = await meta(), itemsBefore = await itemCount();
@@ -1834,19 +1836,24 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   const kind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'backfill-open-items'`)[0] as { kind?: string } | undefined)?.kind;
   const b3Items = await listed(b3);
   const second = await run();
-  // A key the registry knows with no kind is the operator's to classify: left as it is, and said.
+  // A key the registry knows with no kind is the operator's to classify: the run stops before writing, its dry run too
+  // (review pass 2: its items stood with no trust for good, the thoughts passed over once classified).
   await sql`INSERT INTO ob1_agents (label) VALUES ('rho-unkinded')`;
+  const b4 = await raw("rho backfill: a fourth ticket", ["mend the fence"]);
+  const unkindedDry = await run("--as", "rho-unkinded", "--dry-run");
   const unkinded = await run("--as", "rho-unkinded");
+  const b4Items = await listed(b4);
   const unkindedKind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'rho-unkinded'`)[0] as { kind: string | null }).kind;
   assert(dry.code === 0 && /dry run: nothing written/.test(dry.out) && /^2 thoughts with no item yet hold 2 action items to open; 2 past 1000 characters/m.test(dry.out) && itemsAfterDry === itemsBefore,
     `the dry run counts what it would open — two, on two thoughts, the third holding an item already, the two long ones (one past 4000 before cleaning) left out — and writes nothing (${dry.code} ${dry.out.trim().replace(/\n/g, " | ")} ${dry.err.trim()})`);
   assert(real.code === 0 && /opened 2,/.test(real.out) && b1Items.length === 1 && b1Items[0].text === "water the ferns" && b1Items[0].status === "proposed" && b1Items[0].openedBy.name === "backfill-open-items"
       && b1Items[0].openedBy.trust === "agent" && b2Items.length === 1 && kind === "agent" && (await meta()) === before
       && b3Own.status === 200 && b3Items.length === 1 && b3Items[0].text === "fold the laundry"
-      && second.code === 0 && /^0 thoughts with no item yet/m.test(second.out) && /opened 0, 0 already items/.test(second.out),
+      && second.code === 0 && /^0 thoughts with no item yet hold 0 action items to open; 0 past 1000 characters/m.test(second.out) && /opened 0, 0 already items/.test(second.out),
     `the backfill opens the two as proposed from their thoughts, its key classified an agent, no thought's metadata or updated_at moved, the thought with an item passed over; a second run takes nothing (${real.out.trim().replace(/\n/g, " | ")} ${real.err.trim()} | ${b3Items.map((i) => i.text)} | ${second.out.trim().replace(/\n/g, " | ")})`);
-  assert(unkinded.code === 0 && /rho-unkinded: the registry knows this key with no kind/.test(unkinded.out) && unkindedKind === null,
-    `a key the registry knows with no kind is left unclassified, and said (${unkinded.out.trim().replace(/\n/g, " | ")} ${unkinded.err.trim()} | ${unkindedKind})`);
+  assert(unkinded.code === 1 && /rho-unkinded: the registry knows this key with no kind/.test(unkinded.err) && unkindedKind === null && b4Items.length === 0
+      && unkindedDry.code === 1 && /the registry knows this key with no kind/.test(unkindedDry.err) && !/dry run: nothing written/.test(unkindedDry.out),
+    `a key the registry knows with no kind is left unclassified and stops the run before it writes, its dry run too (${unkinded.code} ${unkinded.err.trim()} | ${unkindedKind} | ${b4Items.length} | ${unkindedDry.code} ${unkindedDry.out.trim().replace(/\n/g, " | ")})`);
 }
 
 apiServer.stop();

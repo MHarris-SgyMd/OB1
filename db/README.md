@@ -2488,7 +2488,9 @@ server-portable/README.md, Open items); node_state's open-item kind is SMD-3667'
 `open_item`, for each distinct non-blank string in a thought's
 `metadata.action_items`, from that thought (so it is noted at the thought's capture
 time) and by the key `--as` names (default `backfill-open-items`; a name the
-registry has never seen is classified an agent, a key it knows is left as it is):
+registry has never seen is classified an agent, a key it knows is left as it is, and
+one it knows with no kind stops the run before it writes, since an item's trust is
+stamped as it opens):
 
 ```bash
 bun backfill-open-items.ts --url … --dry-run     # counts what it would open; writes nothing

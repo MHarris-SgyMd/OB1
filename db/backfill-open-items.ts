@@ -26,12 +26,13 @@
  *   --dry-run        count the thoughts and items it would open, and write nothing
  *   --as NAME        the opener's key name (default backfill-open-items); a name the
  *                    registry has never seen is classified agent, so its items stand at
- *                    agent trust (the ticket's word); a key it knows is left as it is
+ *                    agent trust (the ticket's word); a key it knows is left as it is,
+ *                    and one it knows with no kind stops the run (classify it first)
  *   --limit N        at most N thoughts (default all), in id order
  *   --per-thought N  at most N items from one thought (default 20, capture's own cap)
  *
- * Exits 0 done, 1 when the brain lacks migration 117 or an item could not be
- * opened (each named, the rest still opened), 2 for a flag it does not take.
+ * Exits 0 done, 1 when the brain lacks migration 117, --as names a key the
+ * registry knows with no kind, or an item could not be opened (each named, the rest still opened), 2 for a flag it does not take.
  */
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
@@ -55,16 +56,19 @@ try {
 
   // A thought is proposed from once, as a capture proposes once (review pass 1: a re-capture rewords its action items,
   // and proposing again would open near-duplicates): the thoughts holding action items and no item read from them
-  // yet, in id order, so --limit works through them batch by batch. Each thought's strings as 117 will read them —
-  // ob1_work_claim_text cleans — and one past 4000 characters is counted too long before any cleaning (review pass
-  // 1: a megabyte's string made the cleaning raise and the whole query fail).
+  // yet, in id order, so --limit works through them batch by batch — and only those holding a text 117 would take
+  // (review pass 2: a thought of over-long strings alone opened nothing and was taken again by every run). Each
+  // thought's strings as 117 will read them — ob1_work_claim_text cleans — and one past 4000 characters is counted
+  // too long before any cleaning (review pass 1: a megabyte's string made the cleaning raise and the whole query fail).
   const rows = await sql`
     WITH t AS (
       SELECT th.id, th.metadata FROM thoughts th
        WHERE jsonb_typeof(th.metadata->'action_items') = 'array' AND jsonb_array_length(th.metadata->'action_items') > 0
          AND NOT EXISTS (SELECT 1 FROM open_items i WHERE i.origin_thought_id = th.id)
          AND EXISTS (SELECT 1 FROM jsonb_array_elements(th.metadata->'action_items') v
-                      WHERE jsonb_typeof(v) = 'string' AND btrim(v #>> '{}') <> '')
+                      WHERE jsonb_typeof(v) = 'string'
+                        AND CASE WHEN length(v #>> '{}') <= 4000
+                                 THEN length(ob1_work_claim_text(v #>> '{}', 4000, 'an action item')) <= 1000 END)
        ORDER BY th.id
        LIMIT ${limit || null}::bigint),
     e AS (
@@ -97,20 +101,25 @@ try {
   }
   const thoughts = perCount.size;
   console.log(`${thoughts} thoughts with no item yet hold ${plan.length} action items to open; ${tooLong} past 1000 characters and ${capped} past ${perThought} on one thought left out`);
+
+  // The opener: a name the registry has never seen is made an agent's (set_agent_kind, 046), so its items stand at
+  // agent trust. A key the registry knows is the operator's to classify (CLAUDE.md, Keys), never this script's
+  // (review pass 1). One it knows with no kind stops the run before anything is written, the dry run's included: an
+  // item's trust is stamped as it opens, and a run after the key is classified passes its thoughts over (review
+  // pass 2: they stood with no trust for good).
+  const [known] = await sql`SELECT kind FROM ob1_agents WHERE label = ${as}` as { kind: string | null }[];
+  if (known && !known.kind) {
+    console.error(`${as}: the registry knows this key with no kind, and an item's trust is stamped as it opens; classify it first (SELECT set_agent_kind('${as}', 'agent')) or name another key with --as`);
+    process.exit(1);
+  }
   if (dryRun) {
+    console.log(known ? `${as}: opens at ${known.kind} trust` : `${as}: a new name, to be classified agent`);
     console.log("dry run: nothing written");
     process.exit(0);
   }
-
-  // The opener: a name the registry has never seen is made an agent's (set_agent_kind, 046), so its items stand at
-  // agent trust. A key the registry knows is the operator's to classify (CLAUDE.md, Keys): left as it is, said when
-  // it has no kind (review pass 1: an importer's or the operator's own key would have been made an agent's).
-  const [known] = await sql`SELECT kind FROM ob1_agents WHERE label = ${as}` as { kind: string | null }[];
   if (!known) {
     await sql`SELECT set_agent_kind(${as}, 'agent')`;
     console.log(`${as}: a new name, classified agent in the registry, so its items stand at agent trust`);
-  } else if (!known.kind) {
-    console.log(`${as}: the registry knows this key with no kind, so its items stand with no trust; classify it (SELECT set_agent_kind('${as}', 'agent')) and run again for nothing, or leave it`);
   }
   const envelope = { name: as, scope: "write" };
 

@@ -520,8 +520,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     }
     // The extractor's action items as proposed open items (SMD-3665 PR 3a), for a thought this capture wrote: a
     // re-capture's extraction may word them otherwise, and its first capture proposed them already. Never fails the
-    // capture.
-    if (captured.existed !== true) await proposeActionItems(ctx, principal, captured.id, metadata as Record<string, unknown>);
+    // capture. As the cite rows above, only when the store said the row is new (review pass 2: `!== true` read an
+    // absent flag as fresh); a thought it could not say is the backfill's.
+    if (captured.existed === false) await proposeActionItems(ctx, principal, captured.id, metadata as Record<string, unknown>);
 
     // What a key that cannot read may be told about the row: not whether
     // the text was already a thought, nor what it points at (first review
@@ -938,12 +939,12 @@ export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal,
 }
 
 /** At most this many items are proposed from one capture: an extraction listing more is reading a list, not to-dos. */
-export const MAX_PROPOSED_PER_CAPTURE = 20;
+const MAX_PROPOSED_PER_CAPTURE = 20;
 
 /** An action item as 117 will read it (115's ob1_work_claim_text: control characters made spaces, the soft hyphen,
  * zero-width space, word joiner and byte-order mark deleted, white space collapsed, trimmed). */
 const CLEANED_AWAY = new RegExp(`[${String.fromCharCode(0xad, 0x200b, 0x2060, 0xfeff)}]`, "g");
-export const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(CLEANED_AWAY, "").replace(/\s+/gu, " ").trim();
+const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(CLEANED_AWAY, "").replace(/\s+/gu, " ").trim();
 
 /**
  * The extractor's action items as proposed open items (SMD-3665 PR 3a): one per distinct string as 117 reads it
@@ -969,6 +970,7 @@ async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: str
     texts.push(text);
     if (texts.length === MAX_PROPOSED_PER_CAPTURE) break;
   }
+  if (texts.length === 0) return 0;
   let opened = 0;
   const store = await ctx.store();
   for (const text of texts) {
