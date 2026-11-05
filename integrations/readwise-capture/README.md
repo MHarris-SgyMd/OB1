@@ -19,7 +19,7 @@ Receives Readwise highlight webhooks and stores each highlight as a thought in y
 
 ## Cost
 
-Readwise webhooks are free (verified on their Free tier). The server uses the same OpenRouter credits from your main Open Brain setup — embeddings cost ~$0.02 per million tokens, so a typical highlight (~30 tokens) is a fraction of a cent. For 20 new highlights a day, expect roughly $0.01–0.05/month in API costs.
+Readwise webhooks are free (verified on their Free tier). The server uses the same OpenRouter credits from your main Daemonic Brain setup — embeddings cost ~$0.02 per million tokens, so a typical highlight (~30 tokens) is a fraction of a cent. For 20 new highlights a day, expect roughly $0.01–0.05/month in API costs.
 
 For one-shot backfill of your existing library (everything you've ever highlighted), use the [readwise-import recipe](../../recipes/readwise-import/) — the webhook only fires on highlights created after it's registered.
 
@@ -33,7 +33,7 @@ Copy this block into a text editor and fill it in as you go.
 READWISE CAPTURE -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   OpenRouter API key:    ____________
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
 

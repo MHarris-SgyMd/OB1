@@ -13,7 +13,7 @@ Adds Slack as a quick-capture interface for your brain. Type a thought in a Slac
 
 ## Cost
 
-Slack is free. The server uses the same OpenRouter credits from your main Open Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
+Slack is free. The server uses the same OpenRouter credits from your main Daemonic Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
 
 ---
 
@@ -25,7 +25,7 @@ Copy this block into a text editor and fill it in as you go.
 SLACK CAPTURE -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   OpenRouter API key:    ____________
 
 SLACK WORKSPACE INFO

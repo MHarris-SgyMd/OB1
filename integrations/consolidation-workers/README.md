@@ -214,4 +214,4 @@ consolidation-workers/
   README.md          # This file
 ```
 
-This is an optional enhancement — it is not required for the core Open Brain alpha path. Install it after the enhanced thoughts and knowledge graph schemas if you want automated thought quality improvement.
+This is an optional enhancement — it is not required for a working brain. Install it after the enhanced thoughts and knowledge graph schemas if you want automated thought quality improvement.

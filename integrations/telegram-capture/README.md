@@ -52,7 +52,7 @@ Fill these in as you go, you'll need all of them in Step 4:
 
 1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather).
 2. Send `/newbot`.
-3. Pick a display name, then a username. The username must end in `bot` (e.g. `my_open_brain_bot`).
+3. Pick a display name, then a username. The username must end in `bot` (e.g. `my_daemonic_brain_bot`).
 4. BotFather replies with a token shaped like `123456789:ABCdefGhIJKlmnoPQRstUVwxYZ`.
 5. Copy the token into your tracker as `TELEGRAM_BOT_TOKEN`.
 

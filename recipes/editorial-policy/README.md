@@ -47,7 +47,7 @@ Copy this block into a text editor and fill it in as you go.
 EDITORIAL POLICY + AUDITOR -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Postgres URL:              ____________  (SUPABASE_URL — the shim's name for it)
   OpenRouter API key:        ____________
   Slack bot token:           ____________

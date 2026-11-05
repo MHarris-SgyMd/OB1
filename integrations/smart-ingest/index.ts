@@ -42,7 +42,7 @@
  *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
  *   - append_thought_evidence(uuid, jsonb) RPC (from the smart-ingest schema)
  *   - match_thoughts RPC (base Daemonic Brain)
- *   - upsert_thought(text, jsonb, vector) RPC (base Daemonic Brain; db/migrations/004, last redefined by 046)
+ *   - upsert_thought(text, jsonb, vector) RPC (base Daemonic Brain; db/migrations/004, last redefined by 080)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
@@ -766,7 +766,7 @@ const withoutTrust = (m: Record<string, unknown> | null | undefined): Record<str
 
 /**
  * A capture through the 3-argument upsert_thought — Daemonic Brain's shape for every server (SMD-1228; db/migrations/004,
- * last redefined by 046): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
+ * last redefined by 080): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
  * envelope, and the enhanced-thoughts columns by an update carrying neither content nor vector, on a fresh row only —
  * a re-capture of text already there keeps that row's own (as the retired rest-api and enhanced-mcp did). Upstream's
  * 2-argument call put the vector inside the payload, where Daemonic Brain's function does not look: every thought this
