@@ -7,10 +7,12 @@
 // open item in the brain (SMD-3665 PR 3b), kept through the core as the
 // caller (keepRowItem): proposed when the task is added, due at its next_due,
 // moved on or settled done when work is logged, and sync_open_items keeps
-// every task's at once. Nothing else of the core's is reached.
+// every task's at once; its priority is stated on that item (SMD-3666 PR 3,
+// keepItemPriority), its default medium unknown unless the caller chose it.
+// Nothing else of the core's is reached.
 
-import { definePlugin, keepRowItem, ok, operation, refuse, RowItemAnswer, z } from "../../server-portable/plugin-sdk.ts";
-import type { PluginSql, RowItem } from "../../server-portable/plugin-sdk.ts";
+import { definePlugin, keepItemPriority, keepRowItem, ok, operation, refuse, RowItemAnswer, z } from "../../server-portable/plugin-sdk.ts";
+import type { PluginContext, PluginSql, RowItem } from "../../server-portable/plugin-sdk.ts";
 
 const PRIORITIES = ["low", "medium", "high", "urgent"] as const;
 /** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
@@ -50,6 +52,16 @@ const taskItem = (t: { id: string; name: string; frequency_days: number | null; 
   ...(t.frequency_days !== null ? { reopenDone: { reason: `home-maintenance: a recurring task, due again on ${t.next_due}` } } : {}),
 });
 
+/**
+ * A task's priority as its item states it (SMD-3666 PR 3): its word on home-maintenance's row of docs/priority.md's
+ * table, the column's default medium unknown unless the caller chose it (002's priority_chosen). On a live item
+ * alone: a settled one's priority would say nothing.
+ */
+async function keepTaskPriority(ctx: Pick<PluginContext, "call">, item: { id: string; status: string } | null, priority: string, chosen: boolean) {
+  if (!item || (item.status !== "proposed" && item.status !== "open")) return null;
+  return keepItemPriority(ctx, item.id, { scale: "home-maintenance", value: priority, chosen });
+}
+
 /** Whether a task is there. */
 async function taskExists(sql: PluginSql, id: string): Promise<boolean> {
   const [row] = await sql<{ n: number }>`SELECT count(*)::int AS n FROM maintenance_tasks WHERE id = ${id}`;
@@ -86,7 +98,7 @@ export default definePlugin({
   operations: {
     add_maintenance_task: operation({
       title: "Add a maintenance task",
-      description: "Adds a maintenance task and answers it with its id, which log_maintenance names it by. A recurring one gives frequency_days (90 for quarterly, 365 for yearly); without next_due it falls due frequency_days from today. If it was last done on a known day, log_maintenance that day after adding it, and its next_due follows from that day. A one-time one gives no frequency_days, and next_due if it has a date. list_maintenance_tasks lists every task, so check it first rather than adding one twice. The task is an open item in the brain too, answered as item: proposed, due at next_due, until a write key confirms it (set_item_status).",
+      description: "Adds a maintenance task and answers it with its id, which log_maintenance names it by. A recurring one gives frequency_days (90 for quarterly, 365 for yearly); without next_due it falls due frequency_days from today. If it was last done on a known day, log_maintenance that day after adding it, and its next_due follows from that day. A one-time one gives no frequency_days, and next_due if it has a date. list_maintenance_tasks lists every task, so check it first rather than adding one twice. The task is an open item in the brain too, answered as item: proposed, due at next_due, until a write key confirms it (set_item_status); its priority is stated on that item at your key's tier, a priority not given reading as unknown there (the task's own is medium).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -96,24 +108,28 @@ export default definePlugin({
         category: text(100).min(1).nullish().describe("Its kind: 'hvac', 'plumbing', 'exterior', 'appliance', 'landscaping', …"),
         frequency_days: z.number().int().min(1).max(3650).nullish().describe("How often it comes round, in days, 1 to 3650; leave it out for a one-time task"),
         next_due: Day.nullish().describe("The day it is next due, YYYY-MM-DD"),
-        priority: z.enum(PRIORITIES).default("medium").describe("How much it matters: low, medium (unless given), high or urgent"),
+        // Not defaulted here: whether it was given is what the brain is told (SMD-3666 PR 3); the row's default is SQL's.
+        priority: z.enum(PRIORITIES).optional().describe("How much it matters: low, medium, high or urgent; medium unless given, which the brain reads as unknown"),
         notes: text(5000).nullish().describe("Anything else worth keeping (the filter size, say)"),
         today: TodayInput,
       },
       output: { task: Task, item: RowItemAnswer.describe("The task's open item in the brain, proposed until a write key confirms it; null when the brain did not keep it, which sync_open_items repairs") },
       async handler(ctx, t) {
+        const chosen = t.priority !== undefined;
         const [row] = await ctx.db.tx(async (sql) => {
           const [{ id }] = await sql<{ id: string }>`
-            INSERT INTO maintenance_tasks (name, category, frequency_days, next_due, priority, notes)
+            INSERT INTO maintenance_tasks (name, category, frequency_days, next_due, priority, priority_chosen, notes)
             VALUES (${t.name}, ${t.category ?? null}, ${t.frequency_days ?? null}::int,
                     coalesce(${t.next_due ?? null}::date, coalesce(${t.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date) + ${t.frequency_days ?? null}::int),
-                    ${t.priority}, ${t.notes ?? null})
+                    ${t.priority ?? "medium"}, ${chosen}, ${t.notes ?? null})
             RETURNING id`;
           return sql<Answer<z.input<typeof Task>>>`
             SELECT answer || jsonb_build_object('days_until', next_due - coalesce(${t.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date)) AS answer
               FROM task_rows WHERE id = ${id}`;
         });
-        return ok({ task: row.answer, item: (await keepRowItem(ctx, taskItem(row.answer))).item });
+        const { item } = await keepRowItem(ctx, taskItem(row.answer));
+        await keepTaskPriority(ctx, item, row.answer.priority, chosen);
+        return ok({ task: row.answer, item });
       },
     }),
     list_maintenance_tasks: operation({
@@ -269,7 +285,7 @@ export default definePlugin({
     }),
     sync_open_items: operation({
       title: "Keep the tasks' open items",
-      description: "Keeps every task's open item in the brain as add_maintenance_task and log_maintenance do: opens the item of a task that has none (proposed), moves an item's text or due day to its task's, settles done the item of a one-time task whose work is logged, and reopens a recurring task's item a key settled done, since the task comes round again. A done task with no live item opens none, and an item a key dropped is left so. Safe to run again; run it once after turning on items (SMD-3665), and after an add or a log whose item came back null. Answers how many items it opened, updated, settled, reopened and left unchanged, and each task whose item the brain refused with its code. items_truncated: the brain held more than 1000 live items of this plugin's, so a done one-time task's item past them may be left live.",
+      description: "Keeps every task's open item in the brain as add_maintenance_task and log_maintenance do: opens the item of a task that has none (proposed), moves an item's text or due day to its task's, settles done the item of a one-time task whose work is logged, and reopens a recurring task's item a key settled done, since the task comes round again. A done task with no live item opens none, and an item a key dropped is left so. Safe to run again; run it once after turning on items (SMD-3665), and after an add or a log whose item came back null. States each live item's priority as add_maintenance_task does, at your key's tier: priorities_stated counts those written or cleared, the same again writing nothing. Answers how many items it opened, updated, settled, reopened and left unchanged, and each task whose item or priority the brain refused with its code. items_truncated: the brain held more than 1000 live items of this plugin's, so a done one-time task's item past them may be left live.",
       scope: "write",
       annotations: { ...ADDS, idempotentHint: true },
       method: "POST",
@@ -277,23 +293,28 @@ export default definePlugin({
       input: {},
       output: {
         opened: z.number().int(), updated: z.number().int(), settled: z.number().int(), reopened: z.number().int(), unchanged: z.number().int(),
+        priorities_stated: z.number().int(),
         failed: z.array(z.object({ task_id: z.string(), code: z.string() })), items_truncated: z.boolean(),
       },
       async handler(ctx) {
-        const tasks = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Task>>>`SELECT answer FROM task_rows ORDER BY created_at, id`);
+        const tasks = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Task>> & { priority_chosen: boolean }>`SELECT answer, priority_chosen FROM task_rows ORDER BY created_at, id`);
         // The tasks whose item is live (proposed or open): a done task's item is settled only if it has one.
         const live = await ctx.call("list_items", { plugin: "home-maintenance", status: "unsettled", limit: 1000 });
         if (!live.ok) return refuse(409, "ITEMS_UNREADABLE", { cause: live.refusal.code, message: `the brain's open items could not be read (${live.refusal.code}); nothing was kept` });
         const liveRows = new Set(live.value.items.flatMap((i) => (i.plugin ? [i.plugin.row] : [])));
         const tally = { opened: 0, updated: 0, settled: 0, reopened: 0, unchanged: 0 };
+        let prioritiesStated = 0;
         const failed: { task_id: string; code: string }[] = [];
-        for (const { answer: t } of tasks) {
+        for (const { answer: t, priority_chosen } of tasks) {
           if (t.done && !liveRows.has(t.id)) continue;
           const kept = await keepRowItem(ctx, taskItem(t));
-          if (kept.did === "failed") failed.push({ task_id: t.id, code: kept.code });
-          else tally[kept.did]++;
+          if (kept.did === "failed") { failed.push({ task_id: t.id, code: kept.code }); continue; }
+          tally[kept.did]++;
+          const said = await keepTaskPriority(ctx, kept.item, t.priority, priority_chosen);
+          if (said?.did === "failed") failed.push({ task_id: t.id, code: `priority ${said.code}` });
+          else if (said?.did === "asserted" || said?.did === "cleared") prioritiesStated++;
         }
-        return ok({ ...tally, failed, items_truncated: live.value.truncated });
+        return ok({ ...tally, priorities_stated: prioritiesStated, failed, items_truncated: live.value.truncated });
       },
     }),
   },

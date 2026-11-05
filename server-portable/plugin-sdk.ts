@@ -16,9 +16,10 @@ import type { CoreAnswer } from "./core/calls.ts";
 import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
 import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
+import { levelOf, reasonOf, type PriorityScale } from "./priority-scale.ts";
 
 export { z };
-export type { PluginSql };
+export type { PluginSql, PriorityScale };
 
 /** The scope an operation needs, as a core tool's group: read, capture, or write (a forwarder's key is no caller). */
 export type PluginScope = Exclude<Scope, "forward">;
@@ -492,6 +493,35 @@ export async function keepRowItem(ctx: Pick<PluginContext, "call">, want: RowIte
   } catch (err) {
     console.error(`keepRowItem: the item of row ${want.row} was not kept: ${err instanceof Error ? err.message : String(err)}`);
     return { did: "failed", code: "fault", item: null };
+  }
+}
+
+/** What a row says of how much it matters (SMD-3666): its own word on its source's scale, and whether it was chosen — a source's default, not chosen, is unknown. */
+export type RowPriority = { scale: PriorityScale; value: string | null; chosen?: boolean };
+
+/** What keepItemPriority did: 116's outcome, or `failed` with the core's refusal code (`fault` for a throw). */
+export type ItemPriorityKept = { did: "asserted" | "unchanged" | "cleared" | "nothing_to_clear" } | { did: "failed"; code: string };
+
+/**
+ * States a row's own priority on the open item it stands for (SMD-3666 PR 3), through the core as the caller:
+ * set_priority on `{kind: item, key}` with the row's word mapped onto the brain's scale (server-portable/
+ * priority-scale.ts, docs/priority.md's table) and that word as the reason, or clear_priority when the word reads as
+ * unknown (none, a word the scale does not hold, the source's default not chosen). The tier is the caller's key's
+ * (docs/priority.md, "A plugin"); the same again is `unchanged`, nothing written. The due time is the item's own
+ * (recurrence belongs to the item, not the statement), so none is stated. Called after the row's item is kept, and,
+ * as keepRowItem does, it never fails the plugin's write: a refusal or a fault is answered `failed`.
+ */
+export async function keepItemPriority(ctx: Pick<PluginContext, "call">, itemId: string, said: RowPriority): Promise<ItemPriorityKept> {
+  try {
+    const level = levelOf(said.scale, said.value, { chosen: said.chosen });
+    const r = level === null
+      ? await ctx.call("clear_priority", { kind: "item", key: itemId })
+      : await ctx.call("set_priority", { kind: "item", key: itemId, level, reason: reasonOf(said.scale, said.value!) });
+    if (!r.ok) return { did: "failed", code: r.refusal.code };
+    return { did: r.value.outcome };
+  } catch (err) {
+    console.error(`keepItemPriority: the priority of item ${itemId} was not kept: ${err instanceof Error ? err.message : String(err)}`);
+    return { did: "failed", code: "fault" };
   }
 }
 
