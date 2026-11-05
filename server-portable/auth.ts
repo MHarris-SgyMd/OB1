@@ -9,12 +9,13 @@
  * What changes, and why each matters here:
  *
  *   Scopes. The tools that write — `capture_thought`, and since changes 22 and 60
- *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five,
- *   and the vendored recipes' and integrations' likewise since change 67 — are
- *   registered only for a write-scoped key. A read-only key means a leaked
- *   ChatGPT connector URL cannot add or alter anything: read-only keys do not
- *   merely fail to write, the write tools are never registered for them, so they
- *   do not appear in tools/list at all.
+ *   `update_thought` and `delete_thought`, and twenty-four of the extensions'
+ *   forty-five until they became plugins (SMD-2311) — are registered only for a
+ *   write-scoped key. A read-only key means a leaked ChatGPT connector URL cannot
+ *   add or alter anything: read-only keys do not merely fail to write, the write
+ *   tools are never registered for them, so they do not appear in tools/list at
+ *   all. The vendored recipe and integration servers (change 67), HTTP routes
+ *   and workers alone since SMD-3747, refuse a read key's write with a 403.
  *
  *   A third scope, `capture` (SMD-1298), is the mirror image: `capture_thought`,
  *   `set_priority` and `clear_priority` on a thought the key captured (SMD-3664,

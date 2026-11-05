@@ -174,9 +174,12 @@ const COPIES = ["recipes/editorial-policy/_shared/auth.ts", "integrations/_share
     assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === core,
       `${copy} is byte-for-byte server-portable/auth.ts — \`bun run sync-auth\` here rewrites every copy`);
   }
-  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/_shared/{auth,sse}.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules")).sort();
+  const SHARED = new Bun.Glob("{extensions,recipes,integrations}/**/_shared/{auth,sse}.ts");
+  const inTree = [...SHARED.scanSync({ cwd: ROOT })].filter((f) => !f.includes("node_modules")).sort();
   assert(inTree.join() === [...COPIES].sort().join(), `every _shared/auth.ts in the tree is listed here and vice versa, and no _shared/sse.ts is left (${inTree.join(", ")})`);
+  const unread = ["extensions/_shared/auth.ts", "integrations/_shared/sse.ts", "recipes/x/_shared/sse.ts", "integrations/x/_shared/auth.ts"].filter((f) => !SHARED.match(f));
+  assert(unread.length === 0 && !SHARED.match("server-portable/auth.ts"),
+    `…and the scan reads either module in a _shared/ at any depth under the three directories, and nothing outside them (its own probe; unread: ${unread.join(", ") || "none"})`);
   const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)["sync-auth"] ?? "";
   const named = /^for d in ([\w./ -]+); do cp \.\.\/server-portable\/auth\.ts "\$d\/auth\.ts"; done$/.exec(sync);
   const dirs = COPIES.map((copy) => relative(HERE, join(ROOT, dirname(copy))).replace(/\\/g, "/")).sort();
@@ -829,12 +832,17 @@ for (const t of TEXT_ONLY) {
   // install is the MCP stack in devDependencies and nothing else, so anything more fails here rather than land as every
   // integration's pin; a package the suites themselves come to need is named in this check first.
   const FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundleDependencies", "bundledDependencies"];
-  const extra = FIELDS.flatMap((field) => {
-    const value = manifest[field] ?? {};
+  const extraIn = (m: Record<string, unknown>) => FIELDS.flatMap((field) => {
+    const value = (m[field] ?? {}) as Record<string, string> | string[];
     const names: string[] = Array.isArray(value) ? value : Object.keys(value);
     return names.filter((name) => field !== "devDependencies" || !STACK.includes(name)).map((name) => `${field}: ${name}`);
   });
+  const extra = extraIn(manifest);
   assert(extra.length === 0, `integrations/package.json installs the MCP stack in devDependencies and nothing else: a \`bun add\` in an integration folder with no package.json of its own writes here (${extra.join(", ") || "none"})`);
+  const passed = [{ dependencies: { hono: "1" } }, { devDependencies: { ms: "1" } }, { optionalDependencies: { ms: "1" } }, { peerDependencies: { ms: "1" } },
+    { bundleDependencies: ["ms"] }, { bundledDependencies: ["hono"] }].filter((m) => extraIn(m).length === 0);
+  assert(passed.length === 0 && extraIn({ devDependencies: Object.fromEntries(STACK.map((name) => [name, "1"])) }).length === 0,
+    `…and the rule reads a package in every dependency field, a stack name outside devDependencies among them, and passes the stack alone (its own probe; passed: ${passed.map((m) => JSON.stringify(m)).join(" | ") || "none"})`);
   const pkg = manifest.devDependencies as Record<string, string>;
   const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `integrations/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
