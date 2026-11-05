@@ -20,6 +20,7 @@
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { ProviderError, providerDown, refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
+import { modelCall } from "../server-portable/model-call.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
@@ -459,7 +460,13 @@ export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; wh
  * endpoint answers 503 (busy) or the model is still being pulled, so only the
  * call the pass makes says the pass can go on.
  */
-export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
+export function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
+  // Through the model-call seam (SMD-3379 PR 2a): a probe is one of the model server's calls too.
+  return modelCall({ type: "chat", model, base: endpoint.base, purpose: "probe", ...(wake ? { signal: wake } : {}) }, () => probeExchange(endpoint, model, timeoutMs, wake));
+}
+
+/** probeChat's call, once the seam lets it run: the one-token request and its answer read. */
+async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   let r: Response;
   try {
     r = await fetch(`${endpoint.base}/chat/completions`, {

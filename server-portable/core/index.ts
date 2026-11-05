@@ -25,6 +25,8 @@ export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from 
 export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
 /** How long a keyed /health takes at most, the registry's word on its key included: either server's (SMD-2287). */
 export { HEALTH_DEADLINE_MS } from "./reads.ts";
+// The REST core runs each request asLive, so its model calls count live (SMD-3379 PR 2a, model-call.ts).
+export { asLive } from "../model-call.ts";
 export { mendIntervalFrom, newMendState, type MendState } from "./mend.ts";
 export { reprobeIntervalFrom } from "../provider-health.ts";
 

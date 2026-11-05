@@ -34,6 +34,7 @@
 
 import { baseUrlOr, ProviderError, providerEndpoint, refuseEgress, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressEnv, type EgressPolicy, type EgressSubject } from "./egress.ts";
+import { modelCall } from "./model-call.ts";
 import {
   INSUFFICIENT_EVIDENCE,
   JEV_CONTRACT,
@@ -111,8 +112,17 @@ export function resolveJevConfig(env: JevEnv): JevConfig | null {
  */
 type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
 
-/** One exchange with the tier: the deadline, the status kept, the body capped in a message, the JSON parsed. */
-async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
+/**
+ * One exchange with the tier, through the model-call seam (SMD-3379 PR 2a): a decision, or the tier's /info, which
+ * asks no model but is still one of the tier's one-at-a-time requests.
+ */
+function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
+  return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
+    () => jevExchange<T>(cfg, method, path, body, opts));
+}
+
+/** exchange's request, once the seam lets it run: the deadline, the status kept, the body capped in a message, the JSON parsed. */
+async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
   const at = cfg.endpoint.base;
   const timeoutMs = opts.timeoutMs ?? cfg.timeoutMs;
   const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);

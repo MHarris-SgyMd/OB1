@@ -16,7 +16,7 @@ import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
 import { JWT_SHAPE, UNREACHABLE_RETRY_AFTER_SECONDS } from "../oauth-edge.ts";
 import type { TokenCheck } from "../oauth-token.ts";
-import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
+import { asLive, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -236,6 +236,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // every time, and an environment that will not seed is a 500 the
   // healthcheck itself reports. A keyed /health is a request like any other
   // (SMD-2287).
+  // Every model call a request makes is live (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
+  app.use("*", (_c, next) => asLive(() => next()));
   app.use("*", async (c, next) => {
     if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/health" && headerKeys(c.req.raw).length === 0) {
       deps.init();
