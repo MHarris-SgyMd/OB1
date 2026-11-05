@@ -34,7 +34,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - A scheduler: cron on the machine that runs the auditor, or `pg_cron` + `pg_net` in your Postgres
 - OpenRouter API key (the auditor uses `gpt-4o-mini` by default — swap to `claude-haiku-4-5` if you want stricter compliance reasoning)
 - Slack workspace with a bot token (only required if you want critical findings posted automatically; otherwise the auditor still stores reports silently)
@@ -118,7 +118,7 @@ SLACK_DIGEST_CHANNEL=<optional; defaults to SLACK_CAPTURE_CHANNEL>
 POLICY_VERSION=1.3   # or whatever your editorial-policy.md says
 ```
 
-`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
+`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
 
 ### Step 5: Run the auditor
 

@@ -7381,7 +7381,9 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   // The rule, from inside the suite, over the whole of both trees as check 12
   // walks them — not the listed files alone, since the two directories also
   // hold SQL no brain applies as a schema, and a Supabase-ism there is as
-  // much a stop for the reader who runs it.
+  // much a stop for the reader who runs it. The extension template's plugin
+  // migration (extensions/_template/plugin/, SMD-3747) is such SQL too: copied
+  // to plugins/<name>/, it is a plugin's, which the migrator runs.
   const walkSql = (dir: string, out: string[] = []): string[] => {
     for (const name of readdirSync(dir)) {
       if (name === "node_modules" || name.startsWith(".")) continue;
@@ -7393,8 +7395,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
   const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
   const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
-  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
-    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/") || f.startsWith("extensions/_template/plugin/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ or the extension template's plugin (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
 
   const xdb = new PGlite({ extensions: { vector, pg_trgm } });
   for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));

@@ -41,7 +41,7 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ### 1. Check Out the Integration
 
-The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `integrations/test-auth.ts`). Nothing is copied anywhere and nothing is deployed but the two processes (SMD-1800; [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps).
+The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `integrations/test-auth.ts`). Nothing is copied anywhere and nothing is deployed but the two processes (SMD-1800; [Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps).
 
 ### 2. Run the Workers
 
@@ -62,7 +62,7 @@ export \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
