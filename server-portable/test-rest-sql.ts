@@ -1173,8 +1173,8 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
         && renewAwayMcp.isError && /was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it/.test(renewAwayMcp.text),
       `the registry unable to give the holder's id: its own renew and release with its token answer 503 CLAIM_UNATTRIBUTED, no Retry-After, never CLAIM_NOT_YOURS (${renewAway.status} ${renewAway.body.code} ${renewAway.headers.get("retry-after")} | ${releaseAway.status} ${releaseAway.body.code} | ${renewAwayMcp.text.slice(0, 80)})`);
     assert(wrongToken.status === 403 && wrongToken.body.code === "CLAIM_NOT_YOURS" && othersToken.status === 403 && othersToken.body.code === "CLAIM_NOT_YOURS" && endedAway.status === 409 && endedAway.body.code === "CLAIM_RELEASED"
-        && unattributed(claimAway, false) && claimAway.body.id === mine?.id && unattributed(forceAway, true),
-      `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim with its live claim's token CLAIM_UNATTRIBUTED as renew_claim answers (SMD-3705), and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
+        && unattributed(claimAway, false) && claimAway.body.id === mine?.id && claimAway.body.lapsedAt === undefined && renewAway.body.lapsedAt === undefined && unattributed(forceAway, true),
+      `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim with its live claim's token CLAIM_UNATTRIBUTED as renew_claim answers (SMD-3705), neither saying a lapse, and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
     // SMD-3705: claim_work with its own lapsed claim's token, on exactly its work, refused as renew_claim refuses it,
     // and no takeover row written; the same token on other work, and another key's token, stay 115's.
     const lapsedClaim = await rest("POST", "/v1/claims", { ticket: "smd-9318", piece: "pr  1", token: lapsedOwnToken }, KEYS.writer);
@@ -1182,10 +1182,11 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     const lapsedRenew = await rest("POST", `/v1/claims/${lapsedOwnId}/renew`, { token: lapsedOwnToken }, KEYS.writer);
     const [lapsedRow] = await rowsOf(lapsedOwnId);
     assert(unattributed(lapsedClaim, false) && lapsedClaim.body.id === lapsedOwnId && !JSON.stringify(lapsedClaim.body).includes(lapsedOwnToken)
-        && lapsedClaimMcp.isError && /^Refused: claim \S+ was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it\.$/.test(lapsedClaimMcp.text) && !lapsedClaimMcp.text.includes(lapsedOwnToken)
-        && unattributed(lapsedRenew, false) && lapsedRenew.body.id === lapsedClaim.body.id && lapsedRenew.body.cause === lapsedClaim.body.cause
+        && lapsedClaimMcp.isError && /^Refused: claim \S+ was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it\. It lapsed at \S+: before you carry on, list the ticket's claims with include_ended; a claim on its work made or renewed since then means stop, and tell the user\.$/.test(lapsedClaimMcp.text) && !lapsedClaimMcp.text.includes(lapsedOwnToken)
+        && typeof lapsedClaim.body.lapsedAt === "string" && Date.parse(String(lapsedClaim.body.lapsedAt)) < Date.now()
+        && unattributed(lapsedRenew, false) && lapsedRenew.body.id === lapsedClaim.body.id && lapsedRenew.body.cause === lapsedClaim.body.cause && lapsedRenew.body.lapsedAt === lapsedClaim.body.lapsedAt
         && lapsedRow?.released_at === null && lapsedRow.release_reason === null && await claimsOn("pr 1") === 1,
-      `SMD-3705: the registry set up wrong, claim_work with the holder's own lapsed claim's token on its work answers 503 CLAIM_UNATTRIBUTED as renew_claim does, over both doors; no takeover: the claim unreleased, no new row (${lapsedClaim.status} ${lapsedClaim.body.code} ${lapsedClaim.body.cause} | ${lapsedRenew.status} ${lapsedRenew.body.code} | ${lapsedClaimMcp.text.slice(0, 80)} | ${JSON.stringify(lapsedRow)})`);
+      `SMD-3705: the registry set up wrong, claim_work with the holder's own lapsed claim's token on its work answers 503 CLAIM_UNATTRIBUTED as renew_claim does, over both doors, saying when it lapsed (review pass 1: another claim may cover its work by now); no takeover: the claim unreleased, no new row (${lapsedClaim.status} ${lapsedClaim.body.code} ${lapsedClaim.body.cause} | ${lapsedRenew.status} ${lapsedRenew.body.code} | ${lapsedClaimMcp.text.slice(0, 80)} | ${JSON.stringify(lapsedRow)})`);
     const otherPiece = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 2", token: lapsedOwnToken }, KEYS.writer);
     const othersLapsed = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 3", token: lapsedRivalToken }, KEYS.writer);
     const [rivalRow] = await rowsOf(lapsedRivalId);
@@ -1218,8 +1219,8 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     const [awayRow] = await rowsOf(lapsedOwnId);
     assert(lapsedAway.status === 503 && lapsedAway.body.code === "CLAIM_UNATTRIBUTED" && lapsedAway.body.cause === "registry_away" && lapsedAway.body.retryable === true && lapsedAway.body.forced === false
         && lapsedAway.body.id === lapsedOwnId && lapsedAway.headers.get("retry-after") !== null
-        && lapsedAwayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\.$/.test(lapsedAwayMcp.text)
-        && lapsedAwayRenew.status === 503 && lapsedAwayRenew.body.cause === "registry_away" && lapsedAwayRenew.body.id === lapsedOwnId
+        && lapsedAwayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\. It lapsed at \S+: before you carry on, list the ticket's claims with include_ended;/.test(lapsedAwayMcp.text)
+        && typeof lapsedAway.body.lapsedAt === "string" && lapsedAwayRenew.status === 503 && lapsedAwayRenew.body.cause === "registry_away" && lapsedAwayRenew.body.id === lapsedOwnId && lapsedAwayRenew.body.lapsedAt === lapsedAway.body.lapsedAt
         && awayRow?.released_at === null && await claimsOn("pr 1") === 1,
       `SMD-3705: the registry unreachable, the same claim_work answers 503 CLAIM_UNATTRIBUTED registry_away with Retry-After, as renew_claim does; still no takeover (${lapsedAway.status} ${lapsedAway.body.cause} ${lapsedAway.headers.get("retry-after")} | ${lapsedAwayRenew.status} ${lapsedAwayRenew.body.cause} | ${lapsedAwayMcp.text.slice(0, 80)})`);
   } finally {

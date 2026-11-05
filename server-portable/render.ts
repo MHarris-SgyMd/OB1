@@ -1899,7 +1899,9 @@ const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) =
   const why = r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)";
   return r.forced
     ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
-    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.`;
+    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.${r.lapsedAt
+      ? ` It lapsed at ${r.lapsedAt}: before you carry on, list the ticket's claims with include_ended; a claim on its work made or renewed since then means stop, and tell the user.`
+      : ""}`;
 };
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced

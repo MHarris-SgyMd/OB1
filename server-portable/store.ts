@@ -2080,7 +2080,9 @@ export interface ThoughtStore {
    * away — a claim made with one under the caller's name, as ownWhileAway reads
    * it (review pass 5). Its own ended claim on that work is where 115's writer
    * makes a new claim without a word (review pass 4: the refusal read any work,
-   * and refused a split's fresh claims).
+   * and refused a split's fresh claims). `byAgentId` says the claim was made
+   * under an agent id, which 115's holder test then needs (SMD-3705): its own
+   * unreleased claim, read with no id to hand, is refused rather than taken over.
    * Null when no claim has that token (or, given `id`, when that claim hasn't).
    * 115's writers report the new lease, not the one renewed, so a renewal that
    * revived a lapsed claim learns it here. renew_claim gives the id, which the

@@ -89,9 +89,15 @@ async function ownWhileAway(ctx: Ctx, principal: Principal, claim: WorkClaim | n
   if (principal.agentId !== undefined || !claim || token === undefined || claim.holder !== principal.name || claim.holderAgentId === null) return false;
   return (await ctx.store()).claimTokenIs(claim.id, token);
 }
-/** Its callers hold no agent id. With no registry failure named either, the cause is registry_unknown. */
-const unattributedRefusal = (principal: Principal, id: string, forced: boolean) =>
-  unattributedAs("CLAIM_UNATTRIBUTED", principal, { id, forced }) ?? refuse({ code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_unknown", id, forced });
+/**
+ * Its callers hold no agent id. With no registry failure named either, the cause is registry_unknown. `expiresAt`, the
+ * caller's own claim's lease: one run out is said (`lapsedAt`), since another claim may cover its work by now, which
+ * 115 would name once the registry answers (SMD-3705 review pass 1: "keep the token" hid it).
+ */
+const unattributedRefusal = (principal: Principal, id: string, forced: boolean, expiresAt?: string | null) => {
+  const facts = { id, forced, ...(expiresAt && Date.parse(expiresAt) <= Date.now() ? { lapsedAt: expiresAt } : {}) };
+  return unattributedAs("CLAIM_UNATTRIBUTED", principal, facts) ?? refuse({ code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_unknown", ...facts });
+};
 
 /**
  * The lease a token's claim had before a renewal (SMD-3654): 115's writers answer
@@ -152,7 +158,7 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
   // over, or answer a live one WORK_CLAIMED. Refused as renew_claim refuses it; the lease read by the token's hash is
   // the proof ownWhileAway's claimTokenIs gives there. One made by name alone is 115's own by name, and renews.
   if (principal.agentId === undefined && before && before !== "unread" && before.ownOnThisWork === true && before.byAgentId === true) {
-    return unattributedRefusal(principal, before.id, false);
+    return unattributedRefusal(principal, before.id, false, before.expiresAt);
   }
   const a = await asked(ClaimRefused, async () => (await ctx.store()).claimWork({
     issue: input.ticket, piece: input.piece, label: input.label, leaseSeconds: input.lease_seconds, token: tokenOf(input.token), actor: actorOf(ctx, principal),
@@ -195,7 +201,7 @@ export async function renewClaim(ctx: Ctx, principal: Principal, input: Input<"r
     case "CLAIM_NOT_YOURS":
       if (await ownWhileAway(ctx, principal, a.claim, token)) {
         // 115 reads the holder before the end: the holder's own ended claim is CLAIM_RELEASED, as with its id to hand.
-        return a.claim?.releasedAt ? releasedRefusal(input.id, a.claim) : unattributedRefusal(principal, input.id, false);
+        return a.claim?.releasedAt ? releasedRefusal(input.id, a.claim) : unattributedRefusal(principal, input.id, false, a.claim?.expiresAt);
       }
       return notYoursRefusal(principal, input.id, a.claim, false);
     case "CLAIM_RELEASED": return releasedRefusal(input.id, a.claim);
