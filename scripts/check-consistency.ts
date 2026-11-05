@@ -214,7 +214,9 @@
  *      (SMD-1857), no other type is, the target is the default branch and
  *      nothing else, the bypass list is empty and enforcement is active; no
  *      other job reports a check under the aggregate's name; and ci-shift.yml's
- *      workflow_run names that workflow's own name (SMD-3765). A matrix and a
+ *      workflow_run names that workflow's own name, and ci-step-times'
+ *      DEFAULT_WORKFLOWS and DEFAULT_WORKFLOW_PATHS start with its name and
+ *      file (SMD-3765). A matrix and a
  *      name with an expression are allowed now, since the record names no job
  *      but the one. The rules are rulesetProblems and aggregateProblems, pure
  *      functions their probes run on in-memory records (twenty-seven ruleset
@@ -627,6 +629,7 @@ import { CHANGES_DIR, END as INDEX_END, INDEX_FILE, START as INDEX_START, FIRST_
 import { BRAIN_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
 import commitlintConfig from "./commitlint.config.ts";
+import { DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS } from "./ci-step-times.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
 import { inlined as inlinedGrafana, INLINE_FILES } from "./inline-grafana.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./changes-index.ts";
@@ -5449,7 +5452,16 @@ const SHIFT_TRIGGER_PROBES: [unknown, unknown, boolean][] = [
   ["Brain Checks", { on: { workflow_dispatch: {} } }, false],
   ["Brain Checks", null, false],
   [undefined, { on: { workflow_run: { workflows: [undefined] } } }, false],
+  ["", { on: { workflow_run: { workflows: [""] } } }, false],
 ];
+/**
+ * What is wrong with ci-step-times' default listing for this workflow, or null: its first name and file are this
+ * workflow's, so a CI shift's list keeps this workflow's runs (the rest are the names it had before).
+ */
+function listingNamesProblem(name: unknown, path: string, names: readonly string[], paths: readonly string[]): string | null {
+  if (typeof name === "string" && names[0] === name && paths[0] === path) return null;
+  return `DEFAULT_WORKFLOWS starts ${JSON.stringify(names[0] ?? null)} and DEFAULT_WORKFLOW_PATHS ${JSON.stringify(paths[0] ?? null)}, where ${path} is named ${JSON.stringify(name ?? null)} — a CI shift's default listing would keep none of its runs (check 20, SMD-3765)`;
+}
 function checkRulesetRecord() {
   // Self-test: a record every rule accepts passes; each mutant reports exactly
   // one problem, and that problem names what the mutant broke; a non-probe
@@ -5550,6 +5562,11 @@ function checkRulesetRecord() {
   try { shiftDoc = Bun.YAML.parse(readFileSync(join(ROOT, SHIFT_WORKFLOW), "utf8")); } catch { shiftDoc = null; }
   const shiftProblem = shiftTriggerProblem((doc as { name?: unknown }).name, shiftDoc);
   if (shiftProblem) fail(SHIFT_WORKFLOW, shiftProblem);
+  // ci-step-times keeps the workflow's runs by its name and file: a rename that misses its list empties CI shift's window.
+  if (listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks", "Fork Checks"], [WORKFLOW]) !== null || listingNamesProblem("Brain Checks", WORKFLOW, ["Fork Checks"], [WORKFLOW]) === null
+    || listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks"], [".github/workflows/fork-checks.yml"]) === null) fail(SELF, "check 20's listing-names rule no longer reads its probes as written (its own probe)");
+  const listingProblem = listingNamesProblem((doc as { name?: unknown }).name, WORKFLOW, DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS);
+  if (listingProblem) fail("scripts/ci-step-times.ts", listingProblem);
   // Every other workflow, for a job that would report a check under the one
   // context (review pass 1); one that does not parse is check 23's to report.
   const workflowsDir = join(ROOT, ".github", "workflows");
