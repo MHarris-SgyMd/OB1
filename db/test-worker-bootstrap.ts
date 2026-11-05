@@ -16,7 +16,7 @@
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -486,6 +486,71 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   } finally {
     lister.stop(true);
   }
+}
+
+// A follower's waits (SMD-2636): one copy of the start's probe and wait, the database wait, the pass it does not end, and the leases returned later.
+{
+  const lines: string[] = [];
+  const writer = { out: (l: string) => lines.push(`out ${l}`), err: (l: string) => lines.push(`err ${l}`) };
+  const instant = async () => {};
+  const wake = new AbortController().signal;
+  const scripted = (states: Probe[]) => async () => states.shift() ?? { state: "up" as const };
+  const refuseMissing = async (p: Probe) => (p.state === "missing" ? { kind: "model" as const, line: "unserved" } : null);
+
+  // probeAtStart: a refusal only of a probe that answered; no answer is the start's wait, not its refusal.
+  ok("refused" in (await probeAtStart({ probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing })), "probeAtStart: a model unserved at the first probe is refused");
+  const outFirst = await probeAtStart({ probe: scripted([{ state: "out", why: "ECONNREFUSED" }]), refusal: async () => ({ kind: "provider", line: "never asked" }) });
+  ok("out" in outFirst && outFirst.out === "ECONNREFUSED", `probeAtStart: no answer refuses nothing, its why kept for the wait (${JSON.stringify(outFirst)})`);
+  const upFirst = await probeAtStart({ probe: scripted([{ state: "up" }]), refusal: refuseMissing });
+  ok("out" in upFirst && upFirst.out === null, "probeAtStart: an answer through its refusals is no wait");
+
+  // waitAtStart: said, the stamper's startWait on then off, probed until anything but out, held to the refusals.
+  const stamps: boolean[] = [];
+  lines.length = 0;
+  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: scripted([{ state: "out", why: "503" }, { state: "up" }]), refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
+  ok(up === "up" && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after \d+ s$/.test(lines[1] ?? ""),
+    `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
+  const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing, wake, writer, sleep: instant });
+  ok(unserved !== null && unserved !== "up" && unserved.refused.kind === "model", "waitAtStart: what answers is held to the start's refusals");
+  const stop = new AbortController();
+  stop.abort();
+  ok((await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "out", why: "x" }]), refusal: refuseMissing, wake: stop.signal, writer, sleep: instant })) === null, "waitAtStart: a stop ends the wait, null");
+
+  // waitForDatabase and followedPass: the outage said and waited out, the pass run again at once; anything else thrown.
+  const pgDown = () => Object.assign(new Error("Connection closed\nsecond line"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" });
+  lines.length = 0;
+  let checks = 0;
+  ok((await waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: instant, firstLine: true })) && checks === 2
+    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after/.test(lines[0] ?? "") && /^out {3}the database answers again after \d+ s; polling resumes$/.test(lines[1] ?? ""),
+    `waitForDatabase: said with the error's first line, checked until it answers, said again (${checks} checks; ${lines.join(" | ").slice(0, 200)})`);
+  let passes = 0;
+  let afters = 0;
+  const twice = await followedPass({ pass: async () => { if (passes++ === 0) throw pgDown(); return passes; }, afterPass: async () => { afters++; }, follow: true, check: async () => {}, wake, writer, sleep: instant });
+  ok(twice === 2 && afters === 1, `followedPass: a database outage waited out, the pass run again, its counts returned, the wait for the provider after it (${twice}, ${afters} after)`);
+  let threw = "";
+  await followedPass({ pass: async () => { throw new Error("a writer threw"); }, afterPass: async () => {}, follow: true, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.message; });
+  ok(threw === "a writer threw", "followedPass: any other error ends the run");
+  threw = "";
+  await followedPass({ pass: async () => { throw pgDown(); }, afterPass: async () => {}, follow: false, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.name; });
+  ok(threw === "PostgresError", "followedPass: without --follow a database outage ends the run, as before");
+  ok((await followedPass({ pass: async () => { throw pgDown(); }, afterPass: async () => {}, follow: true, check: async () => {}, wake: stop.signal, writer, sleep: instant })) === null, "followedPass: a stop during the wait is null, the counts unread");
+
+  // Unreturned: returned in turn before a pass (the first refused throws), quietly before a gate, all at once at the end.
+  const released: string[] = [];
+  let refuse = new Set<string>();
+  const leases = new Unreturned(async (w) => { if (refuse.has(w)) throw new Error(`refused ${w}`); released.push(w); });
+  leases.add("w1");
+  leases.add("w2");
+  refuse = new Set(["w2"]);
+  let returnThrew = false;
+  await leases.returnAll().catch(() => { returnThrew = true; });
+  ok(returnThrew && released.join() === "w1" && leases.size === 1, `Unreturned.returnAll: each in turn, the first refused thrown, it kept (${released}; ${leases.size} kept)`);
+  leases.add("w3");
+  await leases.returnWhileAnswered();
+  ok(released.join() === "w1" && leases.size === 2, "Unreturned.returnWhileAnswered: a refusal ends the returns quietly, the rest kept");
+  lines.length = 0;
+  await leases.returnAtEnd(30, writer.err);
+  ok(released.join() === "w1,w3" && /^err {3}1 worker\(s\)' leases could not be returned as the run ended; they expire within 30 s$/.test(lines[0] ?? ""), `Unreturned.returnAtEnd: all at once, one line for those that could not go (${released}; ${lines[0]})`);
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

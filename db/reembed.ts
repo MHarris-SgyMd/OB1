@@ -484,7 +484,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, waitOut, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
@@ -1895,17 +1895,21 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       return { restarted, movedSinceDone, retriedFailed, retriedFallbacks, added: Number(added), claimable: Number(claimable), recorded: record };
     });
   if (startOut !== null) {
-    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-    const wake = opts.signal ?? new AbortController().signal;
-    const down = Date.now();
-    err(`  the embedding provider is not answering at start (${startOut.slice(0, 200)}) — the follower pools nothing until it does; it calls ${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)} after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said through a caller's stamper while it lasts — the sleep scheduler's (extract-entities.ts's).
-    await opts.stamper?.startWait?.(true);
-    const answered = await probeUntil(() => embedProbe(wake), wake, (p) => p.state !== "out").finally(() => opts.stamper?.startWait?.(false));
-    if (answered === null) return stoppedWaiting();
-    if (answered.state !== "up") return refused(answered.state === "missing" ? "model" : "provider", `\n  The embedding provider is not usable: ${answered.why}`);
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait. Said through a
+    // caller's stamper while it lasts — the sleep scheduler's (waitAtStart).
+    const waited = await waitAtStart({
+      who: "the embedding provider",
+      why: startOut,
+      meanwhile: `pools nothing until it does; it calls ${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)}`,
+      probe: (wake) => embedProbe(wake),
+      refusal: async (p) => p.state === "up" ? null : { kind: p.state === "missing" ? "model" : "provider", line: `\n  The embedding provider is not usable: ${p.why}` },
+      wake: opts.signal ?? new AbortController().signal,
+      writer: { out, err },
+      stamper: opts.stamper,
+    });
+    if (waited === null) return stoppedWaiting();
+    if (waited !== "up") return refused(waited.refused.kind, waited.refused.line);
     probed = true;
-    out(`  the embedding provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
   }
   if (stoppedEarly()) return 130;
   let start: Start | null;
@@ -2024,8 +2028,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    */
   let drainEnds = new AbortController();
   let gate: AbortSignal = onStop.signal;
-  /** Workers whose leases could not be returned as they ended — the database not answering — returned at the next poll (extract-entities.ts's unreturned). */
-  const unreturned = new Set<string>();
+  /** Workers whose leases could not be returned as they ended — the database not answering — returned at the next poll (Unreturned). */
+  const unreturned = new Unreturned((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`);
   let done = 0;
   let failed = 0;
   let vanished = 0;
@@ -2448,7 +2452,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
-        // A follower returns them at its next poll, where the database answers (extract-entities.ts's unreturned).
+        // A follower returns them at its next poll, where the database answers (Unreturned).
         if (FOLLOW) unreturned.add(workerId);
         err(`  ${workerId}: could not return its leases (${(e as Error).message}); ${FOLLOW ? "returned at the next poll or as the run ends, or" : "they"} expire within ${TTL} s`);
       } finally {
@@ -2598,40 +2602,23 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (stopping) break;
       // Under a gate, the leases a worker could not return go back before it, not after a wait there; one
       // the database refuses now stays for the release below, which waits the database out (review pass 7).
-      if (ADMIT) {
-        for (const w of [...unreturned]) {
-          try {
-            await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-            unreturned.delete(w);
-          } catch {
-            break;
-          }
-        }
-      }
+      if (ADMIT) await unreturned.returnWhileAnswered();
       // The admit gate before the poll's pool (SMD-3379 PR 1b), under the follower's stamp (review pass 1).
       let through = true;
       if (ADMIT) await stamped((async () => { through = (await admitted(ADMIT, onStop.signal)) !== false; })());
       if (!through) break;
       let polled: Start | null;
       try {
-        // Leases a worker could not return as it ended, returned first (extract-entities.ts's).
-        for (const w of unreturned) {
-          await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-          unreturned.delete(w);
-        }
+        // Leases a worker could not return as it ended, returned first.
+        await unreturned.returnAll();
         polled = await pool(firstDeferred);
         saidPoolFailed = false;
       } catch (e) {
         // The database gone is waited out, said once, and the poll runs again
-        // at once (SMD-2679 PR 4a-2b, as extract-entities.ts's followedPass).
+        // at once (SMD-2679 PR 4a-2b, as worker-bootstrap.ts's followedPass).
         if (databaseUnavailable(e)) {
-          const down = Date.now();
-          err(`  the database is not answering (${(e as Error).message.split("\n")[0]}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
           try {
-            if (await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal })) {
-              out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-              pollNow = true;
-            }
+            if (await waitForDatabase(e, { check: () => sql`SELECT 1`, wake: onStop.signal, writer: { out, err }, firstLine: true })) pollNow = true;
           } catch (refused) {
             await stamper?.end("failed");
             throw refused;
@@ -2675,10 +2662,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   }
   // Leases a worker could not return, returned before the run ends — every end, a refusal's too (review pass 3) — where the database answers; else they expire (extract-entities.ts's).
-  if (unreturned.size > 0) {
-    const kept = (await Promise.all([...unreturned].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
-    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${TTL} s`);
-  }
+  await unreturned.returnAtEnd(TTL, err);
   // The record moved under the follower: it ends, refused — its row names the
   // kind, and preflight gives the remedy (SMD-2679).
   if (switchedTo !== null) {
