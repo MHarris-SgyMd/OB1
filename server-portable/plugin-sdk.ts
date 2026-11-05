@@ -15,6 +15,7 @@ import type { ToolName } from "./tools.ts";
 import type { CoreAnswer } from "./core/calls.ts";
 import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
+import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
 
 export { z };
 export type { PluginSql };
@@ -413,6 +414,85 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     return { deferred: true };
   }
   return { ran: (await finish()).value };
+}
+
+/**
+ * A plugin's row as the open item it stands for (SMD-3665 PR 3b): `row` its key (the row's id, plugin_row), `text`
+ * what is to be done, `due` the day it is due (YYYY-MM-DD, the start of that day in UTC) or null, `owner` who is to
+ * do it (left as it is when undefined), and `done` when the row is finished — its item is then settled done with
+ * that reason, and its due time left as it was. `reopenDone` for a row that comes round again (a recurring task): an
+ * item a key settled done is reopened with that reason, since the row falls due anew (review pass 1, the
+ * maintainer's word of 2026-11-05).
+ */
+export type RowItem = { row: string; text: string; due: string | null; owner?: string | null; done?: { reason: string }; reopenDone?: { reason: string } };
+
+/** What keepRowItem did, and the item as it left it; or `failed`, the core's refusal code (`fault` for a throw), no item. */
+export type RowItemKept =
+  | { did: "opened" | "updated" | "settled" | "reopened" | "unchanged"; item: { id: string; status: ItemStatus } }
+  | { did: "failed"; code: string; item: null };
+
+/** An operation's answer of the item its row stands for: its id and status, or null when the brain did not keep it. */
+export const RowItemAnswer = z.object({ id: z.string(), status: z.enum(ITEM_STATUSES) }).nullable();
+
+/** A text as 117 keeps an item's, compared alike: white space collapsed and trimmed (115's cleaning, near enough to tell a change). */
+const asItemText = (s: string) => s.replace(/\s+/gu, " ").trim();
+
+/**
+ * Keeps the open item a plugin's row stands for (SMD-3665 PR 3b), through the core as the caller: open_item with
+ * the row (the plugin named by ctx.call's envelope, so a write key changes it through the plugin alone), `proposed`
+ * — the maintainer's word of 2026-11-05: a row's item is confirmed by a write key, as the extractor's are. The same
+ * row again is the item already there; its text, due day and owner are moved to the row's (update_item), and a row
+ * `done` settles it (set_item_status). A settled item is left as it is — a dropped one stays dropped, unedited —
+ * except a done one whose row comes round again (`reopenDone`), which is reopened and moved to the row's due day.
+ *
+ * Called after the plugin's own transaction commits, so it never fails the plugin's write: a refusal or a fault is
+ * answered `failed`, and the row's next keep (the plugin's sync operation) repairs it.
+ */
+export async function keepRowItem(ctx: Pick<PluginContext, "call">, want: RowItem): Promise<RowItemKept> {
+  try {
+    const opened = await ctx.call("open_item", {
+      text: want.text, plugin_row: want.row, proposed: true,
+      ...(want.due === null ? {} : { due_at: want.due }), ...(want.owner ? { owner: want.owner } : {}),
+    });
+    if (!opened.ok) return { did: "failed", code: opened.refusal.code, item: null };
+    // An unchanged item is shown to a capture-only key only if it is its own; a row's writer is a write key.
+    if (!opened.value.item) return { did: "failed", code: "ITEM_NOT_SHOWN", item: null };
+    let item = opened.value.item;
+    // A key's settling is not undone, nor its item edited after — a dropped item stays as it was dropped — but a row
+    // that comes round again reopens an item settled done: the row is due anew.
+    if (item.status === "dropped" || (item.status === "done" && !want.reopenDone)) return { did: "unchanged", item: { id: item.id, status: item.status } };
+    let did: "opened" | "updated" | "settled" | "reopened" | "unchanged" = opened.value.outcome === "opened" ? "opened" : "unchanged";
+    if (item.status === "done" && want.reopenDone) {
+      const reopened = await ctx.call("set_item_status", { id: item.id, status: "open", reason: want.reopenDone.reason });
+      if (!reopened.ok) return { did: "failed", code: reopened.refusal.code, item: null };
+      item = reopened.value.item;
+      did = "reopened";
+    }
+    if (opened.value.outcome === "unchanged") {
+      const sameDue = item.dueAt === null ? want.due === null : want.due !== null && Date.parse(item.dueAt) === Date.parse(`${want.due}T00:00:00Z`);
+      const changes = {
+        ...(asItemText(item.text) === asItemText(want.text) ? {} : { text: want.text }),
+        ...(want.done || sameDue ? {} : { due_at: want.due }),
+        ...(want.owner === undefined || (item.owner ?? null) === (want.owner ?? null) ? {} : { owner: want.owner }),
+      };
+      if (Object.keys(changes).length > 0) {
+        const updated = await ctx.call("update_item", { id: item.id, ...changes });
+        if (!updated.ok) return { did: "failed", code: updated.refusal.code, item: null };
+        item = updated.value.item;
+        if (updated.value.outcome === "updated" && did === "unchanged") did = "updated";
+      }
+    }
+    if (want.done && (item.status === "proposed" || item.status === "open")) {
+      const settled = await ctx.call("set_item_status", { id: item.id, status: "done", reason: want.done.reason });
+      if (!settled.ok) return { did: "failed", code: settled.refusal.code, item: null };
+      item = settled.value.item;
+      did = "settled";
+    }
+    return { did, item: { id: item.id, status: item.status } };
+  } catch (err) {
+    console.error(`keepRowItem: the item of row ${want.row} was not kept: ${err instanceof Error ? err.message : String(err)}`);
+    return { did: "failed", code: "fault", item: null };
+  }
 }
 
 /** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */
