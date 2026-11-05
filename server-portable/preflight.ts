@@ -5277,7 +5277,6 @@ if (configFailed) {
             // or one kept out of it by its model name, which still refuses beside one (SMD-3486 review pass 1).
             const handFollowers = h.reembedJob !== undefined || unfitName ? handFollowersOf(w.heartbeats) : [];
             const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.job ?? b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
-            // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4 of PR 4b-1).
             const subjectsJudgeHeld = h.holds?.some((x) => x.pass === "subjects" && x.why === "judge") ?? false;
             // Another pass held beside it, a start refusal the scheduler retries among them: not running on meanwhile.
             const othersHeld = h.holds?.some((x) => x.pass !== "subjects") ?? false;
@@ -5286,6 +5285,8 @@ if (configFailed) {
             // line, and the failure went unsaid): the generic cause's line or a statement hold's; nor where a line
             // ends in that sentence already, re-embed's (review pass 7, cold read: said twice).
             let causeSaid = false;
+            // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4
+            // of PR 4b-1).
             if (down && handFollowers.length && !followers.length && !refusedBy) {
               fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
             } else if (down && followers.length) {
@@ -5323,12 +5324,12 @@ if (configFailed) {
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
             } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage") && (!subjectsJudgeHeld || othersHeld)) {
-              // Not where the subject sweep's judge hold says why: its alarm ends its run failed, and neither cause here
-              // is its (SMD-3306 PR 6b-1's review pass 4, the consumer's prototype: the hold's fix came after them); but
-              // beside another pass's hold, a start refusal this line names, and the hold's fix names another pass's
-              // failure else (review pass 5, cold read and the consumer's prototype: the hold outlasts its sleep, so a
-              // later sleep's failure was another pass's, left unsaid, and beside extraction held the hold's fix said the
-              // other passes ran on).
+              // Not where the subject sweep's judge hold says why: its alarm ends its run failed, and neither cause
+              // here is its (SMD-3306 PR 6b-1's review pass 4, the consumer's prototype: the hold's fix came after
+              // them); but beside another pass's hold, a start refusal this line names, and the hold's fix names
+              // another pass's failure else (review pass 5, cold read and the consumer's prototype: the hold outlasts
+              // its sleep, so a later sleep's failure was another pass's, left unsaid, and beside extraction held the
+              // hold's fix said the other passes ran on).
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               causeSaid = true;
             }
@@ -5351,9 +5352,9 @@ if (configFailed) {
             // that run, which runs in the stack, the coordinator's one-off, with the stack's settings, network and
             // version (review pass 2, walkthrough: from a checkout it met the egress gate's default deny before it
             // lifted anything, its chat endpoint not the stack's, its pool key the checkout's version's), once the
-            // coordinator is recreated after a change to deploy/.env, which `compose run` reads afresh where the running
-            // coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the lift
-            // took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
+            // coordinator is recreated after a change to deploy/.env, which `compose run` reads afresh where the
+            // running coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the
+            // lift took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
             if (subjectsJudgeHeld) {
               fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid || (otherPass !== "" && fixes.some((x) => x.endsWith(otherPass))) ? "" : otherPass}`);
             }

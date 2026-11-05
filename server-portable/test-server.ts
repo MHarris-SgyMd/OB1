@@ -1306,8 +1306,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const reWaits = [markOf("heartbeat:sleep", { waiting: ["reembed", "extract"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["reembed"] })?.waitingMidPass];
   assert(JSON.stringify(reWaits) === JSON.stringify([["reembed", "extract"], ["reembed"]]),
     `the scheduler's re-embed pass is carried waiting, at its start and mid-pass (${JSON.stringify(reWaits)})`);
-  // The subject sweep's, the scheduler's fourth pass (SMD-3306 PR 6b-1, read before PR 6b-2 writes it): at its start and
-  // mid-pass on the scheduler's row, never as a follower's own, which it never is.
+  // The subject sweep's, the scheduler's fourth pass (SMD-3306 PR 6b-1, read before PR 6b-2 writes it): at its start
+  // and mid-pass on the scheduler's row, never as a follower's own, which it never is.
   const subjectWaits = [markOf("heartbeat:sleep", { waiting: ["subjects"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["extract", "subjects"] })?.waitingMidPass,
     markOf("heartbeat:extract:stub-meta@1", { waitingMidPass: ["subjects"] })?.waitingMidPass ?? null];
   assert(JSON.stringify(subjectWaits) === JSON.stringify([["subjects"], ["extract", "subjects"], null]),
@@ -1492,8 +1492,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && JSON.stringify(markOf("heartbeat:sleep", { holds: okHolds, ended: true })?.holds) === JSON.stringify(okHolds)
       && markOf("heartbeat:board-sync", { holds: okHolds })?.holds === undefined,
     `the scheduler's held passes are carried when of the shape — one to four, each pass once, a reason of the list, a time or null — kept on an ended row, never off another worker's (${JSON.stringify(holdRows)})`);
-  // The subject sweep held by the alarm (SMD-3306 PR 6b-1): the fourth pass, `judge` its reason, all four passes held at
-  // once taken; a fifth repeats a pass, which the each-pass-once rule refuses before the cap of four can.
+  // The subject sweep held by the alarm (SMD-3306 PR 6b-1): the fourth pass, `judge` its reason, all four passes held
+  // at once taken; a fifth repeats a pass, which the cap of four refuses before the each-pass-once rule can.
   const fourHolds = [{ pass: "reembed", why: "outage", until }, { pass: "extract", why: "lookup", until: null }, { pass: "consolidate", why: "provider", until: null }, { pass: "subjects", why: "judge", until: null }];
   const subjectHolds = [fourHolds, [{ pass: "subjects", why: "judge", until: null }], [...fourHolds, { pass: "subjects", why: "judge", until: null }], [{ pass: "subject", why: "judge", until: null }], [{ pass: "subjects", why: "alarm", until: null }]]
     .map((holds) => markOf("heartbeat:sleep", { holds })?.holds ?? null);
@@ -1517,7 +1517,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && pausedPastSays === "paused by a live call for 60 s; held out: extract (provider, re-arms once the brain is quiet) (last stamped 30 s ago, every 60 s)"
       && leftSays === "running a pass; held out: extract (provider, re-arms in 60 s) (last stamped 30 s ago, every 60 s)"
       && judgeSays === "running a pass; held out: subjects (judge) (last stamped 30 s ago, every 60 s)",
-    `a pause is the state, for how long, and the held passes their reasons and re-arms beside it — an ended or stale row's as its last word, a re-arm past its time while paused waiting for the quiet, a pass the reader says itself left out (${pausedSays} | ${holdsSay} | ${pastSays} | ${endedSays} | ${staleSays} | ${pausedPastSays} | ${leftSays})`);
+    `a pause is the state, for how long, and the held passes their reasons and re-arms beside it — an ended or stale row's as its last word, a re-arm past its time while paused waiting for the quiet, a pass the reader says itself left out (${pausedSays} | ${holdsSay} | ${pastSays} | ${endedSays} | ${staleSays} | ${pausedPastSays} | ${leftSays} | ${judgeSays})`);
   // The status route reads a paused row as running, its work in hand, whether or not a pass runs (review pass 1).
   const { beatState } = await import("./brain-info.ts");
   const pausedIdle = parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: false, paused: { since: pausedAt } }), at, age_s: 30 }]).heartbeats[0]!;

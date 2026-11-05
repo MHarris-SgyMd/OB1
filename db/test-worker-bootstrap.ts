@@ -248,7 +248,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     const up = await probeChat(at, "stub-model", 2000);
     ok(up.state === "up" && sent.model === "stub-model" && sent.max_tokens === 1 && sent.messages?.[0]?.content === PROBE_PROMPT, `a 200 is up; the probe is one token of the fixed prompt to the model (${JSON.stringify(sent).slice(0, 120)})`);
     // Out unanswered only when no answer came within the limit or its body never arrived (SMD-3306 PR 6b-1's review
-    // pass 8): an answer that refuses or errs is out, answered.
+    // pass 8): a refused connection or an answer that errs is out, not unanswered.
     answer = () => new Response('{"error":{"message":"overloaded"}}', { status: 503 });
     const out = await probeChat(at, "m", 2000);
     ok(out.state === "out" && out.why.startsWith("503 ") && out.unanswered === undefined, `a 503 is out, answered (${JSON.stringify(out)})`);

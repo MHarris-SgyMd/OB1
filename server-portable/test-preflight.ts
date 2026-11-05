@@ -4525,8 +4525,7 @@ else {
         `a pass a statement holds until a restart: the row counts it and warns, its fix the setting and the restart (${row(heldOut.out, "sleep")} | ${fix(heldOut.out, "sleep")})`);
       // …and with no judge hold beside it, its fix says the other passes run on meanwhile (SMD-3306 PR 6b-1's review
       // pass 8, mutant: the judge hold's clause always a full stop).
-      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", slept: { from: await at(400), to: null }, budget: noClock, holds: stmtHolds }), 20);
-      const stmtAloneFix = fix((await run(LOG_ON)).out, "sleep");
+      const stmtAloneFix = fix(heldOut.out, "sleep");
       assert(/extract held until a restart: a statement passed its statement_timeout \(300 s\), which its log names [^\n]*then recreate the coordinator — [^\n]*; the other passes run on meanwhile\./.test(stmtAloneFix),
         `a statement hold with no judge hold beside it says the other passes run on meanwhile (${stmtAloneFix})`);
       // Ended so, it is told to raise the setting before it starts again.
@@ -4616,18 +4615,20 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "stopped", ended: true, holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
       const subjectsHeldDown = await run(LOG_ON);
       // …and a row the sweep's alarm ended failed: the hold says why, not the generic cause of a failed pass (SMD-3306
-      // PR 6b-1's review pass 4, the consumer's prototype), another pass's failure its log's (review pass 5, cold read).
+      // PR 6b-1's review pass 4, the consumer's prototype), another pass's failure its log's (review pass 5, cold
+      // read).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsHeldFailed = await run(LOG_ON);
-      // …and beside another pass's hold, a start refusal the scheduler retries: the failed pass's cause said, and the hold's
-      // fix not saying the other passes run on (review pass 5, the consumer's prototype: extraction held, it said so).
+      // …and beside another pass's hold, a start refusal the scheduler retries: the failed pass's cause said, and the
+      // hold's fix not saying the other passes run on (review pass 5, the consumer's prototype: extraction held, it
+      // said so).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "model", until: null }, { pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsHeldBeside = await run(LOG_ON);
       // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherHold = await run(LOG_ON);
-      // …and a failed row held for another reason of the sweep's keeps the generic cause of a failed pass (review pass 5,
-      // mutant: the cause left out beside any hold lived).
+      // …and a failed row held for another reason of the sweep's keeps the generic cause of a failed pass (review pass
+      // 5, mutant: the cause left out beside any hold lived).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherFailed = await run(LOG_ON);
       // …nor for a judge hold of another pass's, which the scheduler never writes (SMD-3306 PR 6b-1's review pass 2,
