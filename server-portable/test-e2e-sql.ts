@@ -1574,8 +1574,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // McpServer surfaces a call to a tool that was never registered for this principal
   // as a JSON-RPC error (-32602), where v1 wrapped "tool not found" as an isError
   // result (SMD-2278). Daemonic Brain's own refusals-as-values path (SMD-1978) is
-  // unaffected — this is the SDK's built-in not-found, not a refusal of Daemonic
-  // Brain's.
+  // unaffected — this is the SDK's built-in not-found, not one of those refusals.
   const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
   assert(read.result === undefined && read.error?.code === -32602 && /Tool search_thoughts not found/.test(String(read.error?.message)), `search_thoughts is not a tool the capture key can call — a JSON-RPC -32602 error, not a result (${JSON.stringify(read.error ?? read.result)?.slice(0, 80)})`);
   assert(/not found|unknown tool/i.test(String(read.error?.message ?? "")), "…told as a missing tool, not a permission error");

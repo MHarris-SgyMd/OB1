@@ -230,10 +230,10 @@ informational and may be stale, as for the other failure reasons). An edit is
 judged on the row's own metadata; a capture is judged before the write, on
 the actor and the text alone. A refused search names `search_thoughts_keyword`, which makes no
 model call. Every dialler — `providerCall`, the judge, the entity extractor —
-asks the gate itself before the request, so no call Daemonic Brain makes is ungated;
-a refusal there is a `ProviderError` of kind `egress`. Deny is the default and
-"local" is declared, never guessed: a stack from before the gate that points
-at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
+asks the gate itself before the request, so no call Daemonic Brain makes is
+ungated; a refusal there is a `ProviderError` of kind `egress`. Deny is the
+default and "local" is declared, never guessed: a stack from before the gate that
+points at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
 egress` row says so with the line.
 
 A local endpoint — local by its hostname, the credential rule's sense and not

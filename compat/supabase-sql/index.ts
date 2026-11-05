@@ -177,8 +177,8 @@ const quoteName = (name: string) => `"${name.replace(/"/g, '""')}"`;
  * operator is the column's (the file that wants containment under a key has
  * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
  * 73): the bio worker's source and profile queries filter on `metadata->>…`,
- * and ident()'s refusal was a 500 at the worker's first query in Daemonic
- * Brain.
+ * and ident()'s refusal was a 500 at the worker's first query in
+ * Daemonic Brain.
  */
 const JSON_PATH = /^([A-Za-z_][A-Za-z0-9_]*)((?:->>?[A-Za-z_][A-Za-z0-9_]*)+)$/;
 

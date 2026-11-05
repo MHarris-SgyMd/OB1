@@ -538,9 +538,9 @@ the first of them converts (SMD-2149, SMD-2021).
 ## What moves, what stays
 
 - **board-sync (SMD-1954) stays** as the no-orchestrator fallback: the path for
-  any brain without the profile, and the owner of Daemonic Brain's Linear board until
-  an n8n Linear template meets decision 8 — at which point, on a brain that runs
-  that template, the template replaces it there.
+  any brain without the profile, and the owner of Daemonic Brain's Linear board
+  until an n8n Linear template meets decision 8 — at which point, on a brain that
+  runs that template, the template replaces it there.
 - **The recipes stay until a template replaces one.** Of the capture recipes,
   only `gmail-smart-pull` has a planned template (SMD-2257), and it retires only
   after that template has run unattended — on another brain, or with the recipe

@@ -48,8 +48,8 @@
  * The adapter sources are EXTERNAL content and pass SMD-1813's allowlist:
  * every item names a scope (the corpus, a vault root, an export) and only a scope named
  * by `--allow <a,b>` / OB1_INGEST_ALLOW is ingested — default nothing, the
- * refusal counted and said. Daemonic Brain's own records (fork, commit, memory) are
- * not external and are not gated.
+ * refusal counted and said. Daemonic Brain's own records (fork, commit, memory)
+ * are not external and are not gated.
  *
  *   bun db/ingest-records.ts --url … --dry-run             # count per source, write nothing
  *   bun db/ingest-records.ts --url … --source fork         # one source

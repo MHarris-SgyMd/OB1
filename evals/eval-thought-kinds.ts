@@ -21,9 +21,9 @@
  * piece of assigned work with its problem and its acceptance test, which is
  * what a Linear import IS, and `procedure` (how to do a repeatable thing) is
  * not that. A thought that is genuinely two kinds with neither dominant is
- * `compound`, with the kinds it contains recorded under `parts` — Daemonic
- * Brain's answer to a compound is to atomize it (SMD-1930), not to give it two
- * types.
+ * `compound`, with the kinds it contains recorded under `parts` —
+ * Daemonic Brain's answer to a compound is to atomize it (SMD-1930), not to
+ * give it two types.
  *
  * Four modes, one shape:
  *

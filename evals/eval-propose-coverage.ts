@@ -5,9 +5,9 @@
  * thought (recall is about the name being proposed; the decider does the
  * typing): what fraction of what the current extractor finds would
  * propose→decide even see? The SMD-1961 gold is arXiv papers (citation-dense, a
- * proposer's worst case); its own content is Linear issues, session summaries
- * and notes — identifier- and code-artifact-dominated, where the deterministic
- * channels should do far better.
+ * proposer's worst case); the brain's own content is Linear issues, session
+ * summaries and notes — identifier- and code-artifact-dominated, where the
+ * deterministic channels should do far better.
  *
  * Run read-only against the dogfood stable brain.
  */

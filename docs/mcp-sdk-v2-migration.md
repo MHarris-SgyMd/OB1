@@ -2,8 +2,8 @@
 
 > **Amended 2026-09-27 by `docs/operator-surface-tiers.md` (SMD-2282).** The staging below still holds, and stage 1 (SMD-2278) has landed. But server-portable is no longer the long-term canonical surface. The REST core (SMD-2284) is the contract, and the MCP surface becomes a new SDK-v2 server that is a client of it (SMD-2287). Where this record calls server-portable "the canonical one-HTTP-process server" or "the canonical surface", read it as true until SMD-2287's cutover. Stage 2 (SMD-2279) is mostly retirement under SMD-1931.
 
-An architecture decision record. **Decided 2026-09-27: GO — migrate Daemonic
-Brain onto the MCP TypeScript SDK v2 scoped packages
+An architecture decision record. **Decided 2026-09-27: GO — migrate
+Daemonic Brain onto the MCP TypeScript SDK v2 scoped packages
 (`@modelcontextprotocol/core` + `@modelcontextprotocol/server`), retiring the v1
 single package `@modelcontextprotocol/sdk` and the third-party `@hono/mcp`.
 Staged, server-portable first. The spike proves the transport swap is small —
@@ -82,10 +82,10 @@ untouched. **No tool code changed.** The tool `inputSchema` stays a zod object.
   336 KiB gzip), `nodejs_compat` only. (A target since retired, with the
   PostgREST store it ran, in SMD-3152.)
 
-**The revision matches Daemonic Brain's posture.** v2 negotiated `protocolVersion`
-down to the client's requested `2024-11-05` and returned a well-formed
-`initialize` result, so existing clients that send both `Accept` tokens keep
-working. v2 answers a normal request/response as an SSE stream
+**The revision matches Daemonic Brain's posture.** v2 negotiated
+`protocolVersion` down to the client's requested `2024-11-05` and returned a
+well-formed `initialize` result, so existing clients that send both `Accept`
+tokens keep working. v2 answers a normal request/response as an SSE stream
 (`content-type: text/event-stream`) when the client accepts it, so the SMD-1864
 `withSseKeepalive` wrapper still applies unchanged — the `[17]` keepalive suite
 is green.

@@ -4,8 +4,9 @@ reranker re-look, kept out of rerank-spike.ts on purpose.
 
 BAAI/bge-reranker-v2-m3 is the local analog of the hosted Voyage rerank-2.5 that
 GBrain uses. It scores (question, candidate) pairs directly (a cross-encoder,
-unlike Daemonic Brain's bi-encoder retrieval), reorders the candidate pool, takes 5,
-and reports strict recall_all@5 for the multi-session + temporal slices.
+unlike Daemonic Brain's bi-encoder retrieval), reorders the candidate pool,
+takes 5, and reports strict recall_all@5 for the multi-session + temporal
+slices.
 
 The result, on the LongMemEval load with headroom (oracle@30 is 99.2% / 95.3%):
 the cross-encoder is flat-to-NEGATIVE, and worse with more context —
@@ -21,10 +22,10 @@ topic is equally relevant, so per-document reranking cannot pick the gold
 instances, and a longer window only surfaces more spurious topical matches that
 demote the true golds. See evals/README.md and FORK.md.
 
-That this needs a torch env at all — Ollama serves no reranker, and Daemonic Brain's
-Python is too new for torch wheels — is itself part of the finding: a real
-reranker is not in the local-by-default stack. Run it with uv, off the pool dump
-that rerank-spike.ts writes:
+That this needs a torch env at all — Ollama serves no reranker, and
+Daemonic Brain's Python is too new for torch wheels — is itself part of the
+finding: a real reranker is not in the local-by-default stack. Run it with uv,
+off the pool dump that rerank-spike.ts writes:
 
     OB1_RERANK_POOL_OUT=/tmp/rr-pool.json OB1_RERANK_ARMS=baseline OB1_RERANK_POOL=30 \
       DATABASE_URL=... OB1_EVAL_LME=... OB1_EVAL_LME_MAP=... bun evals/rerank-spike.ts

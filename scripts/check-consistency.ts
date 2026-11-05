@@ -208,11 +208,11 @@
  *      four review flags, required-status- checks with its parameters — are
  *      present once each, the one optional rule — merge-queue, which GitHub
  *      refuses on a user-owned repository and the record adds the day this one
- *      is organisation-owned — at most once and, when present, with Daemonic
- *      Brain's merge method, every entry judged on its own merge commit and no
- *      PR waiting for another (SMD-1857), no other type is, the target is the
- *      default branch and nothing else, the bypass list is empty and
- *      enforcement is active; no other job reports a check under the
+ *      is organisation-owned — at most once and, when present, with
+ *      Daemonic Brain's merge method, every entry judged on its own merge
+ *      commit and no PR waiting for another (SMD-1857), no other type is, the
+ *      target is the default branch and nothing else, the bypass list is empty
+ *      and enforcement is active; no other job reports a check under the
  *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
  *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
  *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
@@ -886,7 +886,7 @@ async function checkMigrationNumbers() {
 // the binary path from an environment variable. `life-engine`'s recommended
 // settings.json allowed `Bash(*)` beside a skip-permissions launch, defended by
 // a prompt rule addressed to the model being injected. Both were fixed on that
-// ticket; this is what keeps the next rebase from bringing them back.
+// ticket; this is what keeps them from coming back.
 //
 // The rule this enforces, written down here because the tree is vendored from
 // upstream wholesale (MAINTAINING.md, "Vendored content"): we audit once and hold the
@@ -1162,7 +1162,7 @@ function textFilesUnder(dirs: { dir: string; rel: string }[]) {
 // thoughts.derived_from` that silently overwrote 025's contract. The
 // vendored files were fixed on that ticket (FORK.md change 58: the statements
 // cut where the file adds to a brain, the file excepted where it creates one);
-// this is what keeps the next rebase from bringing them back.
+// this is what keeps them from coming back.
 //
 // The owned set is READ from db/migrations/ — every `CREATE [OR REPLACE]
 // FUNCTION` at the start of a line, comments stripped, with the file that last
@@ -1319,8 +1319,8 @@ function checkCoreFunctions() {
 // no revocation short of re-keying every client, and full write access on a
 // key accepted from a URL query string. FORK.md change 64 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
-// is never given the tools that write — and this is what keeps the next rebase
-// from bringing the two lines back. Its first run found the same compare in
+// is never given the tools that write — and this is what keeps the two
+// lines from coming back. Its first run found the same compare in
 // seventeen more vendored files; change 67 (SMD-1455) moved every one — the
 // MCP and HTTP servers onto the module, the webhook receivers onto a
 // timing-safe compare of digests — and the exception list below emptied.
@@ -1616,7 +1616,7 @@ function checkCredentialCompares() {
 // rows of the old vector stay under the new one, and 008's actor is not set.
 // FORK.md change 69 routed every one through `update_thought` (edits) or the
 // 3-argument `upsert_thought` (captures, the vector and its label in one
-// call); this is what keeps the next rebase from bringing one back.
+// call); this is what keeps one from coming back.
 //
 // The rule is the MECHANISM: a PostgREST table verb that replaces columns —
 // `.update(` or `.upsert(` — on `thoughts` (`.from("thoughts")`, either
@@ -2425,7 +2425,7 @@ function checkBunNative() {
 // no policy for the role they actually connect as denies that role every row.
 // The statements were cut on that ticket (FORK.md change 93), each file left
 // with a note pointing at `migrate.ts --grant`'s `community` group; this keeps
-// the next rebase from bringing them back — and holds db/ to the same rule
+// them from coming back — and holds db/ to the same rule
 // test-schema [10] has held the migrations to since the start, now one
 // spelling: db/config.mjs's SUPABASE_SQL_RULES over stripSqlComments, which
 // is literal-aware (a `--` inside a string no longer hides the rest of its
@@ -5753,8 +5753,8 @@ checkDestructiveSql();
 // its PostgREST store and the Cloudflare Workers target (SMD-3152, check 22b),
 // which were outside this scan (the shim's own suite writes its PostgREST
 // expectations by hand and loads no oracle; server/index.ts, the Edge Function
-// build that also held it, left with SMD-1800). This is what keeps the next rebase, or
-// the next vendored file, from bringing a PostgREST client back: a
+// build that also held it, left with SMD-1800). This is what keeps the next
+// vendored file from bringing a PostgREST client back: a
 // specifier-shaped string naming the package — "@supabase/supabase-js",
 // "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
 // ("https://esm.sh/@supabase/supabase-js@2", unpkg's), with or without a

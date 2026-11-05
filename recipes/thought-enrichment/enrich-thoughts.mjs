@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // ob1-fork (SMD-2139): this script paged PostgREST's `/thoughts` route and wrote
-// each row's enrichment back through it with a service-role key, and Daemonic
-// Brain's stack runs no PostgREST. It reads and writes through
+// each row's enrichment back through it with a service-role key, and
+// Daemonic Brain's stack runs no PostgREST. It reads and writes through
 // compat/supabase-sql now — SUPABASE_URL is a postgres:// connection string,
 // SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live in the
 // URL). Run it from a checkout: the import is relative. The checkpoint stays at

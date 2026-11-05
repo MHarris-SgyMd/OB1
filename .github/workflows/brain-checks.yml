@@ -3,9 +3,9 @@
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
 # workflow invokes any of them. That is how upstream's server/test-stateless.mjs
 # came to assert the opposite of production for three months without anyone
-# noticing (the Edge Function build and its three mirror suites left Daemonic
-# Brain with SMD-1800; server-portable/ is the server, and its suites import
-# it).
+# noticing (the Edge Function build and its three mirror suites left
+# Daemonic Brain with SMD-1800; server-portable/ is the server, and its
+# suites import it).
 #
 # This workflow exists so Daemonic Brain's code cannot rot the same way.
 name: Brain Checks

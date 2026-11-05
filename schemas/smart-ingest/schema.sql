@@ -146,8 +146,8 @@ END $$;
 --    Idempotent via SHA256 identity of (source_label + excerpt + thought_id).
 --    Returns { thought_id, evidence_count, action: 'appended' | 'already_exists' }.
 --
---    Daemonic Brain (SMD-2128): p_thought_id is uuid, thoughts.id's type here. The
---    bigint form is dropped first so one function answers the name — beside
+--    Daemonic Brain (SMD-2128): p_thought_id is uuid, thoughts.id's type here.
+--    The bigint form is dropped first so one function answers the name — beside
 --    a second overload the server's call would be ambiguous — which also
 --    drops the EXECUTE `--grant` gave that form: on a brain that had it, run
 --    `bun migrate.ts --grant <role>` again after this file.

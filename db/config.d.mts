@@ -417,8 +417,7 @@ export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "s
  * caller, grouped by the role that needs each group — tables for the
  * migrations' own groups; tables, sequences and functions for the community
  * schemas'. The single spelling read by preflight's `write privileges` check,
- * `migrate.ts
- * --grant`, and db/README.md.
+ * `migrate.ts --grant`, and db/README.md.
  */
 export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;
 /** The advisory lock every `migrate.ts --grant` and `db/login-role.ts` take (SMD-2289). */

@@ -4,8 +4,8 @@
  *
  * SMD-1804. Daemonic Brain ships continuously from `main`, so until this file
  * nothing named what shipped: a brain's identity was "the highest migration its
- * ledger records" plus whichever server happened to be checked out. The scheme
- * is
+ * ledger records" plus whichever server happened to be checked out. The
+ * scheme is
  *
  *   MAJOR.MINOR.PATCH
  *

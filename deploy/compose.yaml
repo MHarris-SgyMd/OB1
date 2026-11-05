@@ -1375,7 +1375,7 @@ services:
   #   comments (db/board-findings.ts, SMD-2681; under the default deny,
   #   OB1_EGRESS_ALLOW=type:board-finding), LINEAR_COMMENT_API_KEY, never the
   #   same key, at most OB1_FINDINGS_POST_CAP (5) a day. A brain that is not
-  #   Daemonic Brain's own never names it.
+  #   the maintainer's own never names it.
   # - `workers`, extraction and consolidation unattended (SMD-2424):
   #   `extract-entities.ts --follow` and `consolidate.ts --follow`, each
   #   draining its pool, then polling every OB1_EXTRACT_FOLLOW /

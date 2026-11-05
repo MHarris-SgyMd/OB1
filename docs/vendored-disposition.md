@@ -148,20 +148,20 @@ rather than twenty-one rewrites. This is that decision; the count is the survey 
 `main` at f7693c4c, re-measured on d8e3de60 (`grep -rlE "rest/v1|from supabase import|create_client\(|SUPABASE_SERVICE_ROLE_KEY" recipes --include=*.mjs --include=*.js --include=*.py --include=*.ts`,
 the ten files already on the shim set aside).
 
-**Weighed.** (1) *Upstream-only* — mark the twenty-one and stop: cheapest, and Daemonic
-Brain loses every import recipe, the root README's "start importing your data" table.
-(2) *A PostgREST profile* — `postgrest/postgrest` in `deploy/compose.yaml` behind a JWT
-secret so the scripts run unchanged: one service and zero porting, but it brings back
-the surface SMD-1795 retired (its title: "no Supabase account, PostgREST or Deno
-anywhere in the tree"), and every raw insert SMD-1524 closed for the servers stays open
-for these scripts — five of them embed the text themselves and POST content and vector
-as a row — no model label, no audit actor, three with no fingerprint and two with one
-computed client-side, a copy of 003's rule that drifts with it — and five more call
-`upsert_thought` over `/rest/v1/rpc/`, the right function over the wrong transport.
-(SMD-1524's rule is for vendored code; Daemonic Brain's own writers in `db/` — the
-ingester below among them — insert rows themselves by design, with the same fingerprint
-function and the audit actor set.) Declined. (3) *Port by kind* — taken, with (1)'s
-verdict for the three whose capability Daemonic Brain's core already owns.
+**Weighed.** (1) *Upstream-only* — mark the twenty-one and stop: cheapest, and
+Daemonic Brain loses every import recipe, the root README's "start importing your data"
+table. (2) *A PostgREST profile* — `postgrest/postgrest` in `deploy/compose.yaml`
+behind a JWT secret so the scripts run unchanged: one service and zero porting, but it
+brings back the surface SMD-1795 retired (its title: "no Supabase account, PostgREST or
+Deno anywhere in the tree"), and every raw insert SMD-1524 closed for the servers stays
+open for these scripts — five of them embed the text themselves and POST content and
+vector as a row — no model label, no audit actor, three with no fingerprint and two
+with one computed client-side, a copy of 003's rule that drifts with it — and five more
+call `upsert_thought` over `/rest/v1/rpc/`, the right function over the wrong
+transport. (SMD-1524's rule is for vendored code; Daemonic Brain's own writers in `db/`
+— the ingester below among them — insert rows themselves by design, with the same
+fingerprint function and the audit actor set.) Declined. (3) *Port by kind* — taken,
+with (1)'s verdict for the three whose capability Daemonic Brain's core already owns.
 
 **The kinds.** An **import** (a capture from an export) becomes an adapter of the ingestion
 contract (`db/ingest-contract.ts`, SMD-1867): its parser emits `Ingested` items and
@@ -205,9 +205,8 @@ brain `thought_entities` is migration 016's (a uuid `entity_id` to `ob1_entities
 `mention_role`), so the schema's `CREATE TABLE IF NOT EXISTS` is a no-op there and a write of
 `mention_role` fails with 42703 whatever the transport (change 093 recorded the shared name
 for grants; the third review pass measured the write). Each port reads 016's shape and writes
-mentions through Daemonic Brain's `record_thought_entities`, or its ticket says
-why not; `thought_edges` (`schemas/typed-reasoning-edges`) is its own name and
-applies.
+mentions through Daemonic Brain's `record_thought_entities`, or its ticket says why not;
+`thought_edges` (`schemas/typed-reasoning-edges`) is its own name and applies.
 
 **Smoke harnesses and retirements.** A **smoke harness** has its own ticket: `brain-smoke-test`
 retired once `deploy/smoke.sh` took the one check of its that applied and that smoke.sh lacked
@@ -330,15 +329,13 @@ keep their rows below.
 
 ## How the "verified no references" gate is applied
 
-An artifact is *referenced* — and therefore not removable — when something outside its
-own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the consistency checker
-(`scripts/check-consistency.ts`), `.github/workflows/brain-checks.yml`,
-`extensions/package.json` scripts, the SQL-shim codemod
-(`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
-setup step, or another artifact wiring to it. Mentions in `FORK.md` /
-`CHANGELOG.md` are the *audit record*, not a live dependency, and do not block a
-removal.
+An artifact is *referenced* — and therefore not removable — when something outside its own
+folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
+`extensions/test-writes.ts`), the consistency checker (`scripts/check-consistency.ts`),
+`.github/workflows/brain-checks.yml`, `extensions/package.json` scripts, the SQL-shim
+codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
+setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md` are
+the *audit record*, not a live dependency, and do not block a removal.
 
 > **Finding — several ticket-seed "remove" verdicts are revised to keep + audited.**
 > The seed list in SMD-1924 predates the SMD-1228 / SMD-1524 / SMD-1544 / SMD-1798

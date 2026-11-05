@@ -882,12 +882,12 @@ export function embeddingContract(record) {
  * query, so the one argument for off no longer holds and the default flips with
  * it.
  *
- * The costs did not change, and they are still real. Measured on Daemonic
- * Brain's own corpus (db/bench-trgm.ts): the index does nothing below ~10,000
- * rows — the planner correctly declines it — nothing at any scale for a common
- * word, and nothing for a pattern under three characters. It costs roughly +70
- * to +95 microseconds on every capture, and about as much storage as the table
- * itself.
+ * The costs did not change, and they are still real. Measured on
+ * Daemonic Brain's own corpus (db/bench-trgm.ts): the index does nothing below
+ * ~10,000 rows — the planner correctly declines it — nothing at any scale for a
+ * common word, and nothing for a pattern under three characters. It costs
+ * roughly +70 to +95 microseconds on every capture, and about as much storage
+ * as the table itself.
  *
  * So a stock deployment below ~10,000 thoughts now pays that write cost for no
  * read benefit. That is the unflattering half, and it is the reason this stayed

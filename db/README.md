@@ -3271,9 +3271,9 @@ answer budget sized to the text it sends (three times the estimated tokens plus
 and `qwen3.8:27b`), so an answer that will not end is cut in about a minute rather than
 running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
-taxes the repetition the runaways were measured to be: on the maintainer's brain that
-retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. Set
+taxes the repetition the runaways were measured to be: on the maintainer's brain
+that retry, with the budget sized to both measured models, extracted all 32
+thoughts one call could not finish, where windows alone reached 10 to 13. Set
 `OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
 local model with no penalty (SMD-2000) — the pass key on the rows stays the
 first model's, and the dump line records which model answered. The 27B never
