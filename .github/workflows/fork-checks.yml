@@ -1146,8 +1146,9 @@ jobs:
       # s after 106 s of suites, on the run's critical path. Then test-preflight
       # was the job's floor, the long leg of a pair whose median was ~219 s of
       # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
-      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first here, beside
-      # test-upgrade, and rest in the job preflight-rest, on a runner of its
+      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first, [5] alone
+      # since SMD-3710, here beside test-upgrade, and rest in the job
+      # preflight-rest, on a runner of its
       # own, since this job's CPUs are its limit (SMD-3691: that job's
       # comment has the measurements). test-upgrade.ts applies migrations
       # INCREMENTALLY, onto a database that already holds data — the one
@@ -1569,7 +1570,13 @@ jobs:
   # the first shard 71.5 and test-upgrade 33 (most of its span waits); the
   # data layer keeps those two. With two legs, on an EPYC (one run,
   # 41566315515), the first shard ended at 169 s, the CPUs 67% busy and
-  # never at 95%. One Postgres, with a /dev/shm of 1 GB: the data layer's
+  # never at 95%. That first shard still ended 16-26 s after test-upgrade
+  # on an EPYC 7763 (eight main runs to 87240d21), [9]'s 17-19 s of
+  # endpoint timeouts among it, so [9] runs here (SMD-3710). Before, this
+  # job ended 26-91 s before the data layer on that CPU and 12-107 s on
+  # the others; with [9] it may end after it on the fastest (an EPYC 9V45,
+  # a Xeon 6975P-C), whose data layer ends 127 s or more before the run's
+  # last job. One Postgres, with a /dev/shm of 1 GB: the data layer's
   # Postgres step has why.
   preflight-rest:
     name: The deploy gate's rest shard against real Postgres

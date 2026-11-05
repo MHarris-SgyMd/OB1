@@ -59,20 +59,19 @@ const { assert } = sections;
  * runs, by the id in its header. A section no shard here lists is the rest's,
  * so a new section runs in CI unless it is listed. Split by section time: [5]
  * was most of the suite, so it ends at its full re-apply and [5b] goes on from
- * a fresh one; first takes [5] and [9], whose local endpoints wait out
- * their timeouts, and the rest the others, [5b] and [12] the long ones among
- * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
- * in a job of its own and ends well before the first (its job 103 s, against
- * the data layer's 184 s, one run), so the split no longer evens two legs:
- * [9], about 16 s of waits, could go to the rest and take that off the first
- * (SMD-3710).
+ * a fresh one; first takes [5], and the rest the others, [5b] and [12] the
+ * long ones among them. Since SMD-3691 the rest runs in a job of its own, so
+ * the split no longer evens two legs: first is the data layer's, beside
+ * db/test-upgrade.ts, and [9], 17-19 s of endpoint timeouts waited out, went
+ * to the rest (SMD-3710). On an AMD EPYC 7763, in eight main runs to
+ * 87240d21, first ended 16-26 s after test-upgrade, the job's floor, while
+ * preflight-rest's job ended 26-91 s before the data layer's.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  first: ["5", "9"],
+  first: ["5"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -3189,11 +3188,12 @@ else {
     }
   }
   // [5] leaves a brain preflight passes, as [5b] checks at its own end: [9]
-  // reads it, after [5] in the first shard and after [5b] in a full run.
+  // reads [5b]'s, after it in the rest shard and in a full run (SMD-3710), so
+  // this holds [5]'s fixtures to cleaning up after themselves.
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
   const left = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
-  assert(left.ok === true, `[5] leaves a brain preflight passes, the state [9] reads after it (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
+  assert(left.ok === true, `[5] leaves a brain preflight passes, its fixtures cleaned up (failed:${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
 }
 
 if (want("5b")) console.log("\n[5b] Against a real database, from a fresh apply: the capturing role, the fingerprint backfill, the version and ledger rows as other roles read them, the tier and the workers' heartbeats");
@@ -4955,6 +4955,8 @@ else {
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
   }
 
+  // The brain [9]'s degraded start reads, after this in either run that has
+  // both: the rest shard and a full run (SMD-3710).
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
 
