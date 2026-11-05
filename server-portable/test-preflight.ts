@@ -57,15 +57,16 @@ const { assert } = sections;
 /**
  * The suite's shards (SMD-3468), as test-live.ts's SHARDS: the sections each
  * runs, by the id in its header. A section no shard here lists is the rest's,
- * so a new section runs in CI unless it is listed. Split by section time: [5]
- * was most of the suite, so it ends at its full re-apply and [5b] goes on from
- * a fresh one; first takes [5], and the rest the others, [5b] and [12] the
- * long ones among them. Since SMD-3691 the rest runs in a job of its own, so
- * the split no longer evens two legs: first is the data layer's, beside
- * db/test-upgrade.ts, and [9], 17-19 s of endpoint timeouts waited out, went
- * to the rest (SMD-3710). On an AMD EPYC 7763, in eight main runs to
- * 87240d21, first ended 16-26 s after test-upgrade, the job's floor, while
- * preflight-rest's job ended 26-91 s before the data layer's.
+ * so a new section runs in CI unless it is listed. Split first by section
+ * time: [5] was most of the suite, so it ends at its full re-apply and [5b]
+ * goes on from a fresh one; first takes [5], and the rest the others, [5b]
+ * and [12] the long ones among them. Since SMD-3691 the rest runs in a job of
+ * its own, so the split no longer evens two legs: first is the data layer's,
+ * beside db/test-upgrade.ts and that job's foreground suites, and [9] went to
+ * the rest (SMD-3710). [9] took 15-19 s in CI, about 11 s of it four 2.5 s
+ * probe timeouts and most of the rest some 40 preflight runs. On an AMD EPYC
+ * 7763, in eight main runs to 87240d21, first ended 15-20 s after the later
+ * of test-upgrade and those suites, so it was the job's floor by about [9].
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -3193,7 +3194,7 @@ else {
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
   const left = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
-  assert(left.ok === true, `[5] leaves a brain preflight passes, its fixtures cleaned up (failed:${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
+  assert(left.ok === true, `[5] leaves a brain preflight passes, its fixtures cleaned up (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
 }
 
 if (want("5b")) console.log("\n[5b] Against a real database, from a fresh apply: the capturing role, the fingerprint backfill, the version and ledger rows as other roles read them, the tier and the workers' heartbeats");
