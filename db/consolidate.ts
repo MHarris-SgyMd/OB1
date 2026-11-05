@@ -44,7 +44,7 @@
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
  * thought extracted after a run is judged against its older neighbours by the
- * next run or a --follow process. On the fork's default — Ollama, `qwen2.5:7b`
+ * next run or a --follow process. On Daemonic Brain's default — Ollama, `qwen2.5:7b`
  * — that is compute on your own machine and nothing leaves it. Pointed at a
  * hosted provider it is money per pair and both thoughts' text goes to that
  * provider. evals/README.md has the measured calls per thousand thoughts and

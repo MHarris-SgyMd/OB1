@@ -2,7 +2,7 @@
 /**
  * eval-calibration.ts — was the confidence earned? (SMD-1809)
  *
- * The fork writes a confidence in three places — the consolidation judge on
+ * Daemonic Brain writes a confidence in three places — the consolidation judge on
  * every proposal (migration 029), the entity extractor on every mention and
  * edge (016), and the metadata model's kind band that SMD-1951 froze — and it
  * resolves claims in four: a reviewer accepts or rejects a proposal, a hand
@@ -139,7 +139,7 @@ export function kindBandRows(f: Fixture): LedgerRow[] {
  * is resolved by the fork record where the fixture says confirmed or refuted;
  * a thought another thought supersedes is resolved against — the ticket's
  * reading ("superseded by a corrected value"), which counts a supersession
- * that merely extends the same way and so overstates refutation; the fork
+ * that merely extends the same way and so overstates refutation; Daemonic Brain
  * record wins where both apply, since a verdict is a resolution and a pointer
  * is a hint at one. A thought that declared a value and that nothing resolved
  * is unresolved. The confidence is whatever the writer declared under

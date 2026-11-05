@@ -28,7 +28,7 @@
  * lineage table that would hold it for every derived row is SMD-1731's; this
  * tier supplies what such a row would record and builds nothing to hold it.
  *
- * Nothing in the fork calls this yet: the server never decides, and preflight
+ * Nothing in Daemonic Brain calls this yet: the server never decides, and preflight
  * reads the knobs only to check the tier. The spikes are the callers.
  */
 

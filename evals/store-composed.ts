@@ -43,7 +43,7 @@
  * store-readmodel.ts). Self-contained: it starts and tears down its own
  * timescaledb-ha container and builds its own `points`/`docs` tables (NOT the
  * product `thoughts`/`match_thoughts`); LanceDB is embedded (a temp dataset dir).
- * LanceDB is Apache-2.0, the fork FSL-1.1-MIT — an eval dep.
+ * LanceDB is Apache-2.0, Daemonic Brain FSL-1.1-MIT — an eval dep.
  *
  *   bun store-composed.ts                                  # real corpus, full quality sweep
  *   OB1_STORE_QUERIES=15 bun store-composed.ts             # quick smoke

@@ -163,7 +163,7 @@ CREATE TRIGGER trg_thought_edges_updated_at
 --    explicit product decision, not a default.
 -- ============================================================
 
--- This fork (SMD-1796): the posture above was upstream's ENABLE ROW LEVEL
+-- Daemonic Brain (SMD-1796): the posture above was upstream's ENABLE ROW LEVEL
 -- SECURITY with a "service_role full access" policy, GRANTs on the table and
 -- its sequence TO service_role, and REVOKEs FROM authenticated and anon. Those
 -- are Supabase's roles: on plain Postgres the GRANT stops the file (`role

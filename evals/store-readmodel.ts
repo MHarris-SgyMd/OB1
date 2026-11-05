@@ -40,7 +40,7 @@
  * harness (store-backends.ts) — one exact-cosine oracle, the point unit, the
  * point→ref dedup — and its corpus scaffolding (store-compare.ts). Starts and
  * tears down its own timescaledb-ha container; LanceDB is embedded (a temp
- * dataset dir). LanceDB is Apache-2.0, the fork FSL-1.1-MIT — an eval dep.
+ * dataset dir). LanceDB is Apache-2.0, Daemonic Brain FSL-1.1-MIT — an eval dep.
  *
  *   bun store-readmodel.ts                                  # real corpus, hnsw_sq read model
  *   OB1_STORE_QUERIES=15 bun store-readmodel.ts             # quick smoke

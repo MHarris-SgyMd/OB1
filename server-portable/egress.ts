@@ -41,7 +41,7 @@
  * Nothing here dials a provider or reads a database. embed.ts's providerCall,
  * consolidate.ts's judgePair and entities.ts's extractEntities each call
  * `mayLeaveBox` with the subject they are about to send and refuse on a
- * denial, so no call the fork makes is ungated; the server's capture and
+ * denial, so no call Daemonic Brain makes is ungated; the server's capture and
  * search paths ask first and skip the call, so a refused capture costs no
  * request and the reply says why.
  */
@@ -107,7 +107,7 @@ export type EgressPolicy = {
   problems: string[];
 };
 
-/** An on/off flag as the fork's other on/off knobs read it: 1, on, true, yes; trimmed; anything else is off. */
+/** An on/off flag as Daemonic Brain's other on/off knobs read it: 1, on, true, yes; trimmed; anything else is off. */
 export function flagOn(raw: string | undefined): boolean {
   return /^(1|on|true|yes)$/i.test((raw ?? "").trim());
 }

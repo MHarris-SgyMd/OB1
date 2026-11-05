@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * eval-supersession.ts — does EXCLUDING a superseded thought from retrieval help,
- * on the kind of relevance task this fork measures against? (Linear SMD-1253.)
+ * on the kind of relevance task Daemonic Brain measures against? (Linear SMD-1253.)
  *
  * Migration 025 records that one thought supersedes another. The ticket asks the
  * question 020's recency blend had to answer before it could ship: a supersedes
@@ -39,7 +39,7 @@
  *   the way eval-recency prices its window against a sequential-scan oracle.
  *
  * Two definitions of "relevant", because the answer depends on it
- *   TOPICAL   — any document of the topic counts (the fork's title→body task).
+ *   TOPICAL   — any document of the topic counts (Daemonic Brain's title→body task).
  *   CURRENT   — only the current (non-superseded) document counts (the reader who
  *               wants today's answer, not last month's — the ticket's premise).
  *   Reported for each: MRR and R@1, label-only vs exclude, plus a CONTROL (on a
@@ -186,7 +186,7 @@ assert(currentDropped === 0, "exclude never removes the current version");
 
 const pct = (m: Metrics) => `MRR ${m.mrr.toFixed(3)}  R@1 ${(m.r1 * 100).toFixed(0)}%`;
 console.log(`  the stale twin outranks its replacement in ${oldAboveNew}/${twinTopics.length} topics (a coin-flip, by construction)\n`);
-console.log(`  relevance = TOPICAL (any version of the topic counts — the fork's title→body task)`);
+console.log(`  relevance = TOPICAL (any version of the topic counts — Daemonic Brain's title→body task)`);
 console.log(`     label-only : ${pct(topicalLabel)}`);
 console.log(`     exclude    : ${pct(topicalExcl)}   Δ MRR ${(topicalExcl.mrr - topicalLabel.mrr >= 0 ? "+" : "") + (topicalExcl.mrr - topicalLabel.mrr).toFixed(3)}\n`);
 console.log(`  relevance = CURRENT (only the non-superseded version counts — the ticket's premise)`);
@@ -221,12 +221,12 @@ const topicalMoves = Math.abs(topicalExcl.mrr - topicalLabel.mrr) > 0.005;
 const currentMoves = currentExcl.mrr - currentLabel.mrr > 0.005;
 
 console.log("  ── verdict ──");
-console.log(`  On the TOPICAL task the fork measures against, excluding superseded rows ${topicalMoves ? "MOVES" : "does NOT move"} MRR` +
+console.log(`  On the TOPICAL task Daemonic Brain measures against, excluding superseded rows ${topicalMoves ? "MOVES" : "does NOT move"} MRR` +
   ` (${(topicalExcl.mrr - topicalLabel.mrr >= 0 ? "+" : "") + (topicalExcl.mrr - topicalLabel.mrr).toFixed(3)}).`);
 console.log(`  Under CURRENT-version relevance it ${currentMoves ? "helps" : "does not help"}` +
   ` (${(currentExcl.mrr - currentLabel.mrr >= 0 ? "+" : "") + (currentExcl.mrr - currentLabel.mrr).toFixed(3)}), by removing the stale twin that outranks its replacement.`);
 console.log("");
-console.log("  Decision (SMD-1253): the fork's relevance task is TOPICAL, on which the numbers do not move —");
+console.log("  Decision (SMD-1253): Daemonic Brain's relevance task is TOPICAL, on which the numbers do not move —");
 console.log("  so per the ticket the ranking change does NOT ship; supersession is LABELLED, not excluded or");
 console.log("  down-weighted. The label serves the current-version reader (who the CURRENT column shows would");
 console.log("  benefit from exclusion) WITHOUT a ranking change the topical task cannot justify — the same");

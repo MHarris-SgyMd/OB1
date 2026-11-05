@@ -272,7 +272,7 @@ BEGIN
 END;
 $$;
 
--- This fork (SMD-1796): upstream's file ends here with ENABLE ROW LEVEL SECURITY
+-- Daemonic Brain (SMD-1796): upstream's file ends here with ENABLE ROW LEVEL SECURITY
 -- on the eight tables, a policy FOR service_role on each, and GRANTs TO
 -- service_role. Those are Supabase's: on plain Postgres the first GRANT stops
 -- the file (`role "service_role" does not exist`), and with the role created to

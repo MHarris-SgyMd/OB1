@@ -6,7 +6,7 @@
  * SMD-968: `match_thoughts` chose its candidates first and applied the metadata
  * filter afterwards, so a filter matching a small share of the corpus saw a
  * small share of 40 candidates. db/bench-hnsw.ts shows the mechanism on random
- * vectors. This asks whether it matters on the corpus the fork's other numbers
+ * vectors. This asks whether it matters on the corpus Daemonic Brain's other numbers
  * come from — 441 real issues with their real labels — using the function as
  * deployed, in a real Postgres, with the rows stored the way the server stores
  * them (whole-content vector plus bare windows for the long ones).

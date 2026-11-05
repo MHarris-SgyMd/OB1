@@ -23,7 +23,7 @@ The RPCs read `source_type` and `sensitivity_tier` columns from the [enhanced-th
 
 ## Security Model
 
-All four RPCs run as `SECURITY INVOKER`, so they read `thoughts` with the caller's own privileges. On this fork the file grants nothing (SMD-1796): upstream granted execute to Supabase's `authenticated` and `service_role` — **not `anon`** — and those roles do not exist off Supabase; execute is `PUBLIC`'s by default, so whichever role you connect as can call them, and what it sees is what its `SELECT` on `thoughts` allows. On Supabase, if you want an unauthenticated public dashboard to read these aggregates, review your RLS policy first and then grant `anon` yourself, e.g.:
+All four RPCs run as `SECURITY INVOKER`, so they read `thoughts` with the caller's own privileges. In Daemonic Brain the file grants nothing (SMD-1796): upstream granted execute to Supabase's `authenticated` and `service_role` — **not `anon`** — and those roles do not exist off Supabase; execute is `PUBLIC`'s by default, so whichever role you connect as can call them, and what it sees is what its `SELECT` on `thoughts` allows. On Supabase, if you want an unauthenticated public dashboard to read these aggregates, review your RLS policy first and then grant `anon` yourself, e.g.:
 
 ```sql
 grant execute on function public.brain_stats_daily(integer, text, boolean) to anon;
@@ -51,7 +51,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply [`schema.sql`](schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. Nothing to grant (this fork, SMD-1796): the file adds four `SECURITY INVOKER` functions, executable by any role that can read `thoughts` (upstream's `grant execute … to authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default). It's idempotent — safe to run again later if you reinstall.
+2. Nothing to grant (Daemonic Brain, SMD-1796): the file adds four `SECURITY INVOKER` functions, executable by any role that can read `thoughts` (upstream's `grant execute … to authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default). It's idempotent — safe to run again later if you reinstall.
 3. Navigate to **Database → Functions** and verify the four new functions exist:
    - `brain_stats_daily`
    - `brain_stats_daily_lifelog`

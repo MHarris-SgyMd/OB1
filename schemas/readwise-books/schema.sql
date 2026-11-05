@@ -72,7 +72,7 @@ AS $$
   LIMIT p_limit;
 $$;
 
--- This fork (SMD-1796): upstream's `GRANT EXECUTE … TO authenticated, anon,
+-- Daemonic Brain (SMD-1796): upstream's `GRANT EXECUTE … TO authenticated, anon,
 -- service_role` after this function and the next is gone. Those are Supabase's
 -- roles — on plain Postgres the GRANT stops the file (`role "authenticated"
 -- does not exist`) — and EXECUTE is PUBLIC's by default, so nothing replaces

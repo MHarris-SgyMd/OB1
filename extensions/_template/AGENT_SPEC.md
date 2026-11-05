@@ -69,7 +69,7 @@ PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follo
 
 3. **Include indexes** for columns that will be queried frequently (user_id + any filter columns).
 
-4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; this fork runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). The `--grant` group this step once named, `ROLE_GRANTS.extensions`, retired with SMD-2311: an extension is a plugin now, its tables made by the brain's migrator under the plugin's own role (SMD-3747 rewrites this template).
+4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; Daemonic Brain runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). The `--grant` group this step once named, `ROLE_GRANTS.extensions`, retired with SMD-2311: an extension is a plugin now, its tables made by the brain's migrator under the plugin's own role (SMD-3747 rewrites this template).
 
 5. **Never modify the core `thoughts` table.** Adding new tables is fine. Referencing `thoughts` via foreign key is fine. Altering or dropping `thoughts` columns is not.
 
@@ -93,7 +93,7 @@ PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follo
 
 ## File 4: index.ts
 
-The MCP server, in this fork's Bun-native shape (SMD-1799; the Edge Function shape it replaced is FORK.md's history). Must follow this exact structure:
+The MCP server, in Daemonic Brain's Bun-native shape (SMD-1799; the Edge Function shape it replaced is FORK.md's history). Must follow this exact structure:
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -105,7 +105,7 @@ import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Post
 // MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
 // auth.ts is server-portable/auth.ts, copied beside the extensions and held
 // identical by extensions/test-auth.ts. Never
-// compare a key with `!==` yourself (the fork's consistency check refuses it).
+// compare a key with `!==` yourself (Daemonic Brain's consistency check refuses it).
 import { authenticateRequest, canWrite, listenOn, type Principal } from "../_shared/auth.ts";
 // The reply kept alive while a tool runs, and a client that leaves logged: Bun
 // closes a stream silent for 8–12 s (SMD-1864, SMD-2001). _shared/sse.ts is
@@ -236,7 +236,7 @@ Must follow the template at `extensions/_template/README.md`. Key sections:
 
 ### The Bun Run (CRITICAL)
 
-The README's "Run the MCP Server" step is the run every extension README had (`extensions/job-hunt/README.md` was the model until SMD-2311 made the six extensions plugins; SMD-3747 rewrites this template): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
+The README's "Run the MCP Server" step is the run every extension README had (`extensions/job-hunt/README.md` was the model until SMD-2311 made the six extensions plugins; SMD-3747 rewrites this template): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) primitive's Step 3 shows, and behind HTTPS for a hosted client as its Step 5 shows. There is nothing else to deploy: Daemonic Brain's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
 
 ### SQL Setup
 

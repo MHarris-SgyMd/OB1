@@ -1,7 +1,7 @@
 /**
- * version.mjs — the fork's version, and the release ranges that freeze migrations.
+ * version.mjs — Daemonic Brain's version, and the release ranges that freeze migrations.
  *
- * SMD-1804. The fork ships continuously from `main`, so until this file nothing
+ * SMD-1804. Daemonic Brain ships continuously from `main`, so until this file nothing
  * named what shipped: a brain's identity was "the highest migration its ledger
  * records" plus whichever server happened to be checked out. The scheme is
  *
@@ -28,10 +28,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The upstream commit the fork sits on — FORK.md's pin, `upstream-pin-9543c29`, frozen (SMD-1256). Each release records it as data (releases.json's `upstream`); from 2.0.0 the version does not carry it (SMD-3317). */
+/** The upstream commit Daemonic Brain sits on — FORK.md's pin, `upstream-pin-9543c29`, frozen (SMD-1256). Each release records it as data (releases.json's `upstream`); from 2.0.0 the version does not carry it (SMD-3317). */
 export const UPSTREAM_PIN = "9543c29";
 
-/** The fork's repository, for compare links and release downloads — one definition for the assembler and the release job (SMD-1860). */
+/** Daemonic Brain's repository, for compare links and release downloads — one definition for the assembler and the release job (SMD-1860). */
 export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
 
 /**
@@ -121,7 +121,7 @@ function parseVersion(v) {
  * Compare two versions by SemVer 2.0.0 precedence, ignoring build metadata.
  * Returns <0, 0 or >0. A pre-release (`1.0.0-rc.1`) precedes its release
  * (`1.0.0`); pre-release identifiers compare field by field, numeric before
- * alphanumeric. Enough for the fork's own numbers, and self-checked below.
+ * alphanumeric. Enough for Daemonic Brain's own numbers, and self-checked below.
  */
 export function semverCompare(a, b) {
   const x = parseVersion(a);

@@ -16,7 +16,7 @@
 // functions record an actor only when the caller names one; change 69 named none).
 // SMD-1544 (change 73): the source and profile queries filter on JSON paths
 // (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
-// refused — a 500 at the first query on the fork — and renders now; the shim
+// refused — a 500 at the first query in Daemonic Brain — and renders now; the shim
 // also hands created_at back as a string, as PostgREST does, which the prompt
 // slices. extensions/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -482,7 +482,7 @@ async function upsertProfile(
   // itself and stored no vector at all, so the first profile was unsearchable
   // until a re-embed pass reached it. The function reads p_payload->'metadata'
   // and ->>'embedding_model' only — sibling keys such as type/importance/
-  // source_type are dropped, by upstream's function and this fork's alike — so
+  // source_type are dropped, by upstream's function and Daemonic Brain's alike — so
   // the enhanced-thoughts columns follow by a raw update that carries neither
   // content nor vector, as the rewrite path's do. findExistingProfile() has
   // already run; `existed` is a concurrent run's row, reported as not created

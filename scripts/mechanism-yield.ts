@@ -2,7 +2,7 @@
 /**
  * mechanism-yield.ts — which review mechanisms pay, read from the commit log.
  *
- * The fork's review loop records each pass as a commit whose body lists its
+ * Daemonic Brain's review loop records each pass as a commit whose body lists its
  * findings as bullets. This script treats every such bullet as one row and
  * tallies two things about it:
  *
@@ -49,7 +49,7 @@
  * bullet, so a tag wrapped onto the next line is read.
  *
  * A review-pass commit is one whose subject says "review" and "pass" in one
- * of the fork's shapes ("Review, second pass", "Review pass 4", "Second review
+ * of Daemonic Brain's shapes ("Review, second pass", "Review pass 4", "Second review
  * pass", "Review, reproducibility pass"); merges and boyscout commits are not,
  * nor is a subject that merely mentions a pass ("while the third pass was in
  * flight").

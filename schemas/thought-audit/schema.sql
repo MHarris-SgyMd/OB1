@@ -101,7 +101,7 @@ CREATE INDEX IF NOT EXISTS thought_audit_session_id_idx
 CREATE INDEX IF NOT EXISTS thought_audit_created_at_idx
   ON thought_audit (created_at DESC);
 
--- This fork (SMD-1796): upstream's file here ENABLEd ROW LEVEL SECURITY on the
+-- Daemonic Brain (SMD-1796): upstream's file here ENABLEd ROW LEVEL SECURITY on the
 -- table ("service role bypasses RLS automatically") and GRANTed SELECT, INSERT
 -- TO service_role. Those are Supabase's: on plain Postgres the GRANT stops the
 -- file (`role "service_role" does not exist`), and RLS with no policy for the

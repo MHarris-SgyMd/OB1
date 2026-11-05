@@ -1,6 +1,6 @@
 # Lint Sweep
 
-> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 all three with `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
+> **In Daemonic Brain (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway Daemonic Brain's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 all three with `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -73,7 +73,7 @@ OPTIONAL (TIER 3 ONLY)
    ```
 
    > [!NOTE]
-   > This recipe reads the standard `SUPABASE_URL` name every other OB1 recipe reads — on this fork a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
+   > This recipe reads the standard `SUPABASE_URL` name every other OB1 recipe reads — in Daemonic Brain a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
 
    <!-- -->
 
@@ -133,7 +133,7 @@ All flags:
 
 ## Report Format
 
-The output is a self-contained markdown file ready for human review. Sample output from a small test brain (upstream's, with integer ids — on this fork a thought id is a uuid, so `#48221` reads `#2b3a2174-5158-…`):
+The output is a self-contained markdown file ready for human review. Sample output from a small test brain (upstream's, with integer ids — in Daemonic Brain a thought id is a uuid, so `#48221` reads `#2b3a2174-5158-…`):
 
 ```markdown
 ---
@@ -182,7 +182,7 @@ On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the
 - Low-signal noise (importance ≤2, content <40 chars): **18**
 - Exact-duplicate fingerprint groups: **2**
   - fingerprint a1b2c3d4e5f6… → 2 copies (ids: 11032, 11418)
-- Rows missing content_fingerprint: **0** — on this fork migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).
+- Rows missing content_fingerprint: **0** — in Daemonic Brain migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).
 
 ## Tier 2 — Graph-based lint (free)
 
@@ -270,7 +270,7 @@ After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings
 Solution: Create `.env.local` in the same directory as `lint-sweep.js` with the connection string, or export it in your shell. Fall-through order is `process.env` → `.env.local` → `.env`; under `bun`, an `.env` or `.env.local` in the directory you run from is loaded into `process.env` first, so it wins over the script's own files. The legacy `OPEN_BRAIN_URL` name is still accepted (with a one-line deprecation warning).
 
 **Issue: `expected a postgres:// connection URL`**
-Solution: `SUPABASE_URL` still holds a Supabase project URL. On this fork it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
+Solution: `SUPABASE_URL` still holds a Supabase project URL. In Daemonic Brain it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
 
 **Issue: `thoughts (recent 2000) → 42703 column "source_type" does not exist`** (under `--tier=2` alone: `thoughts (high importance) → 42703 column "importance" does not exist`)
 Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 those two and `type`.

@@ -10,7 +10,7 @@
  *
  *   OB1_EVAL_DOCS=stragglers.json ../db/with-postgres.sh bun eval-extract-windows.ts
  *       A JSON array of {id, content} — the thoughts that failed whole-content
- *       extraction on a brain (the 32 that timed out at 900 s on the fork's
+ *       extraction on a brain (the 32 that timed out at 900 s on Daemonic Brain's
  *       own, exported with the query in evals/README.md). Per arm: how many
  *       extract, how many answers are malformed or time out, seconds per
  *       thought, entities and edges written.

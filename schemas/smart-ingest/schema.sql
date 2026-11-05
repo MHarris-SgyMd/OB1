@@ -2,7 +2,7 @@
 -- Adds ingestion_jobs and ingestion_items tables for tracking
 -- the extract-deduplicate-execute lifecycle of bulk text ingestion.
 -- Safe to run multiple times (fully idempotent), and one transaction, BEGIN to
--- COMMIT (this fork, SMD-2128): a refusal anywhere leaves nothing applied, under
+-- COMMIT (Daemonic Brain, SMD-2128): a refusal anywhere leaves nothing applied, under
 -- a client that sends the file as one query and under plain `psql -f`, which
 -- runs on past an error, alike. One exception in kind, not in effect: section 2b
 -- retypes two columns on a table created before it, once — an ALTER TABLE that
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS public.ingestion_items (
   action text NOT NULL DEFAULT 'pending',   -- pending, add, skip, append_evidence, create_revision
   status text NOT NULL DEFAULT 'pending',   -- pending, ready, executed, failed
   reason text,
-  matched_thought_id uuid,                  -- thoughts.id is uuid on this fork (section 2b; SMD-2128)
+  matched_thought_id uuid,                  -- thoughts.id is uuid in Daemonic Brain (section 2b; SMD-2128)
   similarity_score numeric(5,4),
   result_thought_id uuid,
   error_message text,
@@ -80,10 +80,10 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_items_pending
 --     deployments can isolate ingestion history per user. Stock
 --     single-tenant OB1 setups can leave user_id NULL on every row.
 --
---     This fork (SMD-1796): upstream's file went on to add a foreign key
+--     Daemonic Brain (SMD-1796): upstream's file went on to add a foreign key
 --     from user_id to Supabase's auth.users(id), inside a DO block that
 --     ran only where the auth schema exists. Guarded or not, it is a
---     reference into GoTrue's schema, which the fork's SQL rule refuses
+--     reference into GoTrue's schema, which Daemonic Brain's SQL rule refuses
 --     (scripts/check-consistency.ts check 12); a single-operator
 --     brain (SMD-1716) has no auth.users to point at, so the column
 --     stays a plain nullable uuid and the block is gone.
@@ -95,9 +95,9 @@ ALTER TABLE public.ingestion_items
   ADD COLUMN IF NOT EXISTS user_id uuid;
 
 -- ============================================================
--- 2b. THE TWO THOUGHT-ID COLUMNS ARE uuid (this fork, SMD-2128)
+-- 2b. THE TWO THOUGHT-ID COLUMNS ARE uuid (Daemonic Brain, SMD-2128)
 --     Upstream's thoughts.id is an integer and the two columns above were
---     bigint. On this fork thoughts.id is a uuid, so every value the server
+--     bigint. In Daemonic Brain thoughts.id is a uuid, so every value the server
 --     records here is one: a fingerprint or semantic match, the thought an
 --     item wrote. Against bigint, an INSERT carrying a matched id failed
 --     whole — no item of a job with any match was ever persisted — the
@@ -146,7 +146,7 @@ END $$;
 --    Idempotent via SHA256 identity of (source_label + excerpt + thought_id).
 --    Returns { thought_id, evidence_count, action: 'appended' | 'already_exists' }.
 --
---    This fork (SMD-2128): p_thought_id is uuid, thoughts.id's type here. The
+--    Daemonic Brain (SMD-2128): p_thought_id is uuid, thoughts.id's type here. The
 --    bigint form is dropped first so one function answers the name — beside
 --    a second overload the server's call would be ambiguous — which also
 --    drops the EXECUTE `--grant` gave that form: on a brain that had it, run
@@ -237,14 +237,14 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(uuid, jsonb) FROM public;
 
--- This fork (SMD-1796): upstream's section 4 also GRANTed ALL on both tables,
+-- Daemonic Brain (SMD-1796): upstream's section 4 also GRANTed ALL on both tables,
 -- USAGE, SELECT on their two sequences and EXECUTE on the append TO
 -- service_role, and a section 5 ENABLEd ROW LEVEL SECURITY on both tables with
 -- a policy FOR service_role and, where Supabase's auth.uid() exists, a SELECT
 -- policy FOR authenticated scoped to it. Those are Supabase's: on plain
 -- Postgres the first GRANT stops the file (`role "service_role" does not
 -- exist`), and the section's own comment says what RLS then does — "deny-by-
--- default for anyone except service_role", which on this fork is the role you
+-- default for anyone except service_role", which in Daemonic Brain is the role you
 -- connect as. Removed; the REVOKE above stays, so the SECURITY DEFINER append
 -- is callable only by a role granted it.
 -- Grant the role your server connects as instead — from db/:

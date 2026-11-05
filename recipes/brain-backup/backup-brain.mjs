@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ob1-fork (SMD-2144): this script paged PostgREST's `/<table>` route with a
-// service-role key, and this fork's stack runs no PostgREST. It reads the same
+// service-role key, and Daemonic Brain's stack runs no PostgREST. It reads the same
 // pages through compat/supabase-sql now — SUPABASE_URL is a postgres:// connection
 // string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live
 // in the URL), and a table that is not there is Postgres's 42P01 where PostgREST
@@ -35,9 +35,9 @@ const PAGE_SIZE = 1000;
 // Stock Open Brain only has `thoughts`. The other tables are from optional
 // companion contributions (entity extraction, smart ingest). Missing tables
 // are skipped at runtime so this recipe works against any Open Brain install.
-// On this fork the companions are `schemas/entity-extraction` (entities, edges;
+// In Daemonic Brain the companions are `schemas/entity-extraction` (entities, edges;
 // thought_entities is migration 016's on a fork brain) and `schemas/smart-ingest`
-// (ingestion_jobs, ingestion_items); the fork's own tables — thought_audit,
+// (ingestion_jobs, ingestion_items); Daemonic Brain's own tables — thought_audit,
 // thought_sources, thought_facets, ob1_entities and the rest — are not in this
 // list, and `pg_dump` is the whole-brain backup (README).
 const TABLES = [
@@ -98,7 +98,7 @@ if (!SUPABASE_URL) {
   console.error(
     "ERROR: SUPABASE_URL not found.\n" +
     "Either export it or add it to .env.local in the current directory " +
-    "(a postgres:// connection string on this fork)."
+    "(a postgres:// connection string in Daemonic Brain)."
   );
 } else {
   try {

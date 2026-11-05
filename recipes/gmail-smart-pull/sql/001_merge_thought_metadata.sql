@@ -37,7 +37,7 @@ BEGIN
 END;
 $$;
 
--- This fork (SMD-1810): upstream GRANTed EXECUTE on the function TO
+-- Daemonic Brain (SMD-1810): upstream GRANTed EXECUTE on the function TO
 -- service_role here. Supabase's role; on plain Postgres the statement fails
 -- (`role "service_role" does not exist`). Removed — EXECUTE is PUBLIC's by
 -- default and upstream did not REVOKE it, so the grant added nothing a caller

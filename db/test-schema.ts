@@ -1076,7 +1076,7 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    * These are text searches over the migration files, so they cannot tell a
    * statement from prose ABOUT a statement. Migration 012's header quotes the
    * `GRANT EXECUTE ... TO authenticated, service_role` that upstream's version
-   * ends with, in order to explain why this fork does not have it — and that
+   * ends with, in order to explain why Daemonic Brain does not have it — and that
    * quotation failed this assertion. A guard that forbids DISCUSSING the thing
    * it forbids pushes the explanation out of the file, which is the opposite of
    * what these headers are for.
@@ -1531,7 +1531,7 @@ console.log("\n[15] thought_work_claims: the pool, the lease, the release");
   const pendingIdx = (await db.query<{ def: string }>(`SELECT indexdef AS def FROM pg_indexes WHERE indexname = 'thought_work_claims_pending_idx'`)).rows[0]?.def ?? "";
   assert(/\(work_type, enqueued_at\)/.test(pendingIdx) && /WHERE \(status = 'pending'::text\)/.test(pendingIdx),
          `the claim's index is partial on pending rows and ordered by enqueued_at (${pendingIdx.replace(/^.*USING /, "")})`);
-  // 015 must be the fork's shape: no DELETE anywhere, since expiry and clean
+  // 015 must be Daemonic Brain's shape: no DELETE anywhere, since expiry and clean
   // shutdown are UPDATEs and the record of a pass is meant to survive.
   const f015 = files.find((f) => f.startsWith("015"))!;
   const src015 = readFileSync(join(MIGRATIONS, f015), "utf8").replace(/--[^\n]*/g, "");
@@ -2952,7 +2952,7 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
   // carries the OLD trace_provenance body — so re-applying it reverted 026's
   // here. 033 is the last definer now and touches no trace_provenance, but the
   // restore stays: it is cheap, and the trap comes back the day 025 is the
-  // last definer of anything a section restores. The fork's own trap in
+  // last definer of anything a section restores. Daemonic Brain's own trap in
   // miniature: CREATE OR REPLACE takes the whole file, so re-applying an
   // earlier migration out of order clobbers a later redefinition (production
   // applies 001→026 in order and is unaffected).
@@ -15612,8 +15612,8 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
     "a two- or three-argument call — a caller from before 109 — resolves to this form through the default and lists every pass");
 
   // 070 re-applied by hand lands its three-argument form beside 109's: a call
-  // passing three is ambiguous (not unique) and fails, four resolve — why the
-  // fork's callers pass four, and what preflight names. 109 again drops it.
+  // passing three is ambiguous (not unique) and fails, four resolve — why
+  // Daemonic Brain's callers pass four, and what preflight names. 109 again drops it.
   await reapply("070");
   let short = "resolved";
   try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`); } catch (e) { short = (e as Error).message; }

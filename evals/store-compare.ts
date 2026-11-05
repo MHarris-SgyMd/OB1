@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * store-compare.ts — SMD-1037, the real-corpus arm: does the store change the
- * rows retrieval returns, or the time to return them, on the corpus the fork's
+ * rows retrieval returns, or the time to return them, on the corpus Daemonic Brain's
  * other numbers come from (the Linear issues, whole-content vector plus bare
  * windows, at the shipped 1024 width)?
  *

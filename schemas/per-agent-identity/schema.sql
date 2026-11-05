@@ -74,7 +74,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 REVOKE ALL ON FUNCTION public.lookup_agent_memory_key(TEXT) FROM PUBLIC;
 
--- This fork (SMD-1796): upstream's file went on to ENABLE ROW LEVEL SECURITY on
+-- Daemonic Brain (SMD-1796): upstream's file went on to ENABLE ROW LEVEL SECURITY on
 -- both tables with a policy FOR service_role, GRANT the tables TO service_role
 -- and GRANT EXECUTE on the lookup TO service_role. Those are Supabase's: on
 -- plain Postgres the first GRANT stops the file (`role "service_role" does not

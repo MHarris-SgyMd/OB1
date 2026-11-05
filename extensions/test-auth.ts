@@ -1195,7 +1195,7 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// One MCP stack per install (the recurring defect this fork guards against is a
+// One MCP stack per install (the recurring defect Daemonic Brain guards against is a
 // value defined twice): what this directory installs is what the vendored servers
 // run under here and what `bun <file>` resolves for the extensions (SMD-1800 —
 // until then each server carried a deno.json import map, held here to this file,

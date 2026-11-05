@@ -14,7 +14,7 @@
  *   in application code, then UPDATEs, so a writer landing in between is exactly
  *   the lost update the feature exists to prevent.
  *
- * And two exist because this fork has machinery upstream does not: chunks must
+ * And two exist because Daemonic Brain has machinery upstream does not: chunks must
  * follow the content [4], and a read-scoped key must not see the tools at all
  * [7].
  *

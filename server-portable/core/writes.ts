@@ -505,7 +505,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // Memory utilization (SMD-1719, over 034's log): a capture that names a
     // returned id as its source — `derived_from`, or `supersedes` — is the
     // caller USING a search result in a write, the signal MERIT calls memory
-    // utilization and this fork's fetch/edit/delete rows cannot carry (they
+    // utilization and Daemonic Brain's fetch/edit/delete rows cannot carry (they
     // say the caller looked, not that the fact reached a write). A cite row
     // is a pointer the database ACCEPTED: on a fresh row upsert_thought
     // validated every id (a ghost or a loop threw, and nothing reaches

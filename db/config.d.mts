@@ -264,11 +264,11 @@ export const ACCEPTED_CLAIM_SQL: string;
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 /** The migrator's re-run, as every remedy that names it prints it. */
 export const REAPPLY_COMMAND: string;
-/** SQL: whether public holds the fork's `thoughts` (a table or a partitioned one), by pg_class — read as a column, `SELECT ${PUBLIC_THOUGHTS_EXISTS} AS present`. */
+/** SQL: whether public holds Daemonic Brain's `thoughts` (a table or a partitioned one), by pg_class — read as a column, `SELECT ${PUBLIC_THOUGHTS_EXISTS} AS present`. */
 export const PUBLIC_THOUGHTS_EXISTS: string;
 /** The lock timeout, in seconds, migrate.ts sets for its session and quotes in its messages; test-upgrade derives its expectations from it. */
 export const LOCK_TIMEOUT_S: number;
-/** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */
+/** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the consistency checker on push. */
 export function migrationNameProblem(names: string[]): string | null;
 /** A plugin's name: lower-case words joined by single hyphens (SMD-2310). */
 export const PLUGIN_NAME_RE: RegExp;
@@ -413,7 +413,7 @@ export type RoleGrant = { table?: string; view?: string; sequence?: string; func
 /** The groups ROLE_GRANTS is keyed by. */
 export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "jobs" | "pages" | "claims" | "closedclaims" | "priority" | "items" | "community" | "recipes";
 /**
- * Privileges the fork's SECURITY INVOKER functions need to run as their caller,
+ * Privileges Daemonic Brain's SECURITY INVOKER functions need to run as their caller,
  * grouped by the role that needs each group — tables for the migrations' own
  * groups; tables, sequences and functions for the community schemas'. The
  * single spelling read by preflight's `write privileges` check, `migrate.ts
@@ -447,7 +447,7 @@ export const QUERY_LOG: Readonly<{
   searchTools: readonly string[];
   actionTools: readonly string[];
 }>;
-/** True when a server env selects the query log on (the fork's "on" idiom). */
+/** True when a server env selects the query log on (Daemonic Brain's "on" idiom). */
 export function queryLogEnabled(env: Record<string, string | undefined> | undefined | null): boolean;
 /** prune_query_log's retention window in days, from OB1_QUERY_LOG_RETENTION_DAYS or the default. */
 export function queryLogRetentionDays(env: Record<string, string | undefined> | undefined | null): number;
@@ -476,7 +476,7 @@ export function grantRows(groups?: readonly RoleGrantGroup[]): { group: RoleGran
 export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
-/** What a .sql file may not run on this fork: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
+/** What a .sql file may not run in Daemonic Brain: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
 export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];

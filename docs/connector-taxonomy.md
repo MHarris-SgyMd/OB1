@@ -1,6 +1,6 @@
 # Connector taxonomy and the brain-side seam (SMD-1933)
 
-The fork carries many per-vendor implementations of a few external-system
+Daemonic Brain carries many per-vendor implementations of a few external-system
 interfaces: the SMD-1924 triage counted capture integrations and import recipes
 on the way in, digests and briefings on the way out, and the same vendor on
 both sides more than once (`docs/vendored-disposition.md`). This document is the
@@ -397,7 +397,7 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 - **Metadata.** `vendor`, `page_id`, `path or url`, `title`, `tags`, `frontmatter or typed properties`, `created_at`, `updated_at`, `author`
 - **Identity.** `<vendor>:<page id>` where the vendor has one (Notion, Confluence, Blogger); for a file vault, the frontmatter id when present, else the path with a rename detected by content fingerprint (SMD-1813's identity rule: it must survive a rename on either side)
 - **Sink shape.** the page's owned sections written back in the source form; a page the brain did not create is never overwritten whole
-- **Dividing line.** a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam (the atomizer's), not the seam's: the fork's Markdown adapter (`db/ingest-markdown.ts`, SMD-1867) is `1:1`, one file one thought, with chunking left to retrieval (`reembed.ts`); the retired obsidian-vault-import declared `1:many` because its split reached the brain (SMD-2137)
+- **Dividing line.** a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam (the atomizer's), not the seam's: Daemonic Brain's Markdown adapter (`db/ingest-markdown.ts`, SMD-1867) is `1:1`, one file one thought, with chunking left to retrieval (`reembed.ts`); the retired obsidian-vault-import declared `1:many` because its split reached the brain (SMD-2137)
 - **Instances today.** `blogger`
 
 #### `web-clip`

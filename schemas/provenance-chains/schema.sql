@@ -16,7 +16,7 @@
 --   supersedes           UUID    — optional pointer to a prior thought this one
 --                                  replaces (e.g., an updated digest).
 --
--- Helper functions (this fork, SMD-1250): upstream's file defined
+-- Helper functions (Daemonic Brain, SMD-1250): upstream's file defined
 --   trace_provenance(p_thought_id UUID, p_max_depth INT, p_node_cap INT) and
 --   find_derivatives(p_thought_id UUID, p_limit INT) here, under the same
 --   argument lists migrations 025 and 026 give them. On a brain built by
@@ -27,7 +27,7 @@
 --   walk over 026's bounded one (the timeout SMD-1288 removed), and the
 --   migrator's re-run would then fail on the same return type. Sections 5 and
 --   6 are removed; the two functions the README's examples call are 025's and
---   026's — the same argument lists, so the calls run, but the fork's columns
+--   026's — the same argument lists, so the calls run, but Daemonic Brain's columns
 --   (no derivation_layer, sensitivity_tier or restricted flag), SECURITY
 --   INVOKER and ungranted, with no redaction by tier: 025's header,
 --   departures 1 and 2. Section 2's CHECK on derived_from is removed as well:
@@ -87,7 +87,7 @@ ALTER TABLE public.thoughts
 -- before writing) and, at read time, by the ::uuid casts inside
 -- trace_provenance / find_derivatives, which surface any non-UUID element as
 -- a 22P02 error. See schemas/provenance-chains/README.md for details.
--- (This fork: the array CHECK is migration 025's thoughts_derived_from_is_array,
+-- (Daemonic Brain: the array CHECK is migration 025's thoughts_derived_from_is_array,
 --  the same expression; upstream's copy of it is not added again.)
 
 -- Drop the legacy element-level check if it exists from an older install —
@@ -99,7 +99,7 @@ ALTER TABLE public.thoughts
 -- 3. INDEXES
 -- ============================================================
 
--- (This fork: the GIN index on derived_from and the partial index on
+-- (Daemonic Brain: the GIN index on derived_from and the partial index on
 --  supersedes are migration 025's, idx_thoughts_derived_from and
 --  idx_thoughts_supersedes; not created here.)
 
@@ -172,7 +172,7 @@ $$;
 -- letting `authenticated` invoke this directly would let signed-in users
 -- rewrite arbitrary rows' metadata.provenance subtree).
 REVOKE EXECUTE ON FUNCTION public.merge_thought_provenance_metadata(UUID, JSONB) FROM PUBLIC;
--- This fork (SMD-1796): upstream also REVOKEd this and the next merge FROM
+-- Daemonic Brain (SMD-1796): upstream also REVOKEd this and the next merge FROM
 -- authenticated and anon and GRANTed them TO service_role. Those are Supabase's
 -- roles: on plain Postgres the REVOKE stops the file (`role "authenticated"
 -- does not exist`). Removed; the REVOKE FROM PUBLIC stays, so each SECURITY

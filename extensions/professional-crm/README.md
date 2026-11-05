@@ -27,7 +27,7 @@ You ran into someone at a conference six months ago. They mentioned they were lo
 
 A professional contact management system with interaction logging, opportunity tracking, follow-up reminders, meeting prep and stale-contact detection.
 
-On this fork the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins/professional-crm/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_professional_crm`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins/professional-crm/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_professional_crm`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `professional_contacts` — The people in your network

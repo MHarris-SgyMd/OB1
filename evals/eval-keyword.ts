@@ -4,7 +4,7 @@
  *
  * The issue asserts that vector search cannot find an exact token: an error code,
  * a ticket key, a commit SHA, a symbol name. That is a plausible statement about
- * how embeddings work, and it is also exactly the kind of statement this fork has
+ * how embeddings work, and it is also exactly the kind of statement Daemonic Brain has
  * twice published as measured when it was not. So it is measured here.
  *
  * ── The task ─────────────────────────────────────────────────────────────────

@@ -42,7 +42,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** One changed path with git's one-letter status: A added, M modified, D deleted, T type changed (renames are not detected, so none). */
 export type Change = [status: string, path: string];
 
-/** The directories whose change is a change to the fork itself, as CONTRIBUTING.md names them. */
+/** The directories whose change is a change to Daemonic Brain itself, as CONTRIBUTING.md names them. */
 export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "rest-client/", "mcp-server/", "dashboard/", "plugins/", "evals/", "jev/"];
 /** Inside those directories, what asks no fragment: a test file in the tree's spelling (`test-x.ts`, `x.test.ts`) or a Markdown file. */
 export const FRAGMENT_EXEMPT = /(?:^|\/)(?:test-[^/]+|[^/]+\.test)\.(?:ts|mjs|js|py|sh)$|\.md$/i;
@@ -108,7 +108,7 @@ export const LANDING_PROBES: [why: string, changes: Change[], says: string | nul
   ["a release cut — the version migration added, the fragments it numbered deleted, the manifest written", [["A", "db/migrations/048_schema_version.sql"], ["M", "db/version.mjs"], ["D", "changes/smd-1804.md"], ["A", "changes/018-long-captures-stay-searchable.md"], ["M", "CHANGELOG.md"], ["M", "releases.json"]], null],
   ["a migration beside a DELETED manifest — not a cut", [["A", "db/migrations/048_x.sql"], ["D", "releases.json"], ["D", "changes/smd-1804.md"]], "ships no"],
   ["a migration beside a manifest edit with no fragment numbered — not a cut, the assembler refuses one", [["A", "db/migrations/048_x.sql"], ["M", "releases.json"]], "ships no"],
-  ["a migration beside a manifest elsewhere in the tree — not the fork's", [["A", "db/migrations/048_x.sql"], ["M", "integrations/x/releases.json"]], "ships no"],
+  ["a migration beside a manifest elsewhere in the tree — not Daemonic Brain's", [["A", "db/migrations/048_x.sql"], ["M", "integrations/x/releases.json"]], "ships no"],
   ["nothing", [], null],
 ];
 

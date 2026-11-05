@@ -6,7 +6,7 @@
 // Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1524): this pattern writes `thoughts` with a raw insert, by design — its
 // README's SQL creates its own five tables (a `thoughts` with domain/status/source columns)
-// in a project of its own, where this fork's upsert_thought is not. The row it writes
+// in a project of its own, where Daemonic Brain's upsert_thought is not. The row it writes
 // carries no content fingerprint, no model label and no audit actor; the README says so.
 // Listed in scripts/check-consistency.ts check 10's exceptions (FORK.md change 71).
 /**

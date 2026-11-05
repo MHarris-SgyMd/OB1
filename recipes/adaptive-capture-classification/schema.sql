@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS ab_comparisons (
 CREATE INDEX IF NOT EXISTS idx_ab_model_a ON ab_comparisons (model_a);
 CREATE INDEX IF NOT EXISTS idx_ab_model_b ON ab_comparisons (model_b);
 
--- This fork (SMD-1810): after each of the four tables upstream's file GRANTed
+-- Daemonic Brain (SMD-1810): after each of the four tables upstream's file GRANTed
 -- SELECT, INSERT, UPDATE on it TO authenticated, ENABLEd ROW LEVEL SECURITY
 -- and created a policy FOR ALL USING (auth.role() = 'authenticated'). Those
 -- are Supabase's: on plain Postgres the first GRANT stopped the file (`role
@@ -95,4 +95,4 @@ CREATE INDEX IF NOT EXISTS idx_ab_model_b ON ab_comparisons (model_b);
 -- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the four
 -- tables (SELECT, INSERT, UPDATE — upstream's privileges, kept; the recipe
 -- deletes nothing); a role that owns the tables needs nothing. Row-level
--- security on this fork: SMD-1716.
+-- security in Daemonic Brain: SMD-1716.

@@ -10,7 +10,7 @@
  * the bare type `vector` and the operator class `vector_cosine_ops` do not
  * resolve — `type "vector" does not exist` on a database that demonstrably has
  * pgvector (upstream #319, SMD-1247). The population this hits is exactly the
- * one the fork is for, and the whole matrix misses it because the test image
+ * one Daemonic Brain is for, and the whole matrix misses it because the test image
  * does not reproduce it.
  *
  * This suite reproduces it — `relocateVectorTo` moves the extension into `ext`,

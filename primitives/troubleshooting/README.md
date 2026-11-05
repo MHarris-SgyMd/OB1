@@ -43,7 +43,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Read the server's output: a failed tool call logs its cause there
 - `relation "…" does not exist`: the recipe's `schema.sql` did not run against the database `SUPABASE_URL` names
 - `schema "auth" does not exist`, or `function auth.uid() does not exist` / `relation "auth.users" does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
-- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
+- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at Daemonic Brain's local default (1024); the README says which width it needs
 
 ## Database Issues
 

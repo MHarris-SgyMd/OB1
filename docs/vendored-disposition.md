@@ -1,6 +1,6 @@
 # Vendored-content disposition table (SMD-1924)
 
-The fork vendors ~33k lines of upstream community code across `integrations/`,
+Daemonic Brain vendors ~33k lines of upstream community code across `integrations/`,
 `recipes/`, `schemas/` and a few `docs/drafts/` SQL sketches. The standing posture is
 **"audit once, hold the delta"** (SMD-1228 / SMD-1250 / SMD-1256): the tree is *kept* —
 these are the repo's "open for contributions" categories — held to the core's standard
@@ -34,13 +34,13 @@ ad-hoc integrations.
 
 ## Project posture (2026-09-21): no upstream parity
 
-**The fork does not maintain parity or API compatibility with upstream Open Brain.**
+**Daemonic Brain does not maintain parity or API compatibility with upstream Open Brain.**
 Breaking backwards compatibility is an accepted cost at this stage. Consequence for
 this triage: *"preserves the upstream-faithful origin"* is **not** a keep reason. A
 loose artifact whose capability is fully in a `db/` migration and whose only remaining
 value is an upstream reference is **remove**, even if the guard tolerates it. A *live
-in-tree* reference — a kept community integration/recipe that installs it, CI, the
-fork's ROLE_GRANTS, a cross-schema dependency — is still a keep reason (those are fork
+in-tree* reference — a kept community integration/recipe that installs it, CI,
+Daemonic Brain's ROLE_GRANTS, a cross-schema dependency — is still a keep reason (those are fork
 features, not upstream parity).
 
 ## Summary rollup
@@ -51,7 +51,7 @@ exactly one disposition.
 - **keep + audited: 66** (70 until SMD-2920 retired `ob-graph`, `work-operating-model-activation` and `bring-your-own-context` and SMD-2923 retired `repo-learning-coach`; 71 until SMD-2288 retired `kubernetes-deployment`; 78 until `brain-smoke-test` retired, SMD-2103; 77 until SMD-1931 retired `open-brain-rest` and `rest-api`, 75 until it retired `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture`). Two of them — `edge-function-cost-optimization` and
   `local-brain-no-mcp` — are struck through as retired by SMD-1800 and stay in this count as
   they did before SMD-2126. The vendored tree is overwhelmingly legitimate community
-  content with live in-tree references (CI parity tests, recipes, the fork's ROLE_GRANTS,
+  content with live in-tree references (CI parity tests, recipes, Daemonic Brain's ROLE_GRANTS,
   cross-schema deps). The seed "remove" list did not survive the gate — every seed-remove
   integration/schema is load-bearing today (the SMD-1228/1524/1544/1798 audit wired them
   into CI + the shim after the seed was written).
@@ -62,9 +62,9 @@ exactly one disposition.
   - `docs/drafts/agent-memory-branding-dna.md` — upstream personal-brand playbook.
   - `docs/drafts/agent-memory-staging-deploy-notes.md` — upstream staging notes (nuggets captured elsewhere).
   - `docs/drafts/discord-chunking-discussion.md` — resolved (proposals landed in 003/007/011).
-  - `recipes/obsidian-vault-import` — `db/ingest-markdown.ts` is the fork's Obsidian import (SMD-2126 → SMD-2137).
-  - `recipes/local-ollama-embeddings` — the fork embeds locally by default; `db/reembed.ts` for existing rows (SMD-2126 → SMD-2138).
-  - `recipes/brain-smoke-test` — `deploy/smoke.sh` absorbed what applies to the fork; the rest needed PostgREST or a retiring gateway (SMD-2126 → SMD-2103).
+  - `recipes/obsidian-vault-import` — `db/ingest-markdown.ts` is Daemonic Brain's Obsidian import (SMD-2126 → SMD-2137).
+  - `recipes/local-ollama-embeddings` — Daemonic Brain embeds locally by default; `db/reembed.ts` for existing rows (SMD-2126 → SMD-2138).
+  - `recipes/brain-smoke-test` — `deploy/smoke.sh` absorbed what applies to Daemonic Brain; the rest needed PostgREST or a retiring gateway (SMD-2126 → SMD-2103).
   - `schemas/wiki-pages` — the page store is core, migration 064 (SMD-949 → SMD-1812).
   - `integrations/open-brain-rest` — the REST core serves what a client needs of it; each route's fate is in "The brain's outward surface" (SMD-1931).
   - `integrations/rest-api` — likewise (SMD-1931).
@@ -78,7 +78,7 @@ exactly one disposition.
   - `recipes/bring-your-own-context` — with work-operating-model-activation, above (SMD-2920).
   - `recipes/repo-learning-coach` — a study app for a person, unused on stable, its brain bridge embedding with a foreign model; its quiz idea is SMD-3006's codebase Q&A eval (SMD-2923).
 - **sub-file removal: 2.** `recipes/email-history-import/rollback-chunking-columns.sql`
-  — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
+  — undoes abandoned upstream PR #27 column-chunking; no-op in Daemonic Brain; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
   fingerprint server-side (SMD-2126 → SMD-2145).
 - **PostgREST-speaking scripts (SMD-2126, decided 2026-09-24): 30 files in 21 recipes at the
@@ -138,8 +138,8 @@ retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim,
 `brain-smoke-test`'s, SMD-2103, and `ob-graph`'s with the recipe, SMD-2920, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
-none imports `compat/supabase-sql`. The fork's stack (SETUP.md) runs no PostgREST, so on
-this fork not one of their live modes reaches a brain — and an import's `--dry-run` runs
+none imports `compat/supabase-sql`. Daemonic Brain's stack (SETUP.md) runs no PostgREST, so in
+Daemonic Brain not one of their live modes reaches a brain — and an import's `--dry-run` runs
 because it never reaches the URL (readwise's excepted: it asks `thoughts` which highlights it
 holds before its guard), where a maintenance script's reads the brain first and fails the same
 way. SMD-1802 left their READMEs' data-path prose alone for one decision for the class
@@ -147,7 +147,7 @@ rather than twenty-one rewrites. This is that decision; the count is the survey 
 `main` at f7693c4c, re-measured on d8e3de60 (`grep -rlE "rest/v1|from supabase import|create_client\(|SUPABASE_SERVICE_ROLE_KEY" recipes --include=*.mjs --include=*.js --include=*.py --include=*.ts`,
 the ten files already on the shim set aside).
 
-**Weighed.** (1) *Upstream-only* — mark the twenty-one and stop: cheapest, and the fork
+**Weighed.** (1) *Upstream-only* — mark the twenty-one and stop: cheapest, and Daemonic Brain
 loses every import recipe, the root README's "start importing your data" table. (2) *A
 PostgREST profile* — `postgrest/postgrest` in `deploy/compose.yaml` behind a JWT secret so
 the scripts run unchanged: one service and zero porting, but it brings back the surface
@@ -156,10 +156,10 @@ SMD-1524 closed for the servers stays open for these scripts — five of them em
 themselves and POST content and vector as a row — no model label, no audit actor, three with
 no fingerprint and two with one computed client-side, a copy of 003's rule that drifts with it
 — and five more call `upsert_thought` over `/rest/v1/rpc/`, the right function over the wrong
-transport. (SMD-1524's rule is for vendored code; the fork's own writers in `db/` — the
+transport. (SMD-1524's rule is for vendored code; Daemonic Brain's own writers in `db/` — the
 ingester below among them — insert rows themselves by design, with the same fingerprint
 function and the audit actor set.) Declined. (3) *Port by kind* — taken, with (1)'s verdict for the three whose
-capability the fork's core already owns.
+capability Daemonic Brain's core already owns.
 
 **The kinds.** An **import** (a capture from an export) becomes an adapter of the ingestion
 contract (`db/ingest-contract.ts`, SMD-1867): its parser emits `Ingested` items and
@@ -169,7 +169,7 @@ pipeline — its own insert, not `upsert_thought`: 003's `content_fingerprint_of
 links, the watermark, `reembed.ts` for the vector — so a Python parser stays Python and needs
 no database client.
 Not the REST gateway the ticket named as the `.py` target: `integrations/open-brain-rest`'s
-`POST /capture` embeds at `openai/text-embedding-3-small` (1536), which the fork's default
+`POST /capture` embeds at `openai/text-embedding-3-small` (1536), which Daemonic Brain's default
 brain (`qwen3-embedding:4b`, 1024) refuses, and a request per row is the wrong shape for a
 ten-thousand-row import.
 
@@ -203,7 +203,7 @@ brain `thought_entities` is migration 016's (a uuid `entity_id` to `ob1_entities
 `mention_role`), so the schema's `CREATE TABLE IF NOT EXISTS` is a no-op there and a write of
 `mention_role` fails with 42703 whatever the transport (change 093 recorded the shared name
 for grants; the third review pass measured the write). Each port reads 016's shape and writes
-mentions through the fork's `record_thought_entities`, or its ticket says why not;
+mentions through Daemonic Brain's `record_thought_entities`, or its ticket says why not;
 `thought_edges` (`schemas/typed-reasoning-edges`) is its own name and applies.
 
 **Smoke harnesses and retirements.** A **smoke harness** has its own ticket: `brain-smoke-test`
@@ -214,7 +214,7 @@ capability is **in core** retires: `obsidian-vault-import` (the Markdown adapter
 distillation of long sections, its `--min-words` / `--skip-folders` / `--after` filters, its
 secret scan, sync log and source label have no counterpart there and were dropped with it,
 each named in SMD-2137, which removed the directory), `local-ollama-embeddings` (the server embeds locally through
-`OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138; two of its three models are rows of `SETUP.md`'s table, with the fork's numbers), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
+`OB1_LLM_BASE_URL`; `reembed.ts`; removed in SMD-2138; two of its three models are rows of `SETUP.md`'s table, with Daemonic Brain's numbers), `fingerprint-dedup-backfill/backfill-fingerprints.mjs`
 (migration 023).
 
 **Held by check 24** of `scripts/check-consistency.ts`: in every code file under the
@@ -240,7 +240,7 @@ nothing.
 | `lint-sweep` | `lint-sweep.js` (0; was 1) | `thoughts`, `entities`, `edges`, `thought_entities` (read; either URL name; the seven `lint_*` views are psql's, the script reads none) | on the shim since SMD-2144; read-only — recency by `created_at` (uuid ids), `edges` by entity-extraction's columns | SMD-2144 |
 | `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retired: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows; the directory, its two test-writes guards and its check 24 entry are gone | SMD-2138 |
 | `ob-graph` | `smoke-graph-rpcs.mjs` (gone) | `graph_nodes`, `graph_edges`; `traverse_graph`, `find_shortest_path` | **retired** with the recipe: the directory and its check 24 entry are gone | SMD-2920 ✅ (SMD-2146 canceled) |
-| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is the fork's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
+| `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is Daemonic Brain's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
 | `perplexity-conversation-import` | `import-perplexity.py` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2148 |
 | `provenance-chains` | `backfill.mjs` (1), `eval.mjs` (1); `mcp-tools.ts` takes an injected client and test-writes drives it on the shim (SMD-1524) | `thoughts` (PATCH); `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` (`schemas/provenance-chains`' functions) over `/rpc/`; `eval.mjs` writes metadata (reads either URL name) | a REST-core client (SMD-3216; was onto the shim) | SMD-2142 |
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
@@ -329,7 +329,7 @@ keep their rows below.
 
 An artifact is *referenced* — and therefore not removable — when something outside its
 own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the fork guard (`scripts/check-consistency.ts`),
+`extensions/test-writes.ts`), the consistency checker (`scripts/check-consistency.ts`),
 `.github/workflows/brain-checks.yml`, `extensions/package.json` scripts, the SQL-shim
 codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md`
@@ -341,7 +341,7 @@ are the *audit record*, not a live dependency, and do not block a removal.
 > the SQL shim. `entity-extraction-worker`, `consolidation-workers`, and
 > `delete-thought-mcp` were all load-bearing then (CI drove them; recipes and a skill
 > wired to them), so they failed the "verified no references" gate. (`delete-thought-mcp`
-> retired with SMD-1931, its skill repointed at the core's `delete_thought`.) The fork's *own-runtime*
+> retired with SMD-1931, its skill repointed at the core's `delete_thought`.) Daemonic Brain's *own-runtime*
 > rebuilds (`db/` migrations 009 / 016 / 029) run **beside** the vendored community
 > Edge Functions; they do not make them dead. Details in each row below.
 
@@ -361,7 +361,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `delete-thought-mcp` | ~~keep + audited *(revises seed "remove")*~~ → **retired (SMD-1931)** | Was a standalone single-tool server around a raw delete. The core's `delete_thought` (MCP tool and `DELETE /v1/thoughts/{id}`) records the key as the audit actor and answers a cited source with `REFUSED_CITED` and a detach option. `skills/deleting-thoughts` now names the core connector, and its `extensions/test-auth.ts` row went with it. |
 | `discord-capture` | ~~keep + audited~~ → **retired (SMD-1931)** | Was a capture-source README with no code. A Discord source, if one is built, is a REST-core plugin at `/hooks/discord` (SMD-2310). |
 | `enhanced-mcp` | ~~keep + audited + rebuild-tickets~~ → **retired (SMD-1931)** | Was a thirteen-tool MCP server on its own single key. Its search, list, get, update, capture and stats tools are core tools; its graph tools are the entity-graph read the GUI files (SMD-2280); `ops_capture_status` goes with smart-ingest's plugin (SMD-2690); `count_thoughts` and `ops_source_monitor` are dropped ("The brain's outward surface" above). Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
-| `entity-extraction-worker` | keep + audited *(revises seed "remove")* | `db/extract-entities.ts` (migration 016 / SMD-947) is the fork's *own-runtime* rebuild; the vendored Edge Function is the community queue-processor still wired to `smart-ingest` (triggers it by URL), `schemas/entity-extraction`, recipes `entity-wiki` / `wiki-compiler` / `brain-health-monitoring` / `typed-edge-classifier`, and CI `test-auth.ts:199`. Fails "verified no references." |
+| `entity-extraction-worker` | keep + audited *(revises seed "remove")* | `db/extract-entities.ts` (migration 016 / SMD-947) is Daemonic Brain's *own-runtime* rebuild; the vendored Edge Function is the community queue-processor still wired to `smart-ingest` (triggers it by URL), `schemas/entity-extraction`, recipes `entity-wiki` / `wiki-compiler` / `brain-health-monitoring` / `typed-edge-classifier`, and CI `test-auth.ts:199`. Fails "verified no references." |
 | `hermes-agent-memory` | keep + audited | Standalone Python `MemoryProvider` plugin depending on the kept `agent-memory-api`. Not superseded / hazard / dead. |
 | `kubernetes-deployment` | ~~keep + audited~~ → **retired (SMD-1931; removed by SMD-2288)** | Was a self-hosted K8s deployment with its own Postgres and a raw-SQL port of the server. Compose-only leaves it no target; its checker exceptions, its `extensions/test-auth.ts` row and the deploy-stack-auth job's image steps went with it. |
 | `open-brain-rest` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the REST gateway for the Next dashboards' surfaces, which `chrome-capture-extension` POSTed to. Every route's fate is in "The brain's outward surface" above; the extension now calls the REST core. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
@@ -379,19 +379,19 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 |---|---|---|
 | `agent-memory` | keep + audited | Governed-memory **sidecar** tables (memory records, provenance, use-policy, review, recall traces, audit) — all in their own names, core `thoughts` untouched (not a hazard); no `db/` migration replicates them (not superseded). Depended on by `agent-memory-api` / `hermes-agent-memory` / `openclaw-agent-memory` and CI `test-writes.ts` SIDECARS. |
 | `brain-stats-daily` | keep + audited | Dashboard daily-bucket heatmap RPCs (`brain_stats_daily*`), own functions only, core untouched. Distinct from migration 024 (`thought_stats_summary`, a single summary) — not superseded. Standalone dashboard schema; unreferenced ≠ dead (dashboards were an open category until SMD-3310; a page over it would now be a plugin's). |
-| `crm-person-tiers` | keep + audited | Own `crm_persons` / `crm_person_mentions` tables + tiers RPC, core untouched (not a hazard). Wired into the fork's own `db/config.mjs` ROLE_GRANTS and `db/README` grants; optional companion to the `gmail-smart-pull` recipe. |
+| `crm-person-tiers` | keep + audited | Own `crm_persons` / `crm_person_mentions` tables + tiers RPC, core untouched (not a hazard). Wired into Daemonic Brain's own `db/config.mjs` ROLE_GRANTS and `db/README` grants; optional companion to the `gmail-smart-pull` recipe. |
 | `enhanced-thoughts` | keep + audited *(revises seed "remove/fence hazard")* | The SMD-1250 `upsert_thought` clobber is **gone from the current file** (only additive `ALTER … ADD COLUMN` + non-core functions `search_thoughts_text` / `brain_stats_aggregate` / `get_thought_connections`), and check 7 of the guard now blocks its return. Load-bearing: CI `test-writes.ts` SIDECARS applies it, and `entity-extraction-worker` / `consolidation-workers` reference its columns (`enhanced-mcp` and `rest-api` did until SMD-1931). Residual is a documented *deployment* grant caveat (anon + SECURITY DEFINER), not a file hazard. |
-| `entity-extraction` | keep + audited *(revises seed "remove")* | Community `public.entities` / `edges` / `thought_entities` / queue (distinct from the fork's `ob1_*` in migration 016 — they coexist). Required by `schemas/typed-reasoning-edges` (errors without it), used by the vendored worker, `recipes/brain-health-monitoring` ops-views, and CI `test-writes.ts` (reads `consolidation_log`). Fails "verified no references." |
-| `per-agent-identity` | keep + audited *(revises seed "remove")* | Community `openbrain_agents` / `agent_memory_keys` + `lookup_agent_memory_key` — granted by the fork's own `db/config.mjs` ROLE_GRANTS (SMD-1226). Migration 010 is "Ported from schemas/per-agent-identity" with departures (ob1_* names); the community file is the upstream-faithful origin, held to the delta. |
+| `entity-extraction` | keep + audited *(revises seed "remove")* | Community `public.entities` / `edges` / `thought_entities` / queue (distinct from Daemonic Brain's `ob1_*` in migration 016 — they coexist). Required by `schemas/typed-reasoning-edges` (errors without it), used by the vendored worker, `recipes/brain-health-monitoring` ops-views, and CI `test-writes.ts` (reads `consolidation_log`). Fails "verified no references." |
+| `per-agent-identity` | keep + audited *(revises seed "remove")* | Community `openbrain_agents` / `agent_memory_keys` + `lookup_agent_memory_key` — granted by Daemonic Brain's own `db/config.mjs` ROLE_GRANTS (SMD-1226). Migration 010 is "Ported from schemas/per-agent-identity" with departures (ob1_* names); the community file is the upstream-faithful origin, held to the delta. |
 | `provenance-chains` | keep + audited *(revises seed "remove")* | Additive derivation columns + own merge functions (granted by `db/config.mjs`); `recipes/provenance-chains` + `typed-edge-classifier` read it. Guard check 7 (line 554) already fences its function set. Distinct from core's 025/026/032 provenance. |
 | `readwise-books` | keep + audited | Own `readwise_books` cache + RPCs; granted by `db/config.mjs`; companion to `integrations/readwise-capture` + `recipes/readwise-import`; CI `test-writes.ts` SIDECARS. Not superseded, not a hazard. |
-| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-consistency.ts` once carried for it. |
+| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in Daemonic Brain; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to Daemonic Brain. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-consistency.ts` once carried for it. |
 | `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `brain-health-monitoring` references it (`enhanced-mcp` and `rest-api` did until SMD-1931). *(The `schemas/smart-ingest-tables` folder-name drift is resolved; see "Consistency fixes" above.)* Rebuild tracked under SMD-1253. |
-| `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function the fork replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
+| `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function Daemonic Brain replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); was referenced by `delete-thought-mcp` / `update-thought-mcp` until SMD-1931 retired them. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |
 | `thought-work-claims` | **remove** *(no-parity posture)* | Already a **comment-only stub** — all upstream DDL was stripped under SMD-1250 (it would have clobbered 015's `release_thought` / `release_claims_for_worker`). Migration 015 owns the real `thought_work_claims` (evals + `db/config.mjs` grants use it). The stub's only content is upstream documentation. Removal PR: delete the folder; guard check 7 still fences the function names regardless. |
 | `typed-reasoning-edges` | keep + audited + rebuild-ticket **SMD-1253** | Own `thought_edges` table + upsert RPC (granted by `db/config.mjs`); required by `recipes/typed-edge-classifier` (matches its CHECK constraint). Requires `entity-extraction`. Not rebuilt in core; rebuild tracked under SMD-1253. |
-| `wiki-pages` | ~~keep + audited + rebuild-ticket SMD-949~~ → **retired (SMD-1812)** *(no-parity posture; rebuilt in core)* | Was upstream's `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + three RPCs. Migration 064 is the fork's page store — `pages` (a page is a thought: its id, its render as the content), `page_sections`, `page_section_revisions`, `write_page_section`'s regen guard, lineage rows for generated sections — under names of its own, so a brain that applied the file by hand keeps its tables untouched. Directory removed, README index row → core, community grant rows out (`pages` group instead). The wiki recipes' pages belong there (SMD-2143). |
+| `wiki-pages` | ~~keep + audited + rebuild-ticket SMD-949~~ → **retired (SMD-1812)** *(no-parity posture; rebuilt in core)* | Was upstream's `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + three RPCs. Migration 064 is Daemonic Brain's page store — `pages` (a page is a thought: its id, its render as the content), `page_sections`, `page_section_revisions`, `write_page_section`'s regen guard, lineage rows for generated sections — under names of its own, so a brain that applied the file by hand keeps its tables untouched. Directory removed, README index row → core, community grant rows out (`pages` group instead). The wiki recipes' pages belong there (SMD-2143). |
 | `workflow-status` | keep + audited | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration; `migration.sql` uses `ADD COLUMN IF NOT EXISTS` on both columns (idempotent, re-runnable — no install-order collision with `enhanced-thoughts`). Its consumers, the Next.js dashboard's Workflow board and `open-brain-rest`, both retired (SMD-3309, SMD-1931); none is left, and the schema retires with SMD-3260. Distinct from the heavier `enhanced-thoughts`. |
 
 ### `docs/drafts/` (3)
@@ -402,7 +402,7 @@ remaining drafts are unreferenced markdown working-notes.
 
 | Artifact | Disposition | Justification |
 |---|---|---|
-| `agent-memory-branding-dna.md` | **remove** | Upstream (NBJ) product-identity guidance for "NBJ OB1 Agent Memory." Zero references; no fork value under the fork's own-identity / no-parity posture. The sibling brand *assets* it prescribes (`docs/assets/agent-memory/brand/`, and the Next.js dashboard's `public/brand/` until it retired with SMD-3309) are covered by follow-up **SMD-1929**. |
+| `agent-memory-branding-dna.md` | **remove** | Upstream (NBJ) product-identity guidance for "NBJ OB1 Agent Memory." Zero references; no fork value under Daemonic Brain's own-identity / no-parity posture. The sibling brand *assets* it prescribes (`docs/assets/agent-memory/brand/`, and the Next.js dashboard's `public/brand/` until it retired with SMD-3309) are covered by follow-up **SMD-1929**. |
 | `agent-memory-staging-deploy-notes.md` | **remove** | Upstream launch/staging notes (references `NAT-833`, "Jonathan's personal OB1 database"); explicitly transitional ("use it to update the public guides"). Zero references. *Before deleting: confirm the operational nuggets (Hono `/agent-memory-api/*` path normalization) are captured in `integrations/agent-memory-api/README`; fold if not.* |
 | `discord-chunking-discussion.md` | **remove** | Resolved design discussion — all three proposals landed in core (chunking → 007, fingerprint → 003, full-text → 011). Historical; zero references. |
 
@@ -416,15 +416,15 @@ remaining drafts are unreferenced markdown working-notes.
 | `auto-capture` | keep + audited | Workflow-guidance recipe paired with the reusable auto-capture skill. |
 | `brain-backup` | keep + audited → **on the shim (SMD-2144)** | Standalone export-to-JSON backup utility (`backup-brain.mjs`), read-only; its README names `pg_dump` as the whole-brain backup. |
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` / `smart-ingest` tables. |
-| `brain-smoke-test` | ~~keep + audited → **SMD-2126**: SMD-2103~~ → **retired (SMD-2103)** *(no-parity posture; SMD-2126 → SMD-2103)* | Was the fresh-install smoke harness (`smoke-all.js`), seven categories against a Supabase project. Three needed what the fork lacks: PostgREST and a service-role key for DB Schema and Access Key Enforcement, an anon key for Row-Level Security. REST API pointed at `open-brain-rest`, since retired (SMD-1931). The rest was covered already: `deploy/smoke.sh` checks 5–6 for MCP Server; the server's start gate, `server-portable/preflight.ts`, for the schema; the suites for capture, since smoke.sh is read-only; `server-portable/test-auth.ts` for `?key=`. The one Auth check it lacked, a wrong key refused in-protocol, is now smoke.sh's check 1, which also reads the body for -32001 instead of trusting the 200. |
+| `brain-smoke-test` | ~~keep + audited → **SMD-2126**: SMD-2103~~ → **retired (SMD-2103)** *(no-parity posture; SMD-2126 → SMD-2103)* | Was the fresh-install smoke harness (`smoke-all.js`), seven categories against a Supabase project. Three needed what Daemonic Brain lacks: PostgREST and a service-role key for DB Schema and Access Key Enforcement, an anon key for Row-Level Security. REST API pointed at `open-brain-rest`, since retired (SMD-1931). The rest was covered already: `deploy/smoke.sh` checks 5–6 for MCP Server; the server's start gate, `server-portable/preflight.ts`, for the schema; the suites for capture, since smoke.sh is read-only; `server-portable/test-auth.ts` for `?key=`. The one Auth check it lacked, a wrong key refused in-protocol, is now smoke.sh's check 1, which also reads the body for -32001 instead of trusting the 200. |
 | `bring-your-own-context` | ~~keep + audited~~ → **retired (SMD-2920)** *(no-parity posture)* | Was the portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). Its step 4 deployed work-operating-model-activation's server, so it retired with it and `skills/work-operating-model`. |
 | `chatgpt-conversation-import` | keep + audited → SMD-1867 candidate → **SMD-2126**: port onto the ingestion contract (SMD-2147, after SMD-2136) | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
 | `claudeception` | keep + audited | Skills-that-create-skills continuous-learning recipe; searches/captures via the core MCP path. |
-| `content-fingerprint-dedup` | keep + audited | The `upsert_thought` redefinition is a **README code example**, annotated "do not paste — migration 003/005 own it (SMD-1250)"; guard check 7 allowlists it (lines 646/1406). It is the fork's canonical dedup-convention doc, cited by `email-history-import` / `edge-function-cost-optimization` / `gmail-smart-pull` / `lint-sweep`. *(Minor: some cross-refs point at `primitives/content-fingerprint-dedup` / an upstream GitHub URL — stale paths to fix; overlaps SMD-1929.)* |
+| `content-fingerprint-dedup` | keep + audited | The `upsert_thought` redefinition is a **README code example**, annotated "do not paste — migration 003/005 own it (SMD-1250)"; guard check 7 allowlists it (lines 646/1406). It is Daemonic Brain's canonical dedup-convention doc, cited by `email-history-import` / `edge-function-cost-optimization` / `gmail-smart-pull` / `lint-sweep`. *(Minor: some cross-refs point at `primitives/content-fingerprint-dedup` / an upstream GitHub URL — stale paths to fix; overlaps SMD-1929.)* |
 | `daily-digest` | keep + audited | Gmail-draft daily summary via Claude Code scheduled tasks + core MCP; zero infra. |
-| `edge-function-cost-optimization` | ~~keep + audited~~ → **retired (SMD-1800)** | Was an MCP-consolidation/caching recipe about Edge Function invocation billing on Supabase; its measurements were that meter's, which this fork's containers have no analogue of, and its per-session sample's shape (changes 78, 83) lives in those changes' records. Its `examples/_shared/auth.ts` left the `sync-auth` list. |
+| `edge-function-cost-optimization` | ~~keep + audited~~ → **retired (SMD-1800)** | Was an MCP-consolidation/caching recipe about Edge Function invocation billing on Supabase; its measurements were that meter's, which Daemonic Brain's containers have no analogue of, and its per-session sample's shape (changes 78, 83) lives in those changes' records. Its `examples/_shared/auth.ts` left the `sync-auth` list. |
 | `editorial-policy` | keep + audited | 40-rule synthesis constitution + weekly drift auditor; `auditor/index.ts` is CI-driven (`test-writes.ts` DRIVEN_1524, SMD-1524). No core clobber. |
-| `email-history-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2021) | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
+| `email-history-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2021) | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) Daemonic Brain never adopted (it uses `thought_chunks` / migration 007) — a no-op in Daemonic Brain, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
 | `entity-wiki` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2143) | Per-entity markdown wiki generator; reads the kept `entity-extraction` tables + worker. |
 | `fingerprint-dedup-backfill` | keep + audited → **SMD-2126**: `delete-duplicates.mjs` onto the shim, `backfill-fingerprints.mjs` removed (SMD-2145) | Client-side fingerprint backfill **+ duplicate cleanup**. Migration 023 backfills server-side, but the recipe's `delete-duplicates.mjs` removes pre-existing dupes (a migration doesn't), and it's cited as the cleanup step by `lint-sweep` / `edge-function-cost-optimization` / `content-fingerprint-dedup`. Complements core, not superseded. **SMD-2126:** migration 023 backfills the fingerprint server-side, so `backfill-fingerprints.mjs` has no work left here and goes (SMD-2145); the duplicate cleanup stays and moves onto the shim, its deletes through `delete_thought`. |
 | `gmail-smart-pull` | keep + audited → SMD-1867 candidate | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
@@ -437,10 +437,10 @@ remaining drafts are unreferenced markdown working-notes.
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
 | `lint-sweep` | keep + audited → **on the shim (SMD-2144)** | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. Tier 1 needs `schemas/enhanced-thoughts`' columns. |
 | `live-retrieval` | keep + audited | Read-side "flywheel" workflow that surfaces thoughts on topic shifts. |
-| `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. The fork's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
-| `local-ollama-embeddings` | ~~keep + audited~~ → **retired (SMD-2138)** *(no-parity posture; SMD-2126 → SMD-2138)* | Was the capture-without-a-cloud-key recipe. The `ALTER COLUMN embedding TYPE` was a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width."; the example was CI-held (`test-writes.ts`, SMD-1524; its two guards went with it). **SMD-2126:** the fork embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retired in SMD-2138 (test-writes' two text assertions on it went with it; the two models it named that `SETUP.md`'s table lacked are rows there — mxbai with the fork's own 0.882 MRR, gte-qwen2 unmeasured here). |
+| `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. Daemonic Brain's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
+| `local-ollama-embeddings` | ~~keep + audited~~ → **retired (SMD-2138)** *(no-parity posture; SMD-2126 → SMD-2138)* | Was the capture-without-a-cloud-key recipe. The `ALTER COLUMN embedding TYPE` was a README example explicitly annotated "not altered by hand in Daemonic Brain — build at `db/config.mjs`'s width; `upsert_thought` refuses another width."; the example was CI-held (`test-writes.ts`, SMD-1524; its two guards went with it). **SMD-2126:** Daemonic Brain embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retired in SMD-2138 (test-writes' two text assertions on it went with it; the two models it named that `SETUP.md`'s table lacked are rows there — mxbai with Daemonic Brain's own 0.882 MRR, gte-qwen2 unmeasured here). |
 | `ob-graph` | ~~keep + audited + SMD-1798~~ → **retired (SMD-2920)** *(no-parity posture)* | Was the hand-curated knowledge-graph layer (own nodes/edges tables, recursive-CTE traversal, an MCP server with its own key list), unused on stable. A second graph beside 016's extracted one, outside the event log; its traversal and shortest-path reads are SMD-2922's core entity-graph reads. |
-| `obsidian-vault-import` | ~~keep + audited, an SMD-1867 candidate~~ → **retired (SMD-2137)** *(no-parity posture; SMD-2126 → SMD-2137)* | Was the Obsidian-vault import, an SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is the fork's Obsidian import, so the recipe retired in SMD-2137 (the directory is gone); its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and were dropped with it, each named there — the filters, the label, an mtime date and a pre-allowlist vault scan noted on SMD-1814 as the connector's; the root README row points at the adapter and the registry rows went (the `obsidian` vendor returns with SMD-1814's capability). |
+| `obsidian-vault-import` | ~~keep + audited, an SMD-1867 candidate~~ → **retired (SMD-2137)** *(no-parity posture; SMD-2126 → SMD-2137)* | Was the Obsidian-vault import, an SMD-1867 candidate. **SMD-2126:** the Markdown adapter of the ingestion contract (`db/ingest-markdown.ts`, SMD-1867 — frontmatter, `[[wikilinks]]` and tags as facets and edges, the file kept byte for byte) is Daemonic Brain's Obsidian import, so the recipe retired in SMD-2137 (the directory is gone); its heading split with LLM distillation, `--min-words` / `--skip-folders` / `--after` filters, secret scan, sync log and source label have no counterpart in the adapter and were dropped with it, each named there — the filters, the label, an mtime date and a pre-allowlist vault scan noted on SMD-1814 as the connector's; the root README row points at the adapter and the registry rows went (the `obsidian` vendor returns with SMD-1814's capability). |
 | `openclaw-agent-memory` | keep + audited | Canonical OpenClaw × OB1 Agent Memory workflow recipe (depends on the kept `agent-memory-api`). Distinct from the `integrations/openclaw-agent-memory` plugin. |
 | `openclaw-code-review-memory` | keep + audited | OpenClaw code-review-agent memory workflow over Agent Memory. |
 | `openclaw-taskflow-work-log` | keep + audited | OpenClaw TaskFlow handoff-log workflow over Agent Memory. |

@@ -3,7 +3,7 @@
  * export-queries.ts — turn the opt-in query log (migration 034, SMD-1295) into a
  * replayable fixture of the searches a brain was actually asked.
  *
- * Every retrieval number the fork ships is measured on one corpus the baseline
+ * Every retrieval number Daemonic Brain ships is measured on one corpus the baseline
  * already saturates (evals/eval-real.ts, recall@10 0.98), so the reranker,
  * hybrid fusion and GraphRAG all came out neutral there (SMD-1039). This reads
  * the other ground truth — the queries people and agents sent to search, and
