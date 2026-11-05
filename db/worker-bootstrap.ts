@@ -634,13 +634,17 @@ export class ProviderOutage {
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(
     private readonly now: () => number = Date.now,
-    /** How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15 minutes (the subject sweep's, SMD-3306 PR 6b-1). */
-    private readonly windowMs: number = SUSPECT_WINDOW.ms,
+    /**
+     * How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15
+     * minutes (the subject sweep's, SMD-3306 PR 6b-1), or read at each error, when its calls' limit changes as it runs
+     * (consolidation's beside the sweep, PR 6b-2's review pass 3).
+     */
+    private readonly windowMs: number | (() => number) = SUSPECT_WINDOW.ms,
   ) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.windowMs) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= (typeof this.windowMs === "number" ? this.windowMs : this.windowMs())) {
       this.suspects.delete(thoughtId);
       return "thought";
     }

@@ -2779,7 +2779,7 @@ async function sweep(
       (n.replaced ? ` (${n.replaced} in place of a standing subject, ${n.newKey} with a new key)` : "") +
       (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") +
       (n.current ? `, finish ${n.current} already current` : "") + "; " +
-      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) +
+      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} keyed by no rule, no model asked (--subjects rules)`) +
       (n.leftOutOfDate ? ` (${n.leftOutOfDate} with an out-of-date subject)` : "") + ". Nothing was written, pooled or asked." +
       (wouldRefuse.length ? ` A run would be refused: ${wouldRefuse.join("; ")}.` : ""));
     return 0;

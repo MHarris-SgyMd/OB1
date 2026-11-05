@@ -4776,7 +4776,7 @@ else {
       assert(/; re-embed set aside at its word, the switch to this stack's model made since$/.test(row(unprintableMade.out, "sleep")) && /The brain records this stack's model now, as this stack is configured: the set-aside clears at the scheduler's next poll\./.test(fix(unprintableMade.out, "sleep")),
         `a switch with names outside the alphabet, made since, clears as a printable one does (${row(unprintableMade.out, "sleep")} | ${fix(unprintableMade.out, "sleep")})`);
       assert(/; re-embed set aside for a model switch — its model names hold characters preflight does not print; its log names them$/.test(row(unprintable.out, "sleep"))
-          && /Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out/.test(fix(unprintable.out, "sleep")) && !/Its last pass failed/.test(fix(unprintable.out, "sleep")),
+          && /Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out — --switch-model, or the recorded model back in deploy\/\.env with api and sleep recreated\. The other passes run on meanwhile\./.test(fix(unprintable.out, "sleep")) && !/Its last pass failed/.test(fix(unprintable.out, "sleep")),
         `a switch with names outside the alphabet is said without them, not as a generic failure (${row(unprintable.out, "sleep")} | ${fix(unprintable.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
       // The record moved on again since the row's word: the fix names it as it stands (review pass 2).
@@ -4802,7 +4802,7 @@ else {
       assert(/Re-embed is set aside while the brain records .* recreate api and sleep, which read it once\./.test(stoppedSwitchFix) && !/run on meanwhile/.test(stoppedSwitchFix),
         `a stopped scheduler's switch is not said to let the others run on (review pass 4: ${stoppedSwitchFix})`);
       assert(/!\s+sleep\s+.*; re-embed set aside — the brain records old-embed, this stack is configured for new-embed$/.test(row(switched.out, "sleep"))
-          && /Re-embed is set aside while the brain records old-embed and this stack is configured for new-embed: to keep new-embed, cd db && OB1_EMBEDDING_MODEL=new-embed bun reembed\.ts --url \$DATABASE_URL --switch-model .*; to keep old-embed, set OB1_EMBEDDING_MODEL=old-embed \(and OB1_EMBEDDING_DIM to its width\) in deploy\/\.env and recreate api and sleep/.test(fix(switched.out, "sleep"))
+          && /Re-embed is set aside while the brain records old-embed and this stack is configured for new-embed: to keep new-embed, cd db && OB1_EMBEDDING_MODEL=new-embed bun reembed\.ts --url \$DATABASE_URL --switch-model .*; to keep old-embed, set OB1_EMBEDDING_MODEL=old-embed \(and OB1_EMBEDDING_DIM to its width\) in deploy\/\.env and recreate api and sleep, which read it once\. The other passes run on meanwhile\./.test(fix(switched.out, "sleep"))
           && !/Its last pass failed/.test(fix(switched.out, "sleep")),
         `a model switch set aside is said, with both ways out and not the generic failure (${row(switched.out, "sleep")} | ${fix(switched.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model" } }, slept: { from: await at(130), to: null } }), 10);

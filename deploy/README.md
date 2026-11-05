@@ -2245,30 +2245,42 @@ no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
 on, at most about 1,200 a day, so weeks on a brain of tens of thousands of
-thoughts. **Upgrading to the release that brings it:** settle what the first
-period asks before the scheduler runs on the release. Take `sleep` out of
-`OB1_PASSES` in `deploy/.env` and bring the stack up on the release, its
-migrations applied and no scheduler running; count the first pooling in the
-stack, `podman compose -f deploy/compose.yaml run --rm --no-deps coordinator
-db/coordinator.ts run extract --subjects --dry-run`, with the -f files and -p
-the stack was started with; set `OB1_SUBJECT_REASONING` as wanted (off is
-about 8x faster a call); on a brain whose judge model is not yet measured on
-the question, name the rules' pool with the same one-off and `--subjects rules
---limit 1`, which the scheduler then follows, asking no model; then put
-`sleep` back and recreate the coordinator. Where the scheduler named the judge
-model's pool first, `--subjects rules --switch-key --limit 1` moves it to the
-rules', what the judge recorded meanwhile standing. The scheduler never
+thoughts. **Upgrading to the release that brings it** — from a stack running
+`sleep`, from 1.9.0, where `sleep` was a service of its own, from the
+`workers` pass, or at a first start: settle what the first period asks before
+the scheduler runs on the release. Leave `sleep` out of `OB1_PASSES` in
+`deploy/.env` — from 1.9.0, name the other passes there as its upgrade says,
+but not `sleep` yet; take `workers` out too, whose followers would run the
+claim passes unpaused meanwhile — and bring the stack up on the release, its
+migrations applied and no scheduler running (where it ran before, preflight's
+`sleep` row warns it stopped meanwhile, as expected); set `OB1_SUBJECT_REASONING` as wanted first
+(off is about 8x faster a call), since the count's pool and limit follow it;
+count the first pooling in the stack, `podman compose -f deploy/compose.yaml
+run --rm --no-deps coordinator db/coordinator.ts run extract --subjects
+--dry-run`, with the -f files and -p the stack was started with; on a brain
+whose judge model is not yet measured on the question, name the rules' pool
+with the same one-off and `--subjects rules --limit 1`, which the scheduler
+then follows, asking no model; then put `sleep` in `OB1_PASSES` and recreate
+the coordinator. Where the scheduler named the judge model's pool first,
+`--subjects rules --switch-key --limit 1` moves it to the rules' once the
+judge call in hand ends, its answer dropped, what the judge recorded meanwhile
+standing. A hand run that asks the judge model (`--subjects --switch-key`,
+`--judge-checked`) lengthens no limit of the scheduler's: on a model server of
+one slot, run it while preflight's `sleep` row reads idle, or retry the claims
+consolidation failed beside it after. The scheduler never
 switches a pool: another one named — a rule's, the question's or
 `OB1_SUBJECT_REASONING`'s change — holds the sweep until `--subjects
 --switch-key` is run by hand in the stack, and a garbage-judge alarm's trip
 holds it until a `--judge-checked` run by hand; preflight's `sleep` row gives
 each command. Anything else that ends the sweep sets it down for the period
-alone, said on `heartbeat:sleep`, the other passes running on. While it asks
-the judge model, consolidation's judge calls each get their own 120 s and one
-of the sweep's calls (1,020 s, or 420 s with the reasoning off): on a model
-server of one slot a call of consolidation's waits out the sweep's call in
-hand, which its 120 s alone would time out, so a hung judgement takes that
-long to notice, until SMD-3379 PR 2b keeps a slot's wait out of the limit. A
+alone, said on `heartbeat:sleep`, the other passes running on. While its run
+asks the judge model, consolidation's judge calls each get their own 120 s and
+one of the sweep's calls (1,020 s, or 420 s with the reasoning off), read as
+each call starts: on a model server of one slot a call of consolidation's
+waits out the sweep's call in hand, which its 120 s alone could time out. So a
+hung judgement takes that long a pair to notice, and a hung provider up to
+twice that, the probe after the call getting the same, until SMD-3379 PR 2b
+keeps a slot's wait out of the limit. A
 migration run beside the scheduler — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
@@ -2312,7 +2324,9 @@ searches (SMD-3315). Preflight's `sleep` row says whether it is working,
 paused or idle, with its last period.
 
 **First start.** The same worker key as the `workers` pass (`OB1_WORKER_KEY`,
-its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES`, then:
+its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES` — once the subject
+sweep's first pool is settled ("Upgrading to the release that brings it",
+above) — then:
 
 ```bash
 podman compose -f deploy/compose.yaml up -d coordinator
@@ -2335,8 +2349,10 @@ live call. The coordinator is a default service and `unless-stopped`, so the
 stack's `up -d` and a reboot bring it back ("After a reboot", above), and a
 plain `down` stops it with the rest.
 
-**From the `workers` pass.** Name `sleep` in `OB1_PASSES` in place of
-`workers` and recreate the coordinator: it stops the followers and starts the
+**From the `workers` pass.** Settle the subject sweep's first pool first
+("Upgrading to the release that brings it", above). Then name `sleep` in
+`OB1_PASSES` in place of `workers` and recreate the coordinator: it stops the
+followers and starts the
 scheduler, never both at once. Then delete the followers' rows, or
 preflight's `workers` row asks for them back. A follower run outside the
 coordinator — by hand, or an old stack's `extract` and `consolidate`

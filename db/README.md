@@ -4647,7 +4647,9 @@ in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
 `deploy/README.md`, "The `sleep` pass instead", has the first start, the
-move from the `workers` pass and the dump's volume):
+move from the `workers` pass and the dump's volume). Before its first period
+on a release with the subject sweep, settle the sweep's first pool
+(Upgrading to the release that brings it, under The subject sweep, below):
 
 ```bash
 podman compose -f deploy/compose.yaml up -d coordinator
@@ -4883,33 +4885,49 @@ and the judge model asked the rest, one call at a time at a median of 71 s
 for the 27B with its reasoning on (the question's own reasoning, above): at
 most about 1,200 a day, fewer beside consolidation's calls and between
 periods, so weeks on a brain of tens of thousands of thoughts. A blank name
-is none named, so blanking it brings the judge model's pool back, from the
-rules' too. **Upgrading to the release that brings it:** what the first
-period asks is settled before that period, so do this before the scheduler
-runs on the release: take `sleep` out of `OB1_PASSES` in `deploy/.env` and
+is none named: under the rules' pool blanking it brings the judge model's
+pool back, the sweep started again under it; under the judge model's pool it
+sets the sweep down `failed` for that period, the next naming it again.
+**Upgrading to the release that brings it** — from a stack that runs `sleep`
+already, from 1.9.0, where `sleep` was a service of its own, from the
+`workers` pass, or at a first start: what the first period asks is settled
+before that period, so do this before the scheduler runs on the release:
+leave `sleep` out of `OB1_PASSES` in `deploy/.env` — from 1.9.0, name the
+other passes there as its upgrade says but `sleep` not yet; take `workers`
+out too, whose followers would run the claim passes unpaused meanwhile — and
 bring the stack up on the release (its migrations apply, and no scheduler
-runs); count the first pooling in the stack — `podman compose -f
-deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run
-extract --subjects --dry-run`, with the -f files and -p the stack was started
-with — whose `ask <model> about N` is the number; set
-`OB1_SUBJECT_REASONING` as wanted (off is about 8x faster a call); on a brain
-whose judge model is not yet measured on the question (the metadata model's
-default judges when `OB1_JUDGE_MODEL` is unset, and gave the 27B's key for 60
-of 99, above), name the rules' pool with the same one-off and `--subjects
-rules --limit 1`, which the scheduler then follows, asking no model; then put
-`sleep` back and recreate the coordinator (`up -d coordinator`). A scheduler
-that named the judge model's pool first moves to the rules' with `--subjects
-rules --switch-key --limit 1`: what the judge recorded meanwhile stands,
-current under any pool. From the rules' pool to the judge model's later,
-`--subjects --switch-key --dry-run` counts and `--switch-key --limit 1`
-switches, the scheduler's runs taking the rest. The scheduler never switches
+runs; where it ran before, preflight's `sleep` row warns it stopped meanwhile,
+as expected); set `OB1_SUBJECT_REASONING` as wanted first (off is about 8x
+faster a call), since the count's pool and limit follow it; count the first
+pooling in the stack —
+`podman compose -f deploy/compose.yaml run --rm --no-deps coordinator
+db/coordinator.ts run extract --subjects --dry-run`, with the -f files and -p
+the stack was started with — whose `ask <model> about N` is the number; on a
+brain whose judge model is not yet measured on the question (the metadata
+model's default judges when `OB1_JUDGE_MODEL` is unset, and gave the 27B's key
+for 60 of 99, above), name the rules' pool with the same one-off and
+`--subjects rules --limit 1`, which the scheduler then follows, asking no
+model; then put `sleep` in `OB1_PASSES` and recreate the coordinator (`up -d
+coordinator`). A scheduler that named the judge model's pool first moves to
+the rules' with `--subjects rules --switch-key --limit 1`, once the judge
+call in hand ends, its answer dropped: what the judge recorded meanwhile
+stands, current under the rules' pool, and under a judge model's pool unless
+that one turns the reasoning on (those found with it off are asked again).
+From the rules' pool to the judge model's later, `--subjects --switch-key
+--dry-run` counts and `--subjects --switch-key --limit 1` switches, the
+scheduler's runs taking the rest. A hand run that asks the judge model — that
+switch, `--judge-checked` — lengthens no limit of the scheduler's
+(consolidation's, below): on a model server of one slot run it while
+preflight's `sleep` row reads idle, or retry the claims consolidation failed
+beside it after. The scheduler never switches
 a pool: while `ob1_config` names one that is neither the stack's judge
 model's nor its rules', after a rule's, the question's or the reasoning's
 change since it was named, the sweep is held (`key`), its log naming the
 pools and the ways out: `--subjects --switch-key --limit 1` by hand in the
 stack, which pools again every thought whose subject is not current under the
 stack's key (those keyed by no rule among them, and, under a key with the
-reasoning on, those found with it off; `--switch-key --dry-run` counts them),
+reasoning on, those found with it off; `--subjects --switch-key --dry-run`
+counts them),
 the scheduler's runs taking the rest; `--subjects rules --switch-key --limit
 1`, to the rules' pool; or `OB1_SUBJECT_REASONING` set back where the
 reasoning alone tells them apart. While a garbage-judge alarm's trip holds
@@ -4921,27 +4939,36 @@ run exits 1, saying why last. A refusal at its start — the scheduler's
 check's, a period's — sets it down for the period alone, as re-embed's
 set-down does (the maintainer's choice), and so does any other end of its
 own (`failed`, its log naming the cause: the provider refusing a question, a
-grant refused, the database lost, its naming or pooling broken off, another
-judge model's trip, a throw): said, on the row, the period's outcome failed,
+grant refused, the pool's name blanked under the judge model's pool, the
+database lost, its naming or pooling broken off, another judge model's trip,
+a throw): said, on the row, the period's outcome failed,
 the others running on; the next period or rescan tries it again, a setting
 mended in `deploy/.env` reaching it once the coordinator is recreated. A
 statement past its timeout holds it until a restart, as any pass. N12 aborts
 its calls in hand, at most three a period's hour, as consolidation's: its
-median call runs past the minute. While it asks the judge model,
+median call runs past the minute. While its run asks the judge model,
 consolidation's judge calls get their own limit and one of the sweep's calls
-— 1,020 s with the reasoning on, 420 s off — since on a model server of one
-slot a call of consolidation's waits out the sweep's call in hand, and its
-own 120 s, which counts the wait, timed calls out and failed their claims (the
-maintainer's choice; SMD-3379 PR 2b, keeping a slot's wait out of the limit,
-replaces it): a hung judgement takes that long to notice. Its stop lines are
-left out of the log, as the claim passes' are, and its waits for the provider
-stamp no failed word: the row says them. Not here: a setting that keeps it
-out of sleep (the rules still run under the rules' pool); its failed claims on
-the row (its log names them); a thought set back whose own error is a 429 or
-a 503, never failed, which costs each period other work begins its pauses
-(about 65 s); captures pooled after the 30th day of a period that long, past
-its bound; and a claim's lease, renewed only before a timeout's probe,
-against a wait for a model slot SMD-3379 PR 2b brings.
+— 1,020 s with the reasoning on, 420 s off — read as each call starts, so a
+switch to the judge model's pool lengthens the next call's and the sweep's
+end shortens it: on a model server of one slot a call of consolidation's
+waits out the sweep's call in hand, and its own 120 s, which counts the wait,
+timed calls out and failed their claims (the maintainer's choice; SMD-3379 PR
+2b, keeping a slot's wait out of the limit, replaces it). A hung judgement
+takes that long a pair to notice, and a hung provider up to twice that, the
+probe after the call getting the call's limit; the window in which a thought
+that hangs the provider is its own grows with it, so such a thought is still
+failed. Its stop lines are left out of the log, as the claim passes' are, and
+its waits for the provider stamp no failed word: the row says them. Not here:
+a setting that keeps it out of sleep (the rules still run under the rules'
+pool); its failed claims on the row (its log names them); a thought set back
+whose own error is a 429 or a 503, never failed, which costs each period other
+work begins its pauses (about 65 s); captures pooled after the 30th day of a
+period that long, past its bound; a claim's lease, renewed only before a
+timeout's probe, against a wait for a model slot SMD-3379 PR 2b brings;
+extraction's own limit, 300 s a window, which a capture extracted mid-period
+behind a sweep call past it on a model server of one slot meets, its claim
+failed for `--retry-failed` (2 of 200 measured calls, the reasoning on); and
+a row that shows a hung judgement before its limit has passed.
 
 **Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
 from the brain's size) — its session settings; the clock went in 2.0.0:
@@ -4991,7 +5018,9 @@ past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
 whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
 scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
-still read, for a rollback.
+still read, for a rollback. The subject sweep runs in it from 2.0.0: settle
+its first pool before the scheduler runs on the release (Upgrading to the
+release that brings it, under The subject sweep, above).
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -5149,7 +5178,9 @@ Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
 **From the `workers` pass.** Its followers do not yield, so the two are
 alternatives: the coordinator never runs both (`OB1_PASSES` naming both runs
-`sleep`), and a run refuses (exit 2) while any follower's heartbeat is fresh
+`sleep`; on a release with the subject sweep, settle its first pool before
+`sleep` goes in — Upgrading to the release that brings it, above), and a run
+refuses (exit 2) while any follower's heartbeat is fresh
 — one run by hand, or an old stack's container — at its start, and when a
 poll, idle or in a period, finds one (a follower brought up beside it stamps only
 after its start probe), and `--dry-run` names them. Name `sleep` in place of
@@ -6646,6 +6677,7 @@ bun test-schema.ts                          # PGlite, no container
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
+OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s] alone, the subject sweep under sleep (SMD-3306 PR 6b-2)
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

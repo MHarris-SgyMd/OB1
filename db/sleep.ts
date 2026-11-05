@@ -250,13 +250,19 @@
  * failed: the row's waits say them. The period stays open while a claim in
  * its bound is left, so a thought set back past it in the wait — a hang, or
  * an outage it made no suspect of — leaves the period to end then.
- * Consolidation's judge calls, beside a sweep that asks the judge model, get
- * their own limit and one of the sweep's calls (1,020 s with the reasoning
- * on, 420 s off; review pass 2, the maintainer's choice): on a model server
- * of one slot a call of consolidation's waits out the sweep's call in hand,
- * and its own 120 s, counting the wait, timed calls out and failed their
- * claims. A hung judgement takes that long to notice; SMD-3379 PR 2b, which
- * keeps a slot's wait out of the limit, replaces it.
+ * Consolidation's judge calls, while the sweep's run asks the judge model
+ * beside them, get their own limit and one of the sweep's calls (1,020 s with
+ * the reasoning on, 420 s off; review pass 2, the maintainer's choice), read
+ * as each call starts (review pass 3, the maintainer's choice): on a model
+ * server of one slot a call of consolidation's waits out the sweep's call in
+ * hand, and its own 120 s, counting the wait, timed calls out and failed
+ * their claims. A switch to the judge model's pool lengthens the next call's,
+ * and the sweep's end — held, set down, switched to the rules' pool —
+ * shortens it. A hung judgement takes that long to notice, a pair at a time,
+ * and a hung provider up to twice that, the probe after the call getting the
+ * call's limit; the window in which a thought that hangs the provider is its
+ * own grows with it. SMD-3379 PR 2b, which keeps a slot's wait out of the
+ * limit, replaces it.
  *
  * ── Pausing ─────────────────────────────────────────────────────────────────
  * Every --poll seconds in a period the logs are read for a live write newer
@@ -445,7 +451,16 @@
  * 30 days — a first pooling past some 36,000 thoughts — leaves the captures
  * pooled after its 30th day past its bound, for the next. Its claim's lease is
  * renewed only before a timeout's probe, so a wait for a model slot that
- * SMD-3379 PR 2b brings can outlast it (review pass 2, cold read).
+ * SMD-3379 PR 2b brings can outlast it (review pass 2, run-it). Extraction's
+ * own limit, 300 s a window, is not lengthened beside it: on a model server of
+ * one slot a capture extracted mid-period behind a sweep call past about
+ * 300 s times out, its claim failed for --retry-failed — the reasoning on, 2
+ * of 200 measured calls, until PR 2b (review pass 3, run-it and walkthrough).
+ * A hand run that asks the judge model — --subjects --switch-key,
+ * --judge-checked — lengthens no limit of the scheduler's: run it while
+ * preflight's `sleep` row reads idle, or retry the claims consolidation failed
+ * beside it (the maintainer's choice). No row shows a hung judgement before its
+ * limit has passed (review pass 3, walkthrough).
  */
 
 import type { SQL } from "bun";
@@ -1407,11 +1422,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The pool ob1_config named at that read, for the key hold's words. */
   let subjectsNamed: string | null = null;
   /**
-   * The subject sweep set down for this period (SMD-3306 PR 6b-2, the maintainer's choice: a refusal holds the sweep
-   * alone, the others running on, as re-embed's set-down does): its start refused, at the scheduler's check or a
+   * The subject sweep set down for this period (SMD-3306 PR 6b-2, the maintainer's choice: a refusal sets the sweep
+   * down alone, the others running on, as re-embed's set-down does): its start refused, at the scheduler's check or a
    * period's, by its kind; any other end of its own `failed`, its lines saying why — the provider's refusal of the
-   * question, a grant refused, the pool's name blanked, the database lost (review pass 1, cold read: read as the
-   * provider's alone). Re-armed at the next period's start or a later rescan, as re-embed's set-down is.
+   * question, a grant refused, the pool's name blanked under the judge model's pool, the database lost (review pass 1,
+   * cold read: read as the provider's alone). Re-armed at the next period's start or a later rescan, as re-embed's
+   * set-down is.
    */
   let subjectsDown: SleepHoldWhy | null = null;
   /** The subject sweep held or set down in this period, or idle in a one-shot run: its pool left, so a one-shot run exits 1, said with why. */
@@ -1865,18 +1881,25 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** Aborted when a pass of the current period settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
   /**
-   * Consolidation's judge call limit as it starts (SMD-3306 PR 6b-2, review pass 2, the maintainer's choice): its own,
-   * and while the subject sweep asks the judge model beside it one of the sweep's calls too — on a model server of one
-   * slot a call of consolidation's waits out the sweep's call in hand, and its limit, started before the request, counts
-   * the wait: at its own 120 s, behind sweep calls of 130 s, 2 of 6 timed out and a claim failed, and behind 250 s a
-   * provider outage was read where none was (the run-it reviewer's). So 1,020 s with the reasoning on, 420 s off: a hung
-   * judgement takes that long to notice. SMD-3379 PR 2b, a slot's wait kept out of the limit, replaces it.
+   * Consolidation's judge call limit, read as each call starts (SMD-3306 PR 6b-2, review passes 2 and 3, the
+   * maintainer's choices): its own, and while the subject sweep's run asks the judge model beside it — started in the
+   * period under the judge model's pool, and not yet ended — one of the sweep's calls too. On a model server of one
+   * slot a call of consolidation's waits out the sweep's call in hand, and its limit, started before the request,
+   * counts the wait: at its own 120 s, behind sweep calls of 130 s, 2 of 6 timed out and a claim failed, and behind
+   * 250 s a provider outage was read where none was (the run-it reviewer's). So 1,020 s with the reasoning on, 420 s
+   * off: a hung judgement takes that long a pair to notice, and a hung provider up to twice that, the probe after the
+   * call getting the call's limit (review pass 3, run-it). A switch to the judge model's pool lengthens the next
+   * call's, and the sweep's end — held, set down, refused at its start, switched to the rules' pool — shortens it
+   * (review pass 3: read once, as consolidation started, it kept its own beside a sweep switched to the judge model's,
+   * and the longer one beside a sweep refused at its start). SMD-3379 PR 2b, a slot's wait kept out of the limit,
+   * replaces it.
    */
   const consolidateTimeoutS = (): number => {
     const own = opts.consolidateTimeoutS ?? JUDGE_TIMEOUT_S;
-    return subjectsRuns() && JOBS.subjects !== SUBJECTS_RULES_POOL ? own + (opts.subjectsTimeoutS ?? subjectsTimeoutS(subjectReasoningOn(cfg))) : own;
+    const asking = sweepJob !== null && sweepJob !== SUBJECTS_RULES_POOL && running.some((r) => r.name === "subjects" && !r.settled);
+    return asking ? own + (opts.subjectsTimeoutS ?? subjectsTimeoutS(subjectReasoningOn(cfg))) : own;
   };
-  /** Whether the longer limit was said: once a process, as consolidation first starts under it. */
+  /** Whether the longer limit was said: once a process, as the sweep first starts under the judge model's pool. */
   let saidJudgeLimit = false;
   const start = (name: PassName, workers = WORKERS): Running => {
     const abort = new AbortController();
@@ -1905,17 +1928,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       writer: tagged(name, () => p.hushed),
     };
     const ended = passEnded;
-    const judgeLimit = name === "consolidate" ? consolidateTimeoutS() : 0;
-    if (name === "consolidate" && judgeLimit !== (opts.consolidateTimeoutS ?? JUDGE_TIMEOUT_S) && !saidJudgeLimit) {
-      saidJudgeLimit = true;
-      out(`  consolidation's judge calls get ${judgeLimit} s each beside the subject sweep: their own and one of the sweep's, which a call can wait out on a model server of one slot`);
-    }
     // Extraction's stall floor is its own (consolidation counts no stall). The subject sweep takes common, its workers
     // and summary read by none of it, under the pool the brain names — the rules' asking no model — its claims bounded
-    // by the period's (SMD-3306 PR 6b-2); consolidation its judge calls' limit beside it (review pass 2).
+    // by the period's (SMD-3306 PR 6b-2); consolidation its judge calls' limit, read at each call, beside it (review
+    // passes 2 and 3).
     p.done = (name === "reembed" ? runReembed(common) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
       : name === "subjects" ? sweepSubjects({ ...common, model: JOBS.subjects !== SUBJECTS_RULES_POOL, ...(subjectsBound === null ? {} : { claimsBy: subjectsBound }), ...(opts.subjectsTimeoutS === undefined ? {} : { timeout: opts.subjectsTimeoutS }) })
-      : runConsolidate({ ...common, timeout: judgeLimit, ...(DUMP ? { dump: DUMP } : {}) })).then((code) => {
+      : runConsolidate({ ...common, ...(opts.consolidateTimeoutS === undefined ? {} : { timeout: opts.consolidateTimeoutS }), timeoutNow: consolidateTimeoutS, ...(DUMP ? { dump: DUMP } : {}) })).then((code) => {
       p.settled = true;
       p.code = code;
       ended.abort();
@@ -2734,6 +2753,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       out(`  the subject sweep starts beside consolidation, under ${JOBS.subjects}${JOBS.subjects === SUBJECTS_RULES_POOL ? ", the rules' pool: no model asked" : ""}`);
       sweepJob = JOBS.subjects;
       start("subjects");
+      if (sweepJob !== SUBJECTS_RULES_POOL && !saidJudgeLimit) {
+        saidJudgeLimit = true;
+        out(`  consolidation's judge calls get ${consolidateTimeoutS()} s each while the subject sweep asks the judge model: their own and one of the sweep's, which a call can wait out on a model server of one slot`);
+      }
     };
     /**
      * The subject sweep ended (SMD-3306 PR 6b-2), which ends no period and no scheduler, as re-embed's end does not:
@@ -2741,9 +2764,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * pool named (its 2), a trip holding its judge model (its 3) — and held, said; or the other of this stack's pools
      * named, an operator's switch, which it starts again under; or set down for this period, said: its start's refusal
      * by its kind, anything else `failed`, its lines saying why — the provider's refusal of a question, a grant refused,
-     * the pool's name blanked, the database lost past its start, its naming or pooling broken off, another judge model's
-     * trip, a 0 unasked, or a throw, whose reason is said here, as the pass says none (re-embed's rule). The row is
-     * written now. False when a stop ended the read.
+     * the pool's name blanked under the judge model's pool, the database lost past its start, its naming or pooling
+     * broken off, another judge model's trip, a 0 unasked, or a throw, whose reason is said here, as the pass says none
+     * (re-embed's rule). The row is written now. False when a stop ended the read.
      */
     const subjectsEnded = async (su: Running): Promise<boolean> => {
       const why = await su.done.then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
