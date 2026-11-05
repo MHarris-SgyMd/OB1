@@ -23,8 +23,8 @@
  * else, every `_shared/auth.ts` is byte-for-byte server-portable/auth.ts (a
  * Supabase function is bundled from supabase/functions/, so the module is
  * copied beside the servers rather than imported across the tree), no file
- * under the three category directories builds an MCP server transport (the
- * Vercel route on its own install aside), and the MCP stack's
+ * under the three category directories imports an MCP server package or builds
+ * an MCP server transport (the Vercel route on its own install aside), and the MCP stack's
  * shared pins agree across the tree's installs (this directory's,
  * server-portable's, mcp-server's).
  *
@@ -359,8 +359,18 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   env(s, KEYS);
 }
 
-// Each form a key may travel in, at each worker: a read key's dry run passes and its real run is refused, through
-// every form (the auditor's own schedule sends ?key=). Asked of an MCP server's tools/list until the last left (SMD-3747).
+// The auditor reads AUDITOR_ACCESS_KEYS alone: the brain's MCP_ACCESS_KEYS, set for the other servers, is no key to it.
+{
+  const auditor = SERVERS.find((x) => x.keys === "AUDITOR_ACCESS_KEYS")!;
+  env(auditor, undefined, undefined);
+  process.env.MCP_ACCESS_KEYS = KEYS;
+  const borrowed = await run(auditor, WRITE_KEY, true);
+  assert(borrowed.status === 401, `${auditor.file}: with its own keys unset, a key in the brain's MCP_ACCESS_KEYS is refused (${borrowed.status})`);
+  env(auditor, KEYS);
+}
+
+// Each form a key may travel in, at each worker: a read key's dry run passes, its real run is refused, and a wrong key
+// in it is refused even for a dry run, through every form (the auditor's own schedule sends ?key=). Asked of an MCP server's tools/list until the last left (SMD-3747).
 for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   env(s, KEYS);
   for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
@@ -446,6 +456,8 @@ const LIVE: Live[] = [
       const r = await fetch(base + path, { method, headers: { "x-brain-key": LEGACY_KEY, "Content-Type": "application/json" }, body });
       assert(r.status !== 401 && r.status !== 503, `${file}: under bun, the configured key passes the gate on ${method} ${path} (${r.status})`);
       assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
+      assert((await fetch(base + path, { method, headers: { "x-brain-key": "x".repeat(LEGACY_KEY.length), "Content-Type": "application/json" }, body })).status === 401,
+        "…and so is a wrong key of the right length: its compare is of the key, not of its length");
     },
   })),
 ];
@@ -552,7 +564,7 @@ assert(second !== null && askedElsewhere > 0 && answeredElsewhere.length === 0, 
 console.log("\n[where the key may travel]");
 for (const s of SERVERS.filter((s) => s.kind === "rest" && s.writes.length > 0)) {
   // Each form a key may travel in authenticates, and the scope applies through it: a read key passes the read probe
-  // and is told a write route writes. (An MCP server's tools/list asked this until the last left: SMD-3747.)
+  // and is told a write route writes, and a wrong key in it is refused. (An MCP server's tools/list asked this until the last left: SMD-3747.)
   env(s, KEYS);
   for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
     const read = await http(s, READ_KEY, s.readProbe!, via);
@@ -710,7 +722,7 @@ const withCallees = (text: string, reach: string) => {
   }
   return out;
 };
-const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
+const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:process\.env\.)?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -760,8 +772,8 @@ for (const s of SERVERS) {
   // vendored MCP server brings that kind back first. (The Next.js route on Vercel builds the SDK's own transport, on
   // Node, from its own install; it is not a Bun server.)
   // An MCP server, by what it imports (@hono/mcp, the v1 SDK's server, the v2 server or node packages) or by a
-  // server transport it builds in any spelling (spaced, namespaced, generic; Streamable HTTP, SSE or stdio).
-  const IMPORTS = /\bfrom\s*["'](?:npm:)?(?:@hono\/mcp|@modelcontextprotocol\/(?:sdk\/server|server|node))\b|\b(?:import|require)\s*\(\s*["'](?:npm:)?(?:@hono\/mcp|@modelcontextprotocol\/(?:sdk\/server|server|node))\b/;
+  // server transport it builds (the spellings probed below: spaced, namespaced, generic; Streamable HTTP, SSE or stdio).
+  const IMPORTS = /\b(?:from\s*|(?:import|require)\s*\(\s*)["'`][^"'`]*(?:@hono\/mcp|@modelcontextprotocol\/(?:sdk\/server|server|node))\b/;
   const BUILDS = /\bnew\s+(?:[\w$]+\.)?\w*(?:StreamableHTTP(?!Client)|SSEServer|StdioServer)\w*Transport\b/;
   const TRANSPORT = { test: (text: string) => IMPORTS.test(text) || BUILDS.test(text) };
   const VERCEL_ROUTE = "recipes/vercel-neon-telegram/src/app/api/mcp/route.ts";
@@ -771,10 +783,10 @@ for (const s of SERVERS) {
   assert(building.join() === VERCEL_ROUTE, `no vendored script imports an MCP server package or builds an MCP server transport, so none needs the retired MCP kind; the Vercel route alone, on Node from its own install (${building.join(", ") || "none"})`);
   const caught = ["new WebStandardStreamableHTTPServerTransport(", "new StreamableHTTPTransport(", "new  StreamableHTTPTransport (", "new\nStreamableHTTPTransport(",
     "new mcp.StreamableHTTPTransport(", "new StreamableHTTPTransport<X>(", "new SSEServerTransport(", "new StdioServerTransport(", "new NodeStreamableHTTPServerTransport(",
-    'import { StreamableHTTPTransport } from "@hono/mcp";', 'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";', 'const m = await import("@modelcontextprotocol/server");'];
+    'import { StreamableHTTPTransport } from "@hono/mcp";', 'import { StreamableHTTPTransport } from "../node_modules/@hono/mcp/dist/index.js";', "const m = await import(`@hono/mcp`);", 'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";', 'const m = await import("@modelcontextprotocol/server");'];
   const missed = caught.filter((t) => !TRANSPORT.test(t));
   assert(missed.length === 0 && !TRANSPORT.test('import { Client } from "@modelcontextprotocol/sdk/client/index.js";') && !TRANSPORT.test("new StreamableHTTPClientTransport("),
-    `…and the rule reads each import and spelling of a server, and no client (its own probe; missed: ${missed.join(" | ") || "none"})`);
+    `…and the rule reads each import and spelling of a server probed here, and no client (its own probe; missed: ${missed.join(" | ") || "none"})`);
 }
 
 // The files this test cannot import — a Next.js route, a README's code block —
