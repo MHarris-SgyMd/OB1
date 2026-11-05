@@ -302,10 +302,10 @@ jobs:
 EOF
   local WF=.github/workflows/fork-checks.yml
   # sub FROM TO: an edit of the workflow in the scratch repository, as BSD and GNU sed both take it.
-  # shellcheck disable=SC2329 # called from the cases' OPS, which run() evals
+  # shellcheck disable=SC2317,SC2329 # called from the cases' OPS, which run() evals (SC2317 to CI's shellcheck 0.9, SC2329 to later ones)
   sub() { sed -i.bak "s/$1/$2/" "$WF" && rm -f "$WF.bak"; }
   # add_gated: a copy of h's block, as gated job n, at the workflow's end.
-  # shellcheck disable=SC2329 # as sub
+  # shellcheck disable=SC2317,SC2329 # as sub
   add_gated() { awk '/^  h:/ { p = 1 } /^  r:/ { p = 0 } p' "$WF" | sed "s/^  h:/  n:/; s/' h '/' n '/; s/echo h/echo n/" > "$WF.n" && cat "$WF.n" >> "$WF" && rm -f "$WF.n"; }
   if ! command -v git > /dev/null; then echo "changes.sh: the run's cases need git, and there is none here" >&2; fails=$((fails + 1)); else
     run false pull_request main 'echo x >> docs/a.md'
