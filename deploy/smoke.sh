@@ -322,7 +322,7 @@ print("\x1f".join([d.get("version", ""), d.get("commit", ""), hi, d.get("ledgerS
 IFS=$'\x1f' read -r hv hc hm hl hlast <<<"$facts"
 vfile="$HERE/../server-portable/version.ts"
 want=""; wantLast=""
-[ -r "$vfile" ] && want=$(sed -nE 's/^export const FORK_VERSION = "([^"]+)";$/\1/p' "$vfile")
+[ -r "$vfile" ] && want=$(sed -nE 's/^export const BRAIN_VERSION = "([^"]+)";$/\1/p' "$vfile")
 [ -r "$vfile" ] && wantLast=$(sed -nE 's/^export const LATEST_MIGRATION = ([0-9]+);$/\1/p' "$vfile")
 if [ -z "${hv:-}" ]; then
   # The body is `ok` for every key that may not see the record: a server from

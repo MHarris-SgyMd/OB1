@@ -61,7 +61,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       v[axisFor(String(body.input))] = 1;
       return new Response(JSON.stringify({ data: [{ embedding: v }] }), { headers: { "Content-Type": "application/json" } });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea" }) } }] }), { headers: { "Content-Type": "application/json" } });
+    // A capture marked "rho: remind me" reads action items (SMD-3665 PR 3a's [15]): a repeat in another case, a blank and a number among them;
+    // one marked "rho: a long list" reads 25 texts, each twice in two cases, so the 20 proposed are 20 distinct.
+    const actionItems = JSON.stringify(body).includes("rho: remind me") ? ["call the dentist", "Call the dentist", "  ", 7, "book the vet"]
+      : JSON.stringify(body).includes("rho: a long list") ? Array.from({ length: 25 }, (_, i) => [`task ${i}`, `TASK ${i}`]).flat() : undefined;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea", ...(actionItems ? { action_items: actionItems } : {}) }) } }] }), { headers: { "Content-Type": "application/json" } });
   }
   return realFetch(input as RequestInfo, init);
 }) as typeof fetch;
@@ -1843,6 +1847,78 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
       && ownRefused.ok === false && ownRefused.refusal?.code === "ITEM_UNATTRIBUTED" && ownRefused.refusal?.retryable === false && ownRefused.refusal?.cause === "registry_refused"
       && readerDirect.ok === false && readerDirect.refusal.code === "READ_ONLY_KEY" && (readerDirect.refusal as { key?: string }).key === "reader",
     `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final); its own item with the registry set up wrong or refusing, ITEM_UNATTRIBUTED final, each its cause; a read key's open, READ_ONLY_KEY naming it (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal, misconfigured: ownMisconfigured.refusal, refused: ownRefused.refusal, reader: readerDirect.ok ? "opened" : readerDirect.refusal })})`);
+}
+
+console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, at most 20, noted at its capture time; a re-capture opens none; a capture key's own; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts holding no item yet, classifying a new key an agent and stopping for a known one with no kind, no thought's metadata changed, and a second run opens nothing");
+{
+  type I = { id: string; status: string; text: string; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null; trust: string | null } };
+  const listed = async (thought: string, key?: string) => ((await rest("GET", `/v1/items?status=all&origin_thought=${thought}`, undefined, key)).body.items ?? []) as I[];
+  // A capture whose extraction reads action items: one item per distinct non-blank string, proposed, from the thought.
+  const cap = await rest("POST", "/v1/thoughts", { content: "rho: remind me to call the dentist and book the vet" });
+  const capId = String(cap.body.id);
+  const [{ created_at: capAt }] = await sql`SELECT to_jsonb(created_at) #>> '{}' AS created_at FROM thoughts WHERE id = ${capId}::uuid`;
+  const proposed = await listed(capId);
+  assert(cap.status === 201 && proposed.length === 2 && proposed.every((i) => i.status === "proposed" && i.originThoughtId === capId && i.openedBy.name === "writer" && i.openedBy.scope === "write")
+      && JSON.stringify(proposed.map((i) => i.text).sort()) === JSON.stringify(["book the vet", "call the dentist"])
+      && proposed.every((i) => new Date(i.notedAt).getTime() === new Date(String(capAt)).getTime()),
+    `a capture's action items are two proposed items — the repeat in another case, the blank and the number left out — from the thought, opened by the writer, noted at its capture time (${JSON.stringify(proposed.map((i) => [i.text, i.status]))})`);
+  // A re-capture of the same text opens none; a capture key's capture opens its own.
+  const again = await rest("POST", "/v1/thoughts", { content: "rho: remind me to call the dentist and book the vet" });
+  const capHook = await rest("POST", "/v1/thoughts", { content: "rho: remind me, says the hook" }, KEYS.hook);
+  const hookItems = await listed(String(capHook.body.id));
+  assert(again.status === 201 && String(again.body.id) === capId && (await listed(capId)).length === 2
+      && hookItems.length === 2 && hookItems.every((i) => i.openedBy.name === "hook" && i.openedBy.scope === "capture" && i.status === "proposed"),
+    `a re-capture opens no item; a capture key's capture opens its own, at capture scope (${(await listed(capId)).length} | ${JSON.stringify(hookItems.map((i) => i.openedBy))})`);
+  // At most 20 from one capture, counted after the repeats are dropped (review pass 1: capped first, 20 strings were 10 items).
+  const capLong = await rest("POST", "/v1/thoughts", { content: "rho: a long list of chores" });
+  const longItems = await listed(String(capLong.body.id));
+  assert(capLong.status === 201 && longItems.length === 20 && new Set(longItems.map((i) => i.text.toLowerCase())).size === 20,
+    `a capture whose extraction reads 25 texts, each twice, proposes 20 distinct items (${longItems.length}: ${longItems.map((i) => i.text).join(", ")})`);
+
+  // The backfill: thoughts written with action items and no items yet (as board-sync writes them, past the capture).
+  const raw = async (content: string, actionItems: unknown) => String((await sql`
+    SELECT (upsert_thought(${content}::text, ${{ metadata: { source: "linear", action_items: actionItems } }}::jsonb, NULL::vector)->>'id') AS id`)[0].id);
+  const b1 = await raw("rho backfill: a ticket's to-dos", ["water the ferns", "Water the ferns", "", 7, "x".repeat(1100), "y".repeat(5000)]);
+  const b2 = await raw("rho backfill: a second ticket", ["renew the passport"]);
+  // A thought with an item read from it already is passed over, its action items worded otherwise (review pass 1: a
+  // re-capture's rewording would have been opened beside the item its capture proposed).
+  const b3 = await raw("rho backfill: a third ticket", ["fold the laundry tonight"]);
+  const b3Own = await rest("POST", "/v1/items", { text: "fold the laundry", origin_thought: b3 });
+  // A thought holding no text 117 would take is never taken (review pass 2: it opened nothing and was taken again by every run).
+  await raw("rho backfill: a ticket of one long line", ["z".repeat(1100)]);
+  const meta = async () => JSON.stringify(await sql`SELECT id, metadata, updated_at::text AS u FROM thoughts WHERE id IN (${b1}::uuid, ${b2}::uuid) ORDER BY id`);
+  const itemCount = async () => Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
+  const before = await meta(), itemsBefore = await itemCount();
+  const run = async (...args: string[]) => {
+    const p = Bun.spawn(["bun", "--no-env-file", new URL("../db/backfill-open-items.ts", import.meta.url).pathname, "--url", URL_!, ...args], { stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    return { out, err, code };
+  };
+  const dry = await run("--dry-run");
+  const itemsAfterDry = await itemCount();
+  const real = await run();
+  const b1Items = await listed(b1), b2Items = await listed(b2);
+  const kind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'backfill-open-items'`)[0] as { kind?: string } | undefined)?.kind;
+  const b3Items = await listed(b3);
+  const second = await run();
+  // A key the registry knows with no kind is the operator's to classify: the run stops before writing, its dry run too
+  // (review pass 2: its items stood with no trust for good, the thoughts passed over once classified).
+  await sql`INSERT INTO ob1_agents (label) VALUES ('rho-unkinded')`;
+  const b4 = await raw("rho backfill: a fourth ticket", ["mend the fence"]);
+  const unkindedDry = await run("--as", "rho-unkinded", "--dry-run");
+  const unkinded = await run("--as", "rho-unkinded");
+  const b4Items = await listed(b4);
+  const unkindedKind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'rho-unkinded'`)[0] as { kind: string | null }).kind;
+  assert(dry.code === 0 && /dry run: nothing written/.test(dry.out) && /^2 thoughts with no item yet hold 2 action items to open; 2 past 1000 characters/m.test(dry.out) && itemsAfterDry === itemsBefore,
+    `the dry run counts what it would open — two, on two thoughts, the third holding an item already, the two long ones (one past 4000 before cleaning) left out — and writes nothing (${dry.code} ${dry.out.trim().replace(/\n/g, " | ")} ${dry.err.trim()})`);
+  assert(real.code === 0 && /opened 2,/.test(real.out) && b1Items.length === 1 && b1Items[0].text === "water the ferns" && b1Items[0].status === "proposed" && b1Items[0].openedBy.name === "backfill-open-items"
+      && b1Items[0].openedBy.trust === "agent" && b2Items.length === 1 && kind === "agent" && (await meta()) === before
+      && b3Own.status === 200 && b3Items.length === 1 && b3Items[0].text === "fold the laundry"
+      && second.code === 0 && /^0 thoughts with no item yet hold 0 action items to open; 0 past 1000 characters/m.test(second.out) && /opened 0, 0 already items/.test(second.out),
+    `the backfill opens the two as proposed from their thoughts, its key classified an agent, no thought's metadata or updated_at moved, the thought with an item passed over; a second run takes nothing (${real.out.trim().replace(/\n/g, " | ")} ${real.err.trim()} | ${b3Items.map((i) => i.text)} | ${second.out.trim().replace(/\n/g, " | ")})`);
+  assert(unkinded.code === 1 && /rho-unkinded: the registry knows this key with no kind/.test(unkinded.err) && unkindedKind === null && b4Items.length === 0
+      && unkindedDry.code === 1 && /the registry knows this key with no kind/.test(unkindedDry.err) && !/dry run: nothing written/.test(unkindedDry.out),
+    `a key the registry knows with no kind is left unclassified and stops the run before it writes, its dry run too (${unkinded.code} ${unkinded.err.trim()} | ${unkindedKind} | ${b4Items.length} | ${unkindedDry.code} ${unkindedDry.out.trim().replace(/\n/g, " | ")})`);
 }
 
 apiServer.stop();

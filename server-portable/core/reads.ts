@@ -12,7 +12,7 @@ import { ListCursorRefused, storeKind, UUID_RE, type AuditChange, type ListPosit
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
-import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
+import { BRAIN_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
 import { BRAIN_INFO_TOOL_DEADLINE_MS, HEALTH_DEADLINE_MS } from "../deadlines.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
@@ -720,7 +720,7 @@ const SURFACES: Record<BrainInfoSurface, { deadlineMs: number; opts: ReadOptions
 function serverFacts(ctx: Ctx): ServerFacts {
   const cfg = ctx.embedConfig();
   return {
-    version: FORK_VERSION,
+    version: BRAIN_VERSION,
     releaseRange: RELEASE_RANGE,
     latestMigration: LATEST_MIGRATION,
     commit: ctx.env().OB1_GIT_SHA || "unknown",

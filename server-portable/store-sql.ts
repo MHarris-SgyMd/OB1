@@ -22,7 +22,7 @@ import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
-import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
+import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SUBJECT_POOL_PREFIX } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
@@ -675,14 +675,28 @@ export class SqlStore implements ThoughtStore {
 
   async retryFailed(workType: string): Promise<RetryFailedResult> {
     // The write half of workerStatus, over thought_work_claims (SMD-2132): the
-    // db/*.ts --retry-failed path (extract-entities.ts:413-420) as one statement.
-    // Scoped to the one pool — WHERE work_type = $1 AND status = 'failed' — so a
-    // sibling pool's failures are untouched; a fresh attempt clears the recorded
-    // error, the finish time and the count (015's REQUEUE_SET_SQL shape). The
-    // caller has already gated the write scope. RETURNING the ids feeds the audit.
+    // db/*.ts --retry-failed path as one statement, its pool's own. Scoped to the
+    // one pool — WHERE work_type = $1 AND status = 'failed' — so a sibling pool's
+    // failures are untouched; a fresh attempt clears the recorded error, the
+    // finish time and the count (015's REQUEUE_SET_SQL shape). Extraction's keeps
+    // its date, as extract-entities.ts's own retry does (db/sleep.ts dates its
+    // stopped thoughts ahead, SMD-3008); a subject pool's, as its sweep's, puts a
+    // failure dated ahead at the pool's head, a second before its first claim
+    // pending, no later than now, and clears the pool's standing hang marks
+    // (SMD-3306 PR 6b-1; review pass 8, cold read and claims audit: the head
+    // reached every pool, extraction's forward dates undone, and no mark was
+    // cleared). The caller has already gated the write scope. RETURNING the ids
+    // feeds the audit.
     const rows = await this.sql`
+      WITH unmarked AS (
+        UPDATE thought_work_claims SET last_error = NULL
+         WHERE work_type = ${workType} AND starts_with(${workType}::text, ${SUBJECT_POOL_PREFIX}) AND status IN ('pending', 'claimed')
+           AND starts_with(last_error, ${HUNG_MARK}))
       UPDATE thought_work_claims
-         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0,
+             enqueued_at = CASE WHEN starts_with(${workType}::text, ${SUBJECT_POOL_PREFIX}) AND enqueued_at > now()
+                                THEN LEAST(now(), (SELECT min(p.enqueued_at) FROM thought_work_claims p WHERE p.work_type = ${workType} AND p.status = 'pending') - interval '1 second')
+                                ELSE enqueued_at END
        WHERE work_type = ${workType} AND status = 'failed'
       RETURNING thought_id`;
     const ids = rows.map((r: { thought_id: string }) => String(r.thought_id));

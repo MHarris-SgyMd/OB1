@@ -446,11 +446,14 @@ export const PROBE_PROMPT = "Reply with the word OK.";
 /**
  * What one probe found. `up`: the model answered, or the provider answered a
  * way the next real call will judge (a 400 for the probe's own `max_tokens`,
- * say). `out`: no answer, a timeout, a 429 or a 5xx. `missing`: a 404 naming
- * the model. `refused`: a 401, 402 or 403 (the key), or a 404 naming no model
- * (the base URL).
+ * say). `out`: no answer, a timeout, a 429 or a 5xx — `unanswered`
+ * (probeChat's) when no answer came within its limit or the answer's body
+ * never arrived, the provider holding the call, not refusing it nor erring on
+ * it (SMD-3306 PR 6b-1: the subject sweep reads a call aborted in hand, this
+ * after it, as a hang). `missing`: a 404 naming the model. `refused`: a 401,
+ * 402 or 403 (the key), or a 404 naming no model (the base URL).
  */
-export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; why: string; /** The typed-decision tier's probe found it (probeTier), not the chat endpoint's. */ tier?: true };
+export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; why: string; /** The typed-decision tier's probe found it (probeTier), not the chat endpoint's. */ tier?: true; unanswered?: true };
 
 /**
  * One chat call of one token to `model` at `endpoint` (SMD-2599): the check a
@@ -473,7 +476,7 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
     });
   } catch (e) {
     if (wake?.aborted) return { state: "out", why: "the probe was stopped" };
-    return { state: "out", why: timedOut(e) ? `no answer to a one-token call in ${timeoutMs / 1000} s` : (e as Error).message };
+    return timedOut(e) ? { state: "out", why: `no answer to a one-token call in ${timeoutMs / 1000} s`, unanswered: true } : { state: "out", why: (e as Error).message };
   }
   let words = "";
   let unread = false;
@@ -487,7 +490,7 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
   // one that answered (review pass 2) — whatever its status: an unread 404
   // cannot be told from a wrong URL, nor an unread 401 from a key refused
   // (review pass 3).
-  if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive` };
+  if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive`, unanswered: true };
   if (r.ok) return { state: "up" };
   if (r.status === 429 || r.status >= 500) return { state: "out", why };
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
@@ -589,6 +592,13 @@ export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal,
 export const SUSPECT_WINDOW_MS = 15 * 60_000;
 
 /**
+ * SUSPECT_WINDOW_MS as ProviderOutage reads it when one is made, its window's default and the base a caller's own
+ * window adds to (the subject sweep's): read as it runs, so a live suite shortens it in its own process (SMD-3306 PR
+ * 6b-1).
+ */
+export const SUSPECT_WINDOW = { ms: SUSPECT_WINDOW_MS };
+
+/**
  * A --follow worker's provider outage (SMD-2599): why it began, and the
  * thoughts in hand when it did. While `reason` is set the pass stops after
  * the thought in hand and the follower probes; `end()` clears it when a probe
@@ -597,9 +607,10 @@ export const SUSPECT_WINDOW_MS = 15 * 60_000;
  * answered a probe is the thought's own (a document that crashes the server
  * every time), and `begin` says so, so it is recorded failed and visible
  * rather than cycling through the pool for ever. "Right after" is within
- * SUSPECT_WINDOW_MS of the probe that answered: a thought another process
- * finished meanwhile, and an edit re-queued hours later, meets a later
- * outage as any other thought does (review pass 1).
+ * SUSPECT_WINDOW_MS of the probe that answered, or the window a caller whose
+ * calls run longer gives: a thought another process finished meanwhile, and
+ * an edit re-queued hours later, meets a later outage as any other thought
+ * does (review pass 1).
  */
 export class ProviderOutage {
   reason: string | null = null;
@@ -608,11 +619,15 @@ export class ProviderOutage {
   private suspects = new Set<string>();
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    /** How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15 minutes (the subject sweep's, SMD-3306 PR 6b-1). */
+    private readonly windowMs: number = SUSPECT_WINDOW.ms,
+  ) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.windowMs) {
       this.suspects.delete(thoughtId);
       return "thought";
     }

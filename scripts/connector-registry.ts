@@ -14,7 +14,7 @@
  *   bun scripts/connector-registry.ts            # rewrite the generated block in the spec
  *   bun scripts/connector-registry.ts --check    # print the problems, exit 1 on any
  *
- * check-fork-consistency.ts (check 19) runs registryProblems() over the real
+ * check-consistency.ts (check 19) runs registryProblems() over the real
  * tree and holds the rendered block equal to the committed one. Two rules
  * bite. The declaration: a classified artifact's metadata.json `connectors`
  * equals the vendors its capabilities name, and a contribution that declares
@@ -575,6 +575,6 @@ function main() {
 }
 
 // Run as a CLI only when this file is the entry: both sides realpath'd (a symlinked checkout), and an
-// argv[1] that does not resolve (a REPL, an import) is "not the entry", not a crash — fork-index.ts's idiom.
+// argv[1] that does not resolve (a REPL, an import) is "not the entry", not a crash — changes-index.ts's idiom.
 const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } })();
 if (isMain) main();

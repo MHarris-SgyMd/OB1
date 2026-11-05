@@ -71,7 +71,7 @@ old default — a port podman's `gvproxy` also holds on macOS, so the examples s
 `PORT=8787`), and which a test imports as `default.fetch` without listening (the
 import reads `OB1_LISTEN_HOST`, so a value that is no IP address throws there too). A
 file that still reaches `Deno.*` fails at the call under Bun, is refused by the
-codemod's triage, and fails check 11 of `scripts/check-fork-consistency.ts`.
+codemod's triage, and fails check 11 of `scripts/check-consistency.ts`.
 Then, from a checkout:
 
 ```bash
@@ -96,7 +96,7 @@ its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server. A recipe's `schema.sql` applies to
 a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
-are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-fork-consistency.ts` holds
+are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
