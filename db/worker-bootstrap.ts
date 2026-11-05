@@ -549,7 +549,7 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
  * The typed-decision tier's probe, for consolidate's decide mode (SMD-3115): its /info, which sends no text.
  * `up` when it serves `model`; `missing` when it serves another (the pass key names the decider, so another
  * model's verdicts would be recorded under the wrong name); `out` when it does not answer (no answer, a timeout,
- * a 408, a 429 or a 5xx: SMD-3311); `refused` when the address answers as something else (any other 4xx, or not
+ * a 429 or a 5xx, and a 408 since SMD-3311); `refused` when the address answers as something else (any other 4xx, or not
  * ob1-jev/1).
  */
 export async function probeTier(jev: JevConfig, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
