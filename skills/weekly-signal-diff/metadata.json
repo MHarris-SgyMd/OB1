@@ -1,6 +1,6 @@
 {
   "name": "Weekly Signal Diff",
-  "description": "Standalone skill pack for turning a week's worth of market or AI news into a personalized structural diff using Open Brain memory, a suggested starter universe, and optional live web search.",
+  "description": "Standalone skill pack for turning a week's worth of market or AI news into a personalized structural diff using Daemonic Brain memory, a suggested starter universe, and optional live web search.",
   "category": "skills",
   "author": {
     "name": "Jonathan Edwards",

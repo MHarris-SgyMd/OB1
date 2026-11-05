@@ -8,7 +8,7 @@ The agent's half of session-end capture (SMD-1298). At wrap-up, or when a PR mer
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)) with the portable server at or after SMD-1298 (`capture_thought` takes `source`)
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)) with the portable server at or after SMD-1298 (`capture_thought` takes `source`)
 - A client that supports skills and has the brain's **write** tools connected (Claude Code, Codex, Cursor, or a ChatGPT connector on a write key) — a capture-scoped key has no search and cannot run this skill
 
 ## Installation

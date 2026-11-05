@@ -1,9 +1,9 @@
 ---
 name: autodream-brain-sync
 description: |
-  Syncs Claude Code's local memory system to Open Brain. Triggers whenever memories are
+  Syncs Claude Code's local memory system to Daemonic Brain. Triggers whenever memories are
   saved via dreaming, autodream, or explicit "remember this" requests. After every local
-  memory file write, captures the same content to Open Brain via mcp__open-brain__capture_thought
+  memory file write, captures the same content to Daemonic Brain via mcp__open-brain__capture_thought
   so that memories are accessible from all connected AI clients (ChatGPT, Claude Desktop,
   Codex) and across all devices. Trigger on: memory saves, autodream, dreaming, "remember",
   "save to memory", or any write to the .claude/projects/*/memory/ directory.
@@ -38,15 +38,15 @@ Claude Code's auto-memory system (dreaming/autodream) saves memories to local fi
 Each memory save produces:
 - A local `.md` file in the memory directory (standard behavior)
 - An updated `MEMORY.md` index (standard behavior)
-- A corresponding Open Brain thought capture (added by this skill)
+- A corresponding Daemonic Brain thought capture (added by this skill)
 
 ## Guard Rails
 
 - **Do not capture the MEMORY.md index file itself** — it's just pointers, not content
-- **Do not duplicate** — if updating an existing memory file, capture the updated version (Open Brain handles dedup via embeddings)
+- **Do not duplicate** — if updating an existing memory file, capture the updated version (Daemonic Brain handles dedup via embeddings)
 - **Do not block on failure** — if `mcp__open-brain__capture_thought` fails (MCP server down, network error), complete the local memory save anyway and note the sync failure
-- **Respect memory exclusions** — if the standard memory system says "don't save this", don't capture to Open Brain either
+- **Respect memory exclusions** — if the standard memory system says "don't save this", don't capture to Daemonic Brain either
 
 ## Notes for Other Clients
 
-This skill is specific to Claude Code's auto-memory system. Other clients don't have local memory files, so they capture directly to Open Brain without needing this sync step. The skill ensures Claude Code's local memories don't become an isolated silo.
+This skill is specific to Claude Code's auto-memory system. Other clients don't have local memory files, so they capture directly to Daemonic Brain without needing this sync step. The skill ensures Claude Code's local memories don't become an isolated silo.

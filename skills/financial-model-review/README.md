@@ -6,7 +6,7 @@
 
 This skill helps an AI client review a model like an investor or serious operator would. It checks whether assumptions are supported, whether the structure can be trusted, whether downside cases exist, and whether the model is actually decision-ready instead of merely well-formatted.
 
-For the full OB1 workflow that chains this into research synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the full Daemonic Brain workflow that chains this into research synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the full OB1 workflow that chains this into research synthesis, meeting note
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - A model artifact, spreadsheet export, or pasted assumption set
 
@@ -50,7 +50,7 @@ When installed and invoked correctly, the skill should produce:
 - clear red flags and assumption stress points
 - structural and scenario gaps
 - guidance on what the model is good enough for right now
-- optional Open Brain capture of the final review or highest-signal findings
+- optional Daemonic Brain capture of the final review or highest-signal findings
 
 ## Troubleshooting
 
@@ -65,4 +65,4 @@ Solution: Keep the boundary intact. This skill reviews existing work. If the use
 
 ## Notes for Other Clients
 
-Adapt the Open Brain tool names to your environment, but keep the same review posture: frame the decision, inspect assumptions and structure, pressure-test scenarios, and finish with a usable verdict rather than a vague spreadsheet commentary.
+Adapt the Daemonic Brain tool names to your environment, but keep the same review posture: frame the decision, inspect assumptions and structure, pressure-test scenarios, and finish with a usable verdict rather than a vague spreadsheet commentary.

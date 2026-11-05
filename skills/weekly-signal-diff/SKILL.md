@@ -3,7 +3,7 @@ name: weekly-signal-diff
 description: |
   Use when the user wants a weekly structural diff on AI, software, or another
   fast-moving market. Starts from 10 suggested categories and 30 suggested
-  companies when no watchlist exists, then adapts the scan using Open Brain
+  companies when no watchlist exists, then adapts the scan using Daemonic Brain
   memory, current priorities, and prior digests. Best for prompts like "run my
   weekly signal diff", "what changed this week that matters to me", "track this
   market", or "turn this week's news into structural shifts". Optional live
@@ -20,7 +20,7 @@ version: 1.0.0
 A wall of news does not tell the user what structurally changed. Most weekly
 roundups over-index on headlines, underweight economics and dependency shifts,
 and ignore what the user actually cares about. This skill turns a noisy week
-into a small set of structural changes, weighted by Open Brain memory.
+into a small set of structural changes, weighted by Daemonic Brain memory.
 
 ## When to Use
 
@@ -29,14 +29,14 @@ into a small set of structural changes, weighted by Open Brain memory.
 - "What changed this week that matters to me?"
 - "Track this market and tell me the structural shifts"
 - "Turn this pile of news into a decision-grade diff"
-- Ongoing automation that writes a weekly digest back to Open Brain
+- Ongoing automation that writes a weekly digest back to Daemonic Brain
 
 ## Required Context
 
 Gather as much as the environment allows:
 
 - the user's active projects, bets, and recurring interests
-- prior weekly digests or adjacent summaries stored in Open Brain
+- prior weekly digests or adjacent summaries stored in Daemonic Brain
 - the desired freshness window (default: last 7 days)
 - any preferred outlets, banned sources, or explicit watchlist entities
 
@@ -55,10 +55,10 @@ the strongest search mode the environment supports.
      personal awareness, operator strategy, investor tracking, or content prep.
    - If the user says nothing, default to a 7-day operator-style review.
 
-1. Pull Open Brain context first.
+1. Pull Daemonic Brain context first.
    - Search for active projects, current priorities, recurring entities, recent
      captures, and the last 2-4 weekly digests.
-   - Tool names vary by client. Use the available Open Brain search, list, and
+   - Tool names vary by client. Use the available Daemonic Brain search, list, and
      capture tools in the environment rather than assuming fixed names.
    - Extract a short relevance profile: what the user is building, what they
      keep revisiting, what they are worried about, and what they are trying to
@@ -68,7 +68,7 @@ the strongest search mode the environment supports.
    - Start from the suggested 10-category / 30-company starter universe if the
      user has not defined a watchlist.
    - Treat the starter list as a scaffold, not a contract.
-   - Re-rank or replace items using Open Brain context:
+   - Re-rank or replace items using Daemonic Brain context:
      - promote companies, categories, or themes the user mentions often
      - demote low-signal items
      - add personal-priority entities even if they are outside the starter set
@@ -116,7 +116,7 @@ Use this default structure:
 - `Actions` — optional follow-ups, only if the evidence supports them
 
 1. Capture the durable output.
-   - Save the final digest back into Open Brain when capture tools are
+   - Save the final digest back into Daemonic Brain when capture tools are
      available.
    - Prefer one durable weekly summary plus separate captures only for truly
      important follow-up items.
@@ -130,7 +130,7 @@ When this skill works correctly, the user gets:
 - a concise weekly structural diff instead of a headline roundup
 - a clear explanation of why the shifts matter to them specifically
 - citations or source links when live search is available
-- a durable weekly digest saved back into Open Brain for future comparison
+- a durable weekly digest saved back into Daemonic Brain for future comparison
 
 ## Guardrails
 
@@ -150,7 +150,7 @@ When this skill works correctly, the user gets:
 
 - This skill is portable across Claude Code, Codex, Cursor, and similar clients
   because the core behavior is procedural.
-- Adapt Open Brain tool names to the local environment.
+- Adapt Daemonic Brain tool names to the local environment.
 - For scheduled runs, pair the skill with the user's automation system and keep
   the same structure every week so diffs stay comparable.
 - If OpenRouter is available, prefer a Perplexity Sonar web-search model for

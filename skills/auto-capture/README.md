@@ -1,12 +1,12 @@
 # Auto-Capture
 
-> Behavioral skill that captures ACT NOW items and a session summary to Open Brain when a session ends.
+> Behavioral skill that captures ACT NOW items and a session summary to Daemonic Brain when a session ends.
 
 ## What It Does
 
-This skill teaches your AI client to treat session close as a capture moment. When a work session, brainstorm, or Panning for Gold run is wrapping up, it stores the highest-value outputs in Open Brain instead of relying on you to remember later.
+This skill teaches your AI client to treat session close as a capture moment. When a work session, brainstorm, or Panning for Gold run is wrapping up, it stores the highest-value outputs in Daemonic Brain instead of relying on you to remember later.
 
-If you want the OB1 workflow, composition guidance, and examples for using this skill with Panning for Gold, see the [Auto-Capture recipe](../../recipes/auto-capture/).
+If you want the Daemonic Brain workflow, composition guidance, and examples for using this skill with Panning for Gold, see the [Auto-Capture recipe](../../recipes/auto-capture/).
 
 ## Supported Clients
 
@@ -17,15 +17,15 @@ If you want the OB1 workflow, composition guidance, and examples for using this 
 
 ## Prerequisites
 
-- Working Open Brain setup with a capture tool available ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup with a capture tool available ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
-- Recommended: an Open Brain search tool is also available so the skill can avoid obvious duplicates
+- Recommended: a Daemonic Brain search tool is also available so the skill can avoid obvious duplicates
 
 ## Installation
 
 1. Copy [`SKILL.md`](./SKILL.md) into the right reusable-instructions location for your AI client.
 2. Restart or reload the client so it picks up the skill.
-3. Verify by ending a short session with one clear next action and confirming the client captures both the action and a session summary to Open Brain.
+3. Verify by ending a short session with one clear next action and confirming the client captures both the action and a session summary to Daemonic Brain.
 
 For Claude Code, a common install path is:
 
@@ -45,7 +45,7 @@ cp skills/auto-capture/SKILL.md ~/.claude/skills/auto-capture/SKILL.md
 
 When installed and invoked correctly, the skill:
 
-- captures each ACT NOW item as its own Open Brain thought
+- captures each ACT NOW item as its own Daemonic Brain thought
 - captures one session summary
 - includes concrete next actions and enough context to make the captures useful later
 - avoids capturing raw transcript noise or parked/killed items
@@ -53,7 +53,7 @@ When installed and invoked correctly, the skill:
 ## Troubleshooting
 
 **Issue: The client ends the session without saving anything**
-Solution: Confirm the skill is loaded and that your client exposes an Open Brain capture tool in the current environment. Test the tool manually first if needed.
+Solution: Confirm the skill is loaded and that your client exposes a Daemonic Brain capture tool in the current environment. Test the tool manually first if needed.
 
 **Issue: Captures appear, but they are too vague**
 Solution: Tighten the prompt behavior by preserving the skill's requirement for strong summaries, concrete next actions, and provenance. The skill works best when captures are self-contained.
