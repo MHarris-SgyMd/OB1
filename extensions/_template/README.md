@@ -1,5 +1,7 @@
 # Extension Name
 
+> **Retired until its rewrite (SMD-3747):** every extension is a plugin since SMD-2311, and this template's server imports `../_shared/sse.ts`, which SMD-3747 deleted, so it no longer runs. New operations on the brain are a plugin: start from [`plugins/example/`](../../plugins/example/) and [`plugins/README.md`](../../plugins/README.md).
+
 <!--
 =============================================================================
 TEMPLATE INSTRUCTIONS (for contributors and AI assistants)

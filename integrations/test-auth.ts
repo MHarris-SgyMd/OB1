@@ -112,7 +112,7 @@ type Server = {
   /** Relative to the repository root. */
   file: string;
   kind: Kind;
-  /** The env names this server reads its keys from (the shared server and the auditor have their own). */
+  /** The env names this server reads its keys from (the auditor has its own). */
   keys: string;
   legacy: string;
   /** What SUPABASE_URL must look like: the SQL shim wants postgres:// (every server is on it since SMD-1798). */
@@ -190,7 +190,6 @@ const COPIES = ["recipes/editorial-policy/_shared/auth.ts", "integrations/_share
 // they can be set and unset from here; the rest is read once, at import.
 for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
-process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.MCP_ACCESS_KEYS = KEYS;
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
@@ -503,7 +502,7 @@ for (const live of LIVE) {
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
   // A NODE_PATH from the shell goes too: an integration's packages resolve from the install above it, a recipe's through the committed link, or not at all (SMD-1991).
-  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
+  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
   // Bun's own start line (`Started development server:`, or `Started server:` in production) gives the port, 0 if
   // the child exits first; the child is up when that port answers at all (SMD-1799). `--no-install`: a package that
@@ -824,7 +823,11 @@ for (const t of TEXT_ONLY) {
 // exactly to STACK, retired with it: SMD-2288.)
 // Every pin equal, or this names the package and the two versions.
 {
-  const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
+  const manifest = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
+  // The integrations sit under this install, so a `bun add` run in one with no package.json of its own writes here,
+  // into `dependencies`; the install keeps devDependencies alone, so that lands as a failure, not as a pin.
+  assert(manifest.dependencies === undefined, `integrations/package.json has no dependencies, only the test install's devDependencies: a \`bun add\` in an integration folder with no package.json of its own writes here (${Object.keys(manifest.dependencies ?? {}).join(", ")})`);
+  const pkg = manifest.devDependencies as Record<string, string>;
   // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
   // demanded of the core server.
   const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));

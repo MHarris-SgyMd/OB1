@@ -75,7 +75,7 @@ codemod's triage, and fails check 11 of `scripts/check-fork-consistency.ts`.
 Then, from a checkout:
 
 ```bash
-(cd integrations && bun install)   # once: the pinned hono, zod and MCP SDK the servers import
+(cd integrations && bun install)   # once: the pinned hono and zod the servers import
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \

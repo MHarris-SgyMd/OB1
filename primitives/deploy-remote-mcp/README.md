@@ -4,6 +4,8 @@ A guide to running any Open Brain extension server — and the recipe and integr
 
 "Remote" is about the client, not the machine. A connector in Claude Desktop, claude.ai or ChatGPT dials your server from the vendor's side, so it needs an HTTPS URL it can reach; a client on the same machine (Claude Code, Cursor) reaches `http://127.0.0.1:<port>` directly. Either way the server is one HTTP process — never a stdio process a client spawns, and never a `claude_desktop_config.json` entry.
 
+> **Until this guide's rewrite (SMD-3747):** the extension servers it was written for are plugins since SMD-2311, and `extensions/` holds no install since SMD-3747, so a server file under it cannot resolve Step 2's packages. Read `extensions/extension-name/` below as the recipe's or integration's own folder (`recipes/<name>/`, `integrations/<name>/`), and its README for the extension's.
+
 ## Prerequisites
 
 - A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)

@@ -95,8 +95,8 @@ is green.
    path-A prerequisite). The three `index.ts` changes above; drop `@hono/mcp` +
    `@modelcontextprotocol/sdk`, add `@modelcontextprotocol/core` +
    `/server`; rewrite the two `test-server` Accept assertions and the one
-   `test-e2e-sql` error-shape assertion; keep `integrations/package.json` in lockstep
-   (the two pin sets must stay identical — `integrations/test-auth.ts` fails if they
+   `test-e2e-sql` error-shape assertion; keep `extensions/package.json` in lockstep
+   (the two pin sets must stay identical — `extensions/test-auth.ts` fails if they
    drift; FORK.md change 84). A `changes/smd-NNNN.md` fragment is required (it
    touches `server-portable/`).
 2. **The shared-install vendored servers → v2, or retire per SMD-1931.**

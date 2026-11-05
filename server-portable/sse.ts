@@ -10,7 +10,7 @@
 // The transport answers a POST with an SSE stream at once and writes the tool's
 // result to it when the tool returns; until then the stream carries nothing
 // (the MCP server's SDK v2 transport adds its own keepalive comment every 15 s,
-// longer than the silence Bun's default allows; the vendored servers' none).
+// longer than the silence Bun's default allows).
 // Bun closes a connection that has been silent for `idleTimeout` seconds — 10
 // by default — at the next of its 4-second sweeps, so between 8 and 12 s of
 // silence by phase. What it closes, measured on 1.4.3 (SMD-2931), each case
@@ -33,9 +33,7 @@
 // cannot reach: the MCP server's job polls and mirrors are GETs that a locked
 // table can hold past 10 s (SMD-2287); test-rest [16] measures the cut on
 // every run. Their streams keep the keepalive, for the proxy and for a call
-// past 255 s. The vendored MCP servers stay on the runtime's default, its
-// reaper for dead keep-alive sockets: a tool call of theirs is a POST answered
-// with a stream at once, so the keepalive is what holds it.
+// past 255 s.
 export const SSE_KEEPALIVE_MS = 5_000;
 
 /**
@@ -46,7 +44,7 @@ export const SSE_KEEPALIVE_MS = 5_000;
  * and with an unbounded keepalive each would hold a stream and a timer for
  * hours with no line anywhere. Past this the timer stops, one line says so,
  * and the runtime's idle timeout takes over (on Bun, 255 s of silence on the
- * REST core's streams, 10 on the vendored servers'): a call this long is
+ * REST core's streams): a call this long is
  * stuck, not slow. (Review pass 1.) The MCP server's streams are never that
  * silent, its SDK transport writing its own frame every 15 s, so they end with
  * the call, whose request to the REST core ends at this same bound

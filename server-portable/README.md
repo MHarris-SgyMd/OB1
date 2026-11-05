@@ -1500,8 +1500,7 @@ stored in the same write").
   until the client or a proxy gives up. A provider call is bounded by
   `OB1_LLM_TIMEOUT`, so a call that long is stuck in the database. The brain's
   servers serve with Bun's ceiling, 255 s, for their GETs (the idle timeout,
-  above), and keep the keepalive for the proxy in front and a call past 255 s;
-  the vendored MCP servers stay on the default (`sse.ts` says why, SMD-2931).
+  above), and keep the keepalive for the proxy in front and a call past 255 s.
   The two intervals are constants, not knobs: 5 s is inside any proxy read
   timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged
