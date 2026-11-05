@@ -198,35 +198,34 @@
  *      their own skip (AGGREGATE_MAY_SKIP: commit-lint and
  *      publish-test-counts), and the jobs the changes job gates only when it
  *      said code=false (AGGREGATE_GATED, each needing it and running under
- *      GATED_IF, which fails open; SMD-2435), on which no job it
- *      needs sets continue-on-error or calls a reusable workflow, which runs
- *      on ubuntu-24.04 with no key beyond the few allowed on it or its step,
- *      and whose one step is held verbatim and run on its own cases
- *      (SMD-3168); every check is pinned to the Actions app
- *      (integration_id 15368), strict up-to-date is on and enforced on
- *      create, the four rules — deletion, non-fast-forward, pull-request with
- *      no required review and none of the four review flags, required-status-
- *      checks with its parameters — are present once each, the one optional
- *      rule — merge-queue, which GitHub refuses on a user-owned repository
- *      and the record adds the day this one is organisation-owned — at most
- *      once and, when present, with the fork's merge method, every entry
- *      judged on its own merge commit and no PR waiting for another
- *      (SMD-1857), no other type is, the target is the default branch and
- *      nothing else, the bypass list is empty and enforcement is active; no
- *      other job reports a check under the aggregate's name; and ci-shift.yml's
- *      workflow_run names that workflow's own name, and ci-step-times'
- *      DEFAULT_WORKFLOWS and DEFAULT_WORKFLOW_PATHS start with its name and
- *      file (SMD-3765). A matrix and a
- *      name with an expression are allowed now, since the record names no job
- *      but the one. The rules are rulesetProblems and aggregateProblems, pure
- *      functions their probes run on in-memory records (twenty-seven ruleset
- *      mutants, one accepted addition, nine non-probes; thirty-four aggregate
- *      mutants, four accepted shapes and an empty skip list two ways, four
- *      non-probes; one other-workflow name
- *      clash; sixteen names mayReportAs must allow or refuse; a
- *      5,000-expression name answered at once) and AGGREGATE_RUN under bash on ten cases; every workflow in
- *      .github/workflows is read for a job carrying the aggregate's name; the workflow is parsed with Bun.YAML (SMD-1856,
- *      SMD-3168); no exceptions
+ *      GATED_IF, which fails open; SMD-2435), on which no job it needs sets
+ *      continue-on-error or calls a reusable workflow, which runs on
+ *      ubuntu-24.04 with no key beyond the few allowed on it or its step, and
+ *      whose one step is held verbatim and run on its own cases (SMD-3168);
+ *      every check is pinned to the Actions app (integration_id 15368), strict
+ *      up-to-date is on and enforced on create, the four rules — deletion,
+ *      non-fast-forward, pull-request with no required review and none of the
+ *      four review flags, required-status- checks with its parameters — are
+ *      present once each, the one optional rule — merge-queue, which GitHub
+ *      refuses on a user-owned repository and the record adds the day this one
+ *      is organisation-owned — at most once and, when present, with the fork's
+ *      merge method, every entry judged on its own merge commit and no PR
+ *      waiting for another (SMD-1857), no other type is, the target is the
+ *      default branch and nothing else, the bypass list is empty and
+ *      enforcement is active; no other job reports a check under the
+ *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
+ *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
+ *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
+ *      and a name with an expression are allowed now, since the record names no
+ *      job but the one. The rules are rulesetProblems and aggregateProblems,
+ *      pure functions their probes run on in-memory records (twenty-seven
+ *      ruleset mutants, one accepted addition, nine non-probes; thirty-four
+ *      aggregate mutants, four accepted shapes and an empty skip list two ways,
+ *      four non-probes; one other-workflow name clash; sixteen names
+ *      mayReportAs must allow or refuse; a 5,000-expression name answered at
+ *      once) and AGGREGATE_RUN under bash on ten cases; every workflow in
+ *      .github/workflows is read for a job carrying the aggregate's name; the
+ *      workflow is parsed with Bun.YAML (SMD-1856, SMD-3168); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
@@ -5564,7 +5563,8 @@ function checkRulesetRecord() {
   if (shiftProblem) fail(SHIFT_WORKFLOW, shiftProblem);
   // ci-step-times keeps the workflow's runs by its name and file: a rename that misses its list empties CI shift's window.
   if (listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks", "Fork Checks"], [WORKFLOW]) !== null || listingNamesProblem("Brain Checks", WORKFLOW, ["Fork Checks"], [WORKFLOW]) === null
-    || listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks"], [".github/workflows/fork-checks.yml"]) === null) fail(SELF, "check 20's listing-names rule no longer reads its probes as written (its own probe)");
+    || listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks"], [".github/workflows/fork-checks.yml"]) === null
+    || listingNamesProblem(undefined, WORKFLOW, [], [WORKFLOW]) === null) fail(SELF, "check 20's listing-names rule no longer reads its probes as written (its own probe)");
   const listingProblem = listingNamesProblem((doc as { name?: unknown }).name, WORKFLOW, DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS);
   if (listingProblem) fail("scripts/ci-step-times.ts", listingProblem);
   // Every other workflow, for a job that would report a check under the one
