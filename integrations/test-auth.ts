@@ -824,12 +824,18 @@ for (const t of TEXT_ONLY) {
 // Every pin equal, or this names the package and the two versions.
 {
   const manifest = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
-  // The integrations sit under this install, so a `bun add` run in one with no package.json of its own writes here,
-  // into `dependencies`; the install keeps devDependencies alone, so that lands as a failure, not as a pin.
-  assert(manifest.dependencies === undefined, `integrations/package.json has no dependencies, only the test install's devDependencies: a \`bun add\` in an integration folder with no package.json of its own writes here (${Object.keys(manifest.dependencies ?? {}).join(", ")})`);
+  // The integrations sit under this install, so a `bun add` run in one with no package.json of its own writes here
+  // (plain, -d, --optional or --peer, each into its own field), and bun.lock with it, so a frozen install passes. The
+  // install is the MCP stack in devDependencies and nothing else, so anything more fails here rather than land as every
+  // integration's pin; a package the suites themselves come to need is named in this check first.
+  const FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundleDependencies", "bundledDependencies"];
+  const extra = FIELDS.flatMap((field) => {
+    const value = manifest[field] ?? {};
+    const names: string[] = Array.isArray(value) ? value : Object.keys(value);
+    return names.filter((name) => field !== "devDependencies" || !STACK.includes(name)).map((name) => `${field}: ${name}`);
+  });
+  assert(extra.length === 0, `integrations/package.json installs the MCP stack in devDependencies and nothing else: a \`bun add\` in an integration folder with no package.json of its own writes here (${extra.join(", ") || "none"})`);
   const pkg = manifest.devDependencies as Record<string, string>;
-  // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
-  // demanded of the core server.
   const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `integrations/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
   // server-portable is on the v2 stack (SMD-2278). It shares hono+zod with the

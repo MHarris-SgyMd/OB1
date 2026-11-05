@@ -44,8 +44,8 @@ export const SSE_KEEPALIVE_MS = 5_000;
  * and with an unbounded keepalive each would hold a stream and a timer for
  * hours with no line anywhere. Past this the timer stops, one line says so,
  * and the runtime's idle timeout takes over (on Bun, 255 s of silence on the
- * REST core's streams): a call this long is
- * stuck, not slow. (Review pass 1.) The MCP server's streams are never that
+ * REST core's streams): a call this long is stuck, not slow. (Review pass 1.)
+ * The MCP server's streams are never that
  * silent, its SDK transport writing its own frame every 15 s, so they end with
  * the call, whose request to the REST core ends at this same bound
  * (mcp-server/app.ts's REST_TIMEOUT_MS; SMD-2931).

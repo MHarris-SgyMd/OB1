@@ -1,6 +1,6 @@
 # Extension Name
 
-> **Retired until its rewrite (SMD-3747):** every extension is a plugin since SMD-2311, and this template's server imports `../_shared/sse.ts`, which SMD-3747 deleted, so it no longer runs. New operations on the brain are a plugin: start from [`plugins/example/`](../../plugins/example/) and [`plugins/README.md`](../../plugins/README.md).
+> **Retired until its rewrite (SMD-3747):** every extension is a plugin since SMD-2311, and SMD-3747 deleted what this template relies on: `extensions/package.json`, which its `(cd extensions && bun install)` installs, and the `../_shared/sse.ts` and `../_shared/auth.ts` its spec's server imports, so a server built from it no longer runs. New operations on the brain are a plugin: start from [`plugins/example/`](../../plugins/example/) and [`plugins/README.md`](../../plugins/README.md).
 
 <!--
 =============================================================================

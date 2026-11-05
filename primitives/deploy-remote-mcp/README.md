@@ -40,7 +40,7 @@ Once per checkout:
 (cd integrations && bun install)
 ```
 
-`integrations/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every vendored server. An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
+`integrations/package.json` pins `hono` and `zod` for every vendored server (and the MCP pair, which none imports now). An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 
