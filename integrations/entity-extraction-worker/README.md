@@ -31,7 +31,7 @@ The knowledge graph enables queries like "what projects does Sarah work on?" or 
 
 ### 1. Run the worker
 
-This worker runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This worker runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server in Daemonic Brain shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \

@@ -815,8 +815,8 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// One stack per install (the recurring defect this fork guards against is a value
-// defined twice): what this directory installs is what the vendored servers run
+// One stack per install (the recurring defect Daemonic Brain guards against is a
+// value defined twice): what this directory installs is what the vendored servers run
 // under here and what `bun <file>` resolves for them (SMD-1800 — until then each
 // server carried a deno.json import map, held here to this file, and
 // server/deno.json anchored the set). It is STACK, hono and zod: the v1 MCP pair

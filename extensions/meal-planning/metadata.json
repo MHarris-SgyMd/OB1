@@ -1,6 +1,6 @@
 {
   "name": "Meal Planning",
-  "description": "Recipes, weekly meal plans, and shopping lists made from them. On this fork it is the meal-planning plugin, turned on in the brain itself (SMD-2311); upstream's shared household server is retired.",
+  "description": "Recipes, weekly meal plans, and shopping lists made from them. In Daemonic Brain it is the meal-planning plugin, turned on in the brain itself (SMD-2311); upstream's shared household server is retired.",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

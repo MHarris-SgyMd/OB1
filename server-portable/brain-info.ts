@@ -1433,7 +1433,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
              to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS tickets_linked,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
-               -- The fork's ledger resolves only if the table the path
+               -- Daemonic Brain's ledger resolves only if the table the path
                -- reaches carries migrate.ts's sha256 column: another tool's
                -- schema_migrations on the path is not it (review pass 4).
                'schema_migrations', EXISTS (SELECT 1 FROM pg_attribute a

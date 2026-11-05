@@ -1,6 +1,6 @@
 {
   "name": "Extension Name",
-  "description": "What the extension adds, in a sentence. On this fork it is the extension-name plugin, turned on in the brain itself.",
+  "description": "What the extension adds, in a sentence. In Daemonic Brain it is the extension-name plugin, turned on in the brain itself.",
   "category": "extensions",
   "author": {
     "name": "Your Name",

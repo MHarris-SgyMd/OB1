@@ -2,8 +2,8 @@
 /**
  * eval-calibration.ts — was the confidence earned? (SMD-1809)
  *
- * The fork writes a confidence in three places — the consolidation judge on
- * every proposal (migration 029), the entity extractor on every mention and
+ * Daemonic Brain writes a confidence in three places — the consolidation judge
+ * on every proposal (migration 029), the entity extractor on every mention and
  * edge (016), and the metadata model's kind band that SMD-1951 froze — and it
  * resolves claims in four: a reviewer accepts or rejects a proposal, a hand
  * label agrees or not with the model's kind, the fork record confirms or

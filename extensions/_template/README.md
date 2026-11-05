@@ -50,7 +50,7 @@ Lead with the human pain point. What real-life moment makes this worth building?
 
 One or two sentences on what this adds to the brain.
 
-On this fork the extension is a **plugin**: [`plugins/extension-name`](../../plugins/extension-name/). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_extension_name`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the extension is a **plugin**: [`plugins/extension-name`](../../plugins/extension-name/). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_extension_name`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `entries`: what each row holds

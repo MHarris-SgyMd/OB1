@@ -72,12 +72,12 @@ AS $$
   LIMIT p_limit;
 $$;
 
--- This fork (SMD-1796): upstream's `GRANT EXECUTE … TO authenticated, anon,
--- service_role` after this function and the next is gone. Those are Supabase's
--- roles — on plain Postgres the GRANT stops the file (`role "authenticated"
--- does not exist`) — and EXECUTE is PUBLIC's by default, so nothing replaces
--- them. The table upstream never granted (its integration wrote it through
--- Supabase's default privileges).
+-- Daemonic Brain (SMD-1796): upstream's `GRANT EXECUTE … TO authenticated,
+-- anon, service_role` after this function and the next is gone. Those are
+-- Supabase's roles — on plain Postgres the GRANT stops the file (`role
+-- "authenticated" does not exist`) — and EXECUTE is PUBLIC's by default, so
+-- nothing replaces them. The table upstream never granted (its integration
+-- wrote it through Supabase's default privileges).
 -- Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's

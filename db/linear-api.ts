@@ -1,12 +1,12 @@
 /**
- * linear-api.ts — the one Linear GraphQL client the fork's tools share.
+ * linear-api.ts — the one Linear GraphQL client Daemonic Brain's tools share.
  *
  * evals/build-linear-corpus.ts (the eval corpus) and db/sync-linear.ts (the
  * board in the brain, SMD-1954) both dial api.linear.app; until SMD-1954's third
  * review pass each carried its own copy of the access rule — the endpoint, the
  * raw-vs-Bearer authorization, the "errors arrive with HTTP 200" reading — the
- * value defined twice this fork keeps finding. One definition here, under db/
- * (SMD-1985 moved it from evals/) so SMD-1954's container mounts db/ and
+ * value defined twice Daemonic Brain keeps finding. One definition here, under
+ * db/ (SMD-1985 moved it from evals/) so SMD-1954's container mounts db/ and
  * server-portable/ and nothing else.
  *
  * The client returns data AND errors: Linear answers a partial query with both
