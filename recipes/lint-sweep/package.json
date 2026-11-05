@@ -1,7 +1,7 @@
 {
   "name": "ob1-lint-sweep",
   "version": "1.0.0",
-  "description": "Open Brain Lint Sweep — bounded brain-quality audit (read-only).",
+  "description": "Daemonic Brain Lint Sweep — bounded brain-quality audit (read-only).",
   "private": true,
   "type": "module",
   "main": "lint-sweep.js",

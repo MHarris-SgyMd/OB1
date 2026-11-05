@@ -1,6 +1,6 @@
 # Research-to-Decision Workflow
 
-> Composition recipe for chaining canonical OB1 skills into operator and investor decision workflows.
+> Composition recipe for chaining canonical Daemonic Brain skills into operator and investor decision workflows.
 
 ## What It Does
 
@@ -16,14 +16,14 @@ The canonical reusable skills live here:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Claude Code or another AI coding tool that supports reusable skills/system prompts
 - The canonical [Competitive Analysis skill](../../skills/competitive-analysis/)
 - The canonical [Financial Model Review skill](../../skills/financial-model-review/)
 - The canonical [Deal Memo Drafting skill](../../skills/deal-memo-drafting/)
 - The canonical [Research Synthesis skill](../../skills/research-synthesis/)
 - The canonical [Meeting Synthesis skill](../../skills/meeting-synthesis/)
-- Optional but useful: Open Brain search and capture tools so the workflow can pull prior context and store the highest-value outputs
+- Optional but useful: Daemonic Brain search and capture tools so the workflow can pull prior context and store the highest-value outputs
 
 ## Credential Tracker
 
@@ -31,7 +31,7 @@ The canonical reusable skills live here:
 RESEARCH-TO-DECISION WORKFLOW -- CREDENTIAL TRACKER
 ---------------------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Project URL:           ____________
   Secret key:            ____________
   OpenRouter API key:    ____________
@@ -139,7 +139,7 @@ You do not need every step every time.
 
 ### 7. Capture only the durable outputs
 
-Recommended Open Brain capture points:
+Recommended Daemonic Brain capture points:
 
 - after a strong competitive brief is finished
 - after research synthesis identifies durable findings

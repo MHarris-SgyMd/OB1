@@ -8,19 +8,19 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
-> Import your Google Search, Gmail, Maps, YouTube, and Chrome history from Google Takeout into Open Brain as searchable thoughts.
+> Import your Google Search, Gmail, Maps, YouTube, and Chrome history from Google Takeout into Daemonic Brain as searchable thoughts.
 
 ## What It Does
 
-Takes your Google Takeout data export, filters out noise (passive visits, trivial lookups, notifications), groups activity by day, uses an LLM to distill each day into 1-3 standalone thoughts, and loads them into your Open Brain with vector embeddings and metadata. The result is semantically searchable knowledge extracted from years of Google activity — your research patterns, decisions, habits, and interests.
+Takes your Google Takeout data export, filters out noise (passive visits, trivial lookups, notifications), groups activity by day, uses an LLM to distill each day into 1-3 standalone thoughts, and loads them into your brain with vector embeddings and metadata. The result is semantically searchable knowledge extracted from years of Google activity — your research patterns, decisions, habits, and interests.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Your Google Takeout data export (see Step 1 below)
 - Node.js 18+
 - Your Supabase project URL and service role key (from your credential tracker)
@@ -34,7 +34,7 @@ Copy this block into a text editor and fill it in as you go.
 GOOGLE ACTIVITY IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Supabase Project URL:  ____________
   Supabase Secret key:   ____________
   OpenRouter API key:    ____________

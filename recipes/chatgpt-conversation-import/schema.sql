@@ -1,5 +1,5 @@
 -- ============================================
--- ChatGPT Conversations — OB1 Extension Schema
+-- ChatGPT Conversations — Daemonic Brain Extension Schema
 -- ============================================
 -- Opt-in table for storing conversation-level summaries
 -- with pyramid detail levels. Used with --store-conversations.

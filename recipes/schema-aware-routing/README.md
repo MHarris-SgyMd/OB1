@@ -6,7 +6,7 @@
 
 **Created by [@claydunker-yalc](https://github.com/claydunker-yalc)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
@@ -242,7 +242,7 @@ Key differences from OpenAI direct:
 - **Model strings:** `openai/gpt-4o-mini` and `openai/text-embedding-3-small` (prefixed with the provider)
 - **Same everything else:** Same `Authorization: Bearer` header pattern, same JSON shapes, same `response_format: { type: "json_object" }` support
 
-This is the exact same provider/config pair the brain's REST core (`server-portable/api.ts`, under `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`) uses, so if you have OB1 running, these snippets reuse your existing setup.
+This is the exact same provider/config pair the brain's REST core (`server-portable/api.ts`, under `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`) uses, so if you have Daemonic Brain running, these snippets reuse your existing setup.
 
 ✅ **Done when:** Both functions make real API calls and return data instead of throwing errors.
 
@@ -365,6 +365,6 @@ alter table interactions alter column embedding type vector(YOUR_DIMENSION);
 
 ## Credits
 
-Built by Clay Dunker ([@claydunker-yalc](https://github.com/claydunker-yalc)) — an elementary school teacher who builds with Claude Code. This pattern emerged from building a personal knowledge management system (Open Brain / OB1) that captures thoughts from Slack and routes them into a structured database.
+Built by Clay Dunker ([@claydunker-yalc](https://github.com/claydunker-yalc)) — an elementary school teacher who builds with Claude Code. This pattern emerged from building a personal knowledge management system (Open Brain / Daemonic Brain) that captures thoughts from Slack and routes them into a structured database.
 
 If you want to learn more about the project, check out the main [OB1 repository](https://github.com/NateBJones-Projects/OB1).

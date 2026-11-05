@@ -1,10 +1,10 @@
 -- Adaptive Capture Classification — Learning Tables
--- Adds four tables to your Open Brain database to support confidence gating,
+-- Adds four tables to your brain database to support confidence gating,
 -- per-type threshold learning, A/B model comparison, and spell correction learning.
 --
--- Run this once against your Open Brain's database:
+-- Run this once against your brain's database:
 --   psql "$DATABASE_URL" -f recipes/adaptive-capture-classification/schema.sql
--- No existing OB1 tables are modified.
+-- No existing Daemonic Brain tables are modified.
 
 -- ============================================================
 -- 1. correction_learnings

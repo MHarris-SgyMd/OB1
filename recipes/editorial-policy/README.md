@@ -4,11 +4,11 @@
 
 **Created by [@HansBohlmann](https://github.com/HansBohlmann)**
 
-> A 40-rule constitution that governs every synthesis prompt in your Open Brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
+> A 40-rule constitution that governs every synthesis prompt in your brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
 
 ## What It Is
 
-Most Open Brain forks fix prompt drift in scattered prompt strings — when the morning briefing inflates a one-line task into a philosophical paragraph, you tweak the briefing's prompt; when the weekly summary smooths over contradictions, you tweak that one. The fixes don't compound, and the same failures keep reappearing under new names.
+Most Daemonic Brain forks fix prompt drift in scattered prompt strings — when the morning briefing inflates a one-line task into a philosophical paragraph, you tweak the briefing's prompt; when the weekly summary smooths over contradictions, you tweak that one. The fixes don't compound, and the same failures keep reappearing under new names.
 
 This recipe replaces that pattern with a single source of truth: a numbered editorial policy (R1.1, R3.5, R10.2, …) that every synthesis prompt cites at the top of its system message, plus a weekly auditor server that audits compliance and posts critical findings to Slack.
 
@@ -33,7 +33,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - A scheduler: cron on the machine that runs the auditor, or `pg_cron` + `pg_net` in your Postgres
 - OpenRouter API key (the auditor uses `gpt-4o-mini` by default — swap to `claude-haiku-4-5` if you want stricter compliance reasoning)
@@ -47,7 +47,7 @@ Copy this block into a text editor and fill it in as you go.
 EDITORIAL POLICY + AUDITOR -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Postgres URL:              ____________  (SUPABASE_URL — the shim's name for it)
   OpenRouter API key:        ____________
   Slack bot token:           ____________
@@ -79,13 +79,13 @@ Commit the policy to your repo. Future prompt updates will reference its version
 Per R10.2, every synthesis prompt's system message must start with:
 
 ```
-Follow Open Brain Editorial Policy v{version}. Specific rules referenced below by number.
+Follow Daemonic Brain Editorial Policy v{version}. Specific rules referenced below by number.
 ```
 
 Update your `morning-briefing` and `weekly-summary` prompts to start that way and to cite specific rules where relevant. A minimal example:
 
 ```ts
-const system = `Follow Open Brain Editorial Policy v1.3.
+const system = `Follow Daemonic Brain Editorial Policy v1.3.
 
 You are the operator's morning briefing assistant.
 

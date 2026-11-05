@@ -1,11 +1,11 @@
 -- ============================================
--- Life Engine — OB1 Integration Schema
+-- Life Engine — Daemonic Brain Integration Schema
 -- ============================================
--- Extends your Open Brain with tables for
+-- Extends your brain with tables for
 -- habit tracking, check-ins, briefing logs,
 -- and self-improvement evolution tracking.
 --
--- Run this against your Open Brain's database:
+-- Run this against your brain's database:
 --   psql "$DATABASE_URL" -f recipes/life-engine/schema.sql
 -- ============================================
 

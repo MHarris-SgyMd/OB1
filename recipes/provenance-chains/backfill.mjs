@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Backfill provenance on existing Open Brain thoughts.
+ * Backfill provenance on existing Daemonic Brain thoughts.
  *
  * Scans thoughts where source_type matches a derived-artifact pattern (default:
  * any source_type ending in '_pointer') and flips
@@ -75,7 +75,7 @@ if (
   console.warn(
     "[backfill] DEPRECATION: OPEN_BRAIN_URL / OPEN_BRAIN_SERVICE_KEY are the " +
     "legacy names. Prefer SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — every " +
-    "other OB1 recipe uses those and the fallback will be removed in a future " +
+    "other Daemonic Brain recipe uses those and the fallback will be removed in a future " +
     "release.",
   );
 }
@@ -180,7 +180,7 @@ async function sbRpc(fnName, body) {
 // Accepts standard 8-4-4-4-12 hex, case-insensitive.
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 
-// Matches BIGINT-style `#123` references. The canonical OB1 install uses
+// Matches BIGINT-style `#123` references. The canonical Daemonic Brain install uses
 // UUIDs, and trace_provenance / find_derivatives cast every derived_from
 // element to ::uuid — so writing integer strings here would silently
 // corrupt provenance and make downstream RPCs throw 22P02. We detect the
@@ -194,7 +194,7 @@ function parseParentIds(markdown, rowId) {
   for (const u of uuidMatches) ids.add(u.toLowerCase());
   const intMatches = markdown.match(INT_REF_RE) ?? [];
   if (intMatches.length > 0) {
-    // Reject — canonical OB1 is UUID-typed and downstream consumers cast
+    // Reject — canonical Daemonic Brain is UUID-typed and downstream consumers cast
     // every parent id to ::uuid. A user on a BIGINT fork must skip backfill
     // and repopulate derived_from themselves (or hand-edit the INT_REF_RE
     // logic to return the integers uncasted).
@@ -211,7 +211,7 @@ function parseParentIds(markdown, rowId) {
 
 function resolveArtifactPath(pointer, rootDir) {
   const m = pointer.metadata ?? {};
-  // Conventions used by common Open Brain recipes:
+  // Conventions used by common Daemonic Brain recipes:
   //   wiki_pointer.metadata.wiki_path
   //   lint_sweep_pointer.metadata.report_path
   //   weekly_digest_pointer.metadata.digest_path
@@ -325,7 +325,7 @@ async function main() {
     // so the canonical upsert_thought RPC — which only preserves the metadata
     // blob on content_fingerprint conflicts — can round-trip these fields if
     // the row is ever re-upserted. Matches the synthesis-capture pattern used
-    // elsewhere in OB1 recipes: top-level columns are the query surface,
+    // elsewhere in Daemonic Brain recipes: top-level columns are the query surface,
     // metadata.provenance is the durable copy.
     const provenancePatch = {
       derivation_layer: "derived",

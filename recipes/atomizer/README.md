@@ -15,7 +15,7 @@ This recipe ships two workflows:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Node.js 18+
 - An extended `thoughts` schema — you need the following on top of the base table:
   - `thoughts.source_type text` column
@@ -26,7 +26,7 @@ This recipe ships two workflows:
   - A `public.upsert_thought(p_content text, p_payload jsonb)` function that inserts a new thought and returns `{thought_id}`
 - For the Gmail workflow only: thoughts previously imported with [`recipes/email-history-import`](../email-history-import/) so rows carry `source_type = 'gmail_export'` and the `[Email from X to Y | Subject: ... | date]` content prefix
 - An LLM provider — one of:
-  - OpenRouter API key (same one from your Open Brain setup) **recommended, default**
+  - OpenRouter API key (same one from your Daemonic Brain setup) **recommended, default**
   - Anthropic API key (direct)
   - Local `claude` CLI on PATH (must be run from a standalone terminal, not inside a Claude Code session; spawned without a shell, so `CLAUDE_CLI_PATH` must be a bare executable path — on Windows the `claude.exe` from Anthropic's native installer (`irm https://claude.ai/install.ps1 | iex`), since the npm install ships only a `.cmd` shim that cannot be run without a shell)
 
@@ -41,7 +41,7 @@ Collect these once. **Keep them only inside `recipes/atomizer/.env.local`** (alr
 |----------|--------|-----------|
 | `SUPABASE_URL` or `SUPABASE_PROJECT_REF` | Your Open Brain Supabase project | required |
 | `SUPABASE_SERVICE_ROLE_KEY` | Same project, "service_role" key | required |
-| `OPENROUTER_API_KEY` | Same one from your Open Brain setup | required for the default (openrouter) provider |
+| `OPENROUTER_API_KEY` | Same one from your Daemonic Brain setup | required for the default (openrouter) provider |
 | `ANTHROPIC_API_KEY` | Anthropic Console | required only with `--provider=anthropic` |
 | `SELF_EMAILS` | Optional, comma-separated list of your own addresses — skipped on edge pass | optional |
 

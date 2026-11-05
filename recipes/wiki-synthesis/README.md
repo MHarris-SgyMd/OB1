@@ -6,14 +6,14 @@
 
 ## What It Does
 
-Takes your captured thoughts in Open Brain and produces two flavors of wiki output:
+Takes your captured thoughts in Daemonic Brain and produces two flavors of wiki output:
 
 1. **Topic-scoped articles** via `synthesize-wiki.mjs`. Ships with an `autobiography` synthesizer that groups thoughts by year and asks an LLM to write 2-4 paragraphs of biographical prose per year. You can add your own synthesizers (e.g., "career", "travel", "relationships") by extending the catalogue.
-2. **Per-thread email wikis** via `backfill-gmail-wikis.mjs`. Groups Gmail-imported thoughts by `thread_id`, filters to substantive threads (word-count + message/atom thresholds), summarizes each thread, and writes the result back into Open Brain as a new thought (`source_type='gmail_wiki'`) with `derived_from` edges pointing at its source atoms.
+2. **Per-thread email wikis** via `backfill-gmail-wikis.mjs`. Groups Gmail-imported thoughts by `thread_id`, filters to substantive threads (word-count + message/atom thresholds), summarizes each thread, and writes the result back into Daemonic Brain as a new thought (`source_type='gmail_wiki'`) with `derived_from` edges pointing at its source atoms.
 
 Both scripts treat wikis as **emergent, regenerable views** of atomic state — the core `thoughts` table remains the source of truth. Inspired by Andrej Karpathy's LLM Wiki pattern.
 
-## How It Compares to Other OB1 Wiki Recipes
+## How It Compares to Other Daemonic Brain Wiki Recipes
 
 | Recipe | Scope | Schema prerequisites |
 | ------ | ----- | -------------------- |
@@ -25,7 +25,7 @@ Use this recipe when you want corpus-wide synthesis without depending on the ent
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Node.js 18+ (uses built-in `fetch`)
 - API key for any OpenAI-compatible Chat Completions endpoint (OpenRouter, OpenAI, Anthropic via OpenRouter, a local Ollama/LM Studio server, etc.)
 - Your Supabase project URL and service role key
@@ -34,7 +34,7 @@ Use this recipe when you want corpus-wide synthesis without depending on the ent
 
 **Topic mode (autobiography synthesizer):**
 
-- Thoughts in your Open Brain with date metadata. The synthesizer prefers `metadata` keys `event_at`, `life_date`, `source_date`, `captured_at`, `original_date`, or `date`; it falls back to the `created_at` column if none are set. You can narrow the corpus with the `SOURCE_TYPE_FILTER` env var (e.g., to only pull LifeLog-style imports).
+- Thoughts in your brain with date metadata. The synthesizer prefers `metadata` keys `event_at`, `life_date`, `source_date`, `captured_at`, `original_date`, or `date`; it falls back to the `created_at` column if none are set. You can narrow the corpus with the `SOURCE_TYPE_FILTER` env var (e.g., to only pull LifeLog-style imports).
 
 **Email-thread mode:**
 
@@ -48,7 +48,7 @@ Use this recipe when you want corpus-wide synthesis without depending on the ent
 WIKI-SYNTHESIS -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   OPEN_BRAIN_URL:           ____________   (https://<ref>.supabase.co)
   OPEN_BRAIN_SERVICE_KEY:   ____________   (Supabase service role key)
 
@@ -67,9 +67,9 @@ OPTIONAL — TOPIC MODE
 
 ## Steps
 
-### 1. Copy the scripts into your Open Brain project
+### 1. Copy the scripts into your Daemonic Brain project
 
-From this recipe's folder, copy the two scripts into wherever you keep workflow scripts (for example, a `scripts/` directory at the root of your Open Brain project):
+From this recipe's folder, copy the two scripts into wherever you keep workflow scripts (for example, a `scripts/` directory at the root of your Daemonic Brain project):
 
 ```bash
 mkdir -p scripts

@@ -12,7 +12,7 @@
  * links the SELF side of spoken/any-source thoughts.
  *
  * Prerequisites:
- *   - Open Brain base setup
+ *   - Daemonic Brain base setup
  *   - The entity-extraction schema (../../schemas/entity-extraction/) providing
  *     `public.entities` and `public.thought_entities`
  *   - Thoughts whose `metadata.attribution` is 'self' or 'mixed' (and, ideally,

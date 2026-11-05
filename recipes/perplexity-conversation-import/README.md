@@ -8,11 +8,11 @@
 
 **Created by [@demarant](https://github.com/demarant)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
-Import your Perplexity AI search history and memory entries into Open Brain as searchable thoughts.
+Import your Perplexity AI search history and memory entries into Daemonic Brain as searchable thoughts.
 
 ## What It Does
 
@@ -25,7 +25,7 @@ Deduplication via a sync log ensures safe re-runs without duplicates.
 
 ## Prerequisites
 
-- Working Open Brain setup ([getting started guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([getting started guide](../../docs/01-getting-started.md))
 - Perplexity data export (`.xlsx` file)
 - Python 3.10+
 - OpenRouter API key (for embeddings + conversation summarization)

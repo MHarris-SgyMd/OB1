@@ -8,7 +8,7 @@
 
 ## What It Does
 
-One-shot backfill of your Readwise highlight history into Open Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and stores each highlight as a thought with `source_type = 'readwise'`.
+One-shot backfill of your Readwise highlight history into Daemonic Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and stores each highlight as a thought with `source_type = 'readwise'`.
 
 Idempotent: re-running it after new highlights arrive will skip everything already present (dedup by `readwise_highlight_id`) and import only the delta.
 
@@ -24,7 +24,7 @@ Pair it with the [readwise-capture integration](../../integrations/readwise-capt
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - The [readwise-books schema](../../schemas/readwise-books/) applied to your Supabase project
 - Recommended: the [enhanced-thoughts schema](../../schemas/enhanced-thoughts/) applied, so the idempotency check on re-runs hits the `source_type` index
 - A Readwise account with the access token endpoint enabled (any plan; no paid requirement for this recipe)
@@ -52,7 +52,7 @@ Copy this block into a text editor and fill it in as you go.
 READWISE IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Supabase project URL:  ____________
   Service role key:      ____________
   OpenRouter API key:    ____________
@@ -207,7 +207,7 @@ After a successful run:
   - `source_type = 'readwise'`
   - `type = 'reference'`
   - `metadata` containing `readwise_highlight_id`, `readwise_book_id`, `book_title`, `book_author`, `highlighted_at`, `location`, `location_type`, `color`, `url`, and `tags`
-- Every highlight has a 1536-dim embedding, so semantic search in Open Brain immediately surfaces them alongside your other thoughts.
+- Every highlight has a 1536-dim embedding, so semantic search in Daemonic Brain immediately surfaces them alongside your other thoughts.
 
 From any MCP-connected AI you can now ask things like:
 - "What have I highlighted about stoicism?"
@@ -250,7 +250,7 @@ Check that your Open Brain MCP server is connected to the same Supabase project 
 
 ## What You Just Built
 
-Your entire Readwise library is now embedded in Open Brain. Every passage you've ever marked as worth remembering — across every book, article, podcast, and tweet — is searchable by meaning alongside everything else you've captured. Pair with the [readwise-capture integration](../../integrations/readwise-capture/) to make this a permanent feed rather than a one-time import.
+Your entire Readwise library is now embedded in Daemonic Brain. Every passage you've ever marked as worth remembering — across every book, article, podcast, and tweet — is searchable by meaning alongside everything else you've captured. Pair with the [readwise-capture integration](../../integrations/readwise-capture/) to make this a permanent feed rather than a one-time import.
 
 ---
 

@@ -2,15 +2,15 @@
 
 > **In Daemonic Brain (SMD-2126).** `import-chatgpt.py` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; Daemonic Brain's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --source items --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2147 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
 
-> Import your ChatGPT history into Open Brain as curated, searchable thoughts — not raw transcripts.
+> Import your ChatGPT history into Daemonic Brain as curated, searchable thoughts — not raw transcripts.
 
 ## What It Does
 
-Takes your ChatGPT data export, resolves conversation branches, dispatches across 14 content types (text, voice transcripts, web search results, code execution output, and more), filters out trivial conversations using signal-based scoring, and uses an LLM to extract 2-5 distinct, typed thoughts per conversation. Each thought is classified as one of 6 types — decision, preference, learning, context, brainstorm, or reference — and loaded into your Open Brain with vector embeddings and enriched metadata. The result is semantically searchable knowledge extracted from every meaningful ChatGPT conversation you've ever had.
+Takes your ChatGPT data export, resolves conversation branches, dispatches across 14 content types (text, voice transcripts, web search results, code execution output, and more), filters out trivial conversations using signal-based scoring, and uses an LLM to extract 2-5 distinct, typed thoughts per conversation. Each thought is classified as one of 6 types — decision, preference, learning, context, brainstorm, or reference — and loaded into your brain with vector embeddings and enriched metadata. The result is semantically searchable knowledge extracted from every meaningful ChatGPT conversation you've ever had.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Your ChatGPT data export (Settings → Data Controls → Export Data in ChatGPT)
 - Python 3.10+
 - Your Supabase project URL and service role key (from your credential tracker)
@@ -24,7 +24,7 @@ Copy this block into a text editor and fill it in as you go.
 CHATGPT CONVERSATION IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Supabase Project URL:  ____________
   Supabase Secret key:   ____________
   OpenRouter API key:    ____________

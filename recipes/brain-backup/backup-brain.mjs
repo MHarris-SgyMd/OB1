@@ -7,7 +7,7 @@
 // where PostgREST answered PGRST205. The files it writes are the same. Run it from
 // a checkout: the import below is relative to this file.
 /**
- * backup-brain.mjs -- Export the Open Brain tables to local JSON files.
+ * backup-brain.mjs -- Export the Daemonic Brain tables to local JSON files.
  *
  * Paginates through the brain's Postgres (1000 rows per query) and writes each
  * table to backup/<table>-YYYY-MM-DD.json. Shows progress and prints a summary.
@@ -34,7 +34,7 @@ const PAGE_SIZE = 1000;
 
 // Stock Open Brain only has `thoughts`. The other tables are from optional
 // companion contributions (entity extraction, smart ingest). Missing tables
-// are skipped at runtime so this recipe works against any Open Brain install.
+// are skipped at runtime so this recipe works against any Daemonic Brain install.
 // In Daemonic Brain the companions are `schemas/entity-extraction` (entities,
 // edges; thought_entities is migration 016's on a migrated brain) and
 // `schemas/smart-ingest` (ingestion_jobs, ingestion_items); Daemonic Brain's
@@ -295,7 +295,7 @@ async function main() {
     console.log(`Created ${backupDir}`);
   }
 
-  console.log(`\nOpen Brain Backup -- ${dateStr}`);
+  console.log(`\nDaemonic Brain Backup -- ${dateStr}`);
   console.log(`Target: ${backupDir}\n`);
 
   const results = [];

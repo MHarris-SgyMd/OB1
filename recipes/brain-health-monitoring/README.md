@@ -12,7 +12,7 @@
 
 ## What It Does
 
-Adds 8 monitoring views to your Open Brain database that answer the most common operational questions:
+Adds 8 monitoring views to your brain database that answer the most common operational questions:
 
 | View | What It Shows |
 |------|---------------|
@@ -29,7 +29,7 @@ Views 1-5 work with the base enhanced thoughts schema. Views 6-8 are wrapped in 
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` (required for all views)
 - Optional: `schemas/smart-ingest` for the ingestion summary view (view 6)
 - Optional: `schemas/entity-extraction` for the stalled queue and graph coverage views (views 7-8)
@@ -45,7 +45,7 @@ Views 1-5 work with the base enhanced thoughts schema. Views 6-8 are wrapped in 
 
 Open `ops-views.sql` and check which views apply to your setup:
 
-- **Views 1-5** (source volume, recent thoughts, enrichment gaps, type/sensitivity distribution): Work with any Open Brain install that has the enhanced thoughts schema.
+- **Views 1-5** (source volume, recent thoughts, enrichment gaps, type/sensitivity distribution): Work with any Daemonic Brain install that has the enhanced thoughts schema.
 - **View 6** (ingestion summary): Requires the `ingestion_jobs` table from `schemas/smart-ingest`.
 - **Views 7-8** (stalled queue, graph coverage): Require the `entity_extraction_queue` table from `schemas/entity-extraction`.
 

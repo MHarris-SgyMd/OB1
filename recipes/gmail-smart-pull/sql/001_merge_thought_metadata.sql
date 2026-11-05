@@ -6,7 +6,7 @@
 -- Shallow merge only: `metadata || p_patch` replaces top-level keys. Callers
 -- that want deep merges must compose the patch themselves.
 --
--- This migration assumes Open Brain's canonical thoughts table is named
+-- This migration assumes Daemonic Brain's canonical thoughts table is named
 -- `public.brain_thoughts` with a `metadata jsonb` column. If your deployment
 -- uses a different name (e.g. `public.thoughts`), adjust the identifier in
 -- the UPDATE below before running.

@@ -49,7 +49,7 @@ The script groups typed edges by relation, truncates thought content to 300 char
 > [!WARNING]
 > **Schema prereq not yet in OB1 `main`.** The `schemas/entity-extraction/` schema and the `integrations/entity-extraction-worker/` edge function referenced below are in-flight PRs, not merged code. Paths like `../../schemas/entity-extraction/` will 404 on GitHub today. This recipe will not run until both companion PRs land. Track: schema PR [#197](https://github.com/NateBJones-Projects/OB1/pull/197), worker PR [#199](https://github.com/NateBJones-Projects/OB1/pull/199).
 
-- A working Open Brain setup ([guide](../../docs/01-getting-started.md)).
+- A working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)).
 - The `schemas/entity-extraction/` schema deployed, and the companion `integrations/entity-extraction-worker/` edge function processing the queue. This recipe reads `public.entities`, `public.edges`, and `public.thought_entities` — if those tables are empty, there is nothing to synthesize. Let the worker ingest your thoughts for at least one run before you try this.
 - An API key for any OpenAI-compatible Chat Completions provider (OpenRouter, OpenAI, Groq, Together, Anthropic via OpenRouter, a local Ollama/LM Studio server — anything that accepts `POST /chat/completions`).
 - Node.js 18+ (uses built-in `fetch`).
@@ -63,7 +63,7 @@ The script groups typed edges by relation, truncates thought content to 300 char
 ENTITY-WIKI -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Project URL (OPEN_BRAIN_URL):          ____________
   Service role key (OPEN_BRAIN_SERVICE_KEY): ____________
 
@@ -90,7 +90,7 @@ REQUIRED WHEN --output-mode=thought OR --semantic-expand
 No npm install needed — the script uses only Node.js built-ins. Just copy the recipe:
 
 ```bash
-# From your Open Brain project root:
+# From your Daemonic Brain project root:
 cp -r recipes/entity-wiki ./entity-wiki
 cd entity-wiki
 ```

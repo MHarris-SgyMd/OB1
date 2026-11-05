@@ -6,17 +6,17 @@
 
 **Created by [@jaredirish](https://github.com/jaredirish)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
-*Brain dump processor for Open Brain*
+*Brain dump processor for Daemonic Brain*
 
-Turn raw brain dumps, voice transcripts, and stream-of-consciousness notes into structured, evaluated thought inventories that get captured into Open Brain automatically. Every line gets examined. The gold is in the tangents.
+Turn raw brain dumps, voice transcripts, and stream-of-consciousness notes into structured, evaluated thought inventories that get captured into Daemonic Brain automatically. Every line gets examined. The gold is in the tangents.
 
 ## What It Does
 
-Takes any unstructured text (voice transcripts, ChatGPT exports, freeform notes, multi-topic brain dumps) and runs a three-phase process: **Extract** every idea thread without filtering, **Evaluate** the highest-signal ones with deep brainstorming, and **Synthesize** into a permanent gold-found file with results captured as Open Brain thoughts. Nothing gets dismissed as noise on the first pass.
+Takes any unstructured text (voice transcripts, ChatGPT exports, freeform notes, multi-topic brain dumps) and runs a three-phase process: **Extract** every idea thread without filtering, **Evaluate** the highest-signal ones with deep brainstorming, and **Synthesize** into a permanent gold-found file with results captured as Daemonic Brain thoughts. Nothing gets dismissed as noise on the first pass.
 
 ## When to Use It
 
@@ -28,17 +28,17 @@ Takes any unstructured text (voice transcripts, ChatGPT exports, freeform notes,
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Claude Code (or another AI coding tool that supports skills/system prompts)
-- Open Brain MCP tools connected to your AI coding tool (`capture_thought`, `search_thoughts`)
+- Daemonic Brain MCP tools connected to your AI coding tool (`capture_thought`, `search_thoughts`)
 
 ### Credential Tracker
 
 ```
-From your existing Open Brain setup:
+From your existing Daemonic Brain setup:
 - Project URL: _______________
 - OpenRouter API key: _______________
-- Open Brain MCP server connected: yes / no
+- Daemonic Brain MCP server connected: yes / no
 
 No additional credentials needed for this recipe.
 ```
@@ -98,7 +98,7 @@ The processor will:
 
 1. **Phase 1 (Extract):** Read every line, extract all idea threads regardless of category, save an inventory file, and present it to you for confirmation.
 2. **Phase 2 (Evaluate):** After you confirm the inventory, evaluate the top 3-5 threads with deep brainstorming (Build vs Buy analysis, feasibility, connections to your existing work).
-3. **Phase 3 (Synthesize):** Write a permanent gold-found file with verdicts (ACT NOW / RESEARCH MORE / PARK / KILL) and capture key insights to Open Brain via `capture_thought`.
+3. **Phase 3 (Synthesize):** Write a permanent gold-found file with verdicts (ACT NOW / RESEARCH MORE / PARK / KILL) and capture key insights to Daemonic Brain via `capture_thought`.
 
 ### 6. Review the outputs
 
@@ -106,7 +106,7 @@ After processing, you will have:
 
 - **Inventory file:** `docs/brainstorming/YYYY-MM-DD-{source}-inventory.md` listing every extracted thread
 - **Gold-found file:** `docs/brainstorming/YYYY-MM-DD-{source}-gold-found.md` with evaluated threads, verdicts, and next actions
-- **Open Brain thoughts:** ACT NOW items and key insights captured as searchable thoughts
+- **Daemonic Brain thoughts:** ACT NOW items and key insights captured as searchable thoughts
 
 ### 7. (Optional) Adapt for your tool
 
@@ -120,7 +120,7 @@ When working correctly, you should see:
 - A triage step where you confirm the inventory before evaluation begins
 - Deep evaluations for the top threads, each with a clear verdict and next actions
 - A gold-found markdown file saved to your project's docs directory
-- Key findings captured in Open Brain, searchable across future sessions with `search_thoughts`
+- Key findings captured in Daemonic Brain, searchable across future sessions with `search_thoughts`
 
 A typical 30-minute voice transcript yields 10-20 threads, with 3-5 getting full evaluations. Processing takes 2-5 minutes depending on length.
 
@@ -140,8 +140,8 @@ Think of it less as "new capability" and more as a senior analyst's methodology,
 **Issue:** Evaluation agents lose their work (output missing after processing).
 **Solution:** The skill requires all evaluators to write to permanent files as part of their task. If you see missing evaluations, the synthesis phase will still work from the inventory and inline analysis. Check that your AI tool has write permissions to the output directory.
 
-**Issue:** Open Brain capture fails during Phase 3.
-**Solution:** Verify your Open Brain MCP connection is active by running `search_thoughts` with a test query. If the MCP server is disconnected, the gold-found file still contains all results locally. You can manually capture key items later with `capture_thought`.
+**Issue:** Daemonic Brain capture fails during Phase 3.
+**Solution:** Verify your Daemonic Brain MCP connection is active by running `search_thoughts` with a test query. If the MCP server is disconnected, the gold-found file still contains all results locally. You can manually capture key items later with `capture_thought`.
 
 **Issue:** Processing a very long transcript (60+ minutes) uses excessive tokens.
 **Solution:** The skill uses a "summaries first" strategy. If your transcript tool (Fathom, Otter, Fireflies) generates a summary alongside the full transcript, place both files in the same directory. The processor reads the summary first and only dips into the transcript for exact quotes and verification of completeness.

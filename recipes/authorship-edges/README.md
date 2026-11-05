@@ -8,7 +8,7 @@
 
 ## What It Does
 
-Open Brain already has an email correspondent resolver (in the [atomizer recipe](../atomizer/)) that keys people off RFC-2822 `From`/`To`/`Cc` addresses. But spoken and machine-generated capture has no addresses — a wearable transcript chunk is labelled `You` / `Alex` / `Speaker 1`, and a device-generated title or action item has *no* human speaker at all. Nothing in OB1 turns those labels into an authorship edge, and nothing marks a row as machine-generated.
+Daemonic Brain already has an email correspondent resolver (in the [atomizer recipe](../atomizer/)) that keys people off RFC-2822 `From`/`To`/`Cc` addresses. But spoken and machine-generated capture has no addresses — a wearable transcript chunk is labelled `You` / `Alex` / `Speaker 1`, and a device-generated title or action item has *no* human speaker at all. Nothing in Daemonic Brain turns those labels into an authorship edge, and nothing marks a row as machine-generated.
 
 This recipe fills that gap. It is the **spoken / display-name counterpart** to the email resolver:
 

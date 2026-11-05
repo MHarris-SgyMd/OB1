@@ -14,7 +14,7 @@
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *
- * Wraps OB1's capture flow with confidence gating and a per-type learning loop.
+ * Wraps Daemonic Brain's capture flow with confidence gating and a per-type learning loop.
  * Uses the Supabase JS client for database access and fetch() for LLM calls.
  *
  * Prerequisites:
@@ -23,7 +23,7 @@
  *   - `npm install @supabase/supabase-js`
  *
  * Adapt callLLM() to point at your preferred AI gateway (OpenRouter shown here).
- * Adapt writeToOB1() to call your OB1 capture MCP tool or REST endpoint.
+ * Adapt writeToOB1() to call your Daemonic Brain capture MCP tool or REST endpoint.
  */
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
@@ -44,7 +44,7 @@ const THRESHOLD_NUDGE = 0.02;
 const CONSISTENCY_CUTOFF = 9;   // re-run if confidence below this
 const CONSISTENCY_FACTOR = 0.6; // penalty when two runs disagree on type
 
-// OB1 canonical capture types — edit to match your thoughts table
+// Daemonic Brain canonical capture types — edit to match your thoughts table
 const OB1_TYPES = [
   "idea", "task", "person_note", "reference",
   "decision", "lesson", "meeting", "journal",
@@ -208,7 +208,7 @@ async function resolveOutcome(
 }
 
 // ---------------------------------------------------------------------------
-// OB1 capture — replace with your MCP tool call or REST endpoint
+// Daemonic Brain capture — replace with your MCP tool call or REST endpoint
 // ---------------------------------------------------------------------------
 
 async function writeToOB1(classified: Classified): Promise<void> {
@@ -218,7 +218,7 @@ async function writeToOB1(classified: Classified): Promise<void> {
   // server that authenticates a key passes `actor: { name }` in p_payload so
   // 008's audit row names it; this example has no key and names none. No vector is made here: the 2-argument form is resolved and
   // the row waits for the servers' vector mender (SMD-2889) or a re-embed
-  // pass (db/reembed.ts). The OB1 capture MCP tool
+  // pass (db/reembed.ts). The Daemonic Brain capture MCP tool
   // embeds as it captures — if you use it, call it here instead. The
   // classifier's fields ride in metadata: `thoughts` has no tags/project/
   // due_date columns, and `type` as a column is the enhanced-thoughts

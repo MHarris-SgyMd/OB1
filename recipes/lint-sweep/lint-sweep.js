@@ -8,7 +8,7 @@
 // Tier 2 reads `edges` by the columns schemas/entity-extraction gives it
 // (from_entity_id, to_entity_id). Run it from a checkout: the import is relative.
 /**
- * lint-sweep.js — Bounded weekly brain-quality audit for Open Brain.
+ * lint-sweep.js — Bounded weekly brain-quality audit for Daemonic Brain.
  *
  * ESM module; see the sibling package.json for `"type": "module"`. The `.js`
  * extension (rather than `.mjs`) is upstream's, for a gate that admits only
@@ -90,7 +90,7 @@ function envVar(name) {
 // Resolve a variable that supports a legacy alias. Prefer `primary`; fall back
 // to `legacy`. If the legacy name is what actually resolved the value, log a
 // one-line deprecation warning (once per key) so consumers migrate to the
-// canonical SUPABASE_* names shared by every other OB1 recipe.
+// canonical SUPABASE_* names shared by every other Daemonic Brain recipe.
 const _deprecationWarned = new Set();
 function envVarWithLegacy(primary, legacy) {
   const fromPrimary = envVar(primary);
@@ -99,7 +99,7 @@ function envVarWithLegacy(primary, legacy) {
   if (fromLegacy && !_deprecationWarned.has(legacy)) {
     console.warn(
       `[lint-sweep] WARNING: ${legacy} is deprecated; prefer ${primary} ` +
-        `(matches every other OB1 recipe and shared .env.local setups).`
+        `(matches every other Daemonic Brain recipe and shared .env.local setups).`
     );
     _deprecationWarned.add(legacy);
   }
@@ -171,7 +171,7 @@ function parseArgs(argv) {
 }
 
 const HELP = `
-lint-sweep.js — bounded brain-quality audit for Open Brain
+lint-sweep.js — bounded brain-quality audit for Daemonic Brain
 
 Usage: bun lint-sweep.js [options]
 
@@ -408,7 +408,7 @@ async function tier2GraphLint(db, args) {
     graphTablesMissing: [],       // which of (entities, edges, thought_entities) are absent
   };
 
-  // Probe graph tables — they're optional in Open Brain
+  // Probe graph tables — they're optional in Daemonic Brain
   for (const t of ["entities", "edges", "thought_entities"]) {
     try {
       await db.rows(db.from(t).select("*").limit(1), t);
@@ -583,7 +583,7 @@ async function tier3LlmLint(db, args) {
         Authorization: `Bearer ${openrouterKey}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/NateBJones-Projects/OB1",
-        "X-Title": "Open Brain Lint Sweep",
+        "X-Title": "Daemonic Brain Lint Sweep",
       },
       body: JSON.stringify({
         model: args.llmModel,
@@ -644,7 +644,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
   lines.push(`finished_at: ${finishedAt}`);
   lines.push("---");
   lines.push("");
-  lines.push(`# Open Brain Lint Sweep — ${now.slice(0, 10)}`);
+  lines.push(`# Daemonic Brain Lint Sweep — ${now.slice(0, 10)}`);
   lines.push("");
   lines.push("*Read-only audit. This script never mutates thoughts.*");
   lines.push("");

@@ -1,7 +1,7 @@
 # Classification Prompt
 
 This is the system and user prompt used by the classifier. Adapt the type list and user context
-section to match your own Open Brain schema and projects.
+section to match your own Daemonic Brain schema and projects.
 
 ---
 
@@ -40,7 +40,7 @@ Return a JSON object with exactly these fields:
 
 ## Notes on the prompt
 
-**`{types}`** — OB1's canonical types are:
+**`{types}`** — Daemonic Brain's canonical types are:
 
 ```
 ["idea", "task", "person_note", "reference", "decision", "lesson", "meeting", "journal"]

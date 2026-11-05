@@ -1,6 +1,6 @@
 {
   "name": "Aiception (formerly Claudeception)",
-  "description": "Continuous learning system that extracts reusable knowledge from work sessions and creates new skills. Skills that create other skills. Integrates with Open Brain to search for existing knowledge before creating and capture new skills after.",
+  "description": "Continuous learning system that extracts reusable knowledge from work sessions and creates new skills. Skills that create other skills. Integrates with Daemonic Brain to search for existing knowledge before creating and capture new skills after.",
   "category": "recipes",
   "author": {
     "name": "Jared Irish",

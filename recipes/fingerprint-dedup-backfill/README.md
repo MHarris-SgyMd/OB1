@@ -8,7 +8,7 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
@@ -26,7 +26,7 @@ Two scripts work together:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [Content Fingerprint Dedup](../../recipes/content-fingerprint-dedup/) primitive applied (so `content_fingerprint` column exists)
 - Node.js 18+
 
@@ -38,7 +38,7 @@ Copy this block into a text editor and fill it in as you go.
 FINGERPRINT DEDUP BACKFILL -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Supabase URL:            ____________
   Service role key:        ____________
 

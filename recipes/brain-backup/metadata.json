@@ -1,6 +1,6 @@
 {
   "name": "Brain Backup and Export",
-  "description": "Export the Open Brain tables to local JSON files for offline backup and data safety; pg_dump is the whole-brain backup.",
+  "description": "Export the Daemonic Brain tables to local JSON files for offline backup and data safety; pg_dump is the whole-brain backup.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",

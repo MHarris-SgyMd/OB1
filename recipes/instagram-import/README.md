@@ -6,11 +6,11 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
-> Import your Instagram data — DMs, comments, and post captions — into Open Brain.
+> Import your Instagram data — DMs, comments, and post captions — into Daemonic Brain.
 
 ## What It Does
 
@@ -25,7 +25,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
 - **Instagram data export** — download from Instagram Settings
 - **Bun** (the runtime the brain's tools use)
 
