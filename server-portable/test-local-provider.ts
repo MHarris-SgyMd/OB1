@@ -1752,102 +1752,157 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
 
 console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a model server's slots across the brain's processes by advisory locks, live calls never; off unless set; a stop ends a wait; the semaphore fails open (SMD-3379 PR 2b-1)");
 {
-  const { backgroundSlotsFrom, normalisedBase, shareOf, installBackgroundSlots } = await import("./slots.ts");
+  const { backgroundSlotsFrom, normalisedBase, shareOf, installBackgroundSlots, SLOTS_APP } = await import("./slots.ts");
   const { modelCall, asLive } = await import("./model-call.ts");
   const { pausableTimeout } = await import("../db/lease.ts");
   // The setting: types and per-model overrides; off by default; a value that does not parse said, the hook left off.
   const parsed = backgroundSlotsFrom("chat=1, embed=2,decide=1,chat:qwen3.8:27b=3");
-  const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat"].map((r) => backgroundSlotsFrom(r).problem !== undefined);
+  const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat"].map((r) => backgroundSlotsFrom(r).problem ?? "");
   assert(backgroundSlotsFrom(undefined).slots === null && backgroundSlotsFrom(" off ").slots === null && !backgroundSlotsFrom("").problem
-    && JSON.stringify([...(parsed.slots ?? new Map())]) === JSON.stringify([["chat", 1], ["embed", 2], ["decide", 1], ["chat:qwen3.8:27b", 3]]) && refused.every(Boolean),
-    `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat and a bare name (${JSON.stringify(refused)})`);
+    && JSON.stringify([...(parsed.slots ?? new Map())]) === JSON.stringify([["chat", 1], ["embed", 2], ["decide", 1], ["chat:qwen3.8:27b", 3]]) && refused.every(Boolean)
+    && /"chat" has no =N/.test(refused[6]) && /names no model type/.test(refused[2]),
+    `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat and a bare name, each in its own words (${JSON.stringify(refused.map((r) => r.slice(0, 40)))})`);
   // The share a call counts against: per normalised server and model, the decide tier per server; live and unlisted types none.
   const sl = parsed.slots!;
   const bg = (type: "embed" | "chat" | "decide", model: string | undefined, base: string) => shareOf(sl, { type, model, base, cls: "background" });
+  const decideKey = bg("decide", "m1", "http://t")?.key;
   assert(normalisedBase("HTTP://User:pw@Ollama.Local:11434/v1/") === "http://ollama.local:11434/v1"
     && bg("chat", "llama3.2", "http://h/v1")?.key === "ob1:slot:chat:http://h/v1:llama3.2" && bg("chat", "llama3.2", "http://h/v1")?.limit === 1
-    && bg("chat", "qwen3.8:27b", "http://h/v1")?.limit === 3 && bg("decide", "m1", "http://t")?.key === bg("decide", "m2", "http://t/")?.key
+    && bg("chat", "qwen3.8:27b", "http://h/v1")?.limit === 3 && decideKey === "ob1:slot:decide:http://t" && decideKey === bg("decide", "m2", "http://t/")?.key
     && shareOf(sl, { type: "chat", model: "llama3.2", base: "http://h/v1", cls: "live" }) === null
     && shareOf(backgroundSlotsFrom("chat=1").slots!, { type: "embed", model: "e", base: "http://h/v1", cls: "background" }) === null,
     "a share is per normalised model server and model, a model's override over its type's, the decide tier per server alone; a live call and a type left out count against none");
   // Off: no hook, the call runs at once.
   const off = installBackgroundSlots({ url: URL_!, raw: undefined });
   assert(!off.installed, "unset, no hook is set");
+  const watch = new SQL({ url: URL_, max: 1 });
+  const semConns = async () => Number((await watch`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`)[0].c);
+  const call = (model = META_MODEL, cls?: "live") => ({ type: "chat" as const, model, base: PROVIDER, purpose: "test", ...(cls ? { cls } : {}) });
   // On, chat=1: two background chat calls one at a time across the semaphore; a live one and an embedding beside them at once.
   const said: string[] = [];
   const on = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => said.push(l) });
   try {
     let inFlight = 0, most = 0;
     const work = (ms: number) => async () => { inFlight++; most = Math.max(most, inFlight); await Bun.sleep(ms); inFlight--; return ms; };
-    const call = (cls?: "live") => ({ type: "chat" as const, model: META_MODEL, base: PROVIDER, purpose: "test", ...(cls ? { cls } : {}) });
     const t0 = Date.now();
-    let liveAt = 0, embedAt = 0;
+    let liveAt = 0, embedAt = 0, heldConns = -1;
     await Promise.all([
       modelCall(call(), work(300)),
       modelCall(call(), work(300)),
-      Bun.sleep(50).then(() => asLive(() => modelCall(call(), async () => { liveAt = Date.now() - t0; }))),
+      Bun.sleep(50).then(() => asLive(() => modelCall(call(META_MODEL, "live"), async () => { liveAt = Date.now() - t0; }))),
       Bun.sleep(50).then(() => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "test" }, async () => { embedAt = Date.now() - t0; })),
+      Bun.sleep(150).then(async () => { heldConns = await semConns(); }),
     ]);
     const both = Date.now() - t0;
-    assert(on.installed && most === 1 && both >= 600 && liveAt < 250 && embedAt < 250,
-      `chat=1: two background chat calls run one at a time (${both} ms for two of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms)`);
+    const idleConns = await semConns();
+    assert(on.installed && most === 1 && both >= 600 && liveAt < 250 && embedAt < 250 && heldConns === 1 && idleConns === 0 && said.length === 0,
+      `chat=1: two background chat calls run one at a time (${both} ms for two of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms); one connection while a call holds its slot and the other queues, none once idle (${heldConns}, ${idleConns}); nothing said`);
+    // Each model's share its own: three models under chat=1 run at once, none queued behind another's.
+    const t2 = Date.now();
+    const starts: number[] = [];
+    await Promise.all(["m-a", "m-b", "m-c"].map((m) => modelCall(call(m), async () => { starts.push(Date.now() - t2); await Bun.sleep(300); })));
+    assert(starts.length === 3 && Math.max(...starts) < 250, `three models under chat=1 each take their own share's slot at once (${JSON.stringify(starts)} ms)`);
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
-    const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
-    await other`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
-    const t1 = Date.now();
-    // A tagged query runs only once awaited or then'd: so then'd here.
-    setTimeout(() => { other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 600);
-    await modelCall(call(), async () => undefined);
-    const waitedForOther = Date.now() - t1;
-    await other.close();
-    assert(waitedForOther >= 550, `a slot another process holds is waited for: the call ran ${waitedForOther} ms later, once it let go`);
-    // A call's stop ends its wait, rejecting with the stop's reason; the slot is not taken.
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      const [{ got }] = (await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
+      const t1 = Date.now();
+      // A tagged query runs only once awaited or then'd: so then'd here.
+      setTimeout(() => { other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 600);
+      await modelCall(call(), async () => undefined);
+      const waitedForOther = Date.now() - t1;
+      assert(got && waitedForOther >= 550, `a slot another process holds is waited for: the call ran ${waitedForOther} ms later, once it let go`);
+    } finally {
+      await other.close();
+    }
+    // A call's stop ends its wait, rejecting with the stop's reason, the slot not taken: queued behind this process's
+    // own call, and contending for a slot another process holds — a stop, not the database not answering.
     const holder = modelCall(call(), work(600));
-    // The holder running first, so the next call waits for its slot.
     for (let i = 0; i < 100 && inFlight === 0; i++) await Bun.sleep(20);
     const stopper = new AbortController();
     setTimeout(() => stopper.abort(new Error("the pass stopped")), 100);
     const stopped = await modelCall({ ...call(), signal: stopper.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
     await holder;
-    assert(stopped === "rejected: the pass stopped", `a call's stop ends its wait for a slot, rejecting with its reason (${stopped})`);
+    const otherHolds = new SQL({ url: URL_, max: 1 });
+    let contended = "";
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      await otherHolds`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const stopper2 = new AbortController();
+      setTimeout(() => stopper2.abort(new Error("the pass stopped")), 400);
+      // Let go later, so a wait the stop did not end runs the call rather than hanging the suite.
+      setTimeout(() => { otherHolds`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 1500);
+      contended = await modelCall({ ...call(), signal: stopper2.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    } finally {
+      await otherHolds.close();
+    }
+    assert(stopped === "rejected: the pass stopped" && contended === "rejected: the pass stopped" && said.length === 0,
+      `a call's stop ends its wait for a slot, rejecting with its reason, nothing said: queued behind this process's call (${stopped}) and contending with another process's (${contended})`);
   } finally {
     await on.uninstall();
   }
-  // The process's stop ends a wait for a caller that hands none: uninstall, or the install's `stop`.
-  const procStop = new AbortController();
-  const withStop = installBackgroundSlots({ url: URL_!, raw: "chat=1", stop: procStop.signal });
-  try {
-    const call = { type: "chat" as const, model: META_MODEL, base: PROVIDER, purpose: "test" };
-    let firstRunning = false;
-    const first = modelCall(call, () => { firstRunning = true; return Bun.sleep(500).then(() => "first"); });
-    for (let i = 0; i < 100 && !firstRunning; i++) await Bun.sleep(20);
-    setTimeout(() => procStop.abort(new Error("the process is stopping")), 100);
-    const second = await modelCall(call, async () => "second").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
-    await first;
-    assert(second === "rejected: the process is stopping", `the install's stop ends a wait a caller handed no stop for (${second})`);
-  } finally {
-    await withStop.uninstall();
+  // The process's stop ends a wait for a caller that hands none: the install's `stop`, and `uninstall`, which leaves a
+  // call already running its slot until it ends.
+  for (const how of ["stop", "uninstall"] as const) {
+    const procStop = new AbortController();
+    const saidHere: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", stop: procStop.signal, log: (l) => saidHere.push(l) });
+    const other = new SQL({ url: URL_, max: 1 });
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      let firstRunning = false;
+      const first = modelCall(call(), () => { firstRunning = true; return Bun.sleep(600).then(() => "first"); });
+      for (let i = 0; i < 100 && !firstRunning; i++) await Bun.sleep(20);
+      setTimeout(() => { if (how === "stop") procStop.abort(new Error("the process is stopping")); else void inst.uninstall(); }, 100);
+      const second = await modelCall(call(), async () => "second").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const [{ got: duringHeld }] = (await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
+      const firstDone = await first;
+      assert(/rejected: .*the process is stopping/.test(second) && !duringHeld && firstDone === "first" && !saidHere.some((l) => /did not answer/.test(l)),
+        `the process's ${how} ends a wait, rejecting as a stop, not an outage, while the running call keeps its slot to its end (${second}; slot free while held ${duringHeld})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+    }
   }
-  // Fail open: a semaphore whose database does not answer lets the call run without a slot, said once.
+  // Fail open: a semaphore whose database does not answer — here a port that takes each connection and closes it,
+  // counting them — lets the call run without a slot, said once, within its connection's bound; then not asked
+  // again for 30 s, the call queued behind the one that found it down included. Each failed open once tries the
+  // same number of connections: the pair's tries are one call's.
+  let tries = 0;
+  const closer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(sock) { tries++; sock.end(); }, data() {} } });
   const openSaid: string[] = [];
-  const dead = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:1/none", raw: "chat=1", log: (l) => openSaid.push(l) });
+  const deadUrl = `postgres://postgres:x@127.0.0.1:${closer.port}/none`;
+  const lone = installBackgroundSlots({ url: deadUrl, raw: "chat=1", log: () => {}, connectS: 1 });
+  await modelCall(call(), async () => "alone").catch(() => "rejected").finally(() => lone.uninstall());
+  const triesOne = tries;
+  tries = 0;
+  const dead = installBackgroundSlots({ url: deadUrl, raw: "chat=1", log: (l) => openSaid.push(l), connectS: 1 });
   try {
-    const call = { type: "chat" as const, model: META_MODEL, base: PROVIDER, purpose: "test" };
-    const ran = await Promise.all([modelCall(call, async () => "a"), modelCall(call, async () => "b")]).then((r) => r.join(), (e: unknown) => `rejected: ${(e as Error).message}`);
-    assert(ran === "a,b" && openSaid.filter((l) => /did not answer/.test(l)).length === 1, `a semaphore whose database does not answer fails open: the calls run, said once (${JSON.stringify(openSaid)})`);
+    const tOpen = Date.now();
+    const ran = await Promise.all([modelCall(call(), async () => "a"), modelCall(call(), async () => "b")]).then((r) => r.join(), (e: unknown) => `rejected: ${(e as Error).message}`);
+    const triesFirst = tries;
+    const openMs = Date.now() - tOpen;
+    const again = await modelCall(call(), async () => "c").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    assert(ran === "a,b" && again === "c" && openSaid.filter((l) => /did not answer/.test(l)).length === 1 && triesOne >= 1 && triesFirst === triesOne && tries === triesFirst && openMs < 2500,
+      `a semaphore whose database does not answer fails open: the calls run within the connection's bound (${openMs} ms), said once, and the database is not asked again meanwhile, the queued call included (${triesOne} connection tries alone, ${triesFirst} for a pair, ${tries} after a later call; ${JSON.stringify(openSaid)})`);
   } finally {
     await dead.uninstall();
+    closer.stop(true);
   }
-  // The pair's bound pauses while its calls wait: a 300 ms deadline paused for 500 ms fires near 800 ms, not 300.
+  await watch.close();
+  // The pair's bound pauses while its calls wait: 300 ms, paused from about 200 to 700, fires about 100 ms after the resume.
   const d = pausableTimeout(300);
   const tFire = Date.now();
-  setTimeout(() => d.waits.waiting(), 100);
-  setTimeout(() => d.waits.running(), 600);
+  let pausedAt = 0, resumedAt = 0;
+  setTimeout(() => { pausedAt = Date.now() - tFire; d.waits.waiting(); }, 200);
+  setTimeout(() => { resumedAt = Date.now() - tFire; d.waits.running(); }, 700);
   await new Promise<void>((resolve) => d.signal.addEventListener("abort", () => resolve(), { once: true }));
   const firedAt = Date.now() - tFire;
   d.dispose();
-  assert(firedAt >= 750 && (d.signal.reason as Error).name === "TimeoutError", `a pausable deadline stops while its calls wait: 300 ms, paused 500, fired at ${firedAt} ms, a TimeoutError`);
+  const expected = resumedAt + (300 - pausedAt);
+  assert(Math.abs(firedAt - expected) < 80 && (d.signal.reason as Error).name === "TimeoutError",
+    `a pausable deadline stops while its calls wait and goes on with what was left: paused at ${pausedAt}, resumed at ${resumedAt}, fired at ${firedAt} ms (expected ${expected}), a TimeoutError`);
 }
 
 server.stop();

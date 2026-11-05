@@ -1837,10 +1837,9 @@ async function main(): Promise<void> {
   const key = process.env.LINEAR_API_KEY?.trim();
   if (!key) return await refuse("linear-key", `LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1), off when unset; a
-  // wait for a slot ends on the stop below, which hands the seam no stop of its own.
-  const slotsStop = new AbortController();
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, stop: slotsStop.signal });
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1), off when unset. The
+  // first signal leaves a wait for a slot to end, as the issue in hand finishes; the second kills (review pass 1).
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
@@ -2024,7 +2023,7 @@ async function main(): Promise<void> {
   // otherwise land between the clears and the sets with no undo (tenth review
   // pass). The pass ends after the issue in hand; a second signal is the
   // runtime's default and kills.
-  const stop = () => { if (stopping) process.exit(130); stopping = true; slotsStop.abort(new Error("board-sync is stopping")); gate.stop(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
+  const stop = () => { if (stopping) process.exit(130); stopping = true; gate.stop(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 

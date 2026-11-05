@@ -16,7 +16,8 @@
  * Two exceptions: a caller that starts its own deadline and hands it in as the
  * signal — db/consolidate.ts's per-pair bound, judgePair's and decidePair's
  * caller — has it running before the seam, so a hook's wait would count
- * against it (PR 2b decides how); and preflight's probes read their answer's
+ * against it, were the bound not paused while the pair's calls wait (PR 2b-1:
+ * db/lease.ts's pausableTimeout); and preflight's probes read their answer's
  * small body after the seam, which covers the call to its headers.
  *
  * Live or background (`cls`): a call made while a request is served is live —
