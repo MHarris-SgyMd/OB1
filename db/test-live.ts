@@ -20276,7 +20276,7 @@ if (want("38")) {
     // Drained first, a one-shot run with no work at all exits 0 at once, no
     // period begun: at its first read, before any live read (SMD-3783 review
     // pass 1, mutant: under 10 s let a run that waited 12 more polls of 300 ms
-    // by). Under 5 s too, ~0.1 s here, for a wait before the reads begin
+    // by). Under 5 s too, ~40 ms here, for a wait before the reads begin
     // (review pass 2).
     const acWholeDrain = new AbortController();
     const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
