@@ -86,7 +86,7 @@ export default definePlugin({
   operations: {
     add_maintenance_task: operation({
       title: "Add a maintenance task",
-      description: "Adds a maintenance task and answers it with its id, which log_maintenance names it by. A recurring one gives frequency_days (90 for quarterly, 365 for yearly); without next_due it falls due frequency_days from today. If it was last done on a known day, log_maintenance that day after adding it, and its next_due follows from that day. A one-time one gives no frequency_days, and next_due if it has a date. list_maintenance_tasks lists every task, so check it first rather than adding one twice.",
+      description: "Adds a maintenance task and answers it with its id, which log_maintenance names it by. A recurring one gives frequency_days (90 for quarterly, 365 for yearly); without next_due it falls due frequency_days from today. If it was last done on a known day, log_maintenance that day after adding it, and its next_due follows from that day. A one-time one gives no frequency_days, and next_due if it has a date. list_maintenance_tasks lists every task, so check it first rather than adding one twice. The task is an open item in the brain too, answered as item: proposed, due at next_due, until a write key confirms it (set_item_status).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -148,7 +148,7 @@ export default definePlugin({
     }),
     log_maintenance: operation({
       title: "Log maintenance done",
-      description: "Logs work done on a task (task_id, from list_maintenance_tasks or get_upcoming_maintenance) on completed_on, the day it was done in the user's own calendar, and moves the task on: its last_completed is the latest day logged, a recurring task falls due frequency_days after it, and a one-time task is done. A log of older work is kept without moving the task back. Answers the log and the task as it now is. Refused: a task that is not there (NO_SUCH_TASK), and a completed_on more than a day past today in UTC (FUTURE_DATE), which would hold the task's dates in the future for good.",
+      description: "Logs work done on a task (task_id, from list_maintenance_tasks or get_upcoming_maintenance) on completed_on, the day it was done in the user's own calendar, and moves the task on: its last_completed is the latest day logged, a recurring task falls due frequency_days after it, and a one-time task is done. A log of older work is kept without moving the task back. Answers the log, the task as it now is, and its open item (item): a recurring task's moved to its new next_due, reopened if a key had settled it done; a one-time task's settled done. Refused: a task that is not there (NO_SUCH_TASK), and a completed_on more than a day past today in UTC (FUTURE_DATE), which would hold the task's dates in the future for good.",
       scope: "write",
       annotations: ADDS,
       method: "POST",

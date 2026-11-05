@@ -244,7 +244,7 @@ export default definePlugin({
     }),
     add_important_date: operation({
       title: "Add a date to remember",
-      description: "Adds a date to remember. A birthday or an anniversary needs recurring_yearly true: it then comes round each year on its month and day, whatever year date_value is given in (29 February on the 28th in other years). A one-time date (a deadline) before today is kept but never listed by get_upcoming_dates: the answer's next_date is null then. reminder_days_before is how far ahead it is flagged, 7 unless given. A member that is not there is refused (NO_SUCH_MEMBER).",
+      description: "Adds a date to remember. A birthday or an anniversary needs recurring_yearly true: it then comes round each year on its month and day, whatever year date_value is given in (29 February on the 28th in other years). A one-time date (a deadline) before today is kept but never listed by get_upcoming_dates: the answer's next_date is null then. reminder_days_before is how far ahead it is flagged, 7 unless given. A one-time date still to come is an open item in the brain too, answered as item: proposed, due that day, its member its owner, until a write key confirms it (set_item_status). A member that is not there is refused (NO_SUCH_MEMBER).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
