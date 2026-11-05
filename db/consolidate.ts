@@ -247,6 +247,12 @@ export function pendingByPassLine(byPass: { judge_key: string; n: number }[]): s
 export const MAX_STALE_DAYS = 2_000_000;
 
 /**
+ * A judge call's limit when --timeout says none, in seconds: started before the request, so a call queued on a model
+ * server of one slot waits in it. sleep.ts adds a subject sweep's call to it beside the sweep (SMD-3306 PR 6b-2).
+ */
+export const JUDGE_TIMEOUT_S = 120;
+
+/**
  * What one consolidation run is asked to do — the CLI's flags, typed
  * (SMD-2304). A number left out takes the CLI's default, and one given is
  * held to its flag's rule and refused in the CLI's words; `follow` is
@@ -395,7 +401,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   if (typeof ttl === "string") return ttl;
   const heartbeat = read("--heartbeat", opts.heartbeat, heartbeatFor(ttl));
   if (typeof heartbeat === "string") return heartbeat;
-  const timeout = read("--timeout", opts.timeout, 120, { min: 1, max: MAX_CALL_TIMEOUT_S });
+  const timeout = read("--timeout", opts.timeout, JUDGE_TIMEOUT_S, { min: 1, max: MAX_CALL_TIMEOUT_S });
   if (typeof timeout === "string") return timeout;
   const k = read("--k", opts.k, DEFAULT_CANDIDATES, { min: 1, max: 50 });
   if (typeof k === "string") return k;

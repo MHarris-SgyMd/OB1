@@ -2231,26 +2231,39 @@ model's: started once a period, its claims bounded by the period's start plus
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
-on, about 1,200 a day, so weeks on a brain of tens of thousands of thoughts.
-Count them first in the stack: `podman compose -f deploy/compose.yaml run
---rm --no-deps coordinator db/coordinator.ts run extract --subjects
---dry-run`, with the -f files and -p the stack was started with. A judge
-model not yet measured on the question is kept out by naming the rules' pool
-first, the same one-off with `--subjects rules --limit 1`: the scheduler then
-follows it, asking no model. The scheduler never switches a pool: another one
-named — a rule's, the question's or `OB1_SUBJECT_REASONING`'s change — holds
-the sweep until `--subjects --switch-key` is run by hand in the stack, and a
-garbage-judge alarm's trip holds it until a `--judge-checked` run by hand;
-preflight's `sleep` row gives each command. Anything else that ends the
-sweep sets it down for the period alone, said on `heartbeat:sleep`, the other
-passes running on. A migration run beside the scheduler — `migrate.ts`' lock held
+on, at most about 1,200 a day, so weeks on a brain of tens of thousands of
+thoughts. **Upgrading to the release that brings it:** settle what the first
+period asks before the scheduler runs on the release. Take `sleep` out of
+`OB1_PASSES` in `deploy/.env` and bring the stack up on the release, its
+migrations applied and no scheduler running; count the first pooling in the
+stack, `podman compose -f deploy/compose.yaml run --rm --no-deps coordinator
+db/coordinator.ts run extract --subjects --dry-run`, with the -f files and -p
+the stack was started with; set `OB1_SUBJECT_REASONING` as wanted (off is
+about 8x faster a call); on a brain whose judge model is not yet measured on
+the question, name the rules' pool with the same one-off and `--subjects rules
+--limit 1`, which the scheduler then follows, asking no model; then put
+`sleep` back and recreate the coordinator. Where the scheduler named the judge
+model's pool first, `--subjects rules --switch-key --limit 1` moves it to the
+rules', what the judge recorded meanwhile standing. The scheduler never
+switches a pool: another one named — a rule's, the question's or
+`OB1_SUBJECT_REASONING`'s change — holds the sweep until `--subjects
+--switch-key` is run by hand in the stack, and a garbage-judge alarm's trip
+holds it until a `--judge-checked` run by hand; preflight's `sleep` row gives
+each command. Anything else that ends the sweep sets it down for the period
+alone, said on `heartbeat:sleep`, the other passes running on. While it asks
+the judge model, consolidation's judge calls each get their own 120 s and one
+of the sweep's calls (1,020 s, or 420 s with the reasoning off): on a model
+server of one slot a call of consolidation's waits out the sweep's call in
+hand, which its 120 s alone would time out, so a hung judgement takes that
+long to notice, until SMD-3379 PR 2b keeps a slot's wait out of the limit. A
+migration run beside the scheduler — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
 (SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses
 re-embed — the embedding key, credit, the model not served — or its endpoint
 down sets it down for
-that period, said in its log and on `heartbeat:sleep`, and extraction and
-consolidation run on; the next period tries again. **Upgrading a
+that period, said in its log and on `heartbeat:sleep`, and the other passes
+run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
 labelled by the first periods, one embedding call a row, before extraction;
 `bun db/reembed.ts --dry-run` says how many first. A brain recording another
@@ -2354,7 +2367,9 @@ pass a statement holds. **Upgrading to 2.0.0:** `OB1_SLEEP_QUIET` and
 delete them from `deploy/.env`. A period now begins on work rather than after
 a quiet, and runs until its pools drain rather than to a clock, so a backlog
 drains in one period, paused by each live call (`db/README.md`, "Upgrading to
-2.0.0"). The scheduler reads its
+2.0.0"). It also runs the subject sweep, whose first period names its pool:
+settle that pool before the scheduler runs on 2.0.0, with `sleep` out of
+`OB1_PASSES` meanwhile, as "The `sleep` pass instead" above says. The scheduler reads its
 environment once, so recreate the coordinator after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
 A `restart` keeps the values it was created with.

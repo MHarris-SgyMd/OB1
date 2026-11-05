@@ -308,6 +308,16 @@ const NIL_ID = "00000000-0000-0000-0000-000000000000";
 export const MAX_ATTEMPTS = 3;
 
 /**
+ * A judge model's call limit when --timeout says none, in seconds: a reasoning call runs long — of 200 the 27B answered
+ * with its reasoning on, two took over 300 s, the slowest 369 s, where the slowest of 160 without it took 133 s
+ * (SMD-3306 PR 4) — so 900 with the reasoning on and 300 off, each about 2.4x and 2.3x the slowest. sleep.ts reads it
+ * for consolidation's limit beside the sweep (PR 6b-2, review pass 2).
+ */
+export function subjectsTimeoutS(reasoningOn: boolean): number {
+  return reasoningOn ? 900 : 300;
+}
+
+/**
  * How long a run's hand-back of its claims waits under a scheduler's session (releaseHeld), whatever the budget: past a
  * short one, and bounded, the scheduler's stop awaiting it (review pass 3). Read as the run goes, so a test shortens
  * it, as NAMING_WAIT is.
@@ -461,7 +471,8 @@ export interface SubjectSweepOptions {
    * call's own limit, a provider not answering it waited out (PR 6b-1's review pass 6, the maintainer's choice),
    * unanswered past it, a hang of that thought, its claim marked or, marked already, failed as its own (review pass 7,
    * the maintainer's choice); one whose answer comes as it is aborted stands, answered. The sleep scheduler calls it
-   * while its gate is closed (SMD-3379's N12), at most three times a period's hour since PR 6b-2, as consolidation's.
+   * while its gate is closed (SMD-3379's N12), at most three of the sweep's calls aborted a period's hour since PR
+   * 6b-2, as consolidation's.
    */
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
@@ -660,9 +671,7 @@ async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null,
   }
   const LIMIT = opts.limit ?? 0;
   const resolved = resolveEmbedConfig(env as EmbedEnv);
-  // A reasoning call runs long: of 200 the 27B answered with its reasoning on, two took over 300 s, the slowest 369 s,
-  // where the slowest of 160 without it took 133 s (SMD-3306 PR 4): each default about 2.4x and 2.3x the slowest.
-  const TIMEOUT_S = opts.timeout ?? (subjectReasoningOn(resolved) ? 900 : 300);
+  const TIMEOUT_S = opts.timeout ?? subjectsTimeoutS(subjectReasoningOn(resolved));
   if (opts.sql != null && noUrl && env.OB1_WORKER_KEY && !DRY_RUN) {
     // The pass's rule (extract-entities.ts's run): the key resolves on a connection of its own.
     return refused("usage", "extract-entities.ts --subjects resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
@@ -2207,9 +2216,9 @@ async function sweep(
         // outage first, ProviderOutage's suspects cleared, two hung thoughts were failed never; kept for a window,
         // thoughts each holding a one-slot provider for many limits kept each other's next hangs past it; kept for the
         // run, a scheduler ending its period on set-backs alone failed none), its failure said as a hang's; under
-        // SMD-3379's drain, which counts a claim at any date as work, it is asked again in its period (review pass 4,
+        // SMD-3379's drain, which counted a claim at any date as work, it was asked again in its period (review pass 4,
         // the consumer's prototype and the maintainer's choice: put back first, it led every period, the rest of the
-        // pool never asked).
+        // pool never asked) — since PR 6b-2, dated past the period's bound, it waits for the next.
         if (FOLLOW_S > 0 && (e instanceof ProviderDown || kind === "transient" || (kind === "fatal" && modelMissing(e)))) {
           const msg = String((e as Error)?.message ?? e).slice(0, 300);
           const hung = e instanceof TimedOutDown && e.hung;
@@ -2777,7 +2786,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
