@@ -1797,7 +1797,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       Bun.sleep(150).then(async () => { heldConns = await semConns(); }),
     ]);
     const both = Date.now() - t0;
-    const idleConns = await semConns();
+    // A closed backend leaves pg_stat_activity a few ms after the close resolves, more under load (review pass 3).
+    let idleConns = await semConns();
+    for (let i = 0; i < 25 && idleConns > 0; i++) { await Bun.sleep(20); idleConns = await semConns(); }
     assert(on.installed && most === 1 && both >= 900 && liveAt < 250 && embedAt < 250 && heldConns === 2 && idleConns === 0 && said.length === 0,
       `chat=1: three background chat calls run one at a time (${both} ms for three of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms); two connections while a call holds its slot and two queue — the holder's and one poller's — none once idle (${heldConns}, ${idleConns}); nothing said`);
     // Each model's share its own: three models under chat=1 run at once, none queued behind another's.
@@ -1817,14 +1819,17 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         const { installBackgroundSlots } = await import("./slots.ts");
         const { modelCall } = await import("./model-call.ts");
         installBackgroundSlots({ url: process.env.DATABASE_URL, raw: "chat=1" });
+        console.log(Date.now());
         await modelCall({ type: "chat", model: ${JSON.stringify(META_MODEL)}, base: ${JSON.stringify(PROVIDER)}, purpose: "test" }, async () => console.log(Date.now()));
         process.exit(0);`], { cwd: import.meta.dir, env: { ...process.env, DATABASE_URL: URL_ }, stdout: "pipe", stderr: "pipe" });
-      const childAt = Number((await new Response(child.stdout).text()).trim());
+      const [askedAt, childAt] = (await new Response(child.stdout).text()).trim().split("\n").map(Number);
       await child.exited;
       await backlog;
-      const beforeLast = startsA.filter((t) => t < childAt).length;
-      assert(childAt > 0 && beforeLast < startsA.length,
-        `a call in another process gets a slot this one's back-to-back calls let go, not after all of them: it ran after ${beforeLast} of ${startsA.length}`);
+      // Each slot let go goes to the other process's poller more often than not (it asks within a poll, this one's
+      // next call after one): four in a row lost is about one run in a few thousand.
+      const passedBy = startsA.filter((t) => t > askedAt && t < childAt).length;
+      assert(childAt > askedAt && askedAt > 0 && passedBy <= 4,
+        `a call in another process gets one of the first slots this one's back-to-back calls let go once it asks, not after the backlog: ${passedBy} of ${startsA.length} started between its ask and its run`);
     }
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
@@ -1913,32 +1918,115 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await admin.close();
     }
   }
+  // A poller's connection that closes while it waits, before any lock — a Postgres restart, here its backend
+  // terminated: Bun reconnects quietly, the call takes its WAITING lock again on the new session, and the slot it then
+  // takes is no lost one (review pass 3: said lost at the unlock, the mark gone for the rest of the wait).
+  {
+    const reSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => reSaid.push(l) });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    // Slot -1 reads 4294967295 as pg_locks' oid; a backend other than `not`, so the terminated one's lock is not counted.
+    const marks = async (not = 0) => Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND mode = 'ShareLock' AND granted AND pid <> ${not}`)[0].c);
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const waiting = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      let before = 0;
+      for (let i = 0; i < 50 && before === 0; i++) { await Bun.sleep(50); before = await marks(); }
+      const [row] = (await admin`SELECT pid AS old FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`) as { old: number }[];
+      const old = row?.old ?? 0;
+      await admin`SELECT pg_terminate_backend(${old})`;
+      let after = 0;
+      for (let i = 0; i < 50 && after === 0; i++) { await Bun.sleep(50); after = await marks(old); }
+      await other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
+      const ran = await waiting;
+      assert(before === 1 && after === 1 && ran === "ran" && !reSaid.some((l) => /was lost/.test(l)),
+        `a poller whose connection closes while it waits marks itself waiting again on the new session (${before}, then ${after}), and the slot it takes is not said lost (${ran}; ${JSON.stringify(reSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
+    }
+  }
+  /**
+   * A proxy in front of the test Postgres: `pass`; `stall`, every byte dropped, as a paused container or a frozen host
+   * does; `close`, the next connection to send a byte closed, as a Postgres restart ends a session mid-statement.
+   * `opened` counts the connections made through it.
+   */
+  const pgProxy = () => {
+    const pg = new URL(URL_!);
+    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] };
+    const state = { mode: "pass" as "pass" | "stall" | "close", opened: 0 };
+    const listener = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
+      open(c) {
+        state.opened++;
+        c.data = { buf: [] };
+        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) { if (state.mode !== "stall") c.write(d); }, close() { c.end(); }, error() { c.end(); } } })
+          .then((up) => { c.data.up = up; for (const b of c.data.buf) up.write(b); c.data.buf = []; }, () => c.end());
+      },
+      data(c, d) {
+        if (state.mode === "stall") return;
+        if (state.mode === "close") { state.mode = "pass"; c.end(); return; }
+        if (c.data.up) c.data.up.write(d); else c.data.buf.push(new Uint8Array(d));
+      },
+      close(c) { c.data.up?.end(); },
+    } });
+    const via = new URL(URL_!);
+    via.hostname = "127.0.0.1";
+    via.port = String(listener.port);
+    return { url: via.toString(), stop: (closeActive?: boolean) => listener.stop(closeActive), get mode() { return state.mode; }, set mode(m) { state.mode = m; }, get opened() { return state.opened; } };
+  };
+  // A session the database ends mid-statement after it has answered — a restart, a terminate — is asked again on a
+  // fresh one, not read as an outage: the queue behind it is not let through without slots (review pass 3: one
+  // terminate ran a five-call backlog at once under chat=1).
+  {
+    const proxy = pgProxy();
+    const closeSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => closeSaid.push(l), connectS: 1 });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      let inFlight = 0, most = 0;
+      const one = () => modelCall(call(), async () => { inFlight++; most = Math.max(most, inFlight); await Bun.sleep(100); inFlight--; return "ran"; })
+        .then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const calls = [one(), one(), one()];
+      let marked = 0;
+      for (let i = 0; i < 50 && marked === 0; i++) {
+        await Bun.sleep(50);
+        marked = Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
+      }
+      proxy.mode = "close";
+      // Read through a function: the setter's value would otherwise narrow the reads after it.
+      const modeNow = (): string => proxy.mode;
+      for (let i = 0; i < 100 && modeNow() === "close"; i++) await Bun.sleep(20);
+      const closed = modeNow() === "pass";
+      await Bun.sleep(700);
+      await other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
+      const ran = await Promise.all(calls);
+      assert(marked === 1 && closed && ran.every((r) => r === "ran") && most === 1 && !closeSaid.some((l) => /did not answer/.test(l)),
+        `a poller's session closed mid-statement is asked again on a fresh one: the three calls ran one at a time (${most} at most), nothing said down (${JSON.stringify(closeSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
+      proxy.stop(true);
+    }
+  }
   // A database that stops answering after the slot is taken — a proxy in front of Postgres dropping every byte, as a
   // paused container or a frozen host does: the unlock gives up at the bound, the call's answer kept, said as lost; the
   // next call fails open at the bound rather than waiting with no end (review pass 2: both waited past every stop).
   {
-    const pg = new URL(URL_!);
-    let stalled = false;
-    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] };
-    const proxy = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
-      open(c) {
-        c.data = { buf: [] };
-        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) { if (!stalled) c.write(d); }, close() { c.end(); }, error() { c.end(); } } })
-          .then((up) => { c.data.up = up; for (const b of c.data.buf) up.write(b); c.data.buf = []; }, () => c.end());
-      },
-      data(c, d) { if (stalled) return; if (c.data.up) c.data.up.write(d); else c.data.buf.push(new Uint8Array(d)); },
-      close(c) { c.data.up?.end(); },
-    } });
+    const proxy = pgProxy();
     const stallSaid: string[] = [];
-    const via = new URL(URL_!);
-    via.hostname = "127.0.0.1";
-    via.port = String(proxy.port);
-    const inst = installBackgroundSlots({ url: via.toString(), raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 1 });
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 1 });
     // Cut at 6 s, so a wait with no bound fails the row rather than hanging the suite.
     const cut = setTimeout(() => proxy.stop(true), 6000);
     try {
       let endedAt = 0;
-      const answer = await modelCall(call(), async () => { stalled = true; await Bun.sleep(100); endedAt = Date.now(); return "answer"; });
+      const answer = await modelCall(call(), async () => { proxy.mode = "stall"; await Bun.sleep(100); endedAt = Date.now(); return "answer"; });
       const heldMs = Date.now() - endedAt;
       const t1 = Date.now();
       const next = await modelCall(call(), async () => "next").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
@@ -1948,6 +2036,37 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     } finally {
       clearTimeout(cut);
       await inst.uninstall();
+      proxy.stop(true);
+    }
+  }
+  // A database that stops answering a poller that has answered fails it open at the bound, not asked again on a fresh
+  // session: a statement unanswered is no session ended (review pass 3).
+  {
+    const proxy = pgProxy();
+    const pollSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => pollSaid.push(l), connectS: 1 });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    const cut = setTimeout(() => proxy.stop(true), 8000);
+    try {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const polling = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      let marked = 0;
+      for (let i = 0; i < 50 && marked === 0; i++) {
+        await Bun.sleep(50);
+        marked = Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
+      }
+      const openedBefore = proxy.opened;
+      proxy.mode = "stall";
+      const ran = await polling;
+      assert(marked === 1 && ran === "ran" && proxy.opened === openedBefore && pollSaid.some((l) => /did not answer \(no answer in 1 s\)/.test(l)),
+        `a poller its database stops answering fails open at the bound, no fresh session tried (${proxy.opened - openedBefore} opened; ${ran}; ${JSON.stringify(pollSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      clearTimeout(cut);
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
       proxy.stop(true);
     }
   }
