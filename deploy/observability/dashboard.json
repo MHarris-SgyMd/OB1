@@ -2,7 +2,7 @@
   "uid": "ob1",
   "title": "Daemonic Brain",
   "description": "The brain's requests, provider calls, store operations, jobs and Postgres, from the observability profile (SMD-1849). Provisioned from deploy/compose.yaml, so Grafana will not save a change made here: save a copy to keep one.",
-  "tags": ["open-brain"],
+  "tags": ["daemonic-brain"],
   "editable": false,
   "graphTooltip": 1,
   "schemaVersion": 41,

@@ -2146,7 +2146,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:5b54aa8f387503c1382e2306bccf0d92bdc73d158556431e7bc9b8ebe2411123"
+      ob1.grafana-dashboard: "sha256:d880b6e3f23c9942485493efab94f930e546195ed947744db0eaa64ebfd56e99"
       ob1.grafana-alert-rules: "sha256:871041b31a0bf25f93a873f03238eac309683a37f7ed7b0b3a2c12d0802824ef"
       ob1.grafana-dashboard-provider: "sha256:386d684e6960c7b6d164558b23fcb7deda92aa548d557fa48c33922820976a5d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
@@ -2373,7 +2373,7 @@ configs:
         "uid": "ob1",
         "title": "Daemonic Brain",
         "description": "The brain's requests, provider calls, store operations, jobs and Postgres, from the observability profile (SMD-1849). Provisioned from deploy/compose.yaml, so Grafana will not save a change made here: save a copy to keep one.",
-        "tags": ["open-brain"],
+        "tags": ["daemonic-brain"],
         "editable": false,
         "graphTooltip": 1,
         "schemaVersion": 41,

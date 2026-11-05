@@ -1835,13 +1835,14 @@ and the rules still in the file come back at `lgtm`'s next start (measured).
 An install upgraded from a release whose dashboard was named Open Brain
 (before SMD-3769) keeps that folder, empty: Grafana provisions the dashboard
 and the rules into a new Daemonic Brain folder and leaves the old one behind
-(measured on the pinned image, on its `lgtm-data`). Delete it once, from
-`deploy/` as above. The command deletes it only when no dashboard is left
-in it (the rules moved with the dashboard, measured), and says so when there
-is no such folder:
+(measured on the pinned image, on its `lgtm-data`). Once Grafana opens on
+Daemonic Brain after the upgrade's `up -d`, delete the old folder once, from
+`deploy/` as above. The command deletes it only when no dashboard is left in
+it (the rules moved with the dashboard, measured), says so when there is no
+such folder, and fails, deleting nothing, when Grafana does not answer:
 
 ```bash
-docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/folders" | tr "{" "\n" | grep "\"title\":\"Open Brain\"" | grep -o "\"uid\":\"[^\"]*\"" | cut -d\" -f4); test -n "$u" || { echo "no Open Brain folder"; exit 0; }; test "$(curl -fsS -u "$a" "$g/api/search?folderUIDs=$u")" = "[]" || { echo "the Open Brain folder is not empty: move what is in it out first"; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u" > /dev/null && echo "deleted the empty Open Brain folder"'
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; f=$(curl -fsS -u "$a" "$g/api/folders") || { echo "Grafana did not list its folders: wait until it opens, and check its admin password"; exit 1; }; u=$(printf "%s" "$f" | tr "{" "\n" | grep "\"title\":\"Open Brain\"" | grep -o "\"uid\":\"[^\"]*\"" | cut -d\" -f4); test -n "$u" || { echo "no Open Brain folder"; exit 0; }; s=$(curl -fsS -u "$a" "$g/api/search?folderUIDs=$u") || { echo "Grafana did not list the Open Brain folder"; exit 1; }; test "$s" = "[]" || { echo "the Open Brain folder still holds a dashboard: run this once Grafana opens on Daemonic Brain, and move out any dashboard of your own first"; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u" > /dev/null && echo "deleted the empty Open Brain folder"'
 ```
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
