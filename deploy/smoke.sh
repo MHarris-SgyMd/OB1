@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test a running Open Brain server over MCP.
+# Smoke-test a running Daemonic Brain server over MCP.
 #
 # Point it at the compose stack, on its own machine or behind the TLS proxy or
 # tunnel in front of it. It only needs the URL and the access key.
