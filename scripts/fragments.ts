@@ -153,7 +153,7 @@ export function fragmentProblems(text: string, name?: string): string[] {
   // `## Notes` before the record is content the cut writes nowhere.
   const headingsBeforeFork = [...body.slice(0, forkAt < 0 ? body.length : forkAt).matchAll(/(?:^|\n)## ([^\n]*)/g)].map((m) => m[1].trim());
   if (headingsBeforeFork.filter((h) => h === "Changelog").length > 1) problems.push("two `## Changelog` sections — one, of one to three lines");
-  for (const h of headingsBeforeFork) if (h !== "Changelog" && !(both && RECORD_HEADINGS.includes(h))) problems.push(`a \`## ${h}\` section before \`## ${rec}\` — the cut writes it nowhere; a fragment is \`## Changelog\` then \`## Record\` (put the rest in the record)`);
+  for (const h of headingsBeforeFork) if (h !== "Changelog") problems.push(`a \`## ${h}\` section before \`## ${rec}\` — the cut writes it nowhere; a fragment is \`## Changelog\` then \`## Record\` (put the rest in the record)`);
   if (fork === null) problems.push("missing a `## Record` section");
   else if (fork === "") problems.push(`the \`## ${rec}\` section is empty — its first line is the title, then the record`);
   else if (changelogAt > forkAt) problems.push(`the \`## Changelog\` section sits after \`## ${rec}\` — the record runs to the end of the file (its own \`## \` sub-headings included), so the Changelog comes first`);

@@ -603,7 +603,7 @@
  *      when it does not, a need with no counts is named on every page as
  *      having none, and a name uploaded twice fails on main alone
  *      (SMD-3709). Its probe pins what it refuses and passes
- *  51. scripts/commitlint.config.ts takes `[core]` for the project's own code
+ *  52. scripts/commitlint.config.ts takes `[core]` for the project's own code
  *      and `[fork]`, its name before SMD-3765, both held to ticket-ref, a
  *      contribution category not; a mis-cased, unspaced or colon header fails.
  *      CI's commit-lint lints only a PR's own commits, so nothing else reads
@@ -11035,27 +11035,35 @@ function checkTestCountsPublished() {
 }
 checkTestCountsPublished();
 
-// ── 51: commitlint's categories — [core], and [fork] from before it (SMD-3765) ──
+// ── 52: commitlint's categories — [core], and [fork] from before it (SMD-3765) ──
 //
 // commit-lint runs the config only over a PR's own commits, so a category
 // dropped from it, or one no longer held to ticket-ref, fails nothing until a
 // branch commits under it (a [fork] branch from before the rename, a quiet lost
 // warning). This reads the config itself.
 function checkCommitCategories() {
-  const header = commitlintConfig.parserPreset.parserOpts.headerPattern;
-  const ticketRef = commitlintConfig.plugins[0].rules["ticket-ref"];
   const CONFIG = "scripts/commitlint.config.ts";
+  const header = commitlintConfig.parserPreset.parserOpts.headerPattern;
+  // Found by name: a plugin reordered or added is no reason for the whole checker to throw.
+  const ticketRef = commitlintConfig.plugins.find((pl) => "ticket-ref" in pl.rules)?.rules["ticket-ref"];
+  if (!ticketRef) return fail(CONFIG, "no plugin defines ticket-ref — a [core] subject without its ticket goes unwarned (check 52, SMD-3765)");
+  // The rule's level (0 is off) and the type list commit-lint enforces, beside the header that reads them.
+  const rules: Record<string, readonly unknown[] | undefined> = commitlintConfig.rules;
+  const level = rules["ticket-ref"]?.[0];
+  if (typeof level !== "number" || level < 1) fail(CONFIG, "ticket-ref is switched off or missing from rules — its warning never fires (check 52)");
+  const types = rules["type-enum"]?.[2];
+  for (const type of ["core", "fork"]) if (!(Array.isArray(types) && types.includes(type))) fail(CONFIG, `type-enum does not list ${type} — commit-lint refuses a [${type}] subject the header reads (check 52, SMD-3765)`);
   for (const [subject, type] of [["[core] A change (SMD-1)", "core"], ["[fork] A change (SMD-1)", "fork"], ["[recipes] A recipe", "recipes"]] as const) {
-    if (header.exec(subject)?.[1] !== type) fail(CONFIG, `its header pattern does not read ${JSON.stringify(subject)} as [${type}] — commit-lint would refuse it (check 51, SMD-3765)`);
+    if (header.exec(subject)?.[1] !== type) fail(CONFIG, `its header pattern does not read ${JSON.stringify(subject)} as [${type}] — commit-lint would refuse it (check 52, SMD-3765)`);
   }
   for (const subject of ["[Core] A change (SMD-1)", "[core]A change (SMD-1)", "core: A change (SMD-1)"]) {
-    if (header.test(subject)) fail(CONFIG, `its header pattern takes ${JSON.stringify(subject)}, which the house grammar refuses (check 51)`);
+    if (header.test(subject)) fail(CONFIG, `its header pattern takes ${JSON.stringify(subject)}, which the house grammar refuses (check 52)`);
   }
   for (const type of ["core", "fork"]) {
-    if (ticketRef({ type, header: `[${type}] A change` })[0] !== false) fail(CONFIG, `ticket-ref no longer warns on a [${type}] subject without its ticket (check 51, SMD-3765)`);
-    if (ticketRef({ type, header: `[${type}] A change (SMD-1)` })[0] !== true) fail(CONFIG, `ticket-ref warns on a [${type}] subject that ends in its ticket (check 51)`);
+    if (ticketRef({ type, header: `[${type}] A change` })[0] !== false) fail(CONFIG, `ticket-ref no longer warns on a [${type}] subject without its ticket (check 52, SMD-3765)`);
+    if (ticketRef({ type, header: `[${type}] A change (SMD-1)` })[0] !== true) fail(CONFIG, `ticket-ref warns on a [${type}] subject that ends in its ticket (check 52)`);
   }
-  if (ticketRef({ type: "recipes", header: "[recipes] A recipe" })[0] !== true) fail(CONFIG, "ticket-ref holds a contribution category to an SMD ticket — a community PR carries none (check 51)");
+  if (ticketRef({ type: "recipes", header: "[recipes] A recipe" })[0] !== true) fail(CONFIG, "ticket-ref holds a contribution category to an SMD ticket — a community PR carries none (check 52)");
 }
 checkCommitCategories();
 

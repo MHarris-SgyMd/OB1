@@ -11,7 +11,7 @@
  * `[core]` is a change to the project's own code (SMD-3765). `[fork]`, its name
  * before, is still accepted and held to the same rule, so a branch begun before
  * the rename lints as it did; new commits say `[core]`. check-consistency's
- * check 51 reads these categories, since commit-lint reads only a PR's commits.
+ * check 52 reads these categories, since commit-lint reads only a PR's commits.
  * No length cap: subjects run to ~1,169 characters by design (they are sentences),
  * and a cap would fail the record. The rule is SHAPE, not length.
  *

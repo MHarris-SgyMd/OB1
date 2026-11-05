@@ -165,7 +165,9 @@ ship at any time for an urgent fix, but carries no migration.
 1. **The version.** Run `bun scripts/assemble-release.ts` (a dry run that touches
    nothing) for the version it proposes. Bump `db/version.mjs`'s `BRAIN_VERSION` to
    it, and add the migration that writes it: a new `NNN_schema_version.sql`
-   upserting `ob1_config.schema_version`, the highest migration on disk, so the
+   upserting `ob1_config.schema_version` (its comment names `BRAIN_VERSION`; the
+   frozen stamps' say `FORK_VERSION`, its name before SMD-3765), the highest
+   migration on disk, so the
    range the cut freezes ends on the migration that names the release (check 17d
    holds the two equal). Move `db/README.md`'s migration map and the suites'
    migration counts with it, and run `bun scripts/gen-version.ts` to regenerate
