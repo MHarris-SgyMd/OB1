@@ -783,12 +783,15 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   // The sync states a priority changed past the operations: one chosen high, and one set back to the default, unchosen, cleared.
   await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'high', priority_chosen = true WHERE id = ${String(pNone.body.task?.id)}::uuid`;
   await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'medium', priority_chosen = false WHERE id = ${String(pLow.body.task?.id)}::uuid`;
+  // …and a task whose item a key dropped keeps its item unstated, whatever its priority (review pass 1).
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'urgent', priority_chosen = true WHERE id = ${ids.filter}::uuid`;
   const prioritySync = await c("sync_open_items", {});
-  const [noneAfter, lowAfter] = [await saidOn(pNone.body.item?.id), await saidOn(pLow.body.item?.id)];
+  const [noneAfter, lowAfter, droppedAfter] = [await saidOn(pNone.body.item?.id), await saidOn(pLow.body.item?.id), await saidOn(taskItems.get(ids.filter)?.id)];
   const prioritySyncAgain = await c("sync_open_items", {});
   assert(prioritySync.status === 200 && prioritySync.body.priorities_stated === 2 && JSON.stringify(prioritySync.body.failed) === "[]"
-         && noneAfter.level === 3 && lowAfter.level === null && lowAfter.history.at(-1)?.closeReason === "cleared" && prioritySyncAgain.body.priorities_stated === 0,
-    `sync_open_items states a task's priority changed past the operations and clears one set back to the unchosen default; run again it states nothing (${JSON.stringify([prioritySync.body.priorities_stated, noneAfter.level, lowAfter.level, prioritySyncAgain.body.priorities_stated])})`);
+         && noneAfter.level === 3 && lowAfter.level === null && lowAfter.history.at(-1)?.closeReason === "cleared" && prioritySyncAgain.body.priorities_stated === 0
+         && droppedAfter.level === null && droppedAfter.history.length === 0,
+    `sync_open_items states a task's priority changed past the operations and clears one set back to the unchosen default, and leaves a dropped item unstated whatever its task says (review pass 1); run again it states nothing (${JSON.stringify([prioritySync.body.priorities_stated, noneAfter.level, lowAfter.level, prioritySyncAgain.body.priorities_stated])})`);
 
   // Two logs at once, forced to race: a row lock held around both (FOR NO KEY UPDATE, which the logs' foreign-key
   // checks pass) stops each at its UPDATE after its statement has taken its snapshot, the newer queued first. Released,
