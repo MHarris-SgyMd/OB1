@@ -1,7 +1,7 @@
-# The Open Brain stack: the forwarder and proxy in front, the REST core, the MCP
-# server, the operator GUI, Postgres and the migrator, and the profiles beside
-# them. A change reaches a running system through an ordinary pipeline: build,
-# migrate, start.
+# The Daemonic Brain stack: the forwarder and proxy in front, the REST core, the
+# MCP server, the operator GUI, Postgres and the migrator, and the profiles
+# beside them. A change reaches a running system through an ordinary pipeline:
+# build, migrate, start.
 #
 #   podman compose -f deploy/compose.yaml --profile local-models up --build
 #   docker compose -f deploy/compose.yaml --profile local-models up --build
@@ -2146,9 +2146,9 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:bcafd1cbf50f1c5343812ee49bd615746971fa6b9c117321e9fcb23bb145aa3c"
-      ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
-      ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
+      ob1.grafana-dashboard: "sha256:d880b6e3f23c9942485493efab94f930e546195ed947744db0eaa64ebfd56e99"
+      ob1.grafana-alert-rules: "sha256:871041b31a0bf25f93a873f03238eac309683a37f7ed7b0b3a2c12d0802824ef"
+      ob1.grafana-dashboard-provider: "sha256:386d684e6960c7b6d164558b23fcb7deda92aa548d557fa48c33922820976a5d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
     # `telemetry`, where it scrapes pg-exporter alone (SMD-1849 PR 3b). No
@@ -2371,9 +2371,9 @@ configs:
     content: |
       {
         "uid": "ob1",
-        "title": "Open Brain",
+        "title": "Daemonic Brain",
         "description": "The brain's requests, provider calls, store operations, jobs and Postgres, from the observability profile (SMD-1849). Provisioned from deploy/compose.yaml, so Grafana will not save a change made here: save a copy to keep one.",
-        "tags": ["open-brain"],
+        "tags": ["daemonic-brain"],
         "editable": false,
         "graphTooltip": 1,
         "schemaVersion": 41,
@@ -3124,7 +3124,7 @@ configs:
       providers:
         - name: open-brain-dashboard
           type: file
-          folder: Open Brain
+          folder: Daemonic Brain
           disableDeletion: true
           allowUiUpdates: false
           options:
@@ -3141,8 +3141,8 @@ configs:
       apiVersion: 1
       groups:
         - orgId: 1
-          name: Open Brain
-          folder: Open Brain
+          name: Daemonic Brain
+          folder: Daemonic Brain
           interval: 30s
           rules:
             - uid: ob1-server-silent

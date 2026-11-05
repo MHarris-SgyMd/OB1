@@ -11686,7 +11686,7 @@ const DASHBOARD_PROVIDER = [
   "providers:\n",
   "  - name: open-brain-dashboard\n",
   "    type: file\n",
-  "    folder: Open Brain\n",
+  "    folder: Daemonic Brain\n",
   "    disableDeletion: true\n",
   "    allowUiUpdates: false\n",
   "    options:\n",
@@ -11844,7 +11844,7 @@ function dashboardProblems(fileText: string, inline: unknown, provider: unknown,
   let d: unknown;
   try { d = JSON.parse(fileText); } catch (e) { out.push(["json", `does not parse as JSON, so Grafana loads no dashboard: ${(e as Error).message}`]); return out; }
   if (!isMapping(d) || !Array.isArray(d.panels)) { out.push(["json", "is not a dashboard: no `panels` array"]); return out; }
-  if (d.uid !== "ob1" || d.editable !== false || d.title !== "Open Brain") out.push(["identity", `has uid ${JSON.stringify(d.uid)}, editable ${JSON.stringify(d.editable)} and title ${JSON.stringify(d.title)} where they are "ob1" (the address deploy/README.md names, /grafana/d/ob1), false (Grafana's UI may not save a provisioned dashboard) and "Open Brain" (the home page's address is its slug): a copy saved in Grafana and exported has its own uid, "… Copy" and true`]);
+  if (d.uid !== "ob1" || d.editable !== false || d.title !== "Daemonic Brain") out.push(["identity", `has uid ${JSON.stringify(d.uid)}, editable ${JSON.stringify(d.editable)} and title ${JSON.stringify(d.title)} where they are "ob1" (the address deploy/README.md names, /grafana/d/ob1), false (Grafana's UI may not save a provisioned dashboard) and "Daemonic Brain" (the home page's address is its slug): a copy saved in Grafana and exported has its own uid, "… Copy" and true`]);
   const vars = isMapping(d.templating) && Array.isArray(d.templating.list) ? d.templating.list.filter(isMapping) : [];
   const defined = new Set(vars.map((v) => String(v.name)));
   const ids = new Set<unknown>();
@@ -11892,7 +11892,7 @@ function dashboardProblems(fileText: string, inline: unknown, provider: unknown,
   return out;
 }
 const DASHBOARD_PROBE = {
-  uid: "ob1", editable: false, title: "Open Brain",
+  uid: "ob1", editable: false, title: "Daemonic Brain",
   templating: { list: [{ name: "service", datasource: { type: "prometheus", uid: "prometheus" }, query: { query: "label_values(http_server_request_duration_seconds_count, service_name)" } }] },
   panels: [
     { type: "row", id: 1, title: "r", gridPos: { x: 0, y: 0, w: 24, h: 1 }, datasource: undefined as unknown, targets: [] as { refId: string; datasource: { type: string; uid: string }; expr: string }[], panels: [] as unknown[], collapsed: false },
@@ -11921,13 +11921,13 @@ const DASHBOARD_PROBES: [string, string, unknown, unknown, unknown, DashboardRul
   ["a provider reading a directory", dashboardProbe(), inlined(dashboardProbe()), { content: DASHBOARD_PROVIDER.replace(DASHBOARD_PATH, "/otel-lgtm") }, labelled(dashboardProbe()), ["provider"]],
   ["lgtm's label naming an older dashboard, so an upgrade's up -d keeps it", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe((d) => { d.panels[1].title = "a0"; })), ["recreate"]],
   ["lgtm with no labels, as before review pass 1", dashboardProbe(), inlined(dashboardProbe()), HELD, undefined, ["recreate"]],
-  ["lgtm's provider label naming an older provider (review pass 2)", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe(), DASHBOARD_PROVIDER.replace("folder: Open Brain", "folder: Old")), ["recreate"]],
+  ["lgtm's provider label naming an older provider (review pass 2)", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe(), DASHBOARD_PROVIDER.replace("folder: Daemonic Brain", "folder: Old")), ["recreate"]],
   ["a third label on lgtm (review pass 2)", dashboardProbe(), inlined(dashboardProbe()), HELD, { ...labelled(dashboardProbe()), "ob1.extra": "x" }, ["recreate"]],
   ["a file that is not JSON", "{", inlined("{"), HELD, labelled("{"), ["json"]],
   ...([
     ["another uid", (d) => { d.uid = "x"; }, ["identity"]],
     ["an editable dashboard", (d) => { d.editable = true as false; }, ["identity"]],
-    ["a copy's title (review pass 4)", (d) => { (d as Record<string, unknown>).title = "Open Brain Copy"; }, ["identity"]],
+    ["a copy's title (review pass 4)", (d) => { (d as Record<string, unknown>).title = "Daemonic Brain Copy"; }, ["identity"]],
     ["two panels with one id", (d) => { d.panels[2].id = 2; }, ["identity"]],
     ["a data source the image does not provision", (d) => { d.panels[2].datasource = { type: "loki", uid: "loki2" }; }, ["datasource"]],
     ["a query's data source of another type than its uid's", (d) => { d.panels[1].targets[0].datasource = { type: "loki", uid: "prometheus" }; }, ["datasource"]],
@@ -12096,9 +12096,9 @@ function alertRulesProblems(fileText: string, inline: unknown, written: Map<stri
   const dollars = expandedDollars(d, "file", false);
   if (dollars.length) out.push(["sent", `holds a \`$\` at ${dollars.join(", ")}, where Grafana expands it from its environment or a file as it loads the rule ($VAR, $__env{…}, $__file{…}; measured): lgtm's admin password, say, would ride every notification — a \`$\` belongs in an annotation's template or a query alone`]);
   const groups = d.groups.filter(isMapping);
-  if (groups.length !== 1 || d.groups.length !== 1) { out.push(["group", `has ${d.groups.length} groups where it has one, "Open Brain"`]); if (!groups.length) return out; }
+  if (groups.length !== 1 || d.groups.length !== 1) { out.push(["group", `has ${d.groups.length} groups where it has one, "Daemonic Brain"`]); if (!groups.length) return out; }
   const g = groups[0];
-  if (g.orgId !== 1 || g.name !== "Open Brain" || g.folder !== "Open Brain" || !Array.isArray(g.rules)) out.push(["group", `its group is orgId ${JSON.stringify(g.orgId)}, name ${JSON.stringify(g.name)}, folder ${JSON.stringify(g.folder)} where it is orgId 1, "Open Brain" in the dashboard's folder "Open Brain", with a \`rules\` list`]);
+  if (g.orgId !== 1 || g.name !== "Daemonic Brain" || g.folder !== "Daemonic Brain" || !Array.isArray(g.rules)) out.push(["group", `its group is orgId ${JSON.stringify(g.orgId)}, name ${JSON.stringify(g.name)}, folder ${JSON.stringify(g.folder)} where it is orgId 1, "Daemonic Brain" in the dashboard's folder "Daemonic Brain", with a \`rules\` list`]);
   const rules = Array.isArray(g.rules) ? g.rules.filter(isMapping) : [];
   // A rule taken out of the file stays in Grafana, evaluating, until a deletion names it (measured): the one way out.
   const deletions = d.deleteRules;
@@ -12154,7 +12154,7 @@ type AlertProbeRule = Mapping & { data: Mapping[]; annotations: Mapping };
 type AlertProbe = Mapping & { groups: (Mapping & { rules: AlertProbeRule[] })[] };
 const ALERT_PROBE: AlertProbe = {
   apiVersion: 1,
-  groups: [{ orgId: 1, name: "Open Brain", folder: "Open Brain", interval: "30s", rules: [{
+  groups: [{ orgId: 1, name: "Daemonic Brain", folder: "Daemonic Brain", interval: "30s", rules: [{
     uid: "probe", title: "Probe", condition: "B", noDataState: "OK", execErrState: "Error", for: "5m",
     data: [
       { refId: "A", datasourceUid: "prometheus", model: { refId: "A", instant: true, expr: 'max by (service_name) (sum by (service_name) (rate(http_server_request_duration_seconds_count{ob1_outcome="error"}[10m])) / sum by (service_name) (rate(http_server_request_duration_seconds_count[10m])))' } },
