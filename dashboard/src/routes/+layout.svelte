@@ -35,7 +35,7 @@
 	<header class="border-b border-white/10 bg-bg-elevated sticky top-0 z-50">
 		<div class="max-w-5xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-3">
 			<!-- The brand is no heading: each page has its one h1 (review pass 6). -->
-			<a href={HOME} class="flex items-center gap-3 text-xl font-bold">Open Brain</a>
+			<a href={HOME} class="flex items-center gap-3 text-xl font-bold">Daemonic Brain</a>
 			{#if data.signedIn}
 				<!-- It wraps: eight views pushed it 218 px past a phone's width, and every page scrolled sideways (PR 2b review pass 1). -->
 				<nav class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-label="Views">

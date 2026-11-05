@@ -596,7 +596,7 @@ async function assertThrowawayConnection(sql: SQL, url: string): Promise<void> {
 function refuseDrop(refusal: string, overridable: boolean): never {
   console.error(
     `  Refusing to drop the schema: ${refusal}.\n\n` +
-      `  This command DROPS every table Open Brain owns in that database. That is\n` +
+      `  This command DROPS every table the brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
       (overridable
         ? `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
@@ -781,13 +781,13 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
- * The MCP stack — the four packages extensions/package.json installs for the
- * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
+ * The MCP stack — the four packages integrations/package.json installs for the
+ * vendored servers, one list (SMD-1800): integrations/test-auth.ts's pin guard
  * holds that install to them, and server-portable's and mcp-server's to the
  * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
- * recipes and integrations reach that install through the committed
- * recipes/node_modules and integrations/node_modules links (SMD-1991). A name
- * added here alone reaches every reader.
+ * integrations reach that install from under it, the recipes through the
+ * committed recipes/node_modules link (SMD-1991; in integrations/ since
+ * SMD-3747). A name added here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
 
@@ -796,9 +796,9 @@ export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcont
  * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
  * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
  * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
- * `hono` and `zod` are shared with STACK. The vendored servers (extensions) stay
+ * `hono` and `zod` are shared with STACK. The vendored servers (integrations/) stay
  * on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
- * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
+ * during the window the two stacks coexist and integrations/test-auth.ts's pin guard
  * holds each install to its own.
  */
 export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];

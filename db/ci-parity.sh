@@ -316,7 +316,7 @@ free_rows() {
   nodb deploy/auth        limits.ts --self-check
   nodb deploy/auth        target.ts --self-check
   nodb deploy/auth        admin.ts --self-check
-  nodb extensions         test-auth.ts
+  nodb integrations       test-auth.ts
   nodb db                 sync-linear.ts --self-check
   nodb db                 ingest-linear.ts --self-check
   nodb db                 ingest-markdown.ts --self-check
@@ -506,7 +506,7 @@ main() {
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
-  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth integrations scripts compat/supabase-sql dashboard; do install "$dir"; done
 
   # Every other lane starts now, beside this one (SMD-3688): the four test-live
   # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
@@ -544,7 +544,7 @@ main() {
   # data-layer job runs them — last, since it applies vendored schemas to the
   # shared database and drops them after. (The extension tools' suite,
   # test-tools.ts, retired with the last extension server: SMD-2311.)
-  run extensions         test-writes.ts
+  run integrations       test-writes.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
   local shard pid

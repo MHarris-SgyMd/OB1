@@ -330,12 +330,13 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
  *     mark existed);
  *   • with nothing in its public schema but what extensions own (a new
  *     `createdb`, whatever its template installed);
- *   • an Open Brain schema — schema_migrations, ob1_config AND thoughts, since
- *     schema_migrations alone is Rails', Ecto's, golang-migrate's and dbmate's
- *     table too — holding no thoughts: a tier stack's database after `up`.
+ *   • a Daemonic Brain schema — schema_migrations, ob1_config AND thoughts,
+ *     since schema_migrations alone is Rails', Ecto's, golang-migrate's and
+ *     dbmate's table too — holding no thoughts: a tier stack's database after
+ *     `up`.
  * Anything else is refused: the record (tier=stable), a brain with thoughts
- * under no tier stamp (an untiered stable), and a schema that is not Open
- * Brain's at all (another application's database, one name away). The
+ * under no tier stamp (an untiered stable), and a schema that is not
+ * Daemonic Brain's at all (another application's database, one name away). The
  * refusal names no override: the likeliest cause is --from and --to the wrong
  * way round, and marking the target by hand would disarm this guard for it
  * for good. deploy/README.md says how to mark one deliberately.
@@ -361,7 +362,7 @@ export async function targetRefusal(target: SQL): Promise<string | null> {
   const why =
     tier === "stable" ? "--to is stamped tier=stable, the record — are --from and --to the wrong way round?"
     : held ? `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`}, a brain rather than a tier a refresh made — are --from and --to the wrong way round?`
-    : "--to has tables in its public schema and is not an Open Brain schema — another database, one name away?";
+    : "--to has tables in its public schema and is not a Daemonic Brain schema — another database, one name away?";
   return `${why} (database ${db}, no refresh mark)`;
 }
 

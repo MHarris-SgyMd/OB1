@@ -330,9 +330,9 @@ keep their rows below.
 ## How the "verified no references" gate is applied
 
 An artifact is *referenced* — and therefore not removable — when something outside its own
-folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the consistency checker (`scripts/check-consistency.ts`),
-`.github/workflows/brain-checks.yml`, `extensions/package.json` scripts, the SQL-shim
+folder depends on it: a code import, a CI parity test (`integrations/test-auth.ts`,
+`integrations/test-writes.ts`), the consistency checker (`scripts/check-consistency.ts`),
+`.github/workflows/brain-checks.yml`, `integrations/package.json` scripts, the SQL-shim
 codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md` are
 the *audit record*, not a live dependency, and do not block a removal.
@@ -372,7 +372,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `rest-api` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the general REST gateway (CORS, CRUD, an `/ingest` proxy to `smart-ingest`, entity endpoints). Every route's fate is in "The brain's outward surface" above. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `slack-capture` | keep + audited → fold-in **SMD-1867** | Slack quick-capture source. Live: README index, `docs/01-getting-started` step, CI. Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/slack` (SMD-2101).** |
 | `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622` (`rest-api`'s `/ingest` proxy to it retired with SMD-1931), `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) **SMD-1931 (2026-10-08): a REST-core plugin, port SMD-2690.** |
-| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`extensions/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-consistency.ts`). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/telegram` (SMD-2101).** |
+| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`integrations/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-consistency.ts`). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/telegram` (SMD-2101).** |
 | `update-thought-mcp` | ~~keep + audited *(revises seed "remove")*~~ → **retired (SMD-1931)** | Was a standalone single-tool server. The core's `update_thought` (MCP tool and `PATCH /v1/thoughts/{id}`) does what it did. `skills/updating-thoughts` now names the core connector, and its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 
 ### `schemas/` (16)

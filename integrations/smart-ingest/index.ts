@@ -91,8 +91,7 @@ const ACTOR = { name: "MCP_ACCESS_KEY", via: "smart-ingest" };
  * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
  * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
  * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
- * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
- * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped.
  */
 function httpTargetFrom(name: string): string | null {
   const value = process.env[name]?.trim();

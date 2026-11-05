@@ -78,7 +78,7 @@ A source's default says nothing about the item, so decision 3 treats it as unkno
 | GitHub-style labels | – | P3 | P2 | P1 | – | P0 | none |
 | Frontmatter `priority:` | `none` | `low` | `medium` | `high` | `urgent` | `critical` | absent; any other value (kept raw in the item) |
 
-A source added later states its mapping and its default in SMD-3666's table, with a test row each. Upstream's `importance` has no row: it is retired (decision 8). The draft would have mapped it, with a stored 3 or 4 as unknown, since either can be a default ("Defaults that look like statements").
+A source added later states its mapping and its default in SMD-3666's table, with a test row each: `server-portable/priority-scale.ts`, read by the ingestion pipeline, board-sync and the plugins, and held row by row by `bun db/ingest-records.ts --self-check`. Upstream's `importance` has no row: it is retired (decision 8). The draft would have mapped it, with a stored 3 or 4 as unknown, since either can be a default ("Defaults that look like statements").
 
 ### The composition's starting weights
 
