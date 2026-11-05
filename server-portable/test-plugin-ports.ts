@@ -809,9 +809,8 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
 
 console.log("\n[keepRowItem] a row's item through a stub core: a refusal or a fault answered failed, never thrown; a dropped item untouched; a done one reopened only for a row that comes round");
 {
-  type Answer = unknown;
   /** A ctx whose core answers each call by name, in turn, from `script` (an Error is thrown); the calls made, by name. */
-  const stub = (script: Record<string, Answer[]>) => {
+  const stub = (script: Record<string, unknown[]>) => {
     const calls: string[] = [];
     const ctx = { call: async (name: string) => { calls.push(name); const a = script[name]?.shift(); if (a instanceof Error) throw a; return a; } };
     return { calls, ctx: ctx as unknown as Parameters<typeof keepRowItem>[0] };

@@ -284,7 +284,7 @@ export default definePlugin({
         // The tasks whose item is live (proposed or open): a done task's item is settled only if it has one.
         const live = await ctx.call("list_items", { plugin: "home-maintenance", status: "unsettled", limit: 1000 });
         if (!live.ok) return refuse(409, "ITEMS_UNREADABLE", { cause: live.refusal.code, message: `the brain's open items could not be read (${live.refusal.code}); nothing was kept` });
-        const liveRows = new Set(live.value.items.map((i) => i.plugin?.row).filter((r): r is string => typeof r === "string"));
+        const liveRows = new Set(live.value.items.flatMap((i) => (i.plugin ? [i.plugin.row] : [])));
         const tally = { opened: 0, updated: 0, settled: 0, reopened: 0, unchanged: 0 };
         const failed: { task_id: string; code: string }[] = [];
         for (const { answer: t } of tasks) {
