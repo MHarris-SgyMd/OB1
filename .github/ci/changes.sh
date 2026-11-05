@@ -61,7 +61,7 @@ scripts/check-consistency.ts	data-layer
 .github/ci/auth-settings.sh	deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability
 .github/ci/held-cases.sh	deploy-stack
 .github/ci/changes.sh
-.github/ci/test-counts-page.ts
+.github/ci/test-counts-page.ts	compat-shim
 .github/workflows/release.yml
 .github/workflows/release-steps.yml
 .github/workflows/ci-shift.yml
