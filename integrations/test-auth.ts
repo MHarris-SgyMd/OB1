@@ -850,10 +850,9 @@ for (const t of TEXT_ONLY) {
   // vendored servers — held to this install's versions — pins the v2 MCP packages to
   // SERVER_V2_PINS (the independent truth for the two installs that serve MCP), and the
   // v1 MCP packages must be gone. It installs packages beside the stack, so its set
-  // is a superset (no exact check). The
-  // MCP server as a REST client (mcp-server/, SMD-2287) installs the same
-  // stack, so a tool's schema built with server-portable's zod and the SDK
-  // that validates it agree: held the same way.
+  // is a superset (no exact check). The MCP server as a REST client (mcp-server/,
+  // SMD-2287) installs the same stack, so a tool's schema built with
+  // server-portable's zod and the SDK that validates it agree: held the same way.
   for (const file of ["server-portable/package.json", "mcp-server/package.json"]) {
     const manifest = JSON.parse(readFileSync(join(ROOT, file), "utf8")) as { dependencies: Record<string, string>; devDependencies?: Record<string, string> };
     const deps = manifest.dependencies;

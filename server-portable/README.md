@@ -522,9 +522,10 @@ Bun fetching it (SMD-2978).
 
 `hono` and `zod` are pinned to the exact versions `../integrations/package.json`
 installs for the vendored servers, and `integrations/test-auth.ts` fails if they
-drift. The MCP packages are here alone: the v2 scoped packages, the vendored
-servers importing none since SMD-3747. **If you bump a shared package in one
-file, bump it in both in the same commit.**
+drift. That install has no MCP package, the vendored servers importing none
+since SMD-3747; this directory's has the v2 scoped packages. **If you bump a
+shared package, bump it in `package.json` here, `../integrations/package.json`
+and `../mcp-server/package.json` in the same commit.**
 
 ### 2. Run it
 

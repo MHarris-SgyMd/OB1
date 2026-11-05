@@ -111,7 +111,7 @@ From the template, every section kept: why it matters, the learning path, what i
 | Thing | Pattern | Example |
 |-------|---------|---------|
 | Directories, `OB1_PLUGINS` name, manifest `name` | `{kebab-case}` | `job-hunt` |
-| Schema, roles | `plugin_{snake}`, `ob1_plugin_{snake}` (made by the migrator) | `plugin_job_hunt` |
+| Schema, roles | `plugin_{snake}`; `ob1_plugin_{snake}` and its login role `ob1_plugins_{snake}` (made by the migrator) | `plugin_job_hunt`, `ob1_plugin_job_hunt`, `ob1_plugins_job_hunt` |
 | Table names | `{snake_case}` | `companies`, `job_postings` |
 | Operation keys | `{snake_case}` | `add_company`, `search_job_contacts` |
 | MCP tool | `{slug with _}_{key}` | `job_hunt_add_company` |
@@ -131,7 +131,7 @@ Before submitting, verify:
 - [ ] `bun test-plugins.ts` in `server-portable/` passes (after `bun install` there and in `mcp-server/` and `rest-client/`)
 - [ ] The slug is in `PORTED` in `server-portable/test-plugin-ports.ts`, which turns it on for the suite's migrator, and a section there drives every operation over a real database: its drift guard fails an operation of a `PORTED` plugin that no section calls. Run it with `../db/with-postgres.sh bun test-plugin-ports.ts` from `server-portable/` (it starts a throwaway Postgres in a container). Nothing fails a plugin left out of `PORTED`: review holds it
 - [ ] Both `metadata.json` files validate against `/.github/metadata.schema.json`
-- [ ] The guide's test prompts call every tool, and it links `docs/05-tool-audit.md`
+- [ ] The guide's 3 to 5 test prompts exercise the tools, and it links `docs/05-tool-audit.md`
 - [ ] No credentials, API keys, or secrets in any file; no binary files over 1MB
 
 ---

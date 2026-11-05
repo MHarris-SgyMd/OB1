@@ -49,7 +49,7 @@ Once per checkout:
 (cd integrations && bun install)
 ```
 
-`integrations/package.json` pins `hono` and `zod`, all the vendored servers import (SMD-3747). An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). A server that needs another package has a `package.json` of its own, and its README says to install there too. A README's run line that passes `--no-install` makes a skipped install fail the start instead of Bun downloading unpinned packages.
+`integrations/package.json` pins `hono` and `zod`, the packages the vendored servers share (SMD-3747). An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). A server that needs another package has a `package.json` of its own, and its README says to install there too. A README's run line that passes `--no-install` makes a skipped install fail the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 
