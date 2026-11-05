@@ -5863,6 +5863,9 @@ if (want("10")) {
   // with extract's maxTokensFatal: the follower ends refused, exit 2, nothing failed — not each thought's length, the pool
   // failed a row at a time while it runs on (SMD-3311 review pass 1, mutant: no row held the option). Stopped at 20 s if not.
   const budgetNote = await seed("A note whose answer budget the provider refuses while followed.");
+  /** Every claim recorded failed under the key: the run's first call may meet an older pending thought, not the seed (review pass 3). */
+  const failedClaims = async () => ((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0] as { n: number }).n;
+  const budgetFailedBefore = await failedClaims();
   refuseBudget = 1;
   const budgetAc = new AbortController();
   const budgetTimer = setTimeout(() => budgetAc.abort(), 20_000);
@@ -5871,8 +5874,9 @@ if (want("10")) {
     .finally(() => clearTimeout(budgetTimer));
   refuseBudget = 0;
   const budgetRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${budgetNote}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-  assert(budgetCode === 2 && budgetRow !== "failed" && budgetLines.some((l) => /refuses the request itself \(Extraction request to [^)]*400 [^)]*max_tokens/.test(l)),
-         `a follower whose provider refuses the answer budget ends refused, exit 2, the thought not failed (exit ${budgetCode}, ${budgetRow})`);
+  const budgetFailed = (await failedClaims()) - budgetFailedBefore;
+  assert(budgetCode === 2 && budgetRow !== "failed" && budgetFailed === 0 && budgetLines.some((l) => /refuses the request itself \(Extraction request to [^)]*400 [^)]*max_tokens/.test(l)),
+         `a follower whose provider refuses the answer budget ends refused, exit 2, no thought failed (exit ${budgetCode}, ${budgetRow}, ${budgetFailed} failed)`);
   await sql`SELECT delete_thought(${budgetNote}::uuid, NULL::jsonb)`;
   // A run without --follow keeps classifyError's rules: a 408 is the request's, exit 2, nothing failed — followerFault is
   // the followers' alone (SMD-3311 review pass 2, mutant: no row held the one-shot side). The pauses cut, so a run that
@@ -5882,6 +5886,7 @@ if (want("10")) {
     const oneShot408 = await seed("A note a one-shot run meets a 408 on.");
     const oneShot408Lines: string[] = [];
     let oneShot408Code = -1;
+    const oneShotFailedBefore = await failedClaims();
     try {
       // A plain 408, whose words classifyError does not read as a deadline: the gateway's would be the thought's, both before and after.
       body408 = "request timeout";
@@ -5895,8 +5900,9 @@ if (want("10")) {
       restorePauses();
     }
     const oneShot408Row = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${oneShot408}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(oneShot408Code === 2 && oneShot408Row !== "failed" && oneShot408Lines.some((l) => /refused the request itself/.test(l)),
-           `a run without --follow still reads a 408 as the request's: exit 2, the thought not failed (exit ${oneShot408Code}, ${oneShot408Row})`);
+    const oneShotFailed = (await failedClaims()) - oneShotFailedBefore;
+    assert(oneShot408Code === 2 && oneShot408Row !== "failed" && oneShotFailed === 0 && oneShot408Lines.some((l) => /refused the request itself/.test(l)),
+           `a run without --follow still reads a 408 as the request's: exit 2, no thought failed (exit ${oneShot408Code}, ${oneShot408Row}, ${oneShotFailed} failed)`);
     await sql`SELECT delete_thought(${oneShot408}::uuid, NULL::jsonb)`;
   }
   // A following pass that throws (here its Writer, on the pass's own counts
@@ -14916,6 +14922,8 @@ if (want("16")) {
   let judgeCallsInFlight = 0;
   /** While above zero, the next judge calls answer 429 at once, one each (SMD-3311 review pass 1). */
   let judge429 = 0;
+  /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
+  let judge400TimedOut = 0;
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
@@ -14950,6 +14958,10 @@ if (want("16")) {
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
+      if (judge400TimedOut > 0) {
+        judge400TimedOut--;
+        return new Response(JSON.stringify({ error: { message: "the tool call timed out" } }), { status: 400 });
+      }
       if (judge429 > 0) {
         judge429--;
         return new Response(JSON.stringify({ error: { message: "too many requests" } }), { status: 429 });
@@ -16363,8 +16375,23 @@ if (want("16")) {
       const run429Outages = lines.slice(outagesBefore).filter((l) => /the provider is not answering \(Judge request to [^)]*429.*goes back to the pool unrecorded/.test(l)).length;
       assert(run429Status === "succeeded" && run429Outages >= 2 && judge429 === 0,
              `one pair meeting a 429 past the pauses twice in a row, its second right after the probe answered, is judged, not failed as its own (${run429Status}, ${run429Outages} outage(s), ${judge429} 429s left)`);
+
+      // A 400 whose words say "timed out" is no outage followerFault reads: under --follow it stays the pair's, probed
+      // and recorded as the pair's timeout, as before SMD-3311 — not the thought failed at once in the 400's words
+      // (review pass 3, cold read: pass 2's gate passed every answered "timed out" to the worker).
+      const probesBefore400 = judgeProbes;
+      created.push(await seed("The tool table names the judge's call limit.", 69, 3, ["tool-table"]));
+      // Twice: a 400 is asked again without logprobs first (server-portable/consolidate.ts), and that one throws.
+      judge400TimedOut = 2;
+      const newer400 = await seed("The tool table names the judge's new call limit.", 69, 0, ["tool-table"]);
+      created.push(newer400);
+      await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(newer400)) ?? ""), 30_000);
+      const row400 = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${newer400}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+      assert(row400?.status === "failed" && /pair\(s\) not judged: pair with [^:]+: timed out after/.test(row400.last_error ?? "") && judgeProbes > probesBefore400,
+             `a 400 whose words say "timed out" stays the pair's under --follow: probed, recorded as the pair's timeout (${row400?.status}: ${row400?.last_error?.slice(0, 120)}; ${judgeProbes - probesBefore400} probe(s))`);
     } finally {
       judge429 = 0;
+      judge400TimedOut = 0;
       judgeLimitConcurrent = false;
       judgeDown = "503";
       judgeOutage.clear();

@@ -414,9 +414,12 @@ export function followClassify(e: unknown): FollowVerdict {
  * A provider error as a claim follower that pauses before an outage reads it
  * — extract-entities.ts's and consolidate.ts's — through followClassify's
  * split (SMD-3311; re-embed's follower has no pauses and reads the verdict
- * itself). `kind` is classifyError's, but a 4xx followClassify reads as the
- * provider's outage, a 408, is transient — paused for, then an outage — not
- * the request's, which stopped every worker. `suspect`: whether an outage it
+ * itself). `kind` is classifyError's, but two readings are transient —
+ * paused for, then an outage: a 4xx followClassify reads as the provider's
+ * outage, a 408, not the request's, which stopped every worker; and an
+ * answer classifyError called the thought's for its words saying "timed out"
+ * where followClassify reads its status as the provider's (a gateway's 408, a
+ * 504, a 429 or a 503 saying so: review passes 1 and 2). `suspect`: whether an outage it
  * begins makes the thought in hand a suspect, recorded failed if it meets
  * the provider again right after a probe answers. followClassify's
  * backpressure — a 429, a 503, the model not served — says nothing about the
@@ -546,7 +549,8 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
  * The typed-decision tier's probe, for consolidate's decide mode (SMD-3115): its /info, which sends no text.
  * `up` when it serves `model`; `missing` when it serves another (the pass key names the decider, so another
  * model's verdicts would be recorded under the wrong name); `out` when it does not answer (no answer, a timeout,
- * a 5xx); `refused` when the address answers as something else (a 4xx, or not ob1-jev/1).
+ * a 408, a 429 or a 5xx: SMD-3311); `refused` when the address answers as something else (any other 4xx, or not
+ * ob1-jev/1).
  */
 export async function probeTier(jev: JevConfig, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   try {
