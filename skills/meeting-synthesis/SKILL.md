@@ -5,7 +5,7 @@ description: |
   unresolved questions, risks, and follow-up artifacts. Use for prompts like
   "summarize this meeting", "extract action items", "what did we decide", or
   "draft the follow-up". Best when you have notes or a transcript, attendee context,
-  and the reason the meeting happened. Optional Open Brain search and capture can
+  and the reason the meeting happened. Optional Daemonic Brain search and capture can
   pull surrounding context and store the final synthesis or decisions.
 author: Nate B. Jones
 version: 1.0.0
@@ -59,7 +59,7 @@ Gather or confirm:
    - If a point sounds important but was not resolved, keep it as unresolved.
 5. Produce the right artifact.
    - Decision log, action list, follow-up draft, or meeting brief depending on the ask.
-6. Optionally use Open Brain.
+6. Optionally use Daemonic Brain.
    - Search for prior related meetings or project notes before starting.
    - Capture key decisions or the final synthesis after the work is complete.
 

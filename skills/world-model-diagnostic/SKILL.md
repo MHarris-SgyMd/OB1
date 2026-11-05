@@ -6,7 +6,7 @@ description: |
   world-model paradigm, identify where the highest-fidelity signal lives, audit
   the boundary layer between facts and interpretation, flag simulated-judgment
   exposure, and leave with a first/second/third build sequence. Works in plain
-  chat and compounds when Open Brain search/capture tools are present.
+  chat and compounds when Daemonic Brain search/capture tools are present.
 author: Jonathan Edwards
 version: 1.0.0
 ---
@@ -31,7 +31,7 @@ This diagnostic exists to answer five questions:
 
 Run in one of two modes:
 
-- `OB1-connected mode`: if Open Brain search/capture tools are available, use
+- `Brain-connected mode`: if Daemonic Brain search/capture tools are available, use
   them to look for prior context and persist the intake, boundary audit, and
   final assessment.
 - `Direct-chat mode`: if those tools are missing, run the exact same diagnostic
@@ -41,8 +41,8 @@ Run in one of two modes:
 
 Before starting, identify whether the current client exposes:
 
-- a base Open Brain search tool, usually `search_thoughts`
-- a base Open Brain capture tool, usually `capture_thought`
+- a base Daemonic Brain search tool, usually `search_thoughts`
+- a base Daemonic Brain capture tool, usually `capture_thought`
 
 Do not assume exact prefixes. Use the tool names visible in the client.
 
@@ -134,7 +134,7 @@ Evaluate the company against these principles without scoring them numerically:
    - paradigm classification
    - boundary audit on the highest-value information flows
    - final assessment with fact-vs-inference labels
-3. If capture is available, state that the session will be persisted into Open Brain.
+3. If capture is available, state that the session will be persisted into Daemonic Brain.
 
 ### Phase 2: Intake
 
