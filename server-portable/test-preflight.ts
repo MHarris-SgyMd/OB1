@@ -4512,6 +4512,12 @@ else {
       assert(/!\s+sleep\s+.*budget: statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 1 pass\(es\) held by a statement past its timeout/.test(row(heldOut.out, "sleep"))
           && /→ extract held until a restart: a statement passed its statement_timeout \(300 s\), which its log names .* raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env .*then recreate the coordinator/.test(fix(heldOut.out, "sleep")) && !/Its last pass failed/.test(fix(heldOut.out, "sleep")),
         `a pass a statement holds until a restart: the row counts it and warns, its fix the setting and the restart (${row(heldOut.out, "sleep")} | ${fix(heldOut.out, "sleep")})`);
+      // …and with no judge hold beside it, its fix says the other passes run on meanwhile (SMD-3306 PR 6b-1's review
+      // pass 8, mutant: the judge hold's clause always a full stop).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", slept: { from: await at(400), to: null }, budget: noClock, holds: stmtHolds }), 20);
+      const stmtAloneFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/extract held until a restart: a statement passed its statement_timeout \(300 s\), which its log names [^\n]*then recreate the coordinator — [^\n]*; the other passes run on meanwhile\./.test(stmtAloneFix),
+        `a statement hold with no judge hold beside it says the other passes run on meanwhile (${stmtAloneFix})`);
       // Ended so, it is told to raise the setting before it starts again.
       await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(400), to: await at(60) }, budget: noClock, holds: stmtHolds }), 20);
       const heldDown = fix((await run(LOG_ON)).out, "sleep");

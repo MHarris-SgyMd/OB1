@@ -247,9 +247,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   try {
     const up = await probeChat(at, "stub-model", 2000);
     ok(up.state === "up" && sent.model === "stub-model" && sent.max_tokens === 1 && sent.messages?.[0]?.content === PROBE_PROMPT, `a 200 is up; the probe is one token of the fixed prompt to the model (${JSON.stringify(sent).slice(0, 120)})`);
+    // Out unanswered only when no answer came within the limit or its body never arrived (SMD-3306 PR 6b-1's review
+    // pass 8): an answer that refuses or errs is out, answered.
     answer = () => new Response('{"error":{"message":"overloaded"}}', { status: 503 });
     const out = await probeChat(at, "m", 2000);
-    ok(out.state === "out" && out.why.startsWith("503 "), `a 503 is out (${JSON.stringify(out)})`);
+    ok(out.state === "out" && out.why.startsWith("503 ") && out.unanswered === undefined, `a 503 is out, answered (${JSON.stringify(out)})`);
     answer = () => new Response('{"error":{"message":"model \\"m\\" not found, try pulling it first"}}', { status: 404 });
     ok((await probeChat(at, "m", 2000)).state === "missing", "a 404 naming the model is missing");
     answer = () => new Response("404 page not found", { status: 404 });
@@ -260,16 +262,16 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     ok((await probeChat(at, "m", 2000)).state === "up", "another 4xx is up: the provider answered, and the next real call judges it");
     answer = () => new Response(new ReadableStream({ start() {} }), { status: 200 });
     const hung = await probeChat({ ...at }, "m", 300);
-    ok(isOut(hung), `a provider that does not answer within the deadline is out (${JSON.stringify(hung)})`);
+    ok(isOut(hung) && hung.unanswered === true, `a provider that does not answer within the deadline is out, unanswered (${JSON.stringify(hung)})`);
     // A 200 whose body starts and then stalls: hung mid-answer, not up (review pass 2).
     answer = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"choices":')); } }), { status: 200 });
     const stalled = await probeChat({ ...at }, "m", 500);
-    ok(stalled.state === "out", `a 200 whose answer never arrives is out, not up (${JSON.stringify(stalled)})`);
+    ok(stalled.state === "out" && stalled.unanswered === true, `a 200 whose answer never arrives is out, unanswered, not up (${JSON.stringify(stalled)})`);
   } finally {
     stub.stop(true);
   }
   const gone = await probeChat({ base: `http://127.0.0.1:${stub.port}/v1`, headers: {} }, "m", 2000);
-  ok(gone.state === "out", `nothing listening is out (${JSON.stringify(gone).slice(0, 100)})`);
+  ok(gone.state === "out" && gone.unanswered === undefined, `nothing listening is out, refused, not unanswered (${JSON.stringify(gone).slice(0, 100)})`);
 
   // probeUntil on the schedule, without the wall clock.
   const slept: number[] = [];
@@ -404,7 +406,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     const t0 = Date.now();
     setTimeout(() => stop.abort(), 100);
     const stopped = await probeChat({ base: `http://127.0.0.1:${hang.port}/v1`, headers: {} }, "m", 10_000, stop.signal);
-    ok(stopped.state === "out" && Date.now() - t0 < 2000, `a stop ends a probe in flight at once, as out (${JSON.stringify(stopped)} after ${Date.now() - t0} ms)`);
+    ok(stopped.state === "out" && stopped.unanswered === undefined && Date.now() - t0 < 2000, `a stop ends a probe in flight at once, as out, not unanswered (${JSON.stringify(stopped)} after ${Date.now() - t0} ms)`);
   } finally {
     hang.stop(true);
   }
@@ -441,7 +443,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     ok((await modelListed(at, "absent", "stub-meta", 2000)) === "unknown", "a list of another shape is unknown");
     listing = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"error":')); } }), { status: 404 });
     const unread = await probeChat(at, "m", 500);
-    ok(unread.state === "out", `a 404 whose body never arrives is out, not refused (${JSON.stringify(unread)})`);
+    ok(unread.state === "out" && unread.unanswered === true, `a 404 whose body never arrives is out, unanswered, not refused (${JSON.stringify(unread)})`);
   } finally {
     lister.stop(true);
   }

@@ -124,21 +124,22 @@ if (!URL_) {
  * timers instead. The rest's other sections wait on the CPU, so its time
  * moves most with the runner's speed: its slow runs are its median, its fast
  * run ~50 s under. SMD-3306 PR 6b-1's sweep cases took [10h] from ~96 s to
- * ~265 s projected on CI, and SMD-3733 took [38] back to ~262 s, so sleep
- * takes [5d] and [10g] beside [38], long [9f] and [17], extract [10e] and
- * [37b] beside [10f], [10h], [39] and [41], and the rest [10] and [37]: on
- * main 46da8d31's CI section times, sleep ~300 s, long ~295, extract ~289 and
- * the rest ~295, against ~402 for extract with main's cells. A cell's job runs
- * ~15-25 s past its live step, so a section added to a cell adds to the run's
- * length once that cell's job is the run's longest.
+ * ~300-320 s projected on CI, and SMD-3733 took [38] back to ~262 s, so sleep
+ * takes [5d], [10g] and [37b] beside [38], long [9f], [10e], [17] and [39],
+ * extract keeps [10f] beside [10h], and the rest takes [10] and [41]: on main
+ * 46da8d31's CI section times, sleep ~306 s, long ~308 and the rest ~306,
+ * extract [10h]'s own, the floor while it is one section, against ~440-460 for
+ * extract with main's cells. A cell's job runs ~15-25 s past its live step, so
+ * a section added to a cell adds to the run's length once that cell's job is
+ * the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "38"],
-  long: ["9", "9f", "17", "38r", "38b"],
-  extract: ["10e", "10f", "10h", "37b", "39", "41"],
+  sleep: ["5d", "10g", "37b", "38"],
+  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
+  extract: ["10f", "10h"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -7575,6 +7576,37 @@ if (want("10h")) {
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([retryFarT, retryPooledT], "TEXT")}::uuid[])`;
     assert(retryFar.code === 0 && retryFarClaims === "succeeded,pending",
       `--retry-failed puts a failed claim dated ahead at the pool's head, so --limit 1 asks it before a capture pooled before the retry (exit ${retryFar.code}, claims ${retryFarClaims}: ${tally(retryFar)})`);
+    // …a second before its own pool's first claim pending, not another pool's: a failure dated an hour back keeps its
+    // place ahead of it, another pool's claim pending two hours back read by no one, so --retry-failed --limit 1 asks
+    // the older failure (SMD-3306 PR 6b-1's review pass 8, mutant: the read without its pool dated it before the older
+    // failure).
+    const [retryOwnP, retryOwnF] = [await seed("Retry note 7: release notes of an older failure, dated an hour back."), await seed("Retry note 8: release notes of a thought failed as its own while set back ahead.")];
+    await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = ${"an earlier failure"}, enqueued_at = now() - interval '1 hour' WHERE thought_id = ${retryOwnP}::uuid AND work_type = ${POOL}`;
+    await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = ${"an earlier failure"}, enqueued_at = now() + interval '30 days' WHERE thought_id = ${retryOwnF}::uuid AND work_type = ${POOL}`;
+    await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, enqueued_at) VALUES (${retryOwnP}::uuid, ${"case:another-pool"}, 'pending', now() - interval '2 hours')`;
+    let retryOwn: SweepRun | null = null;
+    try {
+      retryOwn = await sweep({ retryFailed: true, limit: 1 });
+    } finally {
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${"case:another-pool"}`;
+    }
+    const retryOwnClaims = [(await claimOf(retryOwnP))?.status, (await claimOf(retryOwnF))?.status].join(",");
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([retryOwnP, retryOwnF], "TEXT")}::uuid[])`;
+    assert(retryOwn?.code === 0 && retryOwnClaims === "succeeded,pending",
+      `--retry-failed dates a failure set back ahead by its own pool's claims pending, another pool's older one read by no one, an older failure asked first (exit ${retryOwn?.code}, claims ${retryOwnClaims}): ${retryOwn ? tally(retryOwn) : ""}`);
+    // …and the pool's standing hang marks cleared with it, a fresh start with the provider: a thought set back marked,
+    // not failed, is unmarked by the retry, asked or not (review pass 8, cold read: a failure having replaced each mark
+    // it met, the retry cleared none).
+    const retryMarkFailedT = await seed("Retry note 5: release notes of a thought failed earlier.");
+    const retryMarkedT = await seed("Retry note 6: release notes of a thought set back marked hung.");
+    await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = ${"an earlier failure"}, enqueued_at = now() - interval '1 hour' WHERE thought_id = ${retryMarkFailedT}::uuid AND work_type = ${POOL}`;
+    await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`}, enqueued_at = now() + interval '30 days' WHERE thought_id = ${retryMarkedT}::uuid AND work_type = ${POOL}`;
+    const retryMark = await sweep({ retryFailed: true, limit: 1 });
+    const retryMarked = await claimOf(retryMarkedT);
+    const retryMarkClaims = [(await claimOf(retryMarkFailedT))?.status, retryMarked?.status].join(",");
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([retryMarkFailedT, retryMarkedT], "TEXT")}::uuid[])`;
+    assert(retryMark.code === 0 && retryMarkClaims === "succeeded,pending" && retryMarked?.last_error === null && /, 1 hang mark\(s\) cleared/.test(retryMark.stdout),
+      `--retry-failed clears the pool's standing hang marks, the marked thought unasked (exit ${retryMark.code}, claims ${retryMarkClaims}, its mark ${retryMarked?.last_error}): ${retryMark.stdout.trim().slice(0, 200)}`);
     // A thought in the pool whose subject is current by the time it is taken (the pass found it at its text after the
     // edit pooled it) is finished unasked, and a dry run counts it so.
     await sql`SELECT requeue_thought_work(${POOL}, ${release}::uuid)`;
@@ -12433,6 +12465,38 @@ if (want("10h")) {
         await drop([liftReadA, liftReadB]);
         assert(liftReadLocked && liftReadRun?.code === 1 && cutEnd(liftReadRun, /The sweep stops here: [0-9a-f-]{36}'s read passed /, 1),
           `a --judge-checked run whose read a session's statement_timeout cuts names what it left of its limit once (exit ${liftReadRun?.code ?? "still running at 20 s"}, ${liftReadGates} gate(s); claims ${liftReadClaims.join(",")}): ${liftReadRun?.stderr.trim().slice(-220)}`);
+        // …and a read's lost poll whose hand-back loses the database names what it left once, the thought it was
+        // reading not counted again (SMD-3306 PR 6b-1's review pass 8, mutant: counted again whatever the read had
+        // counted).
+        const [readLostA, readLostB] = await seedAll(["Lift read lost note A: in a lift run, the model naming nothing for it.", "Lift read lost note B: sweep-pass-good work, its read past the session's statement_timeout, the database lost at its hand-back."]);
+        await sql`UPDATE thought_work_claims SET enqueued_at = enqueued_at + interval '1 second' WHERE work_type = ${POOL} AND thought_id = ${readLostB}::uuid`;
+        const undoReadLost = await caseTrigger("lift_lose_read_hand_back", "BEFORE UPDATE", "thought_work_claims",
+          `NEW.thought_id = '${readLostB}'::uuid AND OLD.status = 'claimed' AND NEW.status = 'pending'`, lose("the read hand-back"));
+        const readLostHolder = new SQL({ url: URL_!, max: 1 });
+        const readLostTx = await readLostHolder.reserve();
+        let readLostGates = 0, readLostLocked = false;
+        let readLostRun: SweepRun | null = null;
+        try {
+          readLostRun = await orHung(sweep({
+            judgeChecked: true, limit: 2, session: BUDGET_SESSION, signal: backstop(),
+            admit: async () => {
+              if (++readLostGates === 3) {
+                await readLostTx`BEGIN`;
+                await readLostTx`LOCK TABLE thought_facets IN ACCESS EXCLUSIVE MODE`;
+                readLostLocked = true;
+              }
+            },
+          }), 20_000);
+        } finally {
+          await readLostTx`ROLLBACK`.catch(() => {});
+          readLostTx.release();
+          await readLostHolder.close({ timeout: 5 });
+          await undoReadLost();
+        }
+        const readLostClaims = await statusOf([readLostA, readLostB]);
+        await drop([readLostA, readLostB]);
+        assert(readLostLocked && readLostRun?.code === 1 && readLostRun.stderr.includes(dbEnd("the read hand-back", 1)),
+          `a --judge-checked run whose read's lost poll loses the database at its hand-back names what it left once (exit ${readLostRun?.code ?? "still running at 20 s"}, ${readLostGates} gate(s); claims ${readLostClaims.join(",")}): ${readLostRun?.stderr.trim().slice(-260)}`);
       }
 
       // …and the row's wait unsaid as the run ends when its write of the wait throws (PR 6b-1's review pass 2, mutant: the
@@ -13482,6 +13546,60 @@ if (want("10h")) {
               && !/hung the provider again/.test(editMarkRun.stderr) && waited.filter((w) => w === "providerWait:true").length === 1,
             `an edit clears a thought's hang mark: its next hang begins an outage, answered after it (exit ${editMarkRun?.code ?? "hung"}; mark after the edit ${editMarkLeft}; claim ${editMarkClaim?.status} ${editMarkClaim?.last_error?.slice(0, 80)}; words ${waited.join(",")})`);
           await drop([editMarkT]);
+          // …and so it does of a hang the run itself saw, its in-memory suspect too: hung, edited in its wait, the
+          // thought's next hang in the run, within the window, is marked again, not failed, and it is answered after
+          // (review pass 8, the consumer's prototype: the edit cleared the mark, and the run's ProviderOutage suspect
+          // failed it).
+          const [editHangT] = await seedAll(["Edited hang alone: sweep-pass-good work, hung, edited in its wait, hung again, then answered."]);
+          let editHangEdited = false;
+          const editHangRow = {
+            ...waitRow,
+            providerWait: async (on: boolean) => {
+              waited.push(`providerWait:${on}`);
+              if (on && !editHangEdited) {
+                editHangEdited = true;
+                await sql`SELECT update_thought(${editHangT}::uuid, ${"Edited hang alone: sweep-pass-good work, hung, edited in its wait, hung again, then answered, since."})`;
+              }
+            },
+          } as unknown as PassStamper;
+          judgeScript.splice(0, judgeScript.length, "slow", "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
+          const editHangRun = await aloneFollow(aloneDone([editHangT]), { timeout: 1, stamper: editHangRow });
+          const editHangClaim = await claimOf(editHangT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(editHangRun?.code === 0 && editHangEdited && editHangClaim?.status === "succeeded" && !/erred on it again|hung the provider again/.test(editHangRun.stderr)
+              && waited.filter((w) => w === "providerWait:true").length === 2,
+            `a thought hung, edited in its wait, hangs again in the run within the window: marked again, not failed, answered after (exit ${editHangRun?.code ?? "hung"}; edited ${editHangEdited}; claim ${editHangClaim?.status} ${editHangClaim?.last_error?.slice(0, 80)}; words ${waited.join(",")})`);
+          await drop([editHangT]);
+          // …and an edit as its call hangs again takes its claim from the run: the verdict's failure not released, its
+          // line unsaid, the claim counted no longer this run's, the thought answered after at its new text (review
+          // pass 8, run-it: the run said it failed as its own, the edit's requeue having it pending).
+          const [lostVerdictT] = await seedAll(["Verdict lost alone: sweep-pass-good work, marked hung, edited as its call hangs again, then answered."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${lostVerdictT}::uuid AND work_type = ${POOL}`;
+          let lostVerdictEdited = false;
+          const lostVerdictOwn = onOwn;
+          onOwn = async (t) => {
+            await lostVerdictOwn?.(t);
+            if (!t.includes("Verdict lost alone:") || lostVerdictEdited) return;
+            lostVerdictEdited = true;
+            await sql`SELECT update_thought(${lostVerdictT}::uuid, ${"Verdict lost alone: sweep-pass-good work, marked hung, edited as its call hangs again, then answered, since."})`;
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          let lostVerdictRun: SweepRun | null = null;
+          try {
+            lostVerdictRun = await aloneFollow(aloneDone([lostVerdictT]), { timeout: 1 });
+          } finally {
+            onOwn = lostVerdictOwn;
+          }
+          const lostVerdictClaim = await claimOf(lostVerdictT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(lostVerdictRun?.code === 0 && lostVerdictEdited && lostVerdictClaim?.status === "succeeded" && lostVerdictClaim.last_error === null
+              && !/hung the provider again/.test(lostVerdictRun.stderr) && /1 claim\(s\) no longer this run's when released/.test(lostVerdictRun.stdout),
+            `an edit as a marked thought's call hangs again takes its claim: its failure unsaid, the claim lost, the thought answered after (exit ${lostVerdictRun?.code ?? "hung"}; edited ${lostVerdictEdited}; claim ${lostVerdictClaim?.status} ${lostVerdictClaim?.last_error?.slice(0, 60)}): ${lostVerdictRun?.stdout.trim().slice(-200)}`);
+          await drop([lostVerdictT]);
           // …and its answer clears it whatever becomes of its write: here the pool named moves as the model is asked,
           // no write made, the claim handed back as the run ends, unmarked (review pass 7, the maintainer's choice: an
           // answer, an edit or --retry-failed clears it).
@@ -13566,17 +13684,81 @@ if (want("10h")) {
           assert(abortLimitRun?.code === 1 && abortLimitAborts === 2 && abortLimitClaim?.status === "failed" && /1 claim[(]s[)] failed: fix the cause/.test(abortLimitRun.stderr),
             `a following run at its limit whose thought's second abort, the provider out after it, fails it as its own ends there, 1 (exit ${abortLimitRun?.code ?? "hung"}; ${abortLimitAborts} abort(s); claim ${abortLimitClaim?.status}): ${abortLimitRun?.stderr.trim().slice(-200)}`);
           await drop([abortLimitT]);
+          // …and only a one-token call unanswered after the abort judges a hang: refused or erring, a restart or a 5xx,
+          // the provider is out and waited out, the thought unmarked; unanswered, its answer's body never arriving, the
+          // thought is marked (review pass 8, run-it: a restart's refusals and a loading model's 500s marked innocents,
+          // a second such abort failing them).
+          const [abortOutT] = await seedAll(["Abort out alone: sweep-pass-good work, aborted in hand twice, the provider erring after one, unanswered after the other."]);
+          let abortOutIn: InHandAbort = () => -1;
+          const abortOutAborts: number[] = [];
+          const abortOutMarks: (string | null)[] = [];
+          const abortOutOwn = onOwn;
+          onOwn = async (t) => {
+            await abortOutOwn?.(t);
+            if (!t.includes("Abort out alone:")) return;
+            abortOutMarks.push(((await sql`SELECT last_error FROM thought_work_claims WHERE thought_id = ${abortOutT}::uuid AND work_type = ${POOL}`)[0] as { last_error: string | null }).last_error);
+            if (abortOutAborts.length < 2) abortOutAborts.push(abortOutIn(0));
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "500", "up", "503stall", "up");
+          let abortOutRun: SweepRun | null = null;
+          try {
+            abortOutRun = await aloneFollow(aloneDone([abortOutT]), { timeout: 1, onPass: (_st, a) => { abortOutIn = a; } });
+          } finally {
+            onOwn = abortOutOwn;
+          }
+          const abortOutClaim = await claimOf(abortOutT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          const abortOutWaits = (abortOutRun?.stderr ?? "").split("\n").filter((l) => /^ {2}the provider is not answering \(/.test(l))
+            .map((l) => (/ — the call in hand aborted by its caller held it past a limit, its thought marked hung, 30 days ahead; /.test(l) ? "hung"
+              : / — the call in hand aborted by its caller; /.test(l) ? "abort" : "other"));
+          assert(abortOutRun?.code === 0 && abortOutAborts.join(",") === "1,1" && abortOutWaits.join(",") === "abort,hung" && abortOutMarks[1] === null
+              && (abortOutMarks[2] ?? "").startsWith(`${HUNG_MARK}the call in hand was aborted by the caller, and a one-token call found the provider out (503, and the answer did not arrive)`)
+              && abortOutClaim?.status === "succeeded" && abortOutClaim.last_error === null,
+            `the one-token call after an abort judges a hang unanswered alone: a 500 marks nothing, an answer that never arrives marks (exit ${abortOutRun?.code ?? "hung"}; aborts ${abortOutAborts.join(",")}; waits ${abortOutWaits.join(",")}; marks ${abortOutMarks.map((m) => m?.slice(0, 60) ?? "none").join(" | ")}; claim ${abortOutClaim?.status} ${abortOutClaim?.last_error?.slice(0, 60)})`);
+          await drop([abortOutT]);
+          // …and a marked thought's answer clears its mark with the call no longer in hand: sleep's N12 aborts nothing
+          // during the clear (review pass 8, cold read: in hand, an abort there cut nothing and was counted).
+          const [clearT] = await seedAll(["Answer clear alone: sweep-pass-good work, marked hung, answered, its mark's clear held a second."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${clearT}::uuid AND work_type = ${POOL}`;
+          const undoClear = await caseTrigger("alone_case_hold_clear", "BEFORE UPDATE", "thought_work_claims",
+            `NEW.thought_id = '${clearT}'::uuid AND OLD.status = 'claimed' AND NEW.status = 'claimed' AND OLD.last_error IS NOT NULL AND NEW.last_error IS NULL`,
+            "PERFORM pg_sleep(1); RETURN NEW;");
+          let clearIn: InHandAbort = () => -1;
+          let clearAborted = -1, clearSlept = false;
+          judgeScript.splice(0, judgeScript.length, "answer");
+          let clearRun: SweepRun | null = null;
+          try {
+            const watching = (async () => {
+              clearSlept = await pollUntil(async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND query LIKE '%starts_with(last_error%'`)[0] as { n: number }).n > 0, 15_000);
+              if (clearSlept) clearAborted = clearIn(0);
+            })();
+            clearRun = await aloneFollow(aloneDone([clearT]), { timeout: 1, onPass: (_st, a) => { clearIn = a; } });
+            await watching;
+          } finally {
+            await undoClear();
+          }
+          const clearClaim = await claimOf(clearT);
+          judgeScript.length = 0;
+          assert(clearRun?.code === 0 && clearSlept && clearAborted === 0 && clearClaim?.status === "succeeded" && clearClaim.last_error === null,
+            `a marked thought's answer clears its mark with no call in hand, sleep's N12 aborting nothing then (exit ${clearRun?.code ?? "hung"}; slept ${clearSlept}; ${clearAborted} call(s) aborted; claim ${clearClaim?.status} ${clearClaim?.last_error?.slice(0, 60)})`);
+          await drop([clearT]);
           // A thought set back 30 days ahead and aborted in hand keeps its date, where its set-back dated it now and it
-          // led again (review pass 7, cold read: sleep's N12 aborting the sweep's calls often), read at the gate after
-          // the abort.
+          // led again (review pass 7, cold read: sleep's N12 aborting the sweep's calls often): dated now while the
+          // probe after the abort runs, read at the gate, so its claim is work in its period, and put back at its date
+          // once that probe answers, read at its next ask (review pass 8, the consumer's prototype: dated ahead through
+          // the probe, a forward drain ended the period under it).
           const [abortFarT] = await seedAll(["Abort far alone: sweep-pass-good work, set back ahead, then aborted in hand."]);
           await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '30 days' WHERE thought_id = ${abortFarT}::uuid AND work_type = ${POOL}`;
           let abortFarIn: InHandAbort = () => -1;
-          let abortFarAborted = -1, abortFarAhead = -1;
+          let abortFarAborted = -1, abortFarAhead = -1, abortFarAtGate = Number.NaN;
           const abortFarOwn = onOwn;
           onOwn = async (t) => {
             await abortFarOwn?.(t);
-            if (t.includes("Abort far alone:") && abortFarAborted === -1) abortFarAborted = abortFarIn(0);
+            if (!t.includes("Abort far alone:")) return;
+            if (abortFarAborted === -1) abortFarAborted = abortFarIn(0);
+            else if (abortFarAhead === -1) abortFarAhead = ((await sql`SELECT EXTRACT(EPOCH FROM enqueued_at - now())::float8 AS s FROM thought_work_claims WHERE thought_id = ${abortFarT}::uuid AND work_type = ${POOL}`)[0] as { s: number }).s;
           };
           judgeScript.splice(0, judgeScript.length, "slow", "answer");
           const abortFarFrom = aloneAsks.length;
@@ -13586,7 +13768,7 @@ if (want("10h")) {
               timeout: 1,
               onPass: (_st, a) => { abortFarIn = a; },
               admit: async () => {
-                if (abortFarAborted === 1 && abortFarAhead === -1) abortFarAhead = ((await sql`SELECT EXTRACT(EPOCH FROM enqueued_at - now())::float8 AS s FROM thought_work_claims WHERE thought_id = ${abortFarT}::uuid AND work_type = ${POOL}`)[0] as { s: number }).s;
+                if (abortFarAborted === 1 && Number.isNaN(abortFarAtGate)) abortFarAtGate = ((await sql`SELECT EXTRACT(EPOCH FROM enqueued_at - now())::float8 AS s FROM thought_work_claims WHERE thought_id = ${abortFarT}::uuid AND work_type = ${POOL}`)[0] as { s: number }).s;
               },
             });
           } finally {
@@ -13595,9 +13777,63 @@ if (want("10h")) {
           const abortFarAsks = aloneAsks.slice(abortFarFrom).join(",");
           const abortFarClaim = await claimOf(abortFarT);
           judgeScript.length = 0;
-          assert(abortFarRun?.code === 0 && abortFarAborted === 1 && abortFarAhead > 29 * 86_400 && abortFarAsks === "AF,AF" && abortFarClaim?.status === "succeeded",
-            `a thought set back 30 days ahead and aborted in hand keeps its date (exit ${abortFarRun?.code ?? "hung"}; aborted ${abortFarAborted}; ${Math.round(abortFarAhead)} s ahead after the abort; asks ${abortFarAsks}; claim ${abortFarClaim?.status})`);
+          assert(abortFarRun?.code === 0 && abortFarAborted === 1 && abortFarAtGate <= 1 && abortFarAhead > 29 * 86_400 && abortFarAsks === "AF,AF" && abortFarClaim?.status === "succeeded",
+            `a thought set back 30 days ahead and aborted in hand is dated now through the probe after it and keeps its date once it answers (exit ${abortFarRun?.code ?? "hung"}; aborted ${abortFarAborted}; ${Math.round(abortFarAtGate)} s ahead at the gate, ${Math.round(abortFarAhead)} s at its next ask; asks ${abortFarAsks}; claim ${abortFarClaim?.status})`);
           await drop([abortFarT]);
+          // …and a stop cutting that probe puts it back at its date too (review pass 8, the consumer's prototype).
+          const [abortStopT] = await seedAll(["Abort far stop alone: sweep-pass-good work, set back ahead, aborted in hand, a stop cutting the probe after."]);
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '30 days' WHERE thought_id = ${abortStopT}::uuid AND work_type = ${POOL}`;
+          let abortStopIn: InHandAbort = () => -1;
+          let abortStopAborted = -1;
+          const abortStopOwn = onOwn;
+          onOwn = async (t) => {
+            await abortStopOwn?.(t);
+            if (t.includes("Abort far stop alone:") && abortStopAborted === -1) abortStopAborted = abortStopIn(0);
+          };
+          judgeScript.splice(0, judgeScript.length, "slow");
+          probeScript.splice(0, probeScript.length, "up", "stopping");
+          const abortStopStop = new AbortController();
+          probeStopper = abortStopStop;
+          let abortStopRun: SweepRun | null = null;
+          try {
+            abortStopRun = await orHung(sweep({ follow: 1, timeout: 1, stamper: waitRow, onPass: (_st, a) => { abortStopIn = a; }, signal: AbortSignal.any([abortStopStop.signal, backstop()]) }), 35_000);
+          } finally {
+            onOwn = abortStopOwn;
+            probeStopper = null;
+          }
+          const [abortStopClaim] = (await sql`SELECT status, EXTRACT(EPOCH FROM enqueued_at - now())::float8 AS ahead FROM thought_work_claims WHERE thought_id = ${abortStopT}::uuid AND work_type = ${POOL}`) as { status: string; ahead: number }[];
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(abortStopRun?.code === 0 && abortStopAborted === 1 && abortStopStop.signal.aborted && abortStopClaim?.status === "pending" && abortStopClaim.ahead > 29 * 86_400,
+            `a stop cutting the probe after an abort puts its thought back at the date it had (exit ${abortStopRun?.code ?? "hung"}; aborted ${abortStopAborted}; claim ${abortStopClaim?.status}, ${Math.round(abortStopClaim?.ahead ?? 0)} s ahead): ${abortStopRun?.stderr.trim().slice(-200)}`);
+          await drop([abortStopT]);
+          // …and so does a probe the provider holds back, a 503, no hang: put back at its date before the wait, read at
+          // its next ask (review pass 8, the consumer's prototype).
+          const [abortHeldT] = await seedAll(["Abort far held alone: sweep-pass-good work, set back ahead, aborted in hand, the probe after held back."]);
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '30 days' WHERE thought_id = ${abortHeldT}::uuid AND work_type = ${POOL}`;
+          let abortHeldIn: InHandAbort = () => -1;
+          let abortHeldAborted = -1, abortHeldAhead = -1;
+          const abortHeldOwn = onOwn;
+          onOwn = async (t) => {
+            await abortHeldOwn?.(t);
+            if (!t.includes("Abort far held alone:")) return;
+            if (abortHeldAborted === -1) abortHeldAborted = abortHeldIn(0);
+            else if (abortHeldAhead === -1) abortHeldAhead = ((await sql`SELECT EXTRACT(EPOCH FROM enqueued_at - now())::float8 AS s FROM thought_work_claims WHERE thought_id = ${abortHeldT}::uuid AND work_type = ${POOL}`)[0] as { s: number }).s;
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "503", "up");
+          let abortHeldRun: SweepRun | null = null;
+          try {
+            abortHeldRun = await aloneFollow(aloneDone([abortHeldT]), { timeout: 1, onPass: (_st, a) => { abortHeldIn = a; } });
+          } finally {
+            onOwn = abortHeldOwn;
+          }
+          const abortHeldClaim = await claimOf(abortHeldT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(abortHeldRun?.code === 0 && abortHeldAborted === 1 && abortHeldAhead > 29 * 86_400 && abortHeldClaim?.status === "succeeded" && abortHeldClaim.last_error === null,
+            `a probe after an abort held back puts its thought back at the date it had, no hang (exit ${abortHeldRun?.code ?? "hung"}; aborted ${abortHeldAborted}; ${Math.round(abortHeldAhead)} s ahead at its next ask; claim ${abortHeldClaim?.status} ${abortHeldClaim?.last_error?.slice(0, 60)})`);
+          await drop([abortHeldT]);
           // …and the probe past the gate is there though the aborted thought's set-back loses its poll to a scheduler's
           // statement_timeout, its claim's row held past the budget (review pass 7, cold read: set after the set-back,
           // it was lost with it, the next thought asked into the abandoned call).
@@ -13639,6 +13875,48 @@ if (want("10h")) {
               && /'s put-back, set-back or claim read passed the scheduler's statement_timeout/.test(abortLostRun.stderr),
             `a call aborted in hand whose set-back loses its poll is still followed by a probe past the gate (exit ${abortLostRun?.code ?? "hung"}; aborted ${abortLostAborted}; ${abortLostProbes} probe(s) before the next ask; asks ${abortLostAsks}; claims ${abortLostClaims.join(",")}): ${abortLostRun?.stderr.trim().slice(0, 300)}`);
           await drop([abortLostT, abortLostNextT]);
+          // …and its hang, the provider out past that probe, is unjudged: the set-back never landed, the claim handed
+          // back by the lost poll, so a marked thought is neither failed nor counted (review pass 8, cold read and
+          // claims audit: judged, a marked thought was failed with its set-back's count at −1).
+          const [lostHangT] = await seedAll(["Abort lost hang alone: sweep-pass-good work, marked hung, aborted in hand, its claim's row held past the budget, the provider out after."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${lostHangT}::uuid AND work_type = ${POOL}`;
+          const lostHangHolder = new SQL({ url: URL_!, max: 1 });
+          let lostHangHeld: Promise<void> | null = null;
+          let lostHangIn: InHandAbort = () => -1;
+          let lostHangAborted = -1;
+          const lostHangOwn = onOwn;
+          onOwn = async (t) => {
+            await lostHangOwn?.(t);
+            if (t.includes("Abort lost hang alone:") && lostHangAborted === -1) {
+              const c = await lostHangHolder.reserve();
+              await c`BEGIN`;
+              await c`SELECT 1 FROM thought_work_claims WHERE thought_id = ${lostHangT}::uuid AND work_type = ${POOL} FOR UPDATE`;
+              lostHangHeld = (async () => {
+                await Bun.sleep(BUDGET_MS + 1000);
+                await c`COMMIT`;
+                c.release();
+              })();
+              lostHangAborted = lostHangIn(0);
+            }
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          let lostHangRun: SweepRun | null = null;
+          try {
+            lostHangRun = await aloneFollow(aloneDone([lostHangT]), { timeout: 1, session: BUDGET_SESSION, onPass: (_st, a) => { lostHangIn = a; } });
+          } finally {
+            onOwn = lostHangOwn;
+            await (lostHangHeld as Promise<void> | null)?.catch(() => {});
+            await lostHangHolder.close({ timeout: 5 });
+          }
+          const lostHangClaim = await claimOf(lostHangT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(lostHangRun?.code === 0 && lostHangAborted === 1 && lostHangClaim?.status === "succeeded" && !/hung the provider again/.test(lostHangRun.stderr)
+              && /'s put-back, set-back or claim read passed the scheduler's statement_timeout/.test(lostHangRun.stderr)
+              && /^ {2}the provider is not answering \([^\n]* — the call in hand aborted by its caller; /m.test(lostHangRun.stderr),
+            `an abort whose set-back loses its poll, the provider out after it, judges no hang of its marked thought (exit ${lostHangRun?.code ?? "hung"}; aborted ${lostHangAborted}; claim ${lostHangClaim?.status} ${lostHangClaim?.last_error?.slice(0, 80)}): ${lostHangRun?.stderr.trim().slice(0, 300)}`);
+          await drop([lostHangT]);
           // …and its probe, answered, ends the provider's streak as the probe after a timeout does: a poison claimed
           // next opens a streak of its own, its suspect, put back first (review pass 7, cold read: it took the streak
           // the aborted thought's 500 opened, one pause fewer, no suspect made, and was set back 30 days ahead).
@@ -13677,6 +13955,325 @@ if (want("10h")) {
           assert(tailRun?.code === 1 && behind && /The provider is not answering after 3 pauses/.test(tailRun.stderr),
             `a run by hand ending on the provider puts its thought behind every set-back (exit ${tailRun?.code ?? "hung"}; behind ${behind}): ${tailRun?.stderr.trim().slice(-200)}`);
           await drop([tailSetT, tailT]);
+          // The one-token call after an abort answered, refusing or erring, judges no hang and is said as it answered:
+          // a 500 quoting a 503 the provider out, a 429 holding calls back, a 404 the judge model missing, the thought
+          // unmarked each time (review pass 8, mutant: the held-back test unanchored read the 500 as held back, and
+          // without its 429 read a 429 as the provider out; run-it: a 500 marked the thought).
+          for (const word of ["500", "429", "404"] as const) {
+            const [abortWordT] = await seedAll([`Abort word alone ${word}: sweep-pass-good work, its call aborted in hand, the one-token call after it answered ${word}.`]);
+            let abortWordIn: InHandAbort = () => -1;
+            let abortWordAborted = -1;
+            let abortWordMark: string | null = "unread";
+            const abortWordOwn: typeof onOwn = onOwn;
+            onOwn = async (t) => {
+              await abortWordOwn?.(t);
+              if (!t.includes(`Abort word alone ${word}:`)) return;
+              if (abortWordAborted === -1) abortWordAborted = abortWordIn(0);
+              else if (abortWordMark === "unread") abortWordMark = (await claimOf(abortWordT))?.last_error ?? null;
+            };
+            judgeScript.splice(0, judgeScript.length, "slow", "answer");
+            probeScript.splice(0, probeScript.length, "up", word, "up");
+            let abortWordRun: SweepRun | null = null;
+            try {
+              abortWordRun = await aloneFollow(aloneDone([abortWordT]), { timeout: 1, onPass: (_st, a) => { abortWordIn = a; } });
+            } finally {
+              onOwn = abortWordOwn;
+            }
+            const abortWordClaim = await claimOf(abortWordT);
+            judgeScript.length = 0;
+            probeScript.length = 0;
+            const abortWordLine = (abortWordRun?.stderr ?? "").split("\n").find((l) => /^ {2}the provider is not answering \(the call in hand was aborted by the caller/.test(l)) ?? "";
+            const abortWordSaid = word === "500" ? /, and a one-token call found the provider out \(500 [^\n]* — the call in hand aborted by its caller; /
+              : word === "429" ? /, and a one-token call was held back \(429 [^\n]* — the call in hand aborted by its caller; /
+              : /, and a one-token call found the judge model missing \(404 [^\n]* — the call in hand aborted by its caller; /;
+            assert(abortWordRun?.code === 0 && abortWordAborted === 1 && abortWordClaim?.status === "succeeded" && abortWordSaid.test(abortWordLine) && abortWordMark === null,
+              `the one-token call after an abort answered ${word} judges no hang, said as it answered (exit ${abortWordRun?.code ?? "hung"}; aborted ${abortWordAborted}; mark as asked again ${abortWordMark?.slice(0, 60)}; claim ${abortWordClaim?.status}): ${abortWordLine.slice(0, 240)}`);
+            await drop([abortWordT]);
+          }
+          // …and an edit pooling the aborted thought again at the gate before that call, unanswered, leaves nothing
+          // marked, the claim no longer this run's, the wait said as the abort's (review pass 8, mutant: hangAborted
+          // without its worker in the filter marked the claim the edit pooled; the wait set as a hang's said it so).
+          const [abortEditT] = await seedAll(["Abort edited alone: sweep-pass-good work, its call aborted in hand, edited before the one-token call after it."]);
+          let abortEditIn: InHandAbort = () => -1;
+          let abortEditAborted = -1, abortEditEdited = false;
+          let abortEditMark: string | null = "unread";
+          const abortEditOwn = onOwn;
+          onOwn = async (t) => {
+            await abortEditOwn?.(t);
+            if (!t.includes("Abort edited alone:")) return;
+            if (abortEditAborted === -1) abortEditAborted = abortEditIn(0);
+            else if (abortEditMark === "unread") abortEditMark = (await claimOf(abortEditT))?.last_error ?? null;
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          let abortEditRun: SweepRun | null = null;
+          try {
+            abortEditRun = await aloneFollow(aloneDone([abortEditT]), {
+              timeout: 1,
+              onPass: (_st, a) => { abortEditIn = a; },
+              admit: async () => {
+                if (abortEditAborted === 1 && !abortEditEdited) {
+                  abortEditEdited = true;
+                  await sql`SELECT update_thought(${abortEditT}::uuid, ${"Abort edited alone: sweep-pass-good work, its call aborted in hand, edited before the one-token call after it, since."})`;
+                }
+              },
+            });
+          } finally {
+            onOwn = abortEditOwn;
+          }
+          const abortEditClaim = await claimOf(abortEditT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          const abortEditLine = (abortEditRun?.stderr ?? "").split("\n").find((l) => /^ {2}the provider is not answering \(the call in hand was aborted by the caller/.test(l)) ?? "";
+          assert(abortEditRun?.code === 0 && abortEditAborted === 1 && abortEditEdited && abortEditClaim?.status === "succeeded" && abortEditMark === null && / — the call in hand aborted by its caller; /.test(abortEditLine),
+            `an edit before the one-token call after an abort leaves nothing marked, the wait said as the abort's (exit ${abortEditRun?.code ?? "hung"}; aborted ${abortEditAborted}; edited ${abortEditEdited}; mark as asked again ${abortEditMark?.slice(0, 60)}; claim ${abortEditClaim?.status}): ${abortEditLine.slice(0, 240)}`);
+          await drop([abortEditT]);
+          // A claim reaped during its timed-out call, as a lease run out is taken: the date ahead as the probe after
+          // the timeout begins is this run's claim's alone, so the reaped one keeps its place, asked again before a
+          // capture pooled after it (review pass 8, mutant: without the claim's status in that write's filter, the
+          // reaped claim went 30 days ahead and the capture was asked first).
+          const [reapedT, reapedCapT] = await seedAll(["Reaped alone: sweep-pass-good work, its lease reaped during its timed-out call.", "Reaped alone capture: sweep-pass-good work, pooled after it."]);
+          const reapedAsks: string[] = [];
+          let reapedDone = false;
+          const reapedOwn = onOwn;
+          onOwn = async (t) => {
+            await reapedOwn?.(t);
+            if (t.includes("Reaped alone capture:")) reapedAsks.push("C");
+            else if (t.includes("Reaped alone:")) {
+              reapedAsks.push("R");
+              if (!reapedDone) {
+                reapedDone = true;
+                await sql`UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL WHERE thought_id = ${reapedT}::uuid AND work_type = ${POOL}`;
+              }
+            }
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          let reapedRun: SweepRun | null = null;
+          try {
+            reapedRun = await aloneFollow(aloneDone([reapedT, reapedCapT]), { timeout: 1 });
+          } finally {
+            onOwn = reapedOwn;
+          }
+          const reapedClaims = await statusOf([reapedT, reapedCapT]);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(reapedRun?.code === 0 && reapedDone && reapedAsks.join(",") === "R,R,C" && reapedClaims.join(",") === "succeeded,succeeded",
+            `a claim reaped during its timed-out call keeps its place, the date ahead this run's claim's alone (exit ${reapedRun?.code ?? "hung"}; asks ${reapedAsks.join(",")}; claims ${reapedClaims.join(",")})`);
+          await drop([reapedT, reapedCapT]);
+          // A thought with an out-of-date subject standing, failed as its own by the one-token call after its second
+          // abort: its failure finished, and counted among those with an out-of-date subject in the run's summary
+          // (review pass 8, mutant: hangAborted's failure kept the claim's finished_at, and counted none).
+          const [abortOldT] = await seedAll(["Abort old subject alone: sweep-pass-good work, an older question's subject standing, its calls aborted in hand."]);
+          const [{ f: abortOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${abortOldT}::uuid`) as { f: string }[];
+          await recordSubject(sql, { id: abortOldT, fingerprint: abortOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await sql`SELECT requeue_thought_work(${POOL}, ${abortOldT}::uuid)`;
+          let abortOldIn: InHandAbort = () => -1;
+          const abortOldAborts: number[] = [];
+          const abortOldOwn = onOwn;
+          onOwn = async (t) => {
+            await abortOldOwn?.(t);
+            if (t.includes("Abort old subject alone:")) abortOldAborts.push(abortOldIn(0));
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "slow");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
+          let abortOldRun: SweepRun | null = null;
+          try {
+            abortOldRun = await aloneFollow(aloneDone([abortOldT]), { timeout: 1, onPass: (_st, a) => { abortOldIn = a; } });
+          } finally {
+            onOwn = abortOldOwn;
+          }
+          const [abortOldClaim] = (await sql`SELECT status, last_error, finished_at IS NOT NULL AS done FROM thought_work_claims WHERE thought_id = ${abortOldT}::uuid AND work_type = ${POOL}`) as { status: string; last_error: string | null; done: boolean }[];
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(abortOldRun?.code === 0 && abortOldAborts.join(",") === "1,1" && abortOldClaim?.status === "failed" && /^hung the provider again, so this thought's: the call in hand was aborted by the caller/.test(abortOldClaim.last_error ?? "")
+              && abortOldClaim.done && /1 failed on hanging the provider again, .*— among them, 1 with an out-of-date subject still standing$/.test(tally(abortOldRun)),
+            `a thought with an out-of-date subject failed as its own by the one-token call after its second abort is finished, and counted among those with an out-of-date subject (exit ${abortOldRun?.code ?? "hung"}; aborts ${abortOldAborts.join(",")}; claim ${abortOldClaim?.status} ${abortOldClaim?.last_error?.slice(0, 60)}, finished ${abortOldClaim?.done}; ${tally(abortOldRun ?? { stdout: "" })})`);
+          await drop([abortOldT]);
+          // …and so is one that hangs the provider twice, failed as its own at its second hang (review pass 8, mutant:
+          // counted only when the provider erred on it).
+          const [hangOldT] = await seedAll(["Hang old subject alone: sweep-pass-good work, an older question's subject standing, hanging the provider each time it is asked."]);
+          const [{ f: hangOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${hangOldT}::uuid`) as { f: string }[];
+          await recordSubject(sql, { id: hangOldT, fingerprint: hangOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await sql`SELECT requeue_thought_work(${POOL}, ${hangOldT}::uuid)`;
+          judgeScript.splice(0, judgeScript.length, "slow", "slow");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
+          const hangOldRun = await aloneFollow(aloneDone([hangOldT]), { timeout: 1 });
+          const hangOldClaim = await claimOf(hangOldT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(hangOldRun?.code === 0 && hangOldClaim?.status === "failed" && /^hung the provider again, so this thought's: /.test(hangOldClaim.last_error ?? "")
+              && /1 failed on hanging the provider again.*— among them, 1 with an out-of-date subject still standing$/.test(tally(hangOldRun)),
+            `a thought with an out-of-date subject hanging the provider twice is counted among those with an out-of-date subject (exit ${hangOldRun?.code ?? "hung"}; claim ${hangOldClaim?.status} ${hangOldClaim?.last_error?.slice(0, 60)}; ${tally(hangOldRun ?? { stdout: "" })})`);
+          await drop([hangOldT]);
+          // A claim pooled again by hand with an old failure's words on it carries no mark: its first hang marks it,
+          // the mark replacing the words, and its second fails it as its own (review pass 8, mutant: any last_error
+          // read as a mark; the words kept over the mark at its set-back).
+          const [oldWordsT] = await seedAll(["Old words alone: sweep-pass-good work, pooled again by hand with an old failure's words, hanging the provider each time it is asked."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${"provider error, an older failure's words, the claim pooled again by hand"} WHERE thought_id = ${oldWordsT}::uuid AND work_type = ${POOL}`;
+          const oldWordsSeen: string[] = [];
+          const oldWordsOwn = onOwn;
+          onOwn = async (t) => {
+            await oldWordsOwn?.(t);
+            if (t.includes("Old words alone:")) oldWordsSeen.push(((await claimOf(oldWordsT))?.last_error ?? "null").slice(0, 24));
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "slow");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
+          let oldWordsRun: SweepRun | null = null;
+          try {
+            oldWordsRun = await aloneFollow(aloneDone([oldWordsT]), { timeout: 1 });
+          } finally {
+            onOwn = oldWordsOwn;
+          }
+          const oldWordsClaim = await claimOf(oldWordsT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(oldWordsRun?.code === 0 && oldWordsSeen.length === 2 && oldWordsSeen[1] === HUNG_MARK.slice(0, 24) && oldWordsClaim?.status === "failed" && /^hung the provider again, so this thought's: /.test(oldWordsClaim.last_error ?? ""),
+            `an old failure's words on a claim pooled again are no mark: its first hang marks it, its second fails it (exit ${oldWordsRun?.code ?? "hung"}; last_error as asked ${oldWordsSeen.join(" | ")}; claim ${oldWordsClaim?.status} ${oldWordsClaim?.last_error?.slice(0, 60)})`);
+          await drop([oldWordsT]);
+          // …and the one-token call after an abort, unanswered, marks such a claim hung, not failed (review pass 8,
+          // mutant: hangAborted reading any last_error as a mark failed it).
+          const [oldAbortT] = await seedAll(["Old words abort alone: sweep-pass-good work, pooled again by hand with an old failure's words, its call aborted in hand."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${"provider error, an older failure's words, the claim pooled again by hand"} WHERE thought_id = ${oldAbortT}::uuid AND work_type = ${POOL}`;
+          let oldAbortIn: InHandAbort = () => -1;
+          let oldAbortAborted = -1;
+          let oldAbortMark: string | null = "unread";
+          const oldAbortOwn = onOwn;
+          onOwn = async (t) => {
+            await oldAbortOwn?.(t);
+            if (!t.includes("Old words abort alone:")) return;
+            if (oldAbortAborted === -1) oldAbortAborted = oldAbortIn(0);
+            else if (oldAbortMark === "unread") oldAbortMark = (await claimOf(oldAbortT))?.last_error ?? null;
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          let oldAbortRun: SweepRun | null = null;
+          try {
+            oldAbortRun = await aloneFollow(aloneDone([oldAbortT]), { timeout: 1, onPass: (_st, a) => { oldAbortIn = a; } });
+          } finally {
+            onOwn = oldAbortOwn;
+          }
+          const oldAbortClaim = await claimOf(oldAbortT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(oldAbortRun?.code === 0 && oldAbortAborted === 1 && (oldAbortMark ?? "").startsWith(HUNG_MARK) && oldAbortClaim?.status === "succeeded"
+              && / — the call in hand aborted by its caller held it past a limit, its thought marked hung, 30 days ahead; /.test(oldAbortRun.stderr),
+            `an old failure's words on an aborted thought's claim are no mark: the one-token call after the abort, unanswered, marks it hung, no failure (exit ${oldAbortRun?.code ?? "hung"}; aborted ${oldAbortAborted}; mark as asked again ${oldAbortMark?.slice(0, 60)}; claim ${oldAbortClaim?.status} ${oldAbortClaim?.last_error?.slice(0, 60)})`);
+          await drop([oldAbortT]);
+          // A hung thought, a suspect of its own outage, then a marked thought's verdict, then the first thought's 500s
+          // past its pauses: failed as its own at that streak, the verdict beginning no outage to clear the suspects
+          // (review pass 8, mutant: the verdict's outage begun first cleared the hung thought's suspect, its streak
+          // failing nothing).
+          const [betweenS, betweenH] = await seedAll(["Verdict between alone: sweep-pass-good work, hanging the provider once, then a 500 each time it is asked.", "Verdict between alone marked: sweep-pass-good work, marked hung, hanging the provider again."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${betweenH}::uuid AND work_type = ${POOL}`;
+          const betweenAsks: string[] = [];
+          const betweenOwn = onOwn;
+          onOwn = async (t) => {
+            await betweenOwn?.(t);
+            if (t.includes("Verdict between alone marked:")) betweenAsks.push("H");
+            else if (t.includes("Verdict between alone:")) betweenAsks.push("S");
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "slow", "500", "500", "500", "500");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
+          let betweenRun: SweepRun | null = null;
+          try {
+            betweenRun = await aloneFollow(aloneDone([betweenS, betweenH]), { timeout: 1 });
+          } finally {
+            onOwn = betweenOwn;
+          }
+          const [betweenSC, betweenHC] = [await claimOf(betweenS), await claimOf(betweenH)];
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          assert(betweenRun?.code === 0 && betweenAsks.join(",") === "S,H,S,S,S,S" && betweenSC?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(betweenSC.last_error ?? "")
+              && betweenHC?.status === "failed" && /^hung the provider again, so this thought's: /.test(betweenHC.last_error ?? ""),
+            `a marked thought's verdict between a hung thought's outage and its next streak clears no suspect: that streak fails it as its own (exit ${betweenRun?.code ?? "hung"}; asks ${betweenAsks.join(",")}; claims ${betweenSC?.status} ${betweenSC?.last_error?.slice(0, 60)}, ${betweenHC?.status} ${betweenHC?.last_error?.slice(0, 40)})`);
+          await drop([betweenS, betweenH]);
+          // A marked thought whose claim another worker takes as it is asked, its lease run out: the answer clears this
+          // run's own claim's mark alone, the other worker's claim keeping it (review pass 8, mutant: the clear without
+          // its worker cleared the other worker's claim's mark).
+          const [takenOverT] = await seedAll(["Taken over alone: sweep-pass-good work, marked hung, its claim taken over by another worker as it is asked."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${takenOverT}::uuid AND work_type = ${POOL}`;
+          let takenOverAt = 0;
+          const takenOverOwn = onOwn;
+          onOwn = async (t) => {
+            await takenOverOwn?.(t);
+            if (t.includes("Taken over alone:") && takenOverAt === 0) {
+              await sql`UPDATE thought_work_claims SET worker_id = ${"another-worker"} WHERE thought_id = ${takenOverT}::uuid AND work_type = ${POOL} AND status = 'claimed'`;
+              takenOverAt = Date.now();
+            }
+          };
+          judgeScript.splice(0, judgeScript.length, "answer");
+          let takenOverRun: SweepRun | null = null;
+          try {
+            takenOverRun = await aloneFollow(async () => takenOverAt > 0 && Date.now() - takenOverAt > 1500, { timeout: 1 });
+          } finally {
+            onOwn = takenOverOwn;
+          }
+          const [takenOverClaim] = (await sql`SELECT status, worker_id, last_error FROM thought_work_claims WHERE thought_id = ${takenOverT}::uuid AND work_type = ${POOL}`) as { status: string; worker_id: string | null; last_error: string | null }[];
+          judgeScript.length = 0;
+          assert(takenOverRun?.code === 0 && takenOverAt > 0 && takenOverClaim?.worker_id === "another-worker" && takenOverClaim.status === "claimed" && (takenOverClaim.last_error ?? "").startsWith(HUNG_MARK)
+              && /1 claim\(s\) no longer this run's when released/.test(`${takenOverRun.stdout}${takenOverRun.stderr}`),
+            `a marked thought's answer clears its own claim's mark alone, another worker's claim keeping it (exit ${takenOverRun?.code ?? "hung"}; claim ${takenOverClaim?.status} ${takenOverClaim?.worker_id} ${takenOverClaim?.last_error?.slice(0, 40)}): ${takenOverRun?.stdout.trim().slice(-200)}`);
+          await drop([takenOverT]);
+          // The one-token call after an abort unanswered, the mark's write refused by the database: the hang
+          // unremembered, the run going on, the wait said as the abort's, the thought answered after (review pass 8,
+          // mutant: uncaught, the refusal ended the run).
+          const [markRefusedT] = await seedAll(["Abort mark refused alone: sweep-pass-good work, its call aborted in hand, the provider out after, its mark refused."]);
+          const undoMarkRefused = await caseTrigger("alone_case_refuse_abort_mark", "BEFORE UPDATE", "thought_work_claims",
+            `NEW.thought_id = '${markRefusedT}'::uuid AND OLD.status = 'pending' AND NEW.status = 'pending' AND starts_with(NEW.last_error, 'hung the provider once: ')`,
+            "RAISE EXCEPTION 'the alone case refuses the abort''s mark'; RETURN NEW;");
+          let markRefusedIn: InHandAbort = () => -1;
+          let markRefusedAborted = -1;
+          const markRefusedOwn = onOwn;
+          onOwn = async (t) => {
+            await markRefusedOwn?.(t);
+            if (t.includes("Abort mark refused alone:") && markRefusedAborted === -1) markRefusedAborted = markRefusedIn(0);
+          };
+          judgeScript.splice(0, judgeScript.length, "slow", "answer");
+          probeScript.splice(0, probeScript.length, "up", "slow", "up");
+          const markRefusedStop = new AbortController();
+          let markRefusedRun: { code: number; stdout: string; stderr: string } | null = null;
+          try {
+            const running = orHung(sweep({ follow: 1, timeout: 1, stamper: waitRow, onPass: (_st, a) => { markRefusedIn = a; }, signal: AbortSignal.any([markRefusedStop.signal, backstop()]) }), 35_000)
+              .catch((e) => ({ code: -9, stdout: "", stderr: String((e as Error)?.message ?? e) }));
+            await pollUntil(aloneDone([markRefusedT]), 20_000);
+            markRefusedStop.abort();
+            markRefusedRun = await running;
+          } finally {
+            onOwn = markRefusedOwn;
+            await undoMarkRefused();
+          }
+          const markRefusedClaim = await claimOf(markRefusedT);
+          judgeScript.length = 0;
+          probeScript.length = 0;
+          const markRefusedLine = (markRefusedRun?.stderr ?? "").split("\n").find((l) => /^ {2}the provider is not answering \(the call in hand was aborted by the caller/.test(l)) ?? "";
+          assert(markRefusedRun?.code === 0 && markRefusedAborted === 1 && markRefusedClaim?.status === "succeeded" && / — the call in hand aborted by its caller; /.test(markRefusedLine),
+            `the one-token call after an abort, its mark's write refused, leaves the hang unremembered and the run going (exit ${markRefusedRun?.code ?? "hung"}; aborted ${markRefusedAborted}; claim ${markRefusedClaim?.status} ${markRefusedClaim?.last_error?.slice(0, 60)}): ${markRefusedLine.slice(0, 200)} | ${markRefusedRun?.stderr.trim().slice(-200)}`);
+          await drop([markRefusedT]);
+          // A marked thought answered, the answer's clear refused by the database: the answer stands, the release
+          // clearing the mark (review pass 8, mutant: uncaught, the refusal lost the answer and ended the run).
+          const [clearRefusedT] = await seedAll(["Clear refused alone: sweep-pass-good work, marked hung, answered, its mark's clear refused."]);
+          await sql`UPDATE thought_work_claims SET last_error = ${`${HUNG_MARK}a hang the case marks`} WHERE thought_id = ${clearRefusedT}::uuid AND work_type = ${POOL}`;
+          const undoClearRefused = await caseTrigger("alone_case_refuse_clear", "BEFORE UPDATE", "thought_work_claims",
+            `NEW.thought_id = '${clearRefusedT}'::uuid AND OLD.status = 'claimed' AND NEW.status = 'claimed' AND NEW.last_error IS NULL AND OLD.last_error IS NOT NULL`,
+            "RAISE EXCEPTION 'the alone case refuses the clear'; RETURN NEW;");
+          judgeScript.splice(0, judgeScript.length, "answer");
+          const clearRefusedStop = new AbortController();
+          let clearRefusedRun: { code: number; stdout: string; stderr: string } | null = null;
+          try {
+            const running = orHung(sweep({ follow: 1, timeout: 1, stamper: waitRow, signal: AbortSignal.any([clearRefusedStop.signal, backstop()]) }), 35_000)
+              .catch((e) => ({ code: -9, stdout: "", stderr: String((e as Error)?.message ?? e) }));
+            await pollUntil(aloneDone([clearRefusedT]), 20_000);
+            clearRefusedStop.abort();
+            clearRefusedRun = await running;
+          } finally {
+            await undoClearRefused();
+          }
+          const clearRefusedClaim = await claimOf(clearRefusedT);
+          judgeScript.length = 0;
+          assert(clearRefusedRun?.code === 0 && clearRefusedClaim?.status === "succeeded" && clearRefusedClaim.last_error === null,
+            `a marked thought's answer stands though its clear is refused, the release clearing the mark (exit ${clearRefusedRun?.code ?? "hung"}; claim ${clearRefusedClaim?.status} ${clearRefusedClaim?.last_error?.slice(0, 60)}): ${clearRefusedRun?.stderr.trim().slice(-200)}`);
+          await drop([clearRefusedT]);
         } finally {
           judgeScript.length = 0;
           probeScript.length = 0;

@@ -1294,6 +1294,22 @@ export function summariseCorpusByModel(rows, atModel, acceptedRows = []) {
 export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the operator: ";
 
 /**
+ * The subject pool's keys begin so (server-portable/subject.ts's subjectPoolKey,
+ * migration 113's ob1_config.subject_pool_key), beside extraction's `extract:`
+ * and re-embed's `reembed:` (SMD-3306).
+ */
+export const SUBJECT_POOL_PREFIX = "subjects:";
+
+/**
+ * The hang's mark a following subject sweep writes in a hung thought's pending
+ * claim, its last_error, the hang's words after it (db/subject-sweep.ts's rule;
+ * SMD-3306 PR 6b-1): a third meaning of that column, beside a failure's and a
+ * succeeded row's caveat, on a subject pool's pending or claimed row alone.
+ * Here, not in the sweep, so the store's retry clears it too.
+ */
+export const HUNG_MARK = "hung the provider once: ";
+
+/**
  * The accepted vectors by label, for the same reduction: per embedding_model,
  * how many rows with a vector have an accepted row — standing: nothing has
  * written the thought since the attempt READ it, claimed_at (015 keeps it on
