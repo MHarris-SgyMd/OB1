@@ -16,6 +16,7 @@ import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHoo
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { failure } from "./refusal.ts";
 import { withSpan } from "../spans.ts";
+import { asBackground } from "../model-call.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -409,9 +410,11 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     // still wait on work that spins (review pass 2).
     // Work, which runs after the answer, starts a trace of its own linked to the delivery's request, as a job's body
     // does; a discard runs before a failed delivery's 500, inside its request, so it stays that request's child (SMD-1849 PR 2d).
+    // So too its model calls: work's are background, as a job's are, though the request's context started it — nobody
+    // waits on them — and a discard's stay the request's, live (SMD-3379 PR 2a, review pass 1).
     const run = () =>
       new Promise<void>((resolve) => setImmediate(resolve))
-        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => work()))
+        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => (what === "work" ? asBackground(work) : work())))
         .then(
           () => undefined,
           (err) => {

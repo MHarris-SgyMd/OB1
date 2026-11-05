@@ -218,6 +218,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     })));
   let doc: Record<string, unknown> | null = null;
 
+  // Every model call a request makes is live (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
+  app.use("*", (_c, next) => asLive(() => next()));
+
   // One JSON line per request (SMD-1849, telemetry.ts): the method, the
   // route's template — never the path it was given (an id), the query string,
   // a key or a body — the operation it runs, the key's name once it has
@@ -236,8 +239,6 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // every time, and an environment that will not seed is a 500 the
   // healthcheck itself reports. A keyed /health is a request like any other
   // (SMD-2287).
-  // Every model call a request makes is live (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
-  app.use("*", (_c, next) => asLive(() => next()));
   app.use("*", async (c, next) => {
     if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/health" && headerKeys(c.req.raw).length === 0) {
       deps.init();

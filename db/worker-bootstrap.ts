@@ -461,8 +461,10 @@ export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; wh
  * call the pass makes says the pass can go on.
  */
 export function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
-  // Through the model-call seam (SMD-3379 PR 2a): a probe is one of the model server's calls too.
-  return modelCall({ type: "chat", model, base: endpoint.base, purpose: "probe", ...(wake ? { signal: wake } : {}) }, () => probeExchange(endpoint, model, timeoutMs, wake));
+  // Through the model-call seam (SMD-3379 PR 2a): a probe is one of the model server's calls too. A probe never
+  // throws, whatever ends it: a hook that ends its wait on `wake` reads as the stop does (review pass 1).
+  return modelCall({ type: "chat", model, base: endpoint.base, purpose: "probe", ...(wake ? { signal: wake } : {}) }, () => probeExchange(endpoint, model, timeoutMs, wake))
+    .catch((e: unknown): Probe => (wake?.aborted ? { state: "out", why: "the probe was stopped" } : { state: "out", why: (e as Error).message }));
 }
 
 /** probeChat's call, once the seam lets it run: the one-token request and its answer read. */

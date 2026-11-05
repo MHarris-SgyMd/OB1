@@ -13,14 +13,20 @@
  * So `run` does what the hook's wait must not eat into: it starts the call's
  * deadline itself (AbortSignal.timeout inside it, not before), and a caller's
  * stop is handed in as `call.signal`, which a hook waiting for a slot honours.
+ * Two exceptions: a caller that starts its own deadline and hands it in as the
+ * signal — db/consolidate.ts's per-pair bound, judgePair's and decidePair's
+ * caller — has it running before the seam, so a hook's wait would count
+ * against it (PR 2b decides how); and preflight's probes read their answer's
+ * small body after the seam, which covers the call to its headers.
  *
  * Live or background (`cls`): a call made while a request is served is live —
  * the REST core runs each request inside `asLive` (rest/app.ts) — and every
  * other is background: the sleep scheduler's passes, board-sync, the CLI
  * scripts, and the servers' own timers (the vector mender, the provider
- * reprobe), which run outside any request. A detached job a request starts is
- * background too (jobs.ts runs it `asBackground`). A call may still say its
- * class outright.
+ * reprobe), which run outside any request. Work a request starts and nobody
+ * waits on is background too: a detached job (jobs.ts runs it `asBackground`)
+ * and a webhook's deferred work (core/plugins.ts), where a discard, run before
+ * the request's 500, stays live. A call may still say its class outright.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -34,7 +40,7 @@ export type ModelCall = {
   type: ModelType;
   /** The model asked for, as the request names it; undefined where the endpoint picks (the decide tier without OB1_JEV_MODEL). */
   model: string | undefined;
-  /** The endpoint's base URL, without its path: the model server, which PR 2b's slots are kept per. */
+  /** The endpoint's base URL, without the call's path (`…/v1`, not `…/v1/embeddings`): the model server, which PR 2b's slots are kept per. */
   base: string;
   /** What the call is for — a short word for a log line and a test: `capture`, `extraction`, `judge`, `probe`… */
   purpose: string;

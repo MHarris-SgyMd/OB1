@@ -63,6 +63,9 @@ let replyDim = DIM;
 let lastEmbedBody: Record<string, unknown> = {};
 
 
+/** The decide tier's /info, in its contract (jev.ts jevInfo): the stand-in answers it, so [11]'s tier call is read whole (SMD-3379 PR 2a). */
+const JEV_INFO = { contract: "ob1-jev/1", model: { name: "stub-decider", source: "s", revision: "r", weights_sha256: "w", calibrator_sha256: "c", rules: "x" }, kinds: ["choose"], max_options: 8, max_batch: 8, max_tokens: 512 };
+
 /** Type the stub's metadata model claims. Real llama3.2 returned "action_item". */
 let replyType = "idea";
 
@@ -71,7 +74,8 @@ const provider = Bun.serve({
   hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
-    const body = (await req.json()) as { model: string; input?: string; response_format?: { type: string } };
+    // A GET (the decide tier's /info, [11]) has no body: read as none, so every request is recorded.
+    const body = (req.method === "POST" ? await req.json() : {}) as { model: string; input?: string; response_format?: { type: string } };
     seen.push({
       path: url.pathname,
       auth: req.headers.get("authorization"),
@@ -79,6 +83,7 @@ const provider = Bun.serve({
       jsonMode: body.response_format?.type === "json_object",
     });
 
+    if (url.pathname.endsWith("/info")) return Response.json(JEV_INFO);
     if (url.pathname.endsWith("/embeddings")) {
       lastEmbedBody = body as Record<string, unknown>;
       // Honour `dimensions` the way Ollama and OpenAI do, so the test exercises a
@@ -1592,7 +1597,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     const live = calls.map((c) => c.call);
     const emb = live.find((c) => c.type === "embed");
     const meta = live.find((c) => c.type === "chat");
-    assert(emb?.cls === "live" && emb.model === EMB_MODEL && emb.base === PROVIDER && emb.purpose === "capture" && meta?.cls === "live" && meta.model === META_MODEL,
+    assert(emb?.cls === "live" && emb.model === EMB_MODEL && emb.base === PROVIDER && emb.purpose === "capture" && meta?.cls === "live" && meta.model === META_MODEL && meta.base === PROVIDER,
       `a capture's calls go through the seam, live: its embedding and its metadata call, each naming its model and the model server (${JSON.stringify(live)})`);
     const cfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: PROVIDER, OB1_METADATA_MODEL: META_MODEL, OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM) });
     const getEmbedding = (text: string, c: typeof cfg, subject: import("./egress.ts").EgressSubject) => createEmbedder(() => c).getEmbedding(text, subject);
@@ -1608,11 +1613,12 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000);
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
-    // The stand-in speaks no tier contract: the info call is refused as a body, but it went through the seam first.
-    const infoFailed = await jevInfo(jev).then(() => false, () => true);
+    // The stand-in answers the tier's /info in its contract: the call is read whole inside the seam.
+    const info = await jevInfo(jev).then((i) => i, (e: unknown) => String(e));
     const seen11 = calls.map((c) => `${c.call.type}/${c.call.purpose}/${c.call.cls}/${c.call.model}`);
     assert(seen11.includes(`chat/extraction/background/${META_MODEL}`) && seen11.includes(`chat/judge/background/${META_MODEL}`) && seen11.includes(`chat/probe/background/${META_MODEL}`)
-      && seen11.includes("decide/info/background/stub-decider") && infoFailed && calls.every((c) => !(c.answer instanceof Response)),
+      && seen11.includes("decide/info/background/stub-decider") && typeof info === "object" && info.contract === "ob1-jev/1"
+      && calls.every((c) => c.answer !== undefined && !(c.answer instanceof Response)),
       `extraction, the judge, a worker's probe and the decide tier each go through the seam, background, each run returning what it read (${JSON.stringify(seen11)})`);
     // The seam is the way through, not a witness: a hook that refuses sends nothing to the provider.
     const before = seen.length;
@@ -1621,29 +1627,70 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
       getEmbedding("refused", cfg, { kind: "re-embed" }).then(() => false, () => true),
       extractEntities("Refused by the seam.", cfg, undefined, { kind: "extraction" }).then(() => false, () => true),
       judgePair({ content: "a", createdAt: null }, { content: "b", createdAt: null }, cfg).then(() => false, () => true),
-      probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000).then(() => false, () => true),
+      // A probe never throws: refused, it reads as out.
+      probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000).then((p) => p.state === "out", () => false),
       jevInfo(jev).then(() => false, () => true),
     ]);
     refuse = false;
     assert(refused.every(Boolean) && seen.length === before, `a hook that refuses every call stops each before the provider sees it (${refused.join(",")}; ${seen.length - before} request(s) reached it)`);
     // The deadline starts inside the seam: a wait longer than the call's own deadline, before the call runs, costs it nothing.
-    const tight = { ...cfg, timeoutMs: 300 };
-    holdMs = 600;
+    const tight = { ...cfg, timeoutMs: 1000 };
+    holdMs = 2000;
     const heldOk = await getEmbedding("held before it runs", tight, { kind: "re-embed" }).then(() => true, (e: unknown) => String(e));
     const heldExtract = await extractEntities("Held before it runs.", tight, undefined, { kind: "extraction" }).then(() => true, (e: unknown) => String(e));
     holdMs = 0;
-    assert(heldOk === true && heldExtract === true, `a 600 ms wait in the seam before a call with a 300 ms deadline: the call still answers, its deadline started inside the seam (${heldOk}; ${heldExtract})`);
+    assert(heldOk === true && heldExtract === true, `a 2 s wait in the seam before a call with a 1 s deadline: the call still answers, its deadline started inside the seam (${heldOk}; ${heldExtract})`);
+    // The egress gate refuses before the seam, so a refused call waits for no slot: an endpoint not declared local,
+    // under the default deny policy, is refused with no call through the seam.
+    const away = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://192.0.2.1/v1", OB1_LLM_API_KEY: "k", OB1_METADATA_MODEL: META_MODEL, OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM) });
+    calls.length = 0;
+    const awayRefused = await getEmbedding("refused at the gate", away, { kind: "re-embed" }).then(() => "sent", (e: unknown) => (e as { kind?: string }).kind ?? String(e));
+    assert(awayRefused === "egress" && calls.length === 0, `the egress gate refuses before the seam: no call reaches it (${awayRefused}; ${calls.length} call(s))`);
+    // The span inside the seam, so it times the call, not a wait before it.
+    const { useTracing, NO_SPAN } = await import("./spans.ts");
+    const spans: { name: string; ms: number }[] = [];
+    useTracing({ run: async (name, _request, fn) => { const t0 = Date.now(); try { return await fn(NO_SPAN); } finally { spans.push({ name, ms: Date.now() - t0 }); } } });
+    holdMs = 500;
+    try {
+      await getEmbedding("a span timed inside the seam", cfg, { kind: "re-embed" });
+    } finally {
+      holdMs = 0;
+      useTracing(undefined);
+    }
+    const provSpan = spans.find((x) => x.name.startsWith("embeddings "));
+    assert(provSpan !== undefined && provSpan.ms < 400, `the provider's span is inside the seam: it times the call, not the seam's 500 ms wait before it (${JSON.stringify(spans)})`);
+    // Each pass hands the seam its stop, which a hook waiting for a slot ends its wait on.
+    const stop = new AbortController();
+    calls.length = 0;
+    await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
+    await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg, stop.signal);
+    await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000, stop.signal);
+    assert(calls.length === 3 && calls.every((c) => c.call.signal === stop.signal), `extraction, the judge and a probe each hand the seam their stop (${calls.map((c) => `${c.call.purpose}:${c.call.signal === stop.signal}`).join(", ")})`);
   } finally {
     setModelCallHook(restore);
   }
-  // A file that sends a model request goes through the seam: it imports it (bench-live.ts measures the provider bare, by design).
+  // A probe never throws: a hook that ends its wait on the probe's stop leaves it reading as stopped (review pass 1).
+  {
+    const wake = new AbortController();
+    const before = setModelCallHook((call) => new Promise((_resolve, reject) => call.signal?.addEventListener("abort", () => reject(call.signal?.reason), { once: true })));
+    try {
+      setTimeout(() => wake.abort(), 50);
+      const probe = await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000, wake.signal).then((p) => p, (e: unknown) => ({ threw: String(e) }));
+      assert(JSON.stringify(probe) === JSON.stringify({ state: "out", why: "the probe was stopped" }), `a probe whose stop ends a hook's wait reads as stopped, never a throw (${JSON.stringify(probe)})`);
+    } finally {
+      setModelCallHook(before);
+    }
+  }
+  // A file that sends a model request goes through the seam: it imports it. A file-level guard — a second, bare fetch in
+  // a file that imports the seam passes it — over the servers', the REST core's and db/'s files, a fetch's first 200
+  // characters read for a model path or a path variable.
   const { readdirSync, readFileSync } = await import("node:fs");
   const here = dirname(fileURLToPath(import.meta.url));
-  const files = [...readdirSync(here).map((f) => join(here, f)), ...readdirSync(join(here, "core")).map((f) => join(here, "core", f)), ...readdirSync(join(here, "../db")).map((f) => join(here, "../db", f))]
-    .filter((f) => f.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(f) && !f.endsWith("/bench-live.ts") && !f.endsWith("/model-call.ts"));
+  const dirs = [here, join(here, "core"), join(here, "rest"), join(here, "../db")];
+  const files = dirs.flatMap((d) => readdirSync(d).map((f) => join(d, f))).filter((f) => f.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(f) && !f.endsWith("/model-call.ts"));
   const bare = files.filter((f) => {
     const src = readFileSync(f, "utf8");
-    return /fetch\([^)]*(\/chat\/completions|\/embeddings|\$\{path\})/.test(src) && !/from "(\.\/|\.\.\/|\.\.\/server-portable\/)model-call\.ts"/.test(src);
+    return /fetch\s*\([\s\S]{0,200}?(\/chat\/completions|\/embeddings|\/decide|\$\{path\})/.test(src) && !/^import [^;]*from "(\.\/|\.\.\/|\.\.\/server-portable\/)model-call\.ts";/m.test(src);
   });
   assert(bare.length === 0, `every file that sends a model request imports the model-call seam (${bare.map((f) => f.split("/").slice(-2).join("/")).join(", ") || "none bare"})`);
 }
