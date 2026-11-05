@@ -740,7 +740,7 @@ reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
 migration are generated into `version.ts` by `scripts/gen-version.ts` (the
-image carries no `db/migrations/` for the server to read; check-fork's 17e round-trips the file, and in a
+image carries no `db/migrations/` for the server to read; check-consistency's 17e round-trips the file, and in a
 checkout preflight's `version module` row compares it with `db/migrations/`, so
 rerun the script after adding a migration). The commit is the image's
 `OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
@@ -1100,6 +1100,11 @@ it, each over REST and MCP alike:
   most 20, from that thought and by the capturing key; a re-capture proposes none, and the
   capture never fails for it. `db/backfill-open-items.ts` does the same for thoughts
   captured before, and for a capture whose items were not proposed.
+- **Plugins keep their rows' items** (SMD-3665 PR 3b). home-maintenance's tasks and
+  family-calendar's one-time dates still to come are `proposed` items standing for their
+  rows, due at the task's `next_due` or the date's day, kept by the SDK's `keepRowItem`
+  through `ctx.call`: a logged one-time task settles its item done, and each plugin's
+  `sync_open_items` keeps every row's at once (plugins/README.md).
 - **Opening.** An item read from a thought (`origin_thought`) is noted at that thought's
   capture time, so an old to-do reads as old. The same thought and text again is the item
   already there (`unchanged`, nothing written), and so is a plugin's row. `proposed: true`
@@ -1223,7 +1228,7 @@ MCP tools do rather than a copy of it:
   spans and log records batched, the AsyncLocalStorage context manager and the
   W3C propagator.
 
-`scripts/check-fork-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
+`scripts/check-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
 and `root.ts` for what a move would leave behind: an import outside the file's list, a
 SQL call or `fetch`, the store named outside `root.ts`'s wiring.
 

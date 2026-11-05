@@ -199,13 +199,13 @@ export interface WorkerHeartbeat {
    */
   slept?: { from: string; to: string | null; budget?: BudgetStop; limit?: number };
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
-  waiting?: ("reembed" | "extract" | "consolidate")[];
+  waiting?: SleepPass[];
   /**
    * The passes waiting mid-pass for a provider that stopped answering
    * (SMD-2905): the sleep scheduler's by name, a follower its own; absent
    * while none is, and for board-sync.
    */
-  waitingMidPass?: ("reembed" | "extract" | "consolidate")[];
+  waitingMidPass?: SleepPass[];
   /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
@@ -493,18 +493,27 @@ export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 /**
  * Why the sleep scheduler holds a pass (WorkerHeartbeat.holds, SMD-3379 PR
  * 1c): re-embed's set-downs — `model` and `provider` among them, the start
- * refusals it retries with `lookup` — and re-embed's model switch.
+ * refusals it retries with `lookup` — and re-embed's model switch; and the
+ * subject sweep's `judge`, a garbage-judge alarm's trip holding the judge
+ * model it names until a hand run checks it (db/subject-sweep.ts's
+ * judgeHeld, SMD-3306 PR 6b-1).
  */
-export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch"] as const;
+export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch", "judge"] as const;
 export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
-/** The passes the sleep scheduler runs, as its `holds` names them. */
-export const SLEEP_PASSES = ["reembed", "extract", "consolidate"] as const;
+/**
+ * The passes the sleep scheduler runs, as its `holds` and its waiting name
+ * them: the subject sweep the fourth (SMD-3306 PR 6b-1), read here before the
+ * scheduler that runs it writes it, as SMD-3379 PR 1c-2's readers were.
+ */
+export const SLEEP_PASSES = ["reembed", "extract", "consolidate", "subjects"] as const;
+/** A pass the sleep scheduler runs (SLEEP_PASSES). */
+export type SleepPass = (typeof SLEEP_PASSES)[number];
 /** A pass the sleep scheduler holds (WorkerHeartbeat.holds). */
-export type SleepHold = { pass: (typeof SLEEP_PASSES)[number]; why: SleepHoldWhy; until: string | null };
+export type SleepHold = { pass: SleepPass; why: SleepHoldWhy; until: string | null };
 
-/** A `holds` value as db/sleep.ts writes it, or undefined: one to three passes, each once, each of the shape. */
+/** A `holds` value as db/sleep.ts writes it, or undefined: one to four passes, each once, each of the shape. */
 function parseHolds(h: unknown): SleepHold[] | undefined {
-  if (!Array.isArray(h) || h.length < 1 || h.length > 3) return undefined;
+  if (!Array.isArray(h) || h.length < 1 || h.length > SLEEP_PASSES.length) return undefined;
   const out: SleepHold[] = [];
   for (const x of h as Record<string, unknown>[]) {
     if (x === null || typeof x !== "object") return undefined;
@@ -793,16 +802,17 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Its waiting passes and its refusal (SMD-2752), each left off when not
     // of the shape: the passes by name, each once; the refusal of the list.
     const w = worker === "sleep" ? v!.waiting : undefined;
-    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "reembed" || p === "extract" || p === "consolidate")
-      ? (w as ("reembed" | "extract" | "consolidate")[])
+    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => (SLEEP_PASSES as readonly unknown[]).includes(p))
+      ? (w as SleepPass[])
       : undefined;
     // Its passes waiting mid-pass (SMD-2905), left off when not of the shape:
     // the scheduler's by name, each once — re-embed among them since it runs
-    // it (SMD-2679 PR 4b); a follower's its own name alone.
+    // it (SMD-2679 PR 4b), the subject sweep since SMD-3306 PR 6b-1; a
+    // follower's its own name alone.
     const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" || worker === "reembed" ? v!.waitingMidPass : undefined;
     const waitingMidPass = Array.isArray(mid) && mid.length > 0 && new Set(mid).size === mid.length
-        && mid.every((p) => p === "reembed" || p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
-      ? (mid as ("reembed" | "extract" | "consolidate")[])
+        && mid.every((p) => (SLEEP_PASSES as readonly unknown[]).includes(p)) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
+      ? (mid as SleepPass[])
       : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
@@ -1671,7 +1681,7 @@ export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason:
 
 /** What the server process knows about itself — no database needed. */
 export interface ServerFacts {
-  /** FORK_VERSION (server-portable/version.ts). */
+  /** BRAIN_VERSION (server-portable/version.ts). */
   version: string;
   /** The migration range releases.json records for that version, or null. */
   releaseRange: readonly [number, number] | null;

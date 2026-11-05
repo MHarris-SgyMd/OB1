@@ -35,7 +35,7 @@ defaults:
 # Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
 # GitHub moves to a new release on its own date), and every `uses:` names a
 # full commit SHA with the tag it was in a trailing comment; Dependabot
-# (.github/dependabot.yml) moves the pins by PR, and check-fork-consistency
+# (.github/dependabot.yml) moves the pins by PR, and check-consistency
 # check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
 # persist-credentials: false: no step needs the token after it (a job that
 # reads history takes it at checkout, fetch-depth: 0; the changes job's one
@@ -131,7 +131,7 @@ jobs:
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
       # the pull_request path is the one that runs; the merge_group path is
       # ready. The migration-number rule (5b) and the rest of
-      # check-fork-consistency below run on whichever tree is checked out. A PR
+      # check-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
       - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
@@ -153,7 +153,7 @@ jobs:
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
       # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
-        run: bun scripts/check-fork-consistency.ts
+        run: bun scripts/check-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
       # mirrors server-portable's and scripts/package.json pins the types at the
@@ -1700,7 +1700,7 @@ jobs:
       # SMD-1843. The knobs the first dogfood stack needed a second -f file for
       # reach the container: preflight's own report in the server log names the
       # provider URL .env set and the query log ON, and the container passed
-      # preflight with no credential set. check-fork-consistency.ts 14 holds
+      # preflight with no credential set. check-consistency.ts 14 holds
       # the file to forwarding every knob the server declares; this holds the
       # running container to what .env said. The first line reads the URL and
       # preflight's "local" clause and nothing between them: SMD-1902 put
@@ -1881,7 +1881,7 @@ jobs:
       # by name, the other two still on loopback (a sorted multiset passed with
       # Ollama opened instead — the second review pass); and no service sets
       # network_mode, since `host` reaches the host's interfaces with no port
-      # published (the third pass). check-fork-consistency.ts 13 holds the
+      # published (the third pass). check-consistency.ts 13 holds the
       # files to the same rule; this holds what compose makes of them.
       - name: Every published port binds loopback
         working-directory: deploy
@@ -1955,7 +1955,7 @@ jobs:
           # members held, the authorization server's and the proxy's each
           # alone; and the same of the canary, every network of which is its
           # own (SMD-2874).
-          # check-fork-consistency.ts 28 holds the files to the same networks;
+          # check-consistency.ts 28 holds the files to the same networks;
           # this holds what compose makes of them, and the full-stack job
           # runs a container on `egress` against Postgres.
           # Every profile compose.yaml defines, read from it, so a service under
@@ -2134,7 +2134,7 @@ jobs:
           [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
           docker compose -f compose.yaml logs --no-color --since "$stopped" forwarder | grep -F 'resolved only to addresses the forwarder does not dial'
 
-      # SMD-2658, SMD-2685. check-fork-consistency's check 28 holds
+      # SMD-2658, SMD-2685. check-consistency's check 28 holds
       # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
       # proxy, what each overlay declares it sets, the keys compose.yaml's
       # services set, and who joins which network under which names. This
@@ -2781,7 +2781,7 @@ jobs:
       # stable's /mcp still reaches stable beside them: from the mesh each name
       # then names more than one container, the collision the route table's
       # and the MCP server's rooted mesh names avoid. Check 28's PROXY_ROUTE_TABLE
-      # (scripts/check-fork-consistency.ts) holds the table.
+      # (scripts/check-consistency.ts) holds the table.
       - name: Stable routes no tier, and nothing under a tier's prefix reaches stable
         working-directory: deploy
         run: |
@@ -5163,7 +5163,7 @@ jobs:
   # the second job MAY_SKIP always lets skip; its `!cancelled()` keeps a gated
   # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
-  # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
+  # setting OB1_TEST_COUNTS: check-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
   # A pull request, the merge queue and a push to another branch publish
   # nothing. contents: write, on this job alone, is what pushes to the wiki's

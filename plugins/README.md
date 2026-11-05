@@ -71,7 +71,7 @@ Checked when the server starts, so a malformed manifest stops it:
 - An output schema does not transform: MCP holds the answer to it a second time.
 - A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
 
-Held by check 31 of `scripts/check-fork-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
+Held by check 31 of `scripts/check-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
 
 - **Its directory** holds TypeScript, `migrations/*.sql`, a `README.md` and a `metadata.json`, nothing else.
 - **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own directory's `.ts` files (static, re-exported or bare), nothing else; zod comes from the SDK. Code that runs in the server imports no test file.
@@ -88,6 +88,7 @@ Held by check 31 of `scripts/check-fork-consistency.ts`, on every push. It is an
 Held by the maintainer's review:
 
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
+- **A row that is a to-do keeps an open item** (SMD-3665 PR 3b) with the SDK's `keepRowItem(ctx, { row, text, due, owner?, done? })`, called after the plugin's own transaction commits. It opens the row's item through `ctx.call("open_item")` with `plugin_row`, `proposed`, so a write key confirms it. The same row again is the item already there: its text, due day and owner (when given) are moved to the row's, and `done` settles it. A dropped item is left as it is, and so is a done one, unless the row comes round again (`reopenDone`, a recurring task), which reopens it. A refusal or a fault is answered `{ did: "failed", code }` and never fails the plugin's write, so a plugin that keeps items gives an operation that keeps every row's at once (`sync_open_items`, as home-maintenance and family-calendar do). `RowItemAnswer` is the `{ id, status }` or `null` an operation's output declares for it.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 
 Plugins are **curated**: they run inside the brain's servers with their privileges, so a new one needs maintainer review. That review is the control; the roles and check 31 catch what review misses by accident.

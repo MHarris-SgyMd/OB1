@@ -3,7 +3,7 @@
 // a tool name against; a JSON import would widen every name to `string`, which
 // is why the source is TS and not tools.json. scripts/gen-tools.ts writes
 // tools.json from this for deploy/smoke.sh (bash, no bun in the deploy job), and
-// check-fork-consistency.ts round-trips the two so they cannot drift.
+// check-consistency.ts round-trips the two so they cannot drift.
 
 import type { Scope } from "./auth.ts";
 
