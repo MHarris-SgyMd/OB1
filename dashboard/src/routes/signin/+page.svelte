@@ -7,7 +7,7 @@
 	let loading = $state(false);
 </script>
 
-<svelte:head><title>Sign in · Open Brain</title></svelte:head>
+<svelte:head><title>Sign in · Daemonic Brain</title></svelte:head>
 
 <div class="max-w-md mx-auto px-6 py-16">
 	<div class="bg-bg-card border border-white/10 rounded-2xl p-8">
