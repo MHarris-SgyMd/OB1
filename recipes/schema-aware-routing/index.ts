@@ -10,7 +10,7 @@
 // carries no content fingerprint, no model label and no audit actor; the README says so.
 // Listed in scripts/check-consistency.ts check 10's exceptions (FORK.md change 71).
 /**
- * Schema-Aware Routing Pattern for Open Brain (OB1)
+ * Schema-Aware Routing Pattern for Daemonic Brain
  *
  * This module demonstrates a pattern where an LLM extracts structured metadata
  * from unstructured text, then routes that data to the correct database tables

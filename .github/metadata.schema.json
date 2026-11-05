@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/NateBJones-Projects/OB1/blob/main/.github/metadata.schema.json",
-  "title": "Open Brain Source Contribution Metadata",
-  "description": "Schema for metadata.json files in OB1 contributions (recipes, schemas, integrations, skills, primitives, extensions, plugins). Daemonic Brain note (siggymd): four optional fields added to the upstream schema \u2014 requires.env, contributors, status, and connectors (SMD-1933) \u2014 the first three so existing contributions that carry legitimate data upstream never modelled validate instead of being stripped, the fourth so a contribution declares the external systems it touches. All are additive and optional; anything valid upstream stays valid here.",
+  "title": "Daemonic Brain Contribution Metadata",
+  "description": "Schema for metadata.json files in Daemonic Brain contributions (recipes, schemas, integrations, skills, primitives, extensions, plugins). Daemonic Brain note (siggymd): four optional fields added to the upstream schema \u2014 requires.env, contributors, status, and connectors (SMD-1933) \u2014 the first three so existing contributions that carry legitimate data upstream never modelled validate instead of being stripped, the fourth so a contribution declares the external systems it touches. All are additive and optional; anything valid upstream stays valid here.",
   "type": "object",
   "required": [
     "name",
@@ -71,7 +71,7 @@
         "open_brain": {
           "type": "boolean",
           "const": true,
-          "description": "Must be true. All contributions require an Open Brain setup."
+          "description": "Must be true. All contributions require a Daemonic Brain setup."
         },
         "services": {
           "type": "array",

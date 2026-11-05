@@ -1,6 +1,6 @@
 {
   "name": "Perplexity Conversation Import",
-  "description": "Import your Perplexity conversations and memories from a data export (.xlsx) into Open Brain as searchable thoughts with embeddings and metadata.",
+  "description": "Import your Perplexity conversations and memories from a data export (.xlsx) into Daemonic Brain as searchable thoughts with embeddings and metadata.",
   "category": "recipes",
   "author": {
     "name": "Antonio De Marinis",

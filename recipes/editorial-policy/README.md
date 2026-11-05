@@ -4,7 +4,7 @@
 
 **Created by [@HansBohlmann](https://github.com/HansBohlmann)**
 
-> A 40-rule constitution that governs every synthesis prompt in your Open Brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
+> A 40-rule constitution that governs every synthesis prompt in your brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
 
 ## What It Is
 
@@ -33,7 +33,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - A scheduler: cron on the machine that runs the auditor, or `pg_cron` + `pg_net` in your Postgres
 - OpenRouter API key (the auditor uses `gpt-4o-mini` by default — swap to `claude-haiku-4-5` if you want stricter compliance reasoning)
@@ -79,13 +79,13 @@ Commit the policy to your repo. Future prompt updates will reference its version
 Per R10.2, every synthesis prompt's system message must start with:
 
 ```
-Follow Open Brain Editorial Policy v{version}. Specific rules referenced below by number.
+Follow Daemonic Brain Editorial Policy v{version}. Specific rules referenced below by number.
 ```
 
 Update your `morning-briefing` and `weekly-summary` prompts to start that way and to cite specific rules where relevant. A minimal example:
 
 ```ts
-const system = `Follow Open Brain Editorial Policy v1.3.
+const system = `Follow Daemonic Brain Editorial Policy v1.3.
 
 You are the operator's morning briefing assistant.
 

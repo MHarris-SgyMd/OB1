@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * session-capture.mjs — a session hook for Claude Code and Codex that captures
- * ONE summary thought into Open Brain at each of a session's checkpoints — a
+ * ONE summary thought into Daemonic Brain at each of a session's checkpoints — a
  * compaction (Claude Code's PreCompact) and the session's end — with the
  * thoughts the session retrieved as its provenance (SMD-1298, SMD-2012) —
  * one thought per EPISODE of the session, not per session (SMD-2013): a

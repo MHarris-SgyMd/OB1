@@ -1,6 +1,6 @@
 -- Draft only.
 -- This is the schema-ready Option B path for the World Model Diagnostic.
--- V1 ships without new tables and persists into core Open Brain thoughts instead.
+-- V1 ships without new tables and persists into core Daemonic Brain thoughts instead.
 
 create table if not exists public.world_model_assessments (
     id uuid primary key default gen_random_uuid(),

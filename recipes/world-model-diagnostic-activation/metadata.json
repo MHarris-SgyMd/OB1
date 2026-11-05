@@ -1,6 +1,6 @@
 {
   "name": "World Model Diagnostic Activation",
-  "description": "Lightweight activation path for running the World Model Readiness Diagnostic inside OB1 using the base search/capture connector, with a direct-paste fallback for Claude and ChatGPT.",
+  "description": "Lightweight activation path for running the World Model Readiness Diagnostic inside Daemonic Brain using the base search/capture connector, with a direct-paste fallback for Claude and ChatGPT.",
   "category": "recipes",
   "author": {
     "name": "Jonathan Edwards",

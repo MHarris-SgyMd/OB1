@@ -20024,7 +20024,7 @@ if (want("26")) {
     const bkNoUrl = await backup({});
     // A mistyped scheme on a connection string: the refusal names the scheme and repeats none of the value (SMD-2263).
     const bkHttps = await backup({ SUPABASE_URL: "mysql://u:pw-not-real@127.0.0.1:5432/x" });
-    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL, got a "mysql:" URL/.test(bkHttps.out) && !bkHttps.out.includes("pw-not-real") && !/Open Brain Backup --/.test(bkHttps.out),
+    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL, got a "mysql:" URL/.test(bkHttps.out) && !bkHttps.out.includes("pw-not-real") && !/Daemonic Brain Backup --/.test(bkHttps.out),
       `…no URL exits 1 with both lines of its message; a mistyped scheme exits 1 with the shim's refusal, which names the scheme and repeats none of the value (its password included), before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

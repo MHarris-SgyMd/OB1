@@ -6,7 +6,7 @@
 // Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // supabase/functions/auditor/index.ts
 //
-// Weekly drift + contradiction auditor for Open Brain.
+// Weekly drift + contradiction auditor for Daemonic Brain.
 //
 // What it does (per editorial-policy.md R8.3, R10.5):
 //   1. Fetches last N days of synthesizable thoughts.
@@ -137,7 +137,7 @@ async function fetchPriorAudits(limit: number): Promise<PriorAudit[]> {
 
 // ── Prompt construction ──────────────────────────────────────────────────
 function buildSystemPrompt(): string {
-  return `Follow Open Brain Editorial Policy v${POLICY_VERSION}. You are the operator's brain auditor.
+  return `Follow Daemonic Brain Editorial Policy v${POLICY_VERSION}. You are the operator's brain auditor.
 
 Your job: scan the supplied corpus of recent thoughts plus the last few audit reports, and produce a STRUCTURED JSON audit report.
 
@@ -292,7 +292,7 @@ async function callAuditor(
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
       "HTTP-Referer": SUPABASE_URL,
-      "X-Title": "Open Brain Auditor",
+      "X-Title": "Daemonic Brain Auditor",
     },
     body: JSON.stringify({
       model: "openai/gpt-4o-mini",

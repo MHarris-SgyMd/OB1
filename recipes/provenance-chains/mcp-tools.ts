@@ -6,7 +6,7 @@
 // Supabase project (adds the derived_from / derivation_* columns and the
 // trace_provenance / find_derivatives helper functions).
 //
-// The snippets below match the canonical Open Brain setup where
+// The snippets below match the canonical Daemonic Brain setup where
 // public.thoughts.id is a UUID. If your project has migrated thoughts to a
 // BIGINT primary key, swap z.string().uuid() for z.number().int().positive()
 // and update the id casts accordingly.
@@ -402,7 +402,7 @@ server.registerTool(
   {
     title: "Capture Derived Thought",
     description:
-      "Save a synthesized/derived artifact (digest, wiki, research summary, report) to Open Brain WITH its provenance. Use this instead of capture_thought ONLY when the thing you are saving was derived from other thoughts already in the brain. Records the parent thought IDs so 'why do I believe this?' and 'what uses this?' stay answerable.",
+      "Save a synthesized/derived artifact (digest, wiki, research summary, report) to Daemonic Brain WITH its provenance. Use this instead of capture_thought ONLY when the thing you are saving was derived from other thoughts already in the brain. Records the parent thought IDs so 'why do I believe this?' and 'what uses this?' stay answerable.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,

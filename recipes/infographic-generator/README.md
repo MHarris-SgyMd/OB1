@@ -1,27 +1,27 @@
 # Infographic Generator
 
-*Turn research docs and Open Brain thoughts into professional infographic images*
+*Turn research docs and Daemonic Brain thoughts into professional infographic images*
 
-Generate infographic images from any markdown document, research analysis, or Open Brain thought cluster using Gemini's free-tier image generation API. Auto-chunks content into logical segments, writes verbose image prompts, generates PNGs, and optionally captures prompts back to Open Brain for future retrieval.
+Generate infographic images from any markdown document, research analysis, or Daemonic Brain thought cluster using Gemini's free-tier image generation API. Auto-chunks content into logical segments, writes verbose image prompts, generates PNGs, and optionally captures prompts back to Daemonic Brain for future retrieval.
 
 ## What It Does
 
-Takes structured or unstructured content and runs a four-step process: **Analyze** the source for logical segments, **Chunk** into one-infographic-per-topic, **Prompt** with verbose image generation instructions (300+ words each with specific colors, layout, typography), and **Generate** actual PNG images via Gemini API. Prompts can be stored in Open Brain for future regeneration or adaptation.
+Takes structured or unstructured content and runs a four-step process: **Analyze** the source for logical segments, **Chunk** into one-infographic-per-topic, **Prompt** with verbose image generation instructions (300+ words each with specific colors, layout, typography), and **Generate** actual PNG images via Gemini API. Prompts can be stored in Daemonic Brain for future regeneration or adaptation.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Claude Code (or another AI coding tool that supports skills/system prompts)
-- Open Brain MCP tools connected (`capture_thought`, `search_thoughts`)
+- Daemonic Brain MCP tools connected (`capture_thought`, `search_thoughts`)
 - Python 3.10+ installed
 - Gemini API key (free tier, get one at [ai.google.dev](https://ai.google.dev))
 
 ### Credential Tracker
 
 ```
-From your existing Open Brain setup:
+From your existing Daemonic Brain setup:
 - Project URL: _______________
-- Open Brain MCP server connected: yes / no
+- Daemonic Brain MCP server connected: yes / no
 
 New for this recipe:
 - Gemini API key: _______________ (from ai.google.dev, free tier works)
@@ -78,7 +78,7 @@ Point the skill at any markdown file:
 Make infographics from docs/research/my-analysis.md
 ```
 
-Or use Open Brain as the source:
+Or use Daemonic Brain as the source:
 
 ```
 Visualize my thoughts about [topic]
@@ -100,12 +100,12 @@ redo 3          # regenerate infographic #3
 redo 3 premium  # regenerate with higher quality model
 ```
 
-### 8. (Optional) Capture prompts to Open Brain
+### 8. (Optional) Capture prompts to Daemonic Brain
 
-The generated prompts are 300+ word rich text documents. Storing them in Open Brain makes them searchable across sessions:
+The generated prompts are 300+ word rich text documents. Storing them in Daemonic Brain makes them searchable across sessions:
 
 ```
-Save these infographic prompts to Open Brain
+Save these infographic prompts to Daemonic Brain
 ```
 
 Future sessions can find them: `search_thoughts("infographic ROI analysis")`
@@ -121,13 +121,13 @@ When working correctly, you should see:
 
 A typical 2-page research doc yields 4-8 infographics. Generation takes 30-60 seconds per image on Gemini's free tier.
 
-## Open Brain Integration
+## Daemonic Brain Integration
 
-This recipe connects to Open Brain in two ways:
+This recipe connects to Daemonic Brain in two ways:
 
-**As a source (read side):** Search Open Brain for thoughts on a topic, synthesize them, then generate infographics from the synthesis. "Visualize my thoughts about MSP operations" pulls relevant thoughts and creates visuals from them.
+**As a source (read side):** Search Daemonic Brain for thoughts on a topic, synthesize them, then generate infographics from the synthesis. "Visualize my thoughts about MSP operations" pulls relevant thoughts and creates visuals from them.
 
-**As storage (write side):** Generated prompts can be captured back to Open Brain. This creates a searchable library of visual templates. "What infographic did I make for the deal structure?" returns the prompt, which can be regenerated or adapted for new content.
+**As storage (write side):** Generated prompts can be captured back to Daemonic Brain. This creates a searchable library of visual templates. "What infographic did I make for the deal structure?" returns the prompt, which can be regenerated or adapted for new content.
 
 Together with [Panning for Gold](../panning-for-gold/) and Auto-Capture Protocol (PR [#42](https://github.com/NateBJones-Projects/OB1/pull/42)), this forms a complete capture-process-visualize flywheel (see [Issue #84](https://github.com/NateBJones-Projects/OB1/issues/84)).
 

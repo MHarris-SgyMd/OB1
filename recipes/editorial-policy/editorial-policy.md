@@ -1,6 +1,6 @@
-# Open Brain Editorial Policy
+# Daemonic Brain Editorial Policy
 
-> The constitution of your Open Brain. Every synthesis prompt — extractor, briefing, weekly summary, auditor, future wiki compiler — inherits from this document. When prompts drift, the fix is in this doc, not in scattered prompt strings.
+> The constitution of your brain. Every synthesis prompt — extractor, briefing, weekly summary, auditor, future wiki compiler — inherits from this document. When prompts drift, the fix is in this doc, not in scattered prompt strings.
 
 **Version:** 1.3 (template release for community use)
 **Applies to:** ingest-thought, morning-briefing, weekly-summary, auditor, and any future synthesis layer.
@@ -170,7 +170,7 @@ One source = at most one output line. Tasks may be grouped into a single action-
 
 **R10.1** This doc is the constitution. It is versioned in git. Changes require a version bump (e.g., 1.0 → 1.1 for additions, 1.0 → 2.0 for breaking rule changes) and a brief changelog entry at the bottom of this file.
 
-**R10.2** Every synthesis prompt's system message MUST start with: `"Follow Open Brain Editorial Policy v{version}. Specific rules referenced below by number."` This makes drift detectable: an output that violates a rule is provably violating *this* document.
+**R10.2** Every synthesis prompt's system message MUST start with: `"Follow Daemonic Brain Editorial Policy v{version}. Specific rules referenced below by number."` This makes drift detectable: an output that violates a rule is provably violating *this* document.
 
 **R10.3** When a new trait is identified (an inflation pattern, a confabulation tendency, a contradiction-smoothing habit), the fix happens here first — in the policy — and then the synthesis prompts are updated to inherit the new rule. Don't patch prompts in isolation.
 

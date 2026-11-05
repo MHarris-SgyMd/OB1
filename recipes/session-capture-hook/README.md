@@ -1,10 +1,10 @@
 # Session Capture Hook
 
-> A session hook for Claude Code and Codex that captures **one summary thought per episode of a session** into Open Brain — a piece of work: the asks between a compaction, a move to another branch or checkout, or a new ticket — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece of the session retrieved as its provenance. Through a capture-only key, after a secret scan that blanks what it finds. Off until you paste the hooks it prints.
+> A session hook for Claude Code and Codex that captures **one summary thought per episode of a session** into Daemonic Brain — a piece of work: the asks between a compaction, a move to another branch or checkout, or a new ticket — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece of the session retrieved as its provenance. Through a capture-only key, after a secret scan that blanks what it finds. Off until you paste the hooks it prints.
 
 ## What It Does
 
-Capture in Open Brain is one thought at a time, when an agent chooses to call `capture_thought`. That under-collects: a two-hour session that searched the brain six times, made a decision and shipped a change leaves nothing behind unless the agent was told to write it down — and on the day this recipe was written, a session whose MCP connection failed at start-up had no capture tool at all and nothing reminded anyone (SMD-1298).
+Capture in Daemonic Brain is one thought at a time, when an agent chooses to call `capture_thought`. That under-collects: a two-hour session that searched the brain six times, made a decision and shipped a change leaves nothing behind unless the agent was told to write it down — and on the day this recipe was written, a session whose MCP connection failed at start-up had no capture tool at all and nothing reminded anyone (SMD-1298).
 
 This hook runs at a session's checkpoints — before each compaction (Claude Code's `PreCompact`, manual or automatic) and when the session ends — whether or not the session ever connected to the brain. It reads the transcript the harness hands it, cuts it into **episodes**, derives one summary per episode, and posts each through the brain's MCP endpoint as one thought:
 
@@ -71,7 +71,7 @@ The config keys (each also an env var, which wins, for a container or a test): `
 
 ## Prerequisites
 
-- A running Open Brain at release 1.1.0 or later — the portable server at or after SMD-1298 (the `capture` key scope and `capture_thought`'s `source` argument; migration 049) — [`SETUP.md`](../../SETUP.md)
+- A running Daemonic Brain at release 1.1.0 or later — the portable server at or after SMD-1298 (the `capture` key scope and `capture_thought`'s `source` argument; migration 049) — [`SETUP.md`](../../SETUP.md)
 - Claude Code, or Codex CLI 0.151 or later (hooks; `PreCompact` is Claude Code's — Codex has no compaction hook)
 - Bun 1.4+ or Node.js 18+ on the machine that runs the sessions
 - The [`session-summary`](../../skills/session-summary/) skill, if you also want the agent to write a considered summary at wrap-up (this hook is the floor under that: it runs whether or not the agent did)
@@ -82,7 +82,7 @@ The config keys (each also an env var, which wins, for a container or a test): `
 SESSION CAPTURE HOOK -- CREDENTIAL TRACKER
 --------------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Endpoint URL (the MCP endpoint, e.g. http://127.0.0.1:8010/mcp):  ____________
 
 GENERATED DURING SETUP

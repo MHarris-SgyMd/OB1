@@ -1,6 +1,6 @@
 {
   "name": "Wiki Compiler",
-  "description": "Compiled wiki layer for Open Brain that orchestrates graph extraction, typed edges, entity pages, and topic synthesis into scheduled or on-demand wiki refreshes.",
+  "description": "Compiled wiki layer for Daemonic Brain that orchestrates graph extraction, typed edges, entity pages, and topic synthesis into scheduled or on-demand wiki refreshes.",
   "category": "recipes",
   "author": {
     "name": "Jonathan Edwards",

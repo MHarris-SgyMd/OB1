@@ -105,7 +105,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Wiki Compiler — Open Brain compiled wiki wrapper
+  console.log(`Wiki Compiler — Daemonic Brain compiled wiki wrapper
 
 Usage:
   node recipes/wiki-compiler/compile-wiki.mjs [flags]

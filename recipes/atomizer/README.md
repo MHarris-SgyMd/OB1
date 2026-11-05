@@ -15,7 +15,7 @@ This recipe ships two workflows:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Node.js 18+
 - An extended `thoughts` schema — you need the following on top of the base table:
   - `thoughts.source_type text` column
