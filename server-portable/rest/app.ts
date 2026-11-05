@@ -218,7 +218,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     })));
   let doc: Record<string, unknown> | null = null;
 
-  // Every model call a request makes is live (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
+  // Every model call made while a request is served is live, unless run asBackground — a detached job, a hook's deferred
+  // work (SMD-3379 PR 2a): the context model-call.ts reads, background outside it.
   app.use("*", (_c, next) => asLive(() => next()));
 
   // One JSON line per request (SMD-1849, telemetry.ts): the method, the

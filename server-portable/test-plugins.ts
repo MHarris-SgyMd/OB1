@@ -1056,6 +1056,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
       odd: { description: "Defers work that fails with a message that is no string.", handler: async (ctx) => { ctx.defer(async () => { throw Object.assign(new Error(), { message: 42 }); }); return { status: 202 }; } },
       classed: { description: "Records the model-call class its handler and its deferred work run under.", handler: async (ctx) => { classes.push(`handler ${currentCallClass()}`); ctx.defer(async () => { classes.push(`work ${currentCallClass()}`); }); return { status: 202 }; } },
       unclassed: { description: "Records the class its discard runs under, then fails.", handler: async (ctx) => { ctx.defer(async () => { classes.push("work ran"); }, async () => { classes.push(`discard ${currentCallClass()}`); }); throw new Error("after the claim"); } },
+      "late-classed": { description: "Fails, leaving a timer that defers with a discard recording its class.", handler: async (ctx) => { setTimeout(() => { ctx.defer(async () => { classes.push("work ran"); }, async () => { classes.push(`late discard ${currentCallClass()}`); }); }, 5); throw new Error("before the timer"); } },
     } });
   const deferApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, log: () => {}, faultLog: (l) => faults.push(l),
     track: (run) => { const p = run(); tracked.push(p); return p; },
@@ -1116,8 +1117,12 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   const classedStatus = r.status;
   r = await post("unclassed");
   await Promise.all(tracked);
-  assert(classedStatus === 202 && r.status === 500 && JSON.stringify(classes) === JSON.stringify(["handler live", "work background", "discard live"]),
-    `a hook's handler and its discard run live, inside the delivery's request, and its deferred work background (${JSON.stringify(classes)})`);
+  r = await post("late-classed");
+  const lateStatus = r.status;
+  await Bun.sleep(50);
+  await Promise.all(tracked);
+  assert(classedStatus === 202 && lateStatus === 500 && JSON.stringify(classes) === JSON.stringify(["handler live", "work background", "discard live", "late discard background"]),
+    `a hook's handler and its discard run live, inside the delivery's request; its deferred work background, and a discard deferred after the 500 has gone (${JSON.stringify(classes)})`);
   const ranAtStringy = ran;
   r = await post("stringy");
   await Promise.all(tracked);

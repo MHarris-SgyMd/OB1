@@ -25,8 +25,9 @@
  * scripts, and the servers' own timers (the vector mender, the provider
  * reprobe), which run outside any request. Work a request starts and nobody
  * waits on is background too: a detached job (jobs.ts runs it `asBackground`)
- * and a webhook's deferred work (core/plugins.ts), where a discard, run before
- * the request's 500, stays live. A call may still say its class outright.
+ * and a webhook's deferred work (core/plugins.ts), whose discard stays live,
+ * run before the delivery's 500, unless it is deferred after the 500 has gone.
+ * A call may still say its class outright.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -85,5 +86,10 @@ export function asBackground<T>(fn: () => T): T {
 export function modelCall<T>(call: ModelCall, run: () => Promise<T>): Promise<T> {
   if (hook === null) return run();
   const { cls, ...rest } = call;
-  return hook({ ...rest, cls: cls ?? currentCallClass() }, run);
+  // A hook that throws before it returns its promise rejects the call, as one that rejects does (review pass 2).
+  try {
+    return hook({ ...rest, cls: cls ?? currentCallClass() }, run);
+  } catch (e) {
+    return Promise.reject(e);
+  }
 }

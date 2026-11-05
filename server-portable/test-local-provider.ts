@@ -1600,7 +1600,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     assert(emb?.cls === "live" && emb.model === EMB_MODEL && emb.base === PROVIDER && emb.purpose === "capture" && meta?.cls === "live" && meta.model === META_MODEL && meta.base === PROVIDER,
       `a capture's calls go through the seam, live: its embedding and its metadata call, each naming its model and the model server (${JSON.stringify(live)})`);
     const cfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: PROVIDER, OB1_METADATA_MODEL: META_MODEL, OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM) });
-    const getEmbedding = (text: string, c: typeof cfg, subject: import("./egress.ts").EgressSubject) => createEmbedder(() => c).getEmbedding(text, subject);
+    const getEmbedding = (text: string, c: typeof cfg, subject: import("./egress.ts").EgressSubject, signal?: AbortSignal) => createEmbedder(() => c).getEmbedding(text, subject, "document", signal);
     // Outside a request a call is background, as the passes', board-sync's and the servers' timers' are; asLive says live.
     calls.length = 0;
     await getEmbedding("a background embedding", cfg, { kind: "re-embed" });
@@ -1627,8 +1627,8 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
       getEmbedding("refused", cfg, { kind: "re-embed" }).then(() => false, () => true),
       extractEntities("Refused by the seam.", cfg, undefined, { kind: "extraction" }).then(() => false, () => true),
       judgePair({ content: "a", createdAt: null }, { content: "b", createdAt: null }, cfg).then(() => false, () => true),
-      // A probe never throws: refused, it reads as out.
-      probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000).then((p) => p.state === "out", () => false),
+      // A hook's refusal is the seam's failure, thrown: not read as the provider out.
+      probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000).then(() => false, () => true),
       jevInfo(jev).then(() => false, () => true),
     ]);
     refuse = false;
@@ -1665,11 +1665,37 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg, stop.signal);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000, stop.signal);
-    assert(calls.length === 3 && calls.every((c) => c.call.signal === stop.signal), `extraction, the judge and a probe each hand the seam their stop (${calls.map((c) => `${c.call.purpose}:${c.call.signal === stop.signal}`).join(", ")})`);
+    await getEmbedding("an embedding with a stop", cfg, { kind: "re-embed" }, stop.signal);
+    await jevInfo(jev, { signal: stop.signal });
+    assert(calls.length === 5 && calls.every((c) => c.call.signal === stop.signal), `extraction, the judge, a probe, an embedding and the decide tier each hand the seam their stop (${calls.map((c) => `${c.call.purpose}:${c.call.signal === stop.signal}`).join(", ")})`);
+    // A call that says its class outright keeps it, whatever the context (review pass 2).
+    const { modelCall } = await import("./model-call.ts");
+    calls.length = 0;
+    await modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "probe", cls: "live" }, async () => "said");
+    await asLive(() => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "probe", cls: "background" }, async () => "said"));
+    assert(calls.map((c) => c.call.cls).join(",") === "live,background", `a call's own class stands over the context's (${calls.map((c) => c.call.cls).join(",")})`);
   } finally {
     setModelCallHook(restore);
   }
-  // A probe never throws: a hook that ends its wait on the probe's stop leaves it reading as stopped (review pass 1).
+  // A hook that ends its wait on the probe's stop leaves it reading as stopped (review pass 1); a hook that throws
+  // before it returns — not the stop — rejects the call, thrown, not read as the provider out (review pass 2).
+  {
+    const before = setModelCallHook(() => { throw new Error("a hook's own bug"); });
+    try {
+      // Called bare, so a throw that escapes before the promise exists is seen as one, not folded into a rejection.
+      let pending: Promise<unknown> | null = null;
+      let threwAtCall = "";
+      try {
+        pending = probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000);
+      } catch (e) {
+        threwAtCall = (e as Error).message;
+      }
+      const sync = pending ? await pending.then((p) => ({ resolved: p }), (e: unknown) => ({ rejected: (e as Error).message })) : { threwAtCall };
+      assert(JSON.stringify(sync) === JSON.stringify({ rejected: "a hook's own bug" }), `a hook that throws before it returns rejects the probe — no throw at the call — its error said, not read as the provider out (${JSON.stringify(sync)})`);
+    } finally {
+      setModelCallHook(before);
+    }
+  }
   {
     const wake = new AbortController();
     const before = setModelCallHook((call) => new Promise((_resolve, reject) => call.signal?.addEventListener("abort", () => reject(call.signal?.reason), { once: true })));
