@@ -1669,9 +1669,9 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   (measured on podman: 37 s from `httpd`'s kill to the new start, 35 s from
   the exporter's; while the exporter is down a scrape is a 502).
 
-Grafana opens on the stack's own dashboard, **Open Brain**, provisioned at
+Grafana opens on the stack's own dashboard, **Daemonic Brain**, provisioned at
 each start as `/grafana/d/ob1` in a folder of that name (its home page is the
-same file, at `/grafana/d/default-home-dashboard/open-brain`; the image's own
+same file, at `/grafana/d/default-home-dashboard/daemonic-brain`; the image's own
 dashboards are under Dashboards) from `deploy/observability/dashboard.json`,
 which compose.yaml carries inline as the `grafana-dashboard` config (check 37
 holds the copy to the file, and every Prometheus name and label its queries
@@ -1724,9 +1724,9 @@ beside stable's and stable alone cannot be picked) and the database (All takes
 every one but Postgres's templates, the brain's being `openbrain`). Grafana
 will not save a change made to it — it is provisioned (measured) — so save a
 copy, in a folder of your own, to keep one (the removal under "Alerts" deletes
-the Open Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
+the Daemonic Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
 sharing externally", which writes `${DS_…}` placeholders) over
-`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Daemonic
 Brain` and `"editable": false` (a saved copy has its own of each; check 37
 says so), and run `bun scripts/inline-grafana.ts`, which writes
 compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
@@ -1739,7 +1739,7 @@ so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
 Nothing on the dashboard shows the disk itself.
 
 **Alerts** (SMD-3050): Grafana also loads five alert rules from
-`deploy/observability/alert-rules.yaml` at each start, into the Open Brain
+`deploy/observability/alert-rules.yaml` at each start, into the Daemonic Brain
 folder, each evaluated every 30 s:
 - **A server stopped sending metrics**: a server that sent `process.uptime`
   in the last day and nothing in the last 10 minutes, for 2 more minutes (a
@@ -1826,11 +1826,24 @@ folder, a copy of the dashboard among them, so move those out first. From
 the same:
 
 ```bash
-docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/dashboards/uid/ob1" | grep -o "\"folderUid\":\"[^\"]*\"" | head -1 | cut -d\" -f4); test -n "$u" || { echo "no Open Brain dashboard, so no folder to delete" >&2; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u?forceDeleteRules=true"'
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/dashboards/uid/ob1" | grep -o "\"folderUid\":\"[^\"]*\"" | head -1 | cut -d\" -f4); test -n "$u" || { echo "no Daemonic Brain dashboard, so no folder to delete" >&2; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u?forceDeleteRules=true"'
 ```
 
 The dashboard is back within seconds, its provider reading the file again,
 and the rules still in the file come back at `lgtm`'s next start (measured).
+
+An install upgraded from a release whose dashboard was named Open Brain
+(before SMD-3769) keeps that folder, empty: Grafana provisions the dashboard
+and the rules into a new Daemonic Brain folder and leaves the old one behind
+(measured on the pinned image, on its `lgtm-data`). Once Grafana opens on
+Daemonic Brain after the upgrade's `up -d`, delete the old folder once, from
+`deploy/` as above. The command deletes it only when no dashboard is left in
+it (the rules moved with the dashboard, measured), says so when there is no
+such folder, and fails, deleting nothing, when Grafana does not answer:
+
+```bash
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; f=$(curl -fsS -u "$a" "$g/api/folders") || { echo "Grafana did not list its folders: wait until it opens, and check its admin password"; exit 1; }; u=$(printf "%s" "$f" | tr "{" "\n" | grep "\"title\":\"Open Brain\"" | grep -o "\"uid\":\"[^\"]*\"" | cut -d\" -f4); test -n "$u" || { echo "no Open Brain folder"; exit 0; }; s=$(curl -fsS -u "$a" "$g/api/search?folderUIDs=$u") || { echo "Grafana did not list the Open Brain folder"; exit 1; }; test "$s" = "[]" || { echo "the Open Brain folder still holds a dashboard: run this once Grafana opens on Daemonic Brain, and move out any dashboard of your own first"; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u" > /dev/null && echo "deleted the empty Open Brain folder"'
+```
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1869,7 +1882,7 @@ too, through the port's network — on Docker Desktop and a podman machine by
 `host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
 port with the host-ports file); on Linux the host's other listeners, by the
 network's gateway. The image's own sample dashboards (RED metrics, JVM) read
-other names; this stack's is Open Brain, above.
+other names; this stack's is Daemonic Brain, above.
 
 A canary (`deploy/canary.sh`) is not on stable's `mesh` (SMD-2874), and its
 env file is made from stable's at its first `up`: with the endpoint in
@@ -2600,7 +2613,7 @@ loopback check, `tier.ts` guards `--to` two ways:
     cannot reach it, so a refresh that failed partway can simply be re-run;
   - one stamped `canary` or `working`;
   - one whose public schema holds nothing but what extensions own;
-  - an Open Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
+  - a Daemonic Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
     holding no thoughts. `schema_migrations` alone is not enough, since Rails,
     Ecto, golang-migrate and dbmate use that name too.
 

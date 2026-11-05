@@ -19,7 +19,7 @@
 	const NOTHING_HELD = "The embedding provider did not answer, and no thought holds the query's identifiers, quoted spans or text exactly. Try again later, or search by exact text.";
 </script>
 
-<svelte:head><title>Search · Open Brain</title></svelte:head>
+<svelte:head><title>Search · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Search</h1>

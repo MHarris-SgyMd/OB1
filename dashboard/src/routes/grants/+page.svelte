@@ -4,7 +4,7 @@
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 </script>
 
-<svelte:head><title>Grants · Open Brain</title></svelte:head>
+<svelte:head><title>Grants · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<header>

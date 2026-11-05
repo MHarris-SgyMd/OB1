@@ -6,7 +6,7 @@
 	const field = $derived(`\n${form?.content ?? ''}`);
 </script>
 
-<svelte:head><title>Capture · Open Brain</title></svelte:head>
+<svelte:head><title>Capture · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Capture a thought</h1>

@@ -293,7 +293,7 @@ export function markerLine(a: string, b: string, words: readonly FindingWord[]):
 export function commentBody(g: FindingGroup): string {
   const other = g.on === g.a ? g.b : g.a;
   return [
-    `**Open Brain found something about ${g.on} and ${other}**, two tickets this board does not link.`,
+    `**Daemonic Brain found something about ${g.on} and ${other}**, two tickets this board does not link.`,
     "",
     ...findingLines(g),
     "",
