@@ -89,7 +89,7 @@ async function ownWhileAway(ctx: Ctx, principal: Principal, claim: WorkClaim | n
   if (principal.agentId !== undefined || !claim || token === undefined || claim.holder !== principal.name || claim.holderAgentId === null) return false;
   return (await ctx.store()).claimTokenIs(claim.id, token);
 }
-/** Called without an agent id alone; none and no word why from the registry is registry_unknown. */
+/** Its callers hold no agent id. With no registry failure named either, the cause is registry_unknown. */
 const unattributedRefusal = (principal: Principal, id: string, forced: boolean) =>
   unattributedAs("CLAIM_UNATTRIBUTED", principal, { id, forced }) ?? refuse({ code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_unknown", id, forced });
 

@@ -14,9 +14,13 @@ import { refuse, type Outcome, type Refusal } from "./refusal.ts";
 export const writerScope = (principal: Principal): "write" | "capture" | undefined =>
   principal.scope === "write" ? "write" : principal.scope === "capture" ? "capture" : undefined;
 
+/** A key with neither scope reaching a writer: 116's and 117's READ_ONLY_KEY, naming the key. */
 export const readOnly = (principal: Principal) => refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
 
-/** A store call, or the refusal the database raised as the store's own class (`Refused`): an argument, or for 115 an ingested key; any other throw stays a fault. */
+/**
+ * A store call, or the refusal the database raised as the store's own class (`Refused`): an argument, or for 115 an
+ * ingested key. Any other throw stays a fault.
+ */
 export async function asked<T, E extends Error>(Refused: abstract new (...args: never[]) => E, run: () => Promise<T>): Promise<T | E> {
   try {
     return await run();
