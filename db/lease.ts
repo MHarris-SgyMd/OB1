@@ -49,6 +49,7 @@
 
 import type { SQL } from "bun";
 import { cleanForDisplay } from "../server-portable/consolidate.ts";
+import type { CallWaits } from "../server-portable/model-call.ts";
 
 /** The lease when --ttl is not given: 015's default for claim_thoughts. */
 export const DEFAULT_TTL_S = 900;
@@ -542,6 +543,39 @@ export async function idleWhile<T>(call: InHandCall | undefined, pending: Promis
     call.waiting = false;
     call.since = Date.now();
   }
+}
+
+/**
+ * A worker's call entry told of its model calls' waits on the model-call
+ * seam's hook (SMD-3379 PR 2a, review pass 3): while any of the thought's
+ * calls waits for a slot — a fan-out's several at once — it holds no call to
+ * abort, as at the admit gate (idleWhile); once the last runs, its call's time
+ * starts again. A wait inside one idleWhile already holds — the decider's call
+ * — leaves it as idleWhile set it. `also`, a pass's own clock beside it
+ * (extraction's stall), told at the same two edges.
+ */
+export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits): CallWaits {
+  let waiting = 0;
+  let before: boolean | undefined;
+  return {
+    waiting() {
+      if (waiting++ > 0) return;
+      const c = get();
+      before = c?.waiting;
+      if (c) c.waiting = true;
+      also?.waiting();
+    },
+    running() {
+      if (waiting === 0 || --waiting > 0) return;
+      const c = get();
+      if (c && before === false) {
+        c.waiting = false;
+        c.since = Date.now();
+      }
+      before = undefined;
+      also?.running();
+    },
+  };
 }
 
 /** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */

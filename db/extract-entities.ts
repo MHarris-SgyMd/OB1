@@ -197,7 +197,8 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -447,6 +448,12 @@ export function abortedNote(extraction: Extraction): string {
  * as the CLI's stack dump always showed; run()'s own client is closed first.
  */
 export async function run(opts: ExtractOptions): Promise<number> {
+  // Its model calls labelled with the pass, for the model-call seam's hook (SMD-3379 PR 2a).
+  return asPass("extract", () => runPass(opts));
+}
+
+/** run's body, inside its pass's label. */
+async function runPass(opts: ExtractOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
   /** A refusal of the options themselves: said, reported as the start's `usage`, 2. */
   const usage = (line: string): number => {
@@ -1173,7 +1180,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * set while processRow runs, with when it was taken up — moved on past a
    * provider pause, which is the provider's time and not the window's
    * (review pass 3) — which says whether the stop was long. A wait at the
-   * admit gate moves it on too, and `pausedAt` marks one in progress, so a
+   * admit gate moves it on too, as does one for a slot on the model-call
+   * seam's hook (stallWaits, PR 2a); `pausedAt` marks either in progress, so a
    * hard stop during it counts up to the wait (SMD-3379 PR 1b-1).
    */
   const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
@@ -1227,6 +1235,32 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         } catch (e) {
           keepingFailed(e, "keep");
         }
+      },
+    };
+  }
+
+  /**
+   * The stall clock of the thought a worker holds, paused while its calls wait
+   * for a slot on the model-call seam's hook, as the admit gate's wait pauses
+   * it: held from then, its `since` moved on by the wait (SMD-3379 PR 2a). A
+   * wait inside one the gate already paused leaves the gate's.
+   */
+  function stallWaits(workerId: string): CallWaits {
+    let at: number | null = null;
+    return {
+      waiting() {
+        const held = inHand.get(workerId);
+        if (!held || held.pausedAt !== undefined) return;
+        at = Date.now();
+        held.pausedAt = at;
+      },
+      running() {
+        const held = inHand.get(workerId);
+        if (at !== null && held && held.pausedAt === at) {
+          held.since += Date.now() - at;
+          held.pausedAt = undefined;
+        }
+        at = null;
       },
     };
   }
@@ -1570,7 +1604,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId, asked, attempt > 0);
+                // A wait for a slot on the model-call seam is neither the call's
+                // time nor the thought's held (review pass 3).
+                outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId), stallWaits(workerId)), () => processRow(row, workerId, asked, attempt > 0));
               } catch (e) {
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
