@@ -15,7 +15,7 @@
  *   [[Note]], [[Note#heading|alias]], ![[Note]]   →  references Note
  *   #tag (inline) and frontmatter `tags:`         →  mentions (topic)
  *   frontmatter                                   →  facets.frontmatter, title, tags
- *   frontmatter `priority:` and `due:`             →  priority (SMD-3666), on the note's thought
+ *   frontmatter `priority:` and `due:`            →  priority (SMD-3666), on the note's thought
  *
  * Identity: the note's NAME — the file name without `.md`, which is what a
  * wikilink names and how Obsidian itself resolves one, so a link's target and
