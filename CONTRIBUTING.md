@@ -36,12 +36,22 @@ This is a first-class path, not a workaround. Some of the best contributions com
 
 - **Extensions** are curated, ordered builds that form a progressive learning path. Each teaches new concepts through practical use. They include database schemas, MCP server code, and step-by-step instructions. If you want to propose a new extension, [open an issue](../../issues/new?template=extension-submission.yml) first.
 - **Primitives** are reusable concept guides that get referenced by multiple extensions. They teach a pattern (like RLS or shared access) once, so extensions can link to them instead of re-explaining. A primitive should be referenced by at least 2 extensions. [Propose one here](../../issues/new?template=primitive-submission.yml).
-- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working Open Brain. Open for community contributions.
+- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working Daemonic Brain. Open for community contributions.
 - **Plugins** add operations to the brain itself (SMD-2310). A plugin is a manifest in `plugins/<name>/`, not a server: the brain's REST core and MCP server serve its operations behind the brain's own keys and scopes, and its tables live in a Postgres schema of its own. A contribution that would once have been its own MCP server with its own keys is a plugin now. See [plugins/README.md](plugins/README.md).
 - **Skills** are standalone agent behaviors packaged as plain-text prompt/skill files. They are smaller than recipes: no full build required, just a reusable behavior you can install into Claude Code, Codex, Cursor, or a similar client. Open for community contributions.
 - If a prompt/skill behavior is reusable across multiple contributions, its canonical home is `skills/`. Recipes and other contributions should depend on it with `requires_skills` instead of keeping the canonical copy in their own folder. Recipe-local `*.skill.md` files are still allowed for tightly coupled glue, but they are not the preferred pattern for reusable behavior.
 
 Not sure where yours fits? Open a discussion issue first.
+
+## Naming the product
+
+The project is **Daemonic Brain**, and it grew out of Open Brain (SMD-1929). Name things in a contribution by one rule:
+
+- **Daemonic Brain names the product:** its setup, its tools, its connector and what it does ("a working Daemonic Brain setup", "the Daemonic Brain capture tool").
+- **One memory is "a brain":** "capture it to your brain", "search the brain".
+- **Open Brain names only the origin:** where the text says the project grew out of it, in a link to upstream's repository or docs, in a credit or an attribution, or in text quoted from upstream. OB1 used as the product's name follows the same rule. OB1 as a repository's name stays.
+- **Identifiers stay as they are until SMD-3771 decides them.** These are the `OB1_*` settings, the `ob1-*` images, the `ob1_` SQL, the `open-brain` connector and compose project, tool names such as `mcp__open-brain__capture_thought`, and repository names in URLs.
+- **A contribution's credit stays its author's:** a `metadata.json` `author` is never changed.
 
 ## Required Files
 
@@ -57,8 +67,8 @@ Every contribution lives in its own subfolder under the right category (e.g., `r
 
 Your contribution's README must include these sections:
 
-1. **What it does** — 1-2 sentences. What capability does this add to Open Brain?
-2. **Prerequisites** — What the user needs before starting (e.g., "Working Open Brain setup," "OpenRouter API key," "Node.js 18+")
+1. **What it does** — 1-2 sentences. What capability does this add to Daemonic Brain?
+2. **Prerequisites** — What the user needs before starting (e.g., "Working Daemonic Brain setup," "OpenRouter API key," "Node.js 18+")
 3. **Step-by-step instructions** — Numbered steps, copy-paste ready where possible. Don't skip steps. Don't assume knowledge that isn't in the prerequisites.
 4. **Expected outcome** — What should the user see when it's working? Be specific.
 5. **Troubleshooting** — At least 2-3 common issues and how to fix them.
@@ -166,7 +176,7 @@ Every contribution needs a `metadata.json` file. Here's the template:
 ```json
 {
   "name": "Email History Import",
-  "description": "Import your Gmail email history into Open Brain as searchable thoughts with sender, subject, and date metadata.",
+  "description": "Import your Gmail email history into your brain as searchable thoughts with sender, subject, and date metadata.",
   "category": "recipes",
   "author": {
     "name": "Matt Hallett",
@@ -232,7 +242,7 @@ Example for a recipe that depends on a reusable skill:
 ```json
 {
   "name": "Auto-Capture Protocol",
-  "description": "Workflow guidance for automatically storing evaluated ideas and session summaries in Open Brain at session close.",
+  "description": "Workflow guidance for automatically storing evaluated ideas and session summaries in your brain at session close.",
   "category": "recipes",
   "author": {
     "name": "Your Name",
@@ -263,7 +273,7 @@ Example for a recipe that depends on a reusable skill:
 **Description must include:**
 - What the contribution does
 - What it requires (services, tools)
-- Confirmation that you tested it on your own Open Brain instance
+- Confirmation that you tested it on a brain of your own
 
 ## Commit messages (the project's own changes)
 
@@ -378,7 +388,7 @@ As you contribute, you'll progress through these levels. Every level is achievab
 
 | Level | What it means | How you get here |
 | ----- | ------------- | ---------------- |
-| **Community Member** | You use Open Brain and participate in discussions | Show up — ask questions, report bugs, share ideas |
+| **Community Member** | You use Daemonic Brain and participate in discussions | Show up — ask questions, report bugs, share ideas |
 | **Contributor** | You've had at least one contribution merged (code or non-code) | Submit a PR (or have a mentor submit one with your attribution) that gets merged |
 | **Regular** | You're a consistent, trusted contributor | 3+ merged contributions, or sustained help reviewing/testing others' work |
 | **Maintainer** | You help review PRs, mentor new contributors, and shape the project | Invited by existing maintainers based on sustained, quality involvement |

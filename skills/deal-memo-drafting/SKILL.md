@@ -5,7 +5,7 @@ description: |
   memo, or acquisition-style brief from existing diligence materials. Use for prompts
   like "draft a deal memo", "turn this diligence packet into a memo", or "write the
   IC draft". Best when you already have research findings, model review notes, meeting
-  outputs, and supporting documents. Optional Open Brain search and capture can pull
+  outputs, and supporting documents. Optional Daemonic Brain search and capture can pull
   prior context and store the final memo or recommendation summary.
 author: Nate B. Jones
 version: 1.0.0
@@ -62,7 +62,7 @@ Gather or confirm:
    - Do not quietly fill missing evidence with confident prose.
 5. Tighten for decision-readiness.
    - End with what the decision-maker should do, why, and what still needs verification.
-6. Optionally use Open Brain.
+6. Optionally use Daemonic Brain.
    - Search for prior deal notes, past meetings, or earlier thesis fragments.
    - Capture the final memo summary or recommendation after the draft is complete.
 

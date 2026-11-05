@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Open Brain — Claude Code Session-End Capture Hook
+ * Daemonic Brain — Claude Code Session-End Capture Hook
  *
  * Reference implementation for the auto-capture-claude-code skill.
  * Fires on every Claude Code session end, reads the transcript, filters out
  * short/agent/sensitive sessions, and POSTs the formatted transcript to the
- * Open Brain REST ingest endpoint for automatic thought extraction.
+ * Daemonic Brain REST ingest endpoint for automatic thought extraction.
  *
  * All errors are logged and swallowed — this hook must never block
  * Claude Code shutdown.
@@ -13,7 +13,7 @@
  * Prerequisites:
  *   - Node.js 18+ (for native fetch)
  *   - SUPABASE_URL and MCP_ACCESS_KEY in environment or .env.local
- *   - Open Brain REST API or smart-ingest edge function deployed
+ *   - Daemonic Brain REST API or smart-ingest edge function deployed
  *
  * Install in .claude/settings.json:
  *   {

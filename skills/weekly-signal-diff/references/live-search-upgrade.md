@@ -5,7 +5,7 @@ user wants fresh, source-backed coverage.
 
 ## Preferred Upgrade Path
 
-For OB1 users with OpenRouter access, prefer the Perplexity Sonar family for
+For Daemonic Brain users with OpenRouter access, prefer the Perplexity Sonar family for
 the retrieval pass. Start with the strongest Sonar search tier available in the
 user's account. Use the plain Sonar tier as the lowest-cost fallback when
 budget matters more than depth.
@@ -47,11 +47,11 @@ Prefer prompts or search instructions that request:
 For scheduled runs:
 
 - keep the retrieval and synthesis structure consistent every week
-- store the final digest back in Open Brain so next week's run has something to
+- store the final digest back in Daemonic Brain so next week's run has something to
   diff against
 - track the week-ending date in the saved summary
 - if cost matters, use a cheaper broad sweep and spend extra search depth only
   on the top candidate shifts
 
-The search layer finds the evidence. Open Brain decides what matters to this
+The search layer finds the evidence. Daemonic Brain decides what matters to this
 user. Keep those roles separate.
