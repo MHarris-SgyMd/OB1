@@ -90,6 +90,8 @@ import { parseFragment, fragmentRecord } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/changes-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { actorPayload } from "../server-portable/store.ts";
+import { dueInstant, levelOf, reasonOf, type PriorityLevel, type PriorityScale } from "../server-portable/priority-scale.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
@@ -129,6 +131,12 @@ export type Doc = {
   watermark?: { key: string; value: string; asOf?: string };
   /** For a record that is a PART of another (a ticket's dated section, SMD-2059): the parent's identity, resolved at the write to whichever writer's row holds it (`source_thought`) and written as the row's `derived_from`. */
   derivedFrom?: Identity;
+  /**
+   * What the record says of how much it matters, mapped onto the brain's scale (SMD-3666): the item it is stated on
+   * (the ticket the record is of, or the record's own thought), its level — null for unknown, which clears the
+   * writer's earlier statement — and its due time as 116 takes it.
+   */
+  priority?: { kind: "thought" | "ticket"; key: string; level: PriorityLevel | null; due: string | null; reason: string | null };
 };
 
 /**
@@ -254,8 +262,10 @@ export function docOf(ingested: Ingested): Doc {
   // to the adapter: a key the row never carried would leave the clock guard
   // inert, silently (first review pass, independent read).
   const wm = ingested.watermark;
+  const id = recordId(source, key);
+  const p = ingested.priority;
   return {
-    id: recordId(source, key),
+    id,
     content: ingested.text,
     source,
     meta: { ...ingested.facets, ...(wm ? { [wm.key]: wm.value } : {}) },
@@ -263,6 +273,7 @@ export function docOf(ingested: Ingested): Doc {
     structure: { identity: ingested.identity, canonical: ingested.canonical, links: ingested.links, mentions: ingested.mentions },
     scope: ingested.scope,
     ...(ingested.watermark ? { watermark: ingested.watermark } : {}),
+    ...(p ? { priority: { kind: p.on?.kind ?? "thought", key: p.on?.key ?? id, level: levelOf(p.scale, p.value), due: dueInstant(p.due), reason: p.value === null ? null : reasonOf(p.scale, p.value) } } : {}),
   };
 }
 
@@ -474,10 +485,12 @@ export function runName(tool: string = INGEST_ACTOR.via, at: Date = new Date()):
   return structureRunName(tool, at);
 }
 
-/** What one record's write said: the row's outcome, and the structure's counts when the record carried one. */
+/** What one record's write said: the row's outcome, the structure's counts when the record carried one, and what became of its priority when it carried one. */
 export type RecordResult = {
   outcome: UpsertResult;
   structure?: StructureResult;
+  /** 116's answer to the record's priority: asserted, unchanged, cleared, nothing_to_clear, or refused with its code. */
+  priority?: PriorityStated;
   /** For `held`: the thought that holds the identity. */
   heldBy?: string;
 };
@@ -522,8 +535,12 @@ export type RecordResult = {
  * a write followed reads "stale" for a reason that is not a later view; the
  * sync's next pass lands the rename from its census, so the cost is a delay
  * and an overstated count, never a lost write (second review pass).
+ *
+ * With `priorities` (the caller has asked that the brain has 116's writers and
+ * the role may run them), a record's priority is stated in the same
+ * transaction once its row stands (SMD-3666); without it, none is.
  */
-export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), actor: IngestActor = INGEST_ACTOR): Promise<RecordResult> {
+export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), actor: IngestActor = INGEST_ACTOR, priorities = false): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
   for (const k of ACTOR_KEYS) delete (meta as Record<string, unknown>)[k];
   const created = doc.createdAt ?? null;
@@ -607,8 +624,11 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
         // (cold read, SMD-1731's second review pass).
         await tx`DELETE FROM derivations WHERE artifact_kind = 'chunks' AND artifact_id = ${doc.id}::uuid`;
       }
-      if (!doc.structure) return { outcome };
-      return { outcome, structure: await recordStructure(tx, doc.id, doc.structure, run) };
+      const structure = doc.structure ? await recordStructure(tx, doc.id, doc.structure, run) : undefined;
+      // The record's priority, stated as the run's actor in the record's own transaction, once its row stands
+      // (SMD-3666): the row's thought is there for 116's existence check, and a ticket's head is the trigger's.
+      const priority = priorities && doc.priority ? await statePriority(tx, doc.priority, actor) : undefined;
+      return { outcome, ...(structure ? { structure } : {}), ...(priority ? { priority } : {}) };
     });
   } catch (e) {
     if (isFingerprintCollision(e)) return { outcome: "skipped" };
@@ -619,6 +639,23 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
     if (e instanceof IdentityHeld) return { outcome: "held", heldBy: e.heldBy };
     throw e;
   }
+}
+
+/** 116's answer to a record's priority, as the run counts it: its outcome, or `refused` and the code. */
+export type PriorityStated = "asserted" | "unchanged" | "cleared" | "nothing_to_clear" | `refused ${string}`;
+
+/**
+ * A record's priority through 116, as the actor (SMD-3666): a level states it — the same again is `unchanged` —
+ * and unknown clears the actor's own earlier statement, nothing else. The envelope states write scope, as the
+ * server's store does for a write key; the tier is the registry's (decision 4): a source when the operator has
+ * declared the actor one, else its kind's.
+ */
+async function statePriority(tx: SQL, p: NonNullable<Doc["priority"]>, actor: IngestActor): Promise<PriorityStated> {
+  const env = { ...actorPayload(actor), scope: "write" };
+  const [row] = (p.level === null
+    ? await tx`SELECT clear_priority(${p.kind}::text, ${p.key}::text, ${env}::jsonb) AS r`
+    : await tx`SELECT assert_priority(${p.kind}::text, ${p.key}::text, ${p.level}::int, ${p.due}::timestamptz, NULL::timestamptz, NULL::text, NULL::text, ${p.reason}::text, false, ${env}::jsonb) AS r`) as { r: { outcome: string; code: string | null } }[];
+  return row.r.outcome === "refused" ? `refused ${row.r.code ?? "UNKNOWN"}` : (row.r.outcome as PriorityStated);
 }
 
 /**
@@ -751,6 +788,33 @@ function selfCheck(): number {
   let actorRefusal = "";
   try { ingestActor("Runner; DROP"); } catch (e) { actorRefusal = (e as Error).message; }
   ok(/^--actor must be a lower-case label/.test(actorRefusal) && !ACTOR_NAME_RE.test("") && !ACTOR_NAME_RE.test(`a${"b".repeat(63)}`), `--actor refuses a name that is not a short lower-case label (${actorRefusal.slice(0, 50)})`);
+
+  // SMD-3666: docs/priority.md's mapping table, a row each — a source's default unknown unless chosen, a word the
+  // row does not hold unknown, frontmatter in any case and trimmed, the other sources' words exact — and the due rule.
+  const table: [PriorityScale, string | null, number | null, boolean?][] = [
+    ["linear", "Low", 1], ["linear", "Medium", 2], ["linear", "High", 3], ["linear", "Urgent", 4], ["linear", "No priority", null], ["linear", "high", null],
+    ["home-maintenance", "low", 1], ["home-maintenance", "medium", null], ["home-maintenance", "medium", 2, true], ["home-maintenance", "high", 3], ["home-maintenance", "urgent", 4],
+    ["github", "P3", 1], ["github", "P2", 2], ["github", "P1", 3], ["github", "P0", 5], ["github", "p0", null],
+    ["frontmatter", "none", 0], ["frontmatter", "low", 1], ["frontmatter", " Medium ", 2], ["frontmatter", "HIGH", 3], ["frontmatter", "urgent", 4], ["frontmatter", "critical", 5],
+    ["frontmatter", "asap", null], ["frontmatter", null, null], ["frontmatter", "constructor", null],
+  ];
+  const tableMisses = table.filter(([scale, value, level, chosen]) => levelOf(scale, value, { chosen }) !== level).map(([scale, value]) => `${scale} ${JSON.stringify(value)}`);
+  ok(tableMisses.length === 0, `the priority mapping table, a row each: Linear's four words, its No priority unknown; home-maintenance's medium unknown unless chosen; P3 to P0; frontmatter none to critical in any case; any other word unknown (${tableMisses.join(", ") || "every row"})`);
+  ok(dueInstant("2026-12-01") === "2026-12-01T00:00:00Z" && dueInstant(" 2026-12-01T17:00:00+02:00 ") === "2026-12-01T17:00:00+02:00" && dueInstant("2026-12-01T17:00Z") === "2026-12-01T17:00Z"
+     && dueInstant("2026-02-30") === null && dueInstant("2026-12-01T17:00:00") === null && dueInstant("soon") === null && dueInstant(null) === null,
+    "a due time: a date is the start of its day in UTC, a time with its offset that instant; a day that does not exist, a time with no offset or no time at all is none");
+  ok(reasonOf("linear", "High") === "Linear priority: High" && reasonOf("frontmatter", " very\thigh ") === "frontmatter priority: very high", "a statement's reason names the source and its word, a control character a space");
+  const ticketDoc = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "High", dueDate: "2026-12-01" }));
+  const noPriority = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "No priority" }));
+  const noDay = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, dueDate: null }));
+  ok(JSON.stringify(ticketDoc.priority) === JSON.stringify({ kind: "ticket", key: SAMPLE_ISSUE.identifier, level: 3, due: "2026-12-01T00:00:00Z", reason: "Linear priority: High" })
+     && ticketDoc.meta.due_date === "2026-12-01" && ticketDoc.meta.priority === "High" && noPriority.priority?.level === null && !("due_date" in noPriority.meta) && noDay.meta.due_date === null,
+    `a ticket's priority is stated on the ticket, Linear's word and due day kept as facets; No priority is unknown; an issue with no dueDate key (a dump built before it was fetched) writes no due_date, one whose dueDate is null writes null (review pass 1) (${JSON.stringify(ticketDoc.priority)})`);
+  const sampleItem = JSON.parse(JSON.stringify(SAMPLE_ITEM)) as Ingested;
+  const noteDoc = docOf({ ...sampleItem, priority: { scale: "frontmatter", value: "urgent", due: "2026-12-01" } });
+  const partDocs = docsOf({ ...linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "High" }), derived: [{ identity: { system: "linear", key: "SMD-1936#update-1" }, canonical: sampleItem.canonical, text: "a dated part", links: [], mentions: [], facets: {} }] });
+  ok(noteDoc.priority?.kind === "thought" && noteDoc.priority.key === noteDoc.id && noteDoc.priority.level === 4 && partDocs.length === 2 && partDocs[1].priority === undefined && docOf(sampleItem).priority === undefined,
+    "an item's own priority is stated on its own thought; a derived part, and an item with none, state nothing");
 
   if (bad === 0) console.log("ingest-records.ts self-check PASS");
   return bad === 0 ? 0 : 1;
@@ -925,12 +989,24 @@ async function main(): Promise<void> {
   const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };
   const heldBy = new Map<string, number>();
+  // The records' priorities (SMD-3666), when the brain has 116's writers and this role may run them; else said once.
+  const docsWithPriority = docs.filter((d) => d.priority).length;
+  // Asked of the role's privileges, not EXECUTE, which PUBLIC holds (review pass 2: a role without the group failed
+  // its first write, ending the run).
+  const priorityProblem = docsWithPriority ? await priorityWritersProblem(sql) : null;
+  const priorities = docsWithPriority > 0 && priorityProblem === null;
+  if (priorityProblem) console.error(`  priority: ${docsWithPriority} record(s) carry a priority, and none is stated: ${priorityProblem}`);
+  const priorityTally = new Map<string, number>();
   /** Why an item wrote nothing, in the emitter's terms (held names the holder inline). */
   const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
   try {
     for (const doc of docs) {
-      const r = await upsertRecord(sql, doc, run, actor);
+      const r = await upsertRecord(sql, doc, run, actor, priorities);
       tally[r.outcome]++;
+      if (r.priority) {
+        priorityTally.set(r.priority, (priorityTally.get(r.priority) ?? 0) + 1);
+        if (r.priority.startsWith("refused")) console.error(`  priority: ${name(doc)}'s priority ${r.priority} on ${doc.priority!.kind} ${doc.priority!.key}`);
+      }
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).
       if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held")) {
@@ -957,6 +1033,7 @@ async function main(): Promise<void> {
   if (structure.records) {
     console.log(`  structure (${structure.records} record(s), run ${run}): canonical inserted ${structure.canonical.inserted ?? 0} updated ${structure.canonical.updated ?? 0} unchanged ${structure.canonical.unchanged ?? 0}; links added ${structure.links.added} closed ${structure.links.closed} kept ${structure.links.kept} dropped ${structure.links.dropped}; structured mentions ${structure.mentions}`);
   }
+  if (priorityTally.size) console.log(`  priorities (SMD-3666, as ${actor.name}): ${[...priorityTally].map(([k, n]) => `${k} ${n}`).join(", ")}`);
   console.log(`  next: bun db/reembed.ts --url … — embed the new rows (vectors + chunks) through the claim path.`);
 }
 

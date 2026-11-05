@@ -28,6 +28,7 @@
  */
 
 import { ENTITY_TYPES, type EntityType } from "../server-portable/entities.ts";
+import type { PriorityScale } from "../server-portable/priority-scale.ts";
 
 /** The relations a source's structured layer may state between two of its items — 053's `link` facet admits exactly these. */
 export const LINK_RELATIONS = ["references", "child_of", "blocks", "blocked_by", "relates_to", "duplicate_of"] as const;
@@ -94,10 +95,22 @@ export type Ingested = {
    * unchanged: the ticket stays what people search for and cite.
    */
   derived?: Derived[];
+  /**
+   * What the source says of how much the item matters (SMD-3666): its own value on its scale
+   * (server-portable/priority-scale.ts, docs/priority.md's mapping table) and when it is due, a date or a time
+   * with its offset. The pipeline maps the value onto the brain's scale and states it through 116 as the run's
+   * actor, on `on` — the ticket the item is the record of — or else on the item's own thought. An unknown value (none,
+   * a word the scale does not hold, a source's default) states nothing, and clears the actor's earlier statement; a
+   * due time with no level is not stated, since a statement needs a level. The raw value stays in the facets.
+   */
+  priority?: ItemPriority;
 };
 
-/** A part of an item mapped as its own thought: everything an item has except the scope, the watermark and further parts, which are the parent's. */
-export type Derived = Omit<Ingested, "scope" | "watermark" | "derived">;
+/** An item's priority as its source gives it (`Ingested.priority`). */
+export type ItemPriority = { scale: PriorityScale; value: string | null; due?: string | null; on?: { kind: "ticket"; key: string } };
+
+/** A part of an item mapped as its own thought: everything an item has except the scope, the watermark, further parts and a priority, which are the parent's. */
+export type Derived = Omit<Ingested, "scope" | "watermark" | "derived" | "priority">;
 
 /** A source adapter: a name and a pure map. It reads; the pipeline writes. */
 export type Adapter<Item> = {
