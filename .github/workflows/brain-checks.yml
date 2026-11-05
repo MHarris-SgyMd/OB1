@@ -12,7 +12,7 @@ name: Brain Checks
 
 on:
   push:
-    branches: [main, "siggymd/**"]
+    branches: [main]
   pull_request:
   merge_group:
   workflow_dispatch:
