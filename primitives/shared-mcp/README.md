@@ -2,7 +2,7 @@
 
 A guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.
 
-> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them: a server of your own in `integrations/` imports `integrations/_shared/auth.ts`, and keeps its own stream alive.
+> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them: a vendored MCP server in `integrations/` now first needs test-auth's MCP kind back, which held such a server and retired with SMD-3747 (its guard fails one); new operations on the brain are a plugin instead (`plugins/README.md`).
 
 ## When You Need This
 

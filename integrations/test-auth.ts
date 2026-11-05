@@ -22,8 +22,9 @@
  * each read does not, the key is read through the shared module and nowhere
  * else, every `_shared/auth.ts` is byte-for-byte server-portable/auth.ts (a
  * Supabase function is bundled from supabase/functions/, so the module is
- * copied beside the servers rather than imported across the tree), no vendored
- * file builds an MCP transport this suite would not hold, and the MCP stack's
+ * copied beside the servers rather than imported across the tree), no file
+ * under the three category directories builds an MCP server transport (the
+ * Vercel route on its own install aside), and the MCP stack's
  * shared pins agree across the tree's installs (this directory's,
  * server-portable's, mcp-server's).
  *
@@ -177,6 +178,7 @@ const COPIES = ["recipes/editorial-policy/_shared/auth.ts", "integrations/_share
     .filter((f) => !f.includes("node_modules")).sort();
   assert(inTree.join() === [...COPIES].sort().join(), `every _shared/auth.ts in the tree is listed here and vice versa, and no _shared/sse.ts is left (${inTree.join(", ")})`);
   const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)["sync-auth"] ?? "";
+  assert(/^for d in [^;]+; do cp \.\.\/server-portable\/auth\.ts "\$d\/auth\.ts"; done$/.test(sync), `package.json's sync-auth copies server-portable/auth.ts into each directory it names, and does nothing else (${sync})`);
   for (const copy of COPIES) {
     const dir = relative(HERE, join(ROOT, dirname(copy))).replace(/\\/g, "/");
     assert(sync.split(/[\s;]+/).includes(dir), `package.json's sync-auth names ${dir}`);
@@ -215,7 +217,7 @@ type Via = "x-access-key" | "x-brain-key" | "bearer" | "query";
 const RPC = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 type Reply = { status: number; json: any; text: string };
 
-/** How long an in-process request may take before it is called a hang — a handler answers a listing in single-digit ms here, and a query is refused at once. */
+/** How long an in-process request may take before it is called a hang — a handler answers in single-digit ms here, and a query is refused at once. */
 const REQUEST_MS = 2000;
 // The silencer is counted, not saved and restored per call: two requests in
 // flight at once (an MCP server's overlapping probe was one, until SMD-3747) would otherwise each save the
@@ -227,7 +229,7 @@ function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
 
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
-  init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
+  init: { method: string; path: string; body?: unknown; rawBody?: string; accept?: boolean }): Promise<Reply> {
   const handler = handlers[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
@@ -244,15 +246,14 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
   const body = init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
-  // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-  return answer(handler, new Request(url, { method: init.method, headers, body, ...(body instanceof ReadableStream ? { duplex: "half" } : {}) }));
+  return answer(handler, new Request(url, { method: init.method, headers, body }));
 }
 /** One request to one handler, in process, with a deadline. */
 async function answer(handler: Handler, req: Request): Promise<Reply> {
   // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
   hush();
-  // Every request has a deadline: a handler that never answers (SMD-1497's
-  // crossed transports parked one) is reported as a timeout with status 0, not
+  // Every request has a deadline: a handler that never answers (an MCP server's
+  // crossed transports parked one, SMD-1497) is reported as a timeout with status 0, not
   // waited on — and the silencer above is released either way, which a
   // `finally` on the bare handler promise could not promise.
   const timeout: Reply = { status: 0, json: null, text: `timed out after ${REQUEST_MS} ms` };
@@ -280,9 +281,9 @@ const http = (s: Server, key: string | null, route: string, via: Via = "x-access
   const [method, path] = route.split(" ");
   return request(s, key, via, {}, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, rawBody });
 };
-/** A worker run, dry or not. */
-const run = (s: Server, key: string | null, dryRun: boolean) =>
-  request(s, key, "x-access-key", {}, s.dryRun === "body"
+/** A worker run, dry or not, the key in the form given. */
+const run = (s: Server, key: string | null, dryRun: boolean, via: Via = "x-access-key") =>
+  request(s, key, via, {}, s.dryRun === "body"
     ? { method: "POST", path: "/", body: { dry_run: dryRun } }
     : { method: "POST", path: dryRun ? "/?dry_run=true" : "/", body: undefined });
 /** Past the gate: whatever the handler answers once the key and the scope let it through — not a refusal by another status. */
@@ -359,6 +360,17 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   env(s, KEYS);
 }
 
+// Each form a key may travel in, at each worker: a read key's dry run passes and its real run is refused, through
+// every form (the auditor's own schedule sends ?key=). Asked of an MCP server's tools/list until the last left (SMD-3747).
+for (const s of SERVERS.filter((s) => s.kind === "worker")) {
+  env(s, KEYS);
+  for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
+    const dry = await run(s, READ_KEY, true, via);
+    const real = await run(s, READ_KEY, false, via);
+    assert(passed(dry) && real.status === 403, `${s.file}: the ${via} form authenticates, and scope applies through it (dry ${dry.status}, real ${real.status})`);
+  }
+}
+
 // ── The webhook receiver ─────────────────────────────────────────────────────
 
 console.log(`\n[${WEBHOOK.file}]`);
@@ -386,7 +398,7 @@ console.log(`\n[${WEBHOOK.file}]`);
 // environment its README documents, and PORT 0 and OB1_LISTEN_HOST 127.0.0.1 beside it,
 // the port read from Bun's start line and polled until the child answers on it; with
 // `--no-install` and no NODE_PATH, so a recipe or integration finds its packages
-// through the committed link above or fails to start, rather than having Bun
+// through the install and link above or fails to start, rather than having Bun
 // fetch them from npm (SMD-1991) — then asked over the port for the one thing that proves it is
 // that server, authenticating: an API's read probe passes under a read key, a
 // worker dry-runs under one, the receiver admits its secret; each refuses a
@@ -477,7 +489,7 @@ for (const live of LIVE) {
   const env: Record<string, string | undefined> = { ...process.env, PORT: "0", ...live.env, OB1_LISTEN_HOST: "127.0.0.1" };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
-  // A NODE_PATH from the shell goes too: a recipe's or integration's packages resolve through the committed links or not at all (SMD-1991).
+  // A NODE_PATH from the shell goes too: an integration's packages resolve from the install above it, a recipe's through the committed link, or not at all (SMD-1991).
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
   // Bun's own start line (`Started development server:`, or `Started server:` in production) gives the port, 0 if
@@ -745,10 +757,15 @@ for (const s of SERVERS) {
   // reply kept alive, its allow-list naming the browser headers) retired with the last of them (SMD-3747). A new
   // vendored MCP server brings that kind back first. (The Next.js route on Vercel builds the SDK's own transport, on
   // Node, from its own install; it is not a Bun server.)
-  const building = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules") && !/(^|\/)test-[^/]*$/.test(f) && readFileSync(join(ROOT, f), "utf8").includes("new StreamableHTTPTransport("))
-    .sort();
-  assert(building.length === 0, `no vendored file builds a StreamableHTTPTransport, so none needs the retired MCP kind (${building.join(", ") || "none"})`);
+  // Either SDK spelling (@hono/mcp's, the SDK's own web-standard one, and the v2 server's), in any script.
+  const TRANSPORT = /new (?:WebStandard)?StreamableHTTP(?:Server)?Transport\(/;
+  const VERCEL_ROUTE = "recipes/vercel-neon-telegram/src/app/api/mcp/route.ts";
+  const scripts = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.{ts,mts,js,mjs}").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules") && f !== "integrations/test-auth.ts" && f !== "integrations/test-writes.ts");
+  const building = scripts.filter((f) => TRANSPORT.test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  assert(building.join() === VERCEL_ROUTE, `no vendored script builds an MCP server transport, so none needs the retired MCP kind; the Vercel route alone, on Node from its own install (${building.join(", ") || "none"})`);
+  assert(TRANSPORT.test("new WebStandardStreamableHTTPServerTransport(") && TRANSPORT.test("new StreamableHTTPTransport(") && TRANSPORT.test("new StreamableHTTPServerTransport("),
+    "…and the rule reads each SDK's spelling of the transport (its own probe)");
 }
 
 // The files this test cannot import — a Next.js route, a README's code block —

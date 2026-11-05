@@ -310,7 +310,7 @@ export function queryOf(url: string): URLSearchParams {
 
 // routable, requestAt and listenHostFrom live here, not in root.ts, because
 // this is the module whose byte-identical copies sit in each vendored tree
-// (`bun run sync-auth` in extensions/) (SMD-2595, SMD-3323).
+// (`bun run sync-auth` in integrations/) (SMD-2595, SMD-3323).
 
 /** Where a request whose URL will not parse is rebuilt: `.invalid` (RFC 6761) is no host a client dials or an origin names. */
 export const REBUILD_ORIGIN = "http://unparsable-host.invalid";

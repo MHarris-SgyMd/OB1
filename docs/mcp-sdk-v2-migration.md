@@ -102,7 +102,7 @@ is green.
 2. **The shared-install vendored servers → v2, or retire per SMD-1931.**
    `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp`, `ob-graph`,
    `work-operating-model-activation` resolve the SDK from one
-   `integrations/node_modules` install, so it is one swap plus each server's own
+   `extensions/node_modules` install, so it is one swap plus each server's own
    `StreamableHTTPTransport` → `WebStandardStreamableHTTPServerTransport` line.
    `delete-thought-mcp` / `update-thought-mcp` also import `ListToolsRequestSchema`
    from the SDK — re-point to v2's type exports. This stage is a candidate to
