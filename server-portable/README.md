@@ -1157,9 +1157,15 @@ MCP tools do rather than a copy of it:
   (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
   POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
   `core/claims.ts` holds the work-claim tools (`claim_work`, `renew_claim`,
-  `release_claim`, `list_claims`, SMD-3598) over migration 115's functions. Each
-  returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
-  `retryable`, and the facts to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
+  `release_claim`, `list_claims`, SMD-3598) over migration 115's functions, and
+  `core/priority.ts` and `core/items.ts` the priority and open-item tools over 116's and
+  117's. `core/caller.ts` is what those three share (SMD-3780): a store call that
+  returns, rather than throws, the refusal the database raised (an argument, or for
+  115 an ingested key), and the registry's failure to give an agent id as each one's
+  `…_UNATTRIBUTED` refusal; and, for the priority and item writers, the scope a
+  writer states and the read-only refusal. Each operation returns its typed value or a
+  typed refusal (`core/refusal.ts`: a `code`, whether it is `retryable`, and the facts
+  to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
