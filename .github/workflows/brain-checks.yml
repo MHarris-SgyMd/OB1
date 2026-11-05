@@ -4813,7 +4813,7 @@ jobs:
           # Grafana 13 answers its home with a redirect to the file's
           # dashboard by its title's slug (measured on the pin).
           home=$(in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/home' | jq -r '.redirectUri // .dashboard.title') || said "Grafana's home did not answer"
-          [[ "$home" == */open-brain || "$home" == "Open Brain" ]] || said "Grafana does not open on the dashboard Open Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
+          [[ "$home" == */daemonic-brain || "$home" == "Daemonic Brain" ]] || said "Grafana does not open on the dashboard Daemonic Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           targets='[.panels[] | (., .panels[]?) | select(.type != "row") | .title as $t | (.targets // [])[] | {t: $t, r: .refId, u: .datasource.uid, q: (.expr // .query)}]'
           jq -c ".dashboard | $targets | .[]" /tmp/grafana-dashboard.json > /tmp/grafana-queries.jsonl
@@ -4866,14 +4866,14 @@ jobs:
           in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/v1/provisioning/alert-rules' > /tmp/grafana-alert-rules.json || said "Grafana's alert rules did not answer"
           rules_have=$(jq -r '[.[] | select(.provenance == "file") | .uid] | sort | join(" ")' /tmp/grafana-alert-rules.json)
           rules_want=$({ grep -oP '^      - uid: \K\S+' observability/alert-rules.yaml || true; } | LC_ALL=C sort | paste -sd ' ')
-          # …in the dashboard's folder, not a second "Open Brain" beside it.
+          # …in the dashboard's folder, not a second "Daemonic Brain" beside it.
           jq -e --slurpfile d /tmp/grafana-dashboard.json '. != [] and all(.[]; .folderUID == $d[0].meta.folderUid)' /tmp/grafana-alert-rules.json > /dev/null \
             || said "Grafana's alert rules are not all in the dashboard's folder ($(jq -r '.meta.folderUid' /tmp/grafana-dashboard.json)): $(jq -c '[.[] | {uid, folderUID}]' /tmp/grafana-alert-rules.json)"
           if [ -z "$rules_want" ] || [ "$rules_have" != "$rules_want" ]; then said "Grafana holds the provisioned alert rules '$rules_have' where deploy/observability/alert-rules.yaml has '${rules_want:-none (its uid lines were not read)}'"; fi
           states() {
             # shellcheck disable=SC2016 # as above
             in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/prometheus/grafana/api/v1/rules' \
-              | jq -r '.data.groups[] | select(.name == "Open Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
+              | jq -r '.data.groups[] | select(.name == "Daemonic Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
           }
           prom() { in_lgtm curl -s --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$1" | jq -c '[.data.result[]? | {m: .metric, v: .value[1]}]' || true; }
           # Every rule judged on one read: the provider rule pending or firing
