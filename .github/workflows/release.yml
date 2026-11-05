@@ -1,7 +1,7 @@
 # The release workflow (SMD-1860): what a tag publishes.
 #
 # A release is cut on main by scripts/assemble-release.ts — the fragments
-# numbered, CHANGELOG.md and releases.json written, FORK_VERSION bumped and a
+# numbered, CHANGELOG.md and releases.json written, BRAIN_VERSION bumped and a
 # schema_version migration added — and named by an annotated tag `v<X.Y.Z>` on
 # the cut's merge commit. This workflow runs on that tag and publishes the
 # runnable half: the ob1-server and ob1-migrate images to GHCR, tagged with the
@@ -41,7 +41,7 @@
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash in
 # release-steps.yml only runs docker and gh. It refuses a tag that does not
-# name releases.json's last entry, a FORK_VERSION that was not bumped, a
+# name releases.json's last entry, a BRAIN_VERSION that was not bumped, a
 # migration or a fragment that landed after the cut, a tag off main, and an
 # unpinned Ollama.
 #
@@ -70,7 +70,7 @@ on:
       - "rest-client/**"
       - "dashboard/**"
       - "plugins/**"
-      - "scripts/fork-index.ts"
+      - "scripts/changes-index.ts"
       - "scripts/mechanism-yield.ts"
       - "scripts/commit-grammar.ts"
       - "db/Dockerfile"

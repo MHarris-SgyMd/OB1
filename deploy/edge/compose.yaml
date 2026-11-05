@@ -34,7 +34,7 @@
 # names, unchanged. Through the edge, a brain's authorization server sees one
 # client address, the edge's (the maintainer's call, 2026-10-15; SMD-2309):
 # its per-address limits then lock out every client behind the edge at once.
-# Check 36 of scripts/check-fork-consistency.ts holds this file whole, and
+# Check 36 of scripts/check-consistency.ts holds this file whole, and
 # the table edge.ts renders.
 name: ob1-edge
 

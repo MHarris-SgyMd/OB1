@@ -590,13 +590,22 @@ export class AbortedInHand extends Error {
  * Put a thought this worker holds at the back of the queue (InHandAbort): its
  * claim back to pending, its attempt not counted — release_claims_for_worker's
  * rule for a thought a worker did not finish — and its enqueued_at now, which
- * claim_thoughts orders by. True when it was this worker's to put back; a
+ * claim_thoughts orders by, or `aheadMs` past now, behind what is queued until
+ * then too: an order, not a delay, since claim_thoughts reads no clock (the
+ * subject sweep's thought set back after an outage, SMD-3306 PR 6b-1); with
+ * `keepLater`, a date already past that is kept (the sweep's thought aborted in
+ * hand, which a set-back after an outage may have dated ahead: SMD-3306
+ * PR 6b-1's review pass 7, cold read); with `mark`, its last_error that, which
+ * claim_thoughts and a hand-back keep (the sweep's hung thought: review pass 7,
+ * the maintainer's choice). True when it was this worker's to put back; a
  * database error is thrown.
  */
-export async function setBack(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
+export async function setBack(sql: SQL, job: string, workerId: string, id: string, aheadMs = 0, keepLater = false, mark: string | null = null): Promise<boolean> {
   const rows = (await sql`
     UPDATE thought_work_claims c
-       SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0), enqueued_at = now()
+       SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0),
+           enqueued_at = CASE WHEN ${keepLater}::boolean THEN GREATEST(c.enqueued_at, now() + make_interval(secs => ${aheadMs / 1000})) ELSE now() + make_interval(secs => ${aheadMs / 1000}) END,
+           last_error = COALESCE(${mark}::text, c.last_error)
      WHERE c.thought_id = ${id}::uuid AND c.work_type = ${job} AND c.worker_id = ${workerId} AND c.status = 'claimed'
     RETURNING 1 AS ok`) as { ok: number }[];
   return rows.length > 0;

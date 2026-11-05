@@ -11,7 +11,7 @@
 #
 # Each directory is relative to the repository root, whatever the caller's
 # directory, and must already be installed: its tsc and types are its own
-# node_modules'. Check 18 (scripts/check-fork-consistency.ts tscStepsIn) reads
+# node_modules'. Check 18 (scripts/check-consistency.ts tscStepsIn) reads
 # the directories a step names here as one tsc step each, and check 35 holds
 # them to db/ci-parity.sh's `typecheck` lines. Check 18 also runs this script
 # against a stub bunx, from another directory, and holds it to: `bunx tsc

@@ -13,7 +13,7 @@
  * and two true facts of one subject that carry different numbers.
  *
  * Why this is a TypeScript module and not a fixture under `fixtures/`
- *   check-fork-consistency check 9 (SMD-1295) reads every committed fixture as
+ *   check-consistency check 9 (SMD-1295) reads every committed fixture as
  *   an allowlist: a string is a uuid or free text under one of four keys, and
  *   anything else is thought content that must not be committed. Its own
  *   probes pin "a leaked thought body" whatever the file claims about itself.

@@ -20,7 +20,7 @@
 # recreates the proxy without it (the label below changes, which is what makes
 # compose recreate; an inline config alone does not). The table holds no
 # comment of its own: Traefik renders it as a Go template first, so a comment
-# line there is not inert, and check 28 (scripts/check-fork-consistency.ts,
+# line there is not inert, and check 28 (scripts/check-consistency.ts,
 # API_ROUTE_TABLE) holds it byte for byte (SMD-2658).
 
 x-api-route: &api-route |

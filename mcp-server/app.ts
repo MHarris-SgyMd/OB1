@@ -13,7 +13,7 @@
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono, type Context } from "hono";
 import { presentedKeys, queryOf } from "../server-portable/auth.ts";
-import { FORK_VERSION } from "../server-portable/version.ts";
+import { BRAIN_VERSION } from "../server-portable/version.ts";
 import { SPECS, type Input } from "../server-portable/core/schemas.ts";
 import type { ToolName } from "../server-portable/tools.ts";
 import { HEALTH_DEADLINE_MS } from "../server-portable/deadlines.ts";
@@ -362,7 +362,7 @@ const WORDS: Record<ToolName, Words> = {
  * client sent them (argumentsById), which a plugin tool sends on.
  */
 function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
+  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION });
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
   // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
