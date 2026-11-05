@@ -45,8 +45,8 @@ defaults:
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
 # lease, deadlock or container wait would otherwise hold the one required
 # check, "Brain Checks passed", pending for six hours. Each is at least three
-# times the job's longest successful run in the newest 400 Brain Checks runs
-# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
+# times the job's longest successful run in the newest 400 Fork Checks runs
+# (this workflow's name then) on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
 # on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
 # 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
 # them one bun install, and auth-poc 302 s: portable-server's limit is 30,

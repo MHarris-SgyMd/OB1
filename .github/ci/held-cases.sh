@@ -9,7 +9,7 @@
 #
 # Run one case after another, each polling its log every 2 s and then sleeping
 # a fixed 2 s, the two steps took ~83 s of "Full stack, no Supabase", the
-# slowest Brain Checks job. Here a batch's cases start together, each log is
+# slowest Fork Checks job (Brain Checks since SMD-3765). Here a batch's cases start together, each log is
 # polled every 0.2 s under one 60 s bound for the batch, and the 2 s settle is
 # the batch's, not each case's: every case is still running at least 2 s after
 # its line, as before. A step whose cases read shared state (heartbeat:sleep)

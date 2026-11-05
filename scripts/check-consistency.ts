@@ -212,8 +212,9 @@
  *      once and, when present, with the fork's merge method, every entry
  *      judged on its own merge commit and no PR waiting for another
  *      (SMD-1857), no other type is, the target is the default branch and
- *      nothing else, the bypass list is empty and enforcement is active; and
- *      no other job reports a check under the aggregate's name. A matrix and a
+ *      nothing else, the bypass list is empty and enforcement is active; no
+ *      other job reports a check under the aggregate's name; and ci-shift.yml's
+ *      workflow_run names that workflow's own name (SMD-3765). A matrix and a
  *      name with an expression are allowed now, since the record names no job
  *      but the one. The rules are rulesetProblems and aggregateProblems, pure
  *      functions their probes run on in-memory records (twenty-seven ruleset
@@ -5524,6 +5525,13 @@ function checkRulesetRecord() {
   try { doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc; } catch (e) { return fail(WORKFLOW, `does not parse: ${(e as Error).message} — check 20 has no job list to hold the record to (SMD-1856)`); }
   if (!doc?.jobs || !Object.keys(doc.jobs).length) return fail(WORKFLOW, "has no jobs check 20 can read — nothing for the one required check to need (SMD-1856)");
   for (const [where, msg] of [...aggregateProblems(doc), ...rulesetProblems(ruleset)]) fail(where, msg);
+  // ci-shift.yml runs after this workflow by its name (workflow_run), which a rename of either leaves silently
+  // unmatched: CI shift would never run again (SMD-3765 renamed "Fork Checks" to "Brain Checks").
+  const SHIFT_WORKFLOW = ".github/workflows/ci-shift.yml";
+  const name = (doc as { name?: unknown }).name;
+  let shiftOn: unknown;
+  try { shiftOn = (Bun.YAML.parse(readFileSync(join(ROOT, SHIFT_WORKFLOW), "utf8")) as { on?: { workflow_run?: { workflows?: unknown } } })?.on?.workflow_run?.workflows; } catch { shiftOn = undefined; }
+  if (!(Array.isArray(shiftOn) && shiftOn.length === 1 && shiftOn[0] === name)) fail(SHIFT_WORKFLOW, `on.workflow_run.workflows is ${JSON.stringify(shiftOn ?? null)}, not [${JSON.stringify(name ?? null)}], ${WORKFLOW}'s name — CI shift would never run after it (check 20, SMD-3765)`);
   // Every other workflow, for a job that would report a check under the one
   // context (review pass 1); one that does not parse is check 23's to report.
   const workflowsDir = join(ROOT, ".github", "workflows");
@@ -7212,7 +7220,7 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
  * in — has a start period longer than zero and probes every second within it, until it first passes. Docker's
  * start interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written
  * without them holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75
- * waits of 5.0–5.6 s a Brain Checks run before this). A disabled healthcheck (`disable: true`, or a test of
+ * waits of 5.0–5.6 s a Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
  * `NONE`) has nothing to probe and is passed over.
  */
 const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml"];
