@@ -5277,7 +5277,16 @@ if (configFailed) {
             // or one kept out of it by its model name, which still refuses beside one (SMD-3486 review pass 1).
             const handFollowers = h.reembedJob !== undefined || unfitName ? handFollowersOf(w.heartbeats) : [];
             const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.job ?? b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
-            // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4 of PR 4b-1).
+            const subjectsJudgeHeld = h.holds?.some((x) => x.pass === "subjects" && x.why === "judge") ?? false;
+            // Another pass held beside it, a start refusal the scheduler retries among them: not running on meanwhile.
+            const othersHeld = h.holds?.some((x) => x.pass !== "subjects") ?? false;
+            // Whether a line here said a failed pass's cause, so the judge hold's fix names another pass's failure
+            // where none did (SMD-3306 PR 6b-1's review pass 6, cold read: a pass waiting on its provider took the
+            // line, and the failure went unsaid): the generic cause's line or a statement hold's; nor where a line
+            // ends in that sentence already, re-embed's (review pass 7, cold read: said twice).
+            let causeSaid = false;
+            // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4
+            // of PR 4b-1).
             if (down && handFollowers.length && !followers.length && !refusedBy) {
               fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
             } else if (down && followers.length) {
@@ -5314,16 +5323,41 @@ if (configFailed) {
               // (SMD-2679); and once the setting passes the bound it stopped
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
-            } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage")) {
+            } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage") && (!subjectsJudgeHeld || othersHeld)) {
+              // Not where the subject sweep's judge hold says why: its alarm ends its run failed, and neither cause
+              // here is its (SMD-3306 PR 6b-1's review pass 4, the consumer's prototype: the hold's fix came after
+              // them); but beside another pass's hold, a start refusal this line names, and the hold's fix names
+              // another pass's failure else (review pass 5, cold read and the consumer's prototype: the hold outlasts
+              // its sleep, so a later sleep's failure was another pass's, left unsaid, and beside extraction held the
+              // hold's fix said the other passes ran on).
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
+              causeSaid = true;
             }
             // A held claim pass's fix stands beside any other: a provider wait's said above does not mend it (review pass 2 of PR 1c-4b).
-            if (!down && stmtHeld.length) fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}; the other passes run on meanwhile.`);
+            // It says the failed pass's cause, and beside the subject sweep's judge hold not that the other passes
+            // run on, the hold's fix saying the sweep is held (SMD-3306 PR 6b-1's review pass 7, cold read and claims
+            // audit).
+            if (!down && stmtHeld.length) {
+              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}${subjectsJudgeHeld ? "." : "; the other passes run on meanwhile."}`);
+              causeSaid = true;
+            }
             if (setFix !== null && !(down && set && set.kind !== "model-switch")) fixes.push(setFix);
             // Running, it refuses beside a hand re-embed follower at its next
             // poll and ends, every pass with it (review pass 1: all three rows
             // passed until then; pass 2: a poll, awake or asleep, not a sleep).
             if (!down && handFollowers.length) fixes.push(`${handFix}: at its next poll, idle or working, the scheduler refuses beside it and ends, every pass with it.`);
+            // The subject sweep held by the garbage-judge alarm, by the scheduler's word (SMD-3306 PR 6b-1): a trip
+            // holds its runs of the judge model the trip named until a hand run checks it (db/subject-sweep.ts's
+            // judgeHeld). The hold is the window's, not the process's: an ended row's last word stands for it until
+            // that run, which runs in the stack, the coordinator's one-off, with the stack's settings, network and
+            // version (review pass 2, walkthrough: from a checkout it met the egress gate's default deny before it
+            // lifted anything, its chat endpoint not the stack's, its pool key the checkout's version's), once the
+            // coordinator is recreated after a change to deploy/.env, which `compose run` reads afresh where the
+            // running coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the
+            // lift took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
+            if (subjectsJudgeHeld) {
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid || (otherPass !== "" && fixes.some((x) => x.endsWith(otherPass))) ? "" : otherPass}`);
+            }
             if (stuck.length) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).

@@ -249,6 +249,10 @@ export function summariseCorpusByModel(
 ): { at: number; unlabelled: number; others: { model: string; c: number; accepted: number }[]; otherCount: number; acceptedCount: number; unaccepted: number };
 /** The caveat `reembed.ts --accept-failed` writes on a failed row it marks succeeded (SMD-1067); both readers recognise an accepted row by it. */
 export const ACCEPTED_CAVEAT_PREFIX: string;
+/** The subject pool's keys begin so (subjectPoolKey; migration 113). */
+export const SUBJECT_POOL_PREFIX: string;
+/** The hang's mark the subject sweep writes in a hung thought's pending claim (its last_error; SMD-3306 PR 6b-1). */
+export const HUNG_MARK: string;
 /** Per embedding_model, the rows with a vector whose thought has a standing accepted row under $1, the model's own key exactly; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
 export const ACCEPTED_BY_MODEL_SQL: string;
 /** 021's claim-key grammar as a Postgres regex (the model up to the last "@"), and the model's OWN key — the canonical spelling, no suffix. */

@@ -535,11 +535,15 @@ export function startRefusalRemedy(kind, worker) {
   if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";
   if (worker === "reembed" && kind === "provider") return "the provider refused the embedding probe: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
   switch (kind) {
-    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model";
+    // The subject sweep's beside the extraction pass's: the sleep row carries the kind alone (SMD-3306 PR 6b-1's review
+    // pass 1), its switch run in the stack (review pass 2, walkthrough: from a checkout, the egress gate's default
+    // deny), after up -d coordinator for a change to deploy/.env (review pass 3, walkthrough: compose run reads
+    // deploy/.env afresh, a running coordinator keeps its own).
+    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model; a subject pool another run named is the sweep's to switch, which pools again, in the stack (podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with, docker compose alike, after up -d coordinator for a change to deploy/.env; the scheduler's runs take the rest), or set OB1_SUBJECT_REASONING back to the named pool's in deploy/.env and recreate the coordinator (up -d coordinator) — the log names which";
     case "identity": return "an unset OB1_WORKER_KEY needs a key minted (cd server-portable && bun keygen.ts --name workers --scope capture): its line in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the coordinator (up -d coordinator); OB1_WORKER_KEY set without MCP_ACCESS_KEYS needs both, as the server has them; a revoked, unlisted or forward-scope worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the coordinator (up -d coordinator)";
     case "model": return "pull the model its log names, or set OB1_JUDGE_MODEL or OB1_EXTRACT_ESCALATE_MODEL to one the provider serves — OB1_METADATA_MODEL names the extraction key, so another one there is the key's switch too (bun db/extract-entities.ts --switch-key)";
     case "provider": return "the provider refused a one-token call: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
-    case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>)";
+    case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>); or, the subject sweep's, grant the roles its log names what it names — its own the door's and the pool's grants, and before the first pool is named each capturing role the claims' (cd db && bun migrate.ts --url <the owner's url> --grant <role> --groups …)";
     case "egress": return "the egress policy refuses every call the pass would make (OB1_EGRESS_* in deploy/.env; this preflight's egress rows say why)";
     case "lookup": return "the worker key's lookup did not name the key, and the egress policy admits that actor alone: its log says why the lookup failed (too many connections, a lock)";
     case "usage": return "a setting its log names is not one the service takes — decimal digits, in its range (the coordinator's guard, board-sync's interval or findings cap) — so set it in deploy/.env, then recreate the coordinator (up -d coordinator); or a pass refused the options the scheduler gave it, which no setting mends: report that, with the log";
@@ -1288,6 +1292,22 @@ export function summariseCorpusByModel(rows, atModel, acceptedRows = []) {
  * caveat, which spends the acceptance.
  */
 export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the operator: ";
+
+/**
+ * The subject pool's keys begin so (server-portable/subject.ts's subjectPoolKey,
+ * migration 113's ob1_config.subject_pool_key), beside extraction's `extract:`
+ * and re-embed's `reembed:` (SMD-3306).
+ */
+export const SUBJECT_POOL_PREFIX = "subjects:";
+
+/**
+ * The hang's mark a following subject sweep writes in a hung thought's pending
+ * claim, its last_error, the hang's words after it (db/subject-sweep.ts's rule;
+ * SMD-3306 PR 6b-1): a third meaning of that column, beside a failure's and a
+ * succeeded row's caveat, on a subject pool's pending or claimed row alone.
+ * Here, not in the sweep, so the store's retry clears it too.
+ */
+export const HUNG_MARK = "hung the provider once: ";
 
 /**
  * The accepted vectors by label, for the same reduction: per embedding_model,
