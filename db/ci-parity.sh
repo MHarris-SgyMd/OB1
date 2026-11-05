@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
+# ci-parity.sh — run what .github/workflows/brain-checks.yml runs, the way CI does:
 # the data-layer job's database-backed suites in CI's order against ONE shared
 # Postgres; beside them, all from the start, test-live.ts's four shards, each on
 # a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
@@ -21,7 +21,7 @@
 #   ./db/ci-parity.sh
 #
 # Check 35 in scripts/check-consistency.ts holds this list to the workflow:
-# every script a fork-checks.yml step runs is a `run` or `nodb` line here, from
+# every script a brain-checks.yml step runs is a `run` or `nodb` line here, from
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its

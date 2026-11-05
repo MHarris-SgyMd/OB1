@@ -138,7 +138,7 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
 // reads may call; a package.json of the server's own folder for a new npm package, with a
-// `bun install --frozen-lockfile` step for that folder in each fork-checks.yml job that runs
+// `bun install --frozen-lockfile` step for that folder in each brain-checks.yml job that runs
 // this suite (this directory's install is the MCP stack alone, held below); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or

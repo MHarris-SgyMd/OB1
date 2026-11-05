@@ -297,7 +297,7 @@ jobs:
             | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.api.image | startswith($s)) and .services.api.pull_policy == "missing" and (.services.mcp.image == .services.api.image) and .services.mcp.pull_policy == "missing" and (.services.app.image == .services.mcp.image) and .services.app.pull_policy == "missing" and (.services.coordinator.image == .services.api.image) and .services.coordinator.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
           # the images it pins and their pull policy, on any service but the
-          # proxy, as fork-checks' "The proxy loads only the held route tables"
+          # proxy, as brain-checks' "The proxy loads only the held route tables"
           # holds of the generator's two other forms.
           # Every other service, the proxy, the networks, the configs and the
           # project's name are compose.yaml's, alone, with api-public, with
@@ -306,7 +306,7 @@ jobs:
           # service under a new one would go unrendered), variables
           # substituted and not; so no alias,
           # service or namespace rides in on a release. This holds the file
-          # itself, whatever branch of the generator rendered it; fork-checks
+          # itself, whatever branch of the generator rendered it; brain-checks
           # renders a rehearsal's form and a tag's, never this one.
           list="$(docker compose -f compose.yaml config --profiles)"
           profiles=()
