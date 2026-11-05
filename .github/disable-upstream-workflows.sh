@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # disable-upstream-workflows.sh — turn off the eleven workflows inherited from
-# upstream, keeping only this fork's own `fork-checks.yml`.
+# upstream, keeping only this fork's own `brain-checks.yml`.
 #
 # WHY THIS EXISTS
 #   Being a fork suppresses several Actions triggers: `pull_request_target`,
@@ -33,7 +33,7 @@
 set -euo pipefail
 
 REPO="${OB1_REPO:-MHarris-SgyMd/OB1}"
-KEEP="fork-checks.yml"
+KEEP="brain-checks.yml"
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
 
