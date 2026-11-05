@@ -11457,7 +11457,10 @@ function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<stri
         if (!running.length) continue;
         const excused = runs[pattern]?.[rel]?.[job];
         if (!excused) problems.push(`job ${job}'s steps name ${rel}, which reads ${pattern}, but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${job}, or say in READER_RUNS why its run of ${rel} does not read ${pattern} (check 53, SMD-2435)`);
-        else for (const l of running.filter((l) => !l.includes(excused.invocation))) problems.push(`job ${job} runs ${rel} as \`${l.trim()}\`, not as READER_RUNS's excused \`${excused.invocation}\` — charge ${job}, or excuse this run too (check 53, SMD-2435)`);
+        // Each run on a line needs its own excused invocation (review pass 5): `x --self-check && x --dry-run` runs x twice.
+        const runsOn = (l: string) => (l.match(new RegExp(runsIt.source, `g${runsIt.flags.replace("g", "")}`)) ?? []).length;
+        const excusedOn = (l: string) => l.split(excused?.invocation ?? "\0").length - 1;
+        if (excused) for (const l of running.filter((l) => excusedOn(l) < runsOn(l))) problems.push(`job ${job} runs ${rel} as \`${l.trim()}\`, not as READER_RUNS's excused \`${excused.invocation}\` — charge ${job}, or excuse this run too (check 53, SMD-2435)`);
       }
     }
     // A READER_RUNS exemption that excuses nothing is stale (review pass 2), so none waits to excuse a later run.
@@ -11546,6 +11549,8 @@ function checkJobMap() {
   // An exemption covers the invocation it names (review pass 4): d runs `bun scripts/rel.ts`, excused only as `rel.ts --check`.
   const narrow = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "changes/*": { "scripts/rel.ts": { d: { invocation: "rel.ts --check", why: "its check reads nothing" } } } });
   if (narrow.length !== 2 || !narrow[0].includes("not as READER_RUNS's excused `rel.ts --check`") || !narrow[1].includes("does not run scripts/rel.ts as `rel.ts --check`")) fail(SELF, `check 53 lets an exemption for one invocation excuse another (its own probe): ${JSON.stringify(narrow)} (SMD-2435)`);
+  const twice = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), blocksOf({ d: "      - run: bun scripts/rel.ts --check && bun scripts/rel.ts --write", l: "" }), { "changes/*": { "scripts/rel.ts": { d: { invocation: "rel.ts --check", why: "its check reads nothing" } } } });
+  if (twice.length !== 1 || !twice[0].includes("not as READER_RUNS's excused `rel.ts --check`")) fail(SELF, `check 53 lets a second run of a reader hide on its excused run's line (its own probe): ${JSON.stringify(twice)} (SMD-2435)`);
   const broad = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "changes/*": { "scripts/rel.ts": { d: { invocation: "scripts/rel.ts", why: "its every run reads nothing" } } } });
   if (broad.length) fail(SELF, `check 53 refuses an exemption naming the invocation the job runs (its own probe): ${JSON.stringify(broad)} (SMD-2435)`);
   if (!exempted.some((m) => m.includes("job d's steps name scripts/rel.ts, which reads changes/*"))) fail(SELF, `check 53 lets an exemption for scripts/x.ts excuse a run of scripts/rel.ts reading changes/* (its own probe): ${JSON.stringify(exempted)} (SMD-2435)`);
