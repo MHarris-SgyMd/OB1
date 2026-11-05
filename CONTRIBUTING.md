@@ -1,18 +1,18 @@
-# Contributing to OB1
+# Contributing to Daemonic Brain
 
 ## Before You Contribute
 
-You need a working Open Brain setup. If you haven't built one yet, start with the [Open Brain guide](docs/01-getting-started.md). Every contribution you submit should be tested against your own instance first — don't submit something you haven't run yourself.
+You need a working brain. If you haven't built one yet, start with the [setup guide](docs/01-getting-started.md). Every contribution you submit should be tested against your own instance first — don't submit something you haven't run yourself.
 
 ## Not a Developer? You Can Still Contribute.
 
-You don't need to write code to contribute to Open Brain. If you have a workflow, a use case, or an idea — that's a contribution. Here's how it works:
+You don't need to write code to contribute to Daemonic Brain. If you have a workflow, a use case, or an idea — that's a contribution. Here's how it works:
 
 1. **Open a [Non-Technical Contribution](../../issues/new?template=non-technical-contribution.yml) issue.** Describe your idea, workflow, or knowledge in plain language. Screenshots and examples help.
 2. **A community mentor picks it up.** They'll work with you to shape your idea into a contribution — writing the code, structuring the README, filling in the metadata.
 3. **You get full credit.** Your name goes in the `author` field of `metadata.json` and in CONTRIBUTORS.md. The mentor is credited as a co-author in the PR.
 
-This is a first-class path, not a workaround. Some of the best contributions come from people who use Open Brain daily but don't code. You can also post ideas in the `#non-dev-contributions` channel on [Discord](https://discord.gg/Cgh9WJEkeG).
+This is a first-class path, not a workaround. Some of the best contributions come from people who use a brain daily but don't code.
 
 **Other ways to contribute without code:**
 - Report bugs or unclear documentation
@@ -116,7 +116,7 @@ PORT=8787 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' bun --no-install r
 \```
 ```
 
-**GRANT step** — Every extension that creates tables MUST say how a role other than the tables' owner is granted them, because nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). The extensions in this tree list their tables in `ROLE_GRANTS.extensions` (`db/config.mjs`) and the file in `CONTRIB_SCHEMA_FILES` (`db/test-support.ts`), so `bun db/migrate.ts --grant <role>` issues them with the core tables (SMD-1810); a contribution that cannot do that gives the lines by hand:
+**GRANT step** — Every contribution that creates tables MUST say how a role other than the tables' owner is granted them, because nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). The recipes in this tree list their tables in `ROLE_GRANTS.recipes` (`db/config.mjs`) and the file in `CONTRIB_SCHEMA_FILES` (`db/test-support.ts`), so `bun db/migrate.ts --grant <role>` issues them with the core tables (SMD-1810); an extension is a plugin, its tables made under its own role (SMD-2311), and the `extensions` group is retired. A contribution that cannot do that gives the lines by hand:
 
 ```sql
 grant select, insert, update, delete on table public.your_table to your_role;
@@ -131,7 +131,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - **"Next Steps"** linking to the next extension
 - **Tool audit link** — Any extension or integration that exposes MCP tools must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in its "Next Steps" or closing section. This helps users manage their tool surface area as they add extensions. The link is checked by the automated review.
 - **MCP tool annotations** — Any extension or integration that exposes MCP tools must mark read-only tools with `annotations: { readOnlyHint: true }` and write tools with `annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false }` unless the tool really can touch arbitrary external resources or destroy data. ChatGPT uses this metadata to distinguish read tools from write actions.
-- **New operations are a plugin, not a server** — A contribution that adds operations to the brain is a plugin (`plugins/<name>/`, see **Plugins** below): it has no server or keys of its own, and no database connection but the one the brain gives it. The vendored servers already under `extensions/` and `integrations/` keep their shape until they port (SMD-2311, SMD-2690, SMD-2101): each is one HTTP process that runs under `bun <file>` and is connected by URL — the key as `?key=` on it, or in an `x-brain-key` header. Do NOT write a stdio server, a `claude_desktop_config.json` entry, or a server a client spawns. A change to one keeps its tests importing it: its entry in `SERVERS` in `extensions/test-auth.ts` (the comment above it lists the entry's fields; `LIVE` derives from it for a server on the shim) — the suite refuses a shim-importing server it does not start — and its tools driven in `extensions/test-tools.ts` or `test-writes.ts`. See the [extension template](extensions/_template/) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/) for that pattern.
+- **New operations are a plugin, not a server** — A contribution that adds operations to the brain is a plugin (`plugins/<name>/`, see **Plugins** below): it has no server or keys of its own, and no database connection but the one the brain gives it. The vendored servers already under `integrations/` and `recipes/` keep their shape until they port (SMD-2690, SMD-2101; the extensions ported with SMD-2311): each is one HTTP process that runs under `bun <file>` and is connected by URL — the key as `?key=` on it, or in an `x-brain-key` header. Do NOT write a stdio server, a `claude_desktop_config.json` entry, or a server a client spawns. A change to one keeps its tests importing it: its entry in `SERVERS` in `extensions/test-auth.ts` (the comment above it lists the entry's fields; `LIVE` derives from it for a server on the shim) — the suite refuses a shim-importing server it does not start — and its writes driven in `extensions/test-writes.ts`. See the [extension template](extensions/_template/) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/) for that pattern.
 
 **Plugins** additionally require (curated: discuss with maintainers first):
 - A manifest in `index.ts` built with `server-portable/plugin-sdk.ts`, imported and listed in `plugins/registry.ts`, its `name` the directory's
@@ -265,13 +265,14 @@ Example for a recipe that depends on a reusable skill:
 - What it requires (services, tools)
 - Confirmation that you tested it on your own Open Brain instance
 
-## Commit messages (fork changes)
+## Commit messages (the project's own changes)
 
-Commits to the fork's own code follow a small grammar, checked by `commitlint`
+Commits to the project's own code follow a small grammar, checked by `commitlint`
 (SMD-1808) — not Conventional Commits (SMD-1804 declined it), just the house shape:
 
 - `[<category>] <subject>`, where `<category>` is one of the PR categories above
-  plus `fork`, `docs`, `resources`. `[fork]` is a change to the fork itself.
+  plus `fork`, `docs`, `resources`. `[fork]` is a change to the project itself
+  (the name is the fork era's).
 - A `[fork]` subject ends in its ticket, `(SMD-NNNN)` — the `ticket-ref` rule (a
   warning).
 - On a review-pass commit, every finding bullet in the body carries a
@@ -283,11 +284,12 @@ It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commi
 locally: `bun scripts/install-hooks.ts` (undo with `--uninstall`). Merge commits
 are ignored. The config is `scripts/commitlint.config.ts`.
 
-## Changelog & versioning (fork changes)
+## Changelog & versioning (the project's own changes)
 
-The fork is versioned `MAJOR.MINOR.PATCH` — plain SemVer from 2.0.0; 1.0.0 to 1.9.0
-carried `+upstream.<sha>` — and the rules are in [`FORK.md`](FORK.md)'s "Versioning"
-section. A change to the fork's own code, as
+Daemonic Brain is versioned `MAJOR.MINOR.PATCH` — plain SemVer from 2.0.0; 1.0.0 to
+1.9.0 carried `+upstream.<sha>` — and the rules are in
+[`MAINTAINING.md`](MAINTAINING.md)'s "Versioning" section. A change to the
+project's own code, as
 opposed to a vendored contribution, records itself as a **release fragment** rather
 than by editing a hand-numbered FORK.md section:
 
@@ -298,9 +300,9 @@ than by editing a hand-numbered FORK.md section:
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
-  own, which the release step assigns. A fragment needs no edit to FORK.md's
-  index, which lists numbered changes alone (SMD-2084). CI holds this: the
-  `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
+  own, which the release step assigns. A fragment needs no edit to the index in
+  `changes/README.md`, which lists numbered changes alone (SMD-2084). CI holds
+  this: the `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
   PR whose change in those directories, test files (`test-*.ts`, `*.test.ts`)
   and Markdown aside, comes with no fragment added or modified; the refusal
   names the files that asked (SMD-1857). The one landing that passes without a fragment is a release
@@ -309,18 +311,18 @@ than by editing a hand-numbered FORK.md section:
   fragment that removes or renames a URL, route, port or setting in a file a
   release ships, a flag or named value of a command a shipped image runs, or
   that deletes vendored code. It says in one sentence which
-  side of the contract the change falls on (FORK.md, "Versioning", "What the
-  version contract covers"; SMD-2687). Inside the contract it is a `major`.
+  side of the contract the change falls on (MAINTAINING.md, "Versioning", "What
+  the version contract covers"; SMD-2687). Inside the contract it is a `major`.
   Maintainer tooling and vendored code are outside it, so there it is a `minor`,
   with an **Upgrading:** line in the changelog entry.
 - The release step assembles the accumulated fragments into numbered change
-  files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
-  commit, after the commit that bumps the version and adds its migration; the
-  maintainer tags the merge and `.github/workflows/release.yml` publishes the
-  images and the release (FORK.md, "Cutting a release"). **Do not hand-number a
-  new change file or edit `CHANGELOG.md` by hand.** (Changes 1–103 predate this
-  and keep their numbers; a `### N.` section in FORK.md is refused by
-  `check-fork-consistency`.)
+  files (`changes/NNN-<slug>.md`), `changes/README.md`'s index and `CHANGELOG.md`
+  in one commit, after the commit that bumps the version and adds its migration;
+  the maintainer tags the merge and `.github/workflows/release.yml` publishes the
+  images and the release (MAINTAINING.md, "Cutting a release"). **Do not
+  hand-number a new change file or edit `CHANGELOG.md` by hand.** (Changes
+  1–103 predate this and keep their numbers; a `### N.` section in
+  MAINTAINING.md or FORK.md is refused by `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
 - A new migration, like a cut, moves what the server reports about itself: rerun
@@ -367,7 +369,7 @@ excused in the registry by name, with a reason.
 - Requires paid services with no free-tier alternative
 - Poorly documented (missing README sections, unclear instructions)
 - Duplicates an existing contribution without meaningful improvement
-- Modifies core Open Brain infrastructure (the `thoughts` table structure, the core MCP server) — that's upstream, not here
+- Modifies the brain's core (the `thoughts` table structure, the core MCP server) — core changes are the maintainer's, made through a ticket, not a contribution
 
 ## Contributor Ladder
 

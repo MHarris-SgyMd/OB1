@@ -13,8 +13,8 @@
  * releases.json's `upstream` key, UPSTREAM_PIN below — so the version no longer
  * spells it. semverCompare ignores build metadata, so the two forms order as
  * their cores do: a brain stamped `1.9.0+upstream.9543c29` is behind a `2.0.0`
- * server. The rules that pick the bump live in FORK.md's "Versioning" section
- * and are checked, not remembered (check-fork-consistency).
+ * server. The rules that pick the bump live in MAINTAINING.md's "Versioning"
+ * section and are checked, not remembered (check-fork-consistency).
  *
  * This module is node-only on purpose. It reads the filesystem and hashes files,
  * and it is imported by migrate.ts, preflight.ts and check-fork-consistency.ts.
@@ -37,7 +37,7 @@ export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
 /**
  * The current fork version — the last release cut (releases.json's last entry),
  * bumped by a cut's first commit together with the migration that writes it
- * (FORK.md, "Cutting a release"). `1.0.0` was the first release (migrations
+ * (MAINTAINING.md, "Cutting a release"). `1.0.0` was the first release (migrations
  * 001..048); `1.1.0` is the second (049..051, a minor: two additive migrations);
  * `1.2.0` the third (052..057, a minor: five additive migrations);
  * `1.3.0` the fourth (058..062, a minor: four additive migrations);

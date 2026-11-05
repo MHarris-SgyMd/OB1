@@ -137,6 +137,4 @@ After following the steps for your client, your Open Brain extension should appe
 
 ## Extensions That Use This
 
-- [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
-
-Every extension that runs a remote MCP server uses this connection pattern.
+None since SMD-2311: the six extensions are plugins, whose tools are on the brain's own connector ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7). Every recipe or integration that runs a remote MCP server uses this connection pattern; SMD-3747 rewrites this guide for them.
