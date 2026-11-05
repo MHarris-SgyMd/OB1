@@ -1,7 +1,7 @@
 ---
 name: session-summary
 description: |
-  At the end of a work session with Open Brain connected, write ONE summary
+  At the end of a work session with Daemonic Brain connected, write ONE summary
   thought — what was asked, what was decided, what changed, and the ids of
   the thoughts the session retrieved as its provenance — through
   capture_thought with derived_from and source. Fires when the user wraps up
@@ -16,7 +16,7 @@ version: 1.1.0
 
 ## Problem
 
-Capture in Open Brain happens one thought at a time, when an agent chooses to
+Capture in Daemonic Brain happens one thought at a time, when an agent chooses to
 call `capture_thought`. A session that searched the brain six times, made a
 decision and shipped a change leaves nothing behind unless someone says "write
 it down". The next session starts from search results, not from the conclusion.
@@ -40,7 +40,7 @@ brain and nothing decided), or when the user has said not to capture.
 
 ## Process
 
-1. **Collect the ids.** Every Open Brain search result printed an `ID:` line;
+1. **Collect the ids.** Every Daemonic Brain search result printed an `ID:` line;
    every capture answered with `id <uuid>`. Gather the ids of the thoughts you
    actually read or built on — not every result that scrolled past. If you
    captured thoughts during the session, include their ids too.

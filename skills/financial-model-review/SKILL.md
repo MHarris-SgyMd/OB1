@@ -5,7 +5,7 @@ description: |
   sensitivity analysis. Use for prompts like "review this model", "stress test these
   assumptions", "what breaks in this forecast", or "is this model decision-ready".
   Best when you have a spreadsheet export, pasted assumptions, key drivers, and the
-  decision the model supports. Optional Open Brain search and capture can pull prior
+  decision the model supports. Optional Daemonic Brain search and capture can pull prior
   model context and store the final review memo.
 author: Nate B. Jones
 version: 1.0.0
@@ -51,7 +51,7 @@ Gather or confirm:
 
 Useful but optional:
 
-- prior versions, management guidance, or historical notes from Open Brain
+- prior versions, management guidance, or historical notes from Daemonic Brain
 
 ## Process
 
@@ -68,7 +68,7 @@ Useful but optional:
    - Check whether the model includes downside cases, key sensitivities, and break conditions.
 6. Convert the review into judgment.
    - Distinguish fatal issues, caution flags, and acceptable simplifications.
-7. Optionally use Open Brain.
+7. Optionally use Daemonic Brain.
    - Search for prior model assumptions, earlier reviews, or management claims.
    - Capture the final review memo or most important flags after completion.
 

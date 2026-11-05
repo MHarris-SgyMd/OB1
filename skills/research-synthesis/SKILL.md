@@ -5,7 +5,7 @@ description: |
   contradictions, confidence markers, gaps, and next questions. Use for prompts
   like "synthesize these sources", "turn this research into a brief", "what are the
   key findings", or "where do these sources disagree". Best when you have a research
-  question, a defined audience, and a set of source materials. Optional Open Brain
+  question, a defined audience, and a set of source materials. Optional Daemonic Brain
   search and capture can pull prior context and store the final synthesis.
 author: Nate B. Jones
 version: 1.0.0
@@ -62,7 +62,7 @@ Gather or confirm:
    - Note which findings are strongly supported and which are provisional.
 6. End with decision usefulness.
    - State what the evidence supports now, what remains unclear, and what to research next.
-7. Optionally use Open Brain.
+7. Optionally use Daemonic Brain.
    - Search for prior related notes before starting.
    - Capture the final synthesis or highest-value findings after completion.
 

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Have something you've built on Open Brain, or an idea for something that should exist? Tell us about it. You don't need to have code ready — ideas are welcome.
+        Have something you've built on Daemonic Brain, or an idea for something that should exist? Tell us about it. You don't need to have code ready — ideas are welcome.
 
   - type: dropdown
     id: category
@@ -37,7 +37,7 @@ body:
     id: description
     attributes:
       label: What does it do?
-      description: 1-3 sentences. What capability does this add to Open Brain?
+      description: 1-3 sentences. What capability does this add to Daemonic Brain?
     validations:
       required: true
 
