@@ -12,13 +12,15 @@
 # its old path too, and each path's modes come with it, so a symlink or a
 # submodule at a docs path is code (review pass 2: a symlink looped the walks).
 # code=false only for a pull request into the default branch whose every
-# changed path is not_code's. Anything else is code=true, and every job runs:
+# changed path is not_code's. Anything else is code=true, and every job runs
+# unless skip= names some (below):
 # - another event (a push to main always runs everything);
 # - a pull request into another branch: stacked on one whose code has not run
 #   here, it would keep this green once retargeted (review pass 1);
 # - a HEAD with no second parent (not a merge commit, or a shallow fetch);
 # - a change git cannot list or that is empty;
-# - one path off the list, or a symlink or submodule anywhere.
+# - one path off the list that is neither CHARGES's nor a workflow edit, or a
+#   symlink or submodule anywhere.
 # No error here stops the step, so the job succeeds with an answer, and a job
 # that fails anyway makes every gated job run (their `if:`) and the aggregate red.
 #
@@ -29,12 +31,41 @@
 # job, or a file the cut cannot read, runs every job. Check 51 holds the cut
 # to Bun's reading of the file: each block parses alone to its job as the
 # whole file does, so no anchor, alias or flow style crosses a block.
+#
+# A path off the list that CHARGES names (PR 3a) charges the gated jobs it
+# gives, none for a path no gated job reads; a pull request whose every path
+# off the list is CHARGES's or a workflow edit skips the gated jobs nothing
+# charged or edited. Check 53 holds CHARGES to the files and steps naming each
+# path. A workflow edit beside HOLDS_THE_CUT's files runs every job.
 set -uo pipefail
 WORKFLOW=.github/workflows/brain-checks.yml
 # The jobs an edit of which runs every job: the changes job, whose answer the
 # gates read, and the job that runs the checker, whose check 51 is what makes
 # an unchanged block a safe skip (review pass 2). Check 51 holds this list.
 RUN_ALL_JOBS="changes repo-consistency"
+# The paths off the list a gated job is known to read (PR 3a): each pattern,
+# a tab, then the gated jobs it can affect, one space between, or none for a
+# path no gated job reads. A pull request whose every path off the list is
+# here (or a workflow edit read by job) skips the gated jobs nothing charged;
+# a path not here runs every job. Check 53 holds each entry to the files whose
+# code names it and the jobs whose steps do. Kept by hand until PR 3b derives
+# it from what each job runs.
+# Beside a workflow edit these run every job: the checker, whose check 51
+# holds the cut, and this file, whose cut the base's copy applies to the
+# head's workflow, unheld by check 51 when the two cuts differ.
+HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
+CHARGES="changes/*	deploy-stack
+scripts/check-consistency.ts	data-layer
+.github/ci/typecheck.sh	portable-server
+.github/ci/full-stack-up.sh	deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability
+.github/ci/auth-settings.sh	deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability
+.github/ci/held-cases.sh	deploy-stack
+.github/ci/changes.sh
+.github/ci/test-counts-page.ts
+.github/workflows/release.yml
+.github/workflows/release-steps.yml
+.github/workflows/ci-shift.yml
+db/ci-parity.sh	"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
 # kind of file runs every job until it is shown here not to matter: Markdown
@@ -57,12 +88,24 @@ not_code() {
   return 1
 }
 
+# charges PATH: the gated jobs CHARGES gives a path, printed (none for a path
+# no gated job reads); returns 1 for a path it does not name.
+charges() {
+  local pat jobs
+  while IFS=$'\t' read -r pat jobs; do
+    # shellcheck disable=SC2254 # the pattern is CHARGES's own glob
+    case "$1" in $pat) printf '%s\n' "$jobs"; return 0 ;; esac
+  done <<< "$CHARGES"
+  return 1
+}
+
 # decide EVENT FILE: FILE holds `git diff --raw -z` records — ":OLDMODE NEWMODE
-# OLDSHA NEWSHA STATUS", NUL, the path, NUL. Prints "true|false|workflow<TAB>why":
-# workflow when the one path off the list is an edit of WORKFLOW, a regular
-# file before and after, which answer then reads by job.
+# OLDSHA NEWSHA STATUS", NUL, the path, NUL. Prints "true|false<TAB>why", or
+# "partial<TAB>WF<TAB>JOBS<TAB>why" when every path off the list is an edit of
+# WORKFLOW, a regular file before and after (WF 1), or one CHARGES names, JOBS
+# the gated jobs those charge; answer then reads the workflow by job.
 decide() {
-  local event=$1 file=$2 meta f n=0 wf=0 oldmode newmode
+  local event=$1 file=$2 meta f n=0 wf=0 oldmode newmode charged='' partial=0 j held=''
   if [ "$event" != pull_request ]; then printf 'true\ta %s run runs every job\n' "$event"; return; fi
   if [ ! -s "$file" ]; then printf 'true\tno change read from HEAD^1..HEAD\n'; return; fi
   while IFS= read -r -d '' meta; do
@@ -77,11 +120,19 @@ decide() {
       *' 120000 '* | *' 160000 '*) printf 'true\t%s is a symlink or a submodule\n' "$f"; return ;;
     esac
     read -r oldmode newmode _ <<< "${meta#:}"
-    if [ "$f" = "$WORKFLOW" ] && [ "$oldmode $newmode" = '100644 100644' ]; then wf=1; continue; fi
-    if ! not_code "$f"; then printf 'true\t%s can affect the code jobs\n' "$f"; return; fi
+    if [ "$f" = "$WORKFLOW" ] && [ "$oldmode $newmode" = '100644 100644' ]; then wf=1; partial=1; continue; fi
+    not_code "$f" && continue
+    case " $HOLDS_THE_CUT " in *" $f "*) held=$f ;; esac
+    if j=$(charges "$f"); then charged="$charged $j"; partial=1; continue; fi
+    printf 'true\t%s can affect the code jobs\n' "$f"; return
   done < "$file"
   if [ "$n" = 0 ]; then printf 'true\tno path read from HEAD^1..HEAD\n'; return; fi
-  if [ "$wf" = 1 ]; then printf 'workflow\t%s is edited, and the %s other changed path(s) are docs\n' "$WORKFLOW" "$((n - 1))"; return; fi
+  if [ "$wf" = 1 ] && [ -n "$held" ]; then printf 'true\t%s is edited beside %s, which holds how it is read by job\n' "$WORKFLOW" "$held"; return; fi
+  if [ "$partial" = 1 ]; then
+    # shellcheck disable=SC2086 # split on purpose: one job a line
+    charged=$(printf '%s\n' $charged | sort -u | tr '\n' ' '); charged=${charged% }
+    printf 'partial\t%s\t%s\tevery path off the list is a workflow edit or one CHARGES names\n' "$wf" "$charged"; return
+  fi
   printf 'false\tall %s changed path(s) are docs\n' "$n"
 }
 
@@ -134,21 +185,22 @@ cut_blocks() {
     }' "$1"
 }
 
-# by_job: in a checkout whose HEAD^1..HEAD edits WORKFLOW alone of the paths
-# off the list, prints "true<TAB>skip<TAB>why": skip names the gated jobs (a
-# block holding its own gate on skip) whose block is unchanged, or is empty
-# when an edit outside the jobs or of a RUN_ALL_JOBS job, or an unreadable
-# file, runs every job.
+# by_job WF CHARGED: in a checkout whose every path off the list is an edit of
+# WORKFLOW (WF 1) or one CHARGES names, CHARGED the gated jobs those charge;
+# prints "true<TAB>skip<TAB>why". skip names the gated jobs (a block holding
+# its own gate on skip) that nothing charged and, with WF 1, whose block is
+# unchanged; it is empty when an edit outside the jobs or of a RUN_ALL_JOBS
+# job, or an unreadable file, runs every job.
 by_job() {
-  local d f id changed='' skip='' rc=0
+  local wf=$1 charged=$2 d f id changed='' skip='' rc=0
   d=$(mktemp -d) || { printf 'true\t\tno scratch directory to read %s by job\n' "$WORKFLOW"; return; }
   mkdir "$d/base" "$d/head"
-  if ! git show "HEAD^1:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null; then
+  if ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || { [ "$wf" = 1 ] && ! git show "HEAD^1:$WORKFLOW" > "$d/base.yml" 2> /dev/null; }; then
     printf 'true\t\t%s could not be read at HEAD^1 and HEAD\n' "$WORKFLOW"; rc=1
-  elif ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
+  elif ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null || { [ "$wf" = 1 ] && ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; }; then
     printf 'true\t\t%s is not in the shape its jobs are read apart in\n' "$WORKFLOW"; rc=1
   fi
-  if [ "$rc" = 0 ]; then
+  if [ "$rc" = 0 ] && [ "$wf" = 1 ]; then
     for f in "$d"/base/* "$d"/base/.top "$d"/head/* "$d"/head/.top; do
       [ -e "$f" ] || continue
       id=${f##*/}
@@ -168,10 +220,10 @@ by_job() {
   if [ "$rc" = 0 ]; then
     for f in "$d"/head/*; do
       id=${f##*/}
-      case " $changed " in *" $id "*) continue ;; esac
+      case " $changed $charged " in *" $id "*) continue ;; esac
       grep -qF "' $id '" "$f" && grep -qF 'needs.changes.outputs.skip' "$f" && skip="$skip $id"
     done
-    printf 'true\t%s\t%s edits job(s) %s; the gated jobs whose block is unchanged skip\n' "${skip# }" "$WORKFLOW" "${changed:-none}"
+    printf 'true\t%s\tthe change reaches job(s) %s; the other gated jobs skip\n' "${skip# }" "$(printf '%s %s' "$changed" "$charged" | tr -s ' ' | sed 's/^ //; s/ $//; s/^$/none/')"
   fi
   rm -rf "$d"
 }
@@ -191,7 +243,10 @@ answer() {
   if ! git diff --raw -z --no-renames --no-abbrev 'HEAD^1' HEAD > "$changed" 2> /dev/null; then : > "$changed"; fi
   result=$(decide "$event" "$changed")
   rm -f "$changed"
-  if [ "${result%%$'\t'*}" = workflow ]; then by_job; return; fi
+  if [ "${result%%$'\t'*}" = partial ]; then
+    local rest=${result#partial$'\t'}
+    by_job "${rest%%$'\t'*}" "$(r=${rest#*$'\t'}; printf '%s' "${r%%$'\t'*}")"; return
+  fi
   printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"
 }
 
@@ -205,13 +260,19 @@ self_check() {
     expect=$1 event=$2; shift 2
     : > "$dir/c"
     for p in "$@"; do printf ':%s %s 0000000 0000000 M\0%s\0' "${OLDMODE:-100644}" "${MODE:-100644}" "$p" >> "$dir/c"; done
-    got=$(decide "$event" "$dir/c"); got=${got%%$'\t'*}
+    local whole jobs
+    whole=$(decide "$event" "$dir/c"); got=${whole%%$'\t'*}
     if [ "$got" != "$expect" ]; then echo "changes.sh: $event $* is code=$got, not $expect" >&2; fails=$((fails + 1)); fi
+    # CHARGED=…: the jobs a partial answer's paths charge (its third field).
+    if [ -n "${CHARGED+set}" ] && [ "$got" = partial ]; then
+      jobs=${whole#partial$'\t'*$'\t'}; jobs=${jobs%%$'\t'*}
+      if [ "$jobs" != "$CHARGED" ]; then echo "changes.sh: $event $* charges '$jobs', not '$CHARGED'" >&2; fails=$((fails + 1)); fi
+    fi
   }
   check false pull_request docs/01-getting-started.md
   check false pull_request README.md recipes/x/README.md "docs/a b.md" docs/img/shot.png docs/diagram.svg
   check false pull_request db/README.md
-  check true pull_request changes/smd-1.md
+  CHARGED=deploy-stack check partial pull_request changes/smd-1.md
   check true pull_request docs/a.md docs/subject-anchored-claims.md
   check true pull_request integrations/telegram-capture/README.md
   check true pull_request recipes/schema-aware-routing/README.md
@@ -225,7 +286,8 @@ self_check() {
   check true pull_request dashboard/static/logo.png
   check true pull_request dashboard/README.md
   check true pull_request README.MD
-  check true pull_request .github/ci/changes.sh
+  CHARGED='' check partial pull_request .github/ci/changes.sh
+  check true pull_request .github/ci/new-step.sh
   check true pull_request "$(printf 'docs/a\nserver-portable/x.ts')"
   check true pull_request
   check true push docs/a.md
@@ -240,10 +302,19 @@ self_check() {
   OLDMODE=100644 MODE=000000 check false pull_request docs/gone.md
   MODE=100755 check false pull_request docs/now-executable.md
   # The workflow read by job (PR 2): an edit of it alone, or beside docs; anything else of it is code.
-  check workflow pull_request .github/workflows/brain-checks.yml
-  check workflow pull_request docs/a.md .github/workflows/brain-checks.yml README.md
+  CHARGED='' check partial pull_request .github/workflows/brain-checks.yml
+  CHARGED='' check partial pull_request docs/a.md .github/workflows/brain-checks.yml README.md
   check true pull_request .github/workflows/brain-checks.yml server-portable/api.ts
-  check true pull_request .github/workflows/release.yml
+  CHARGED='' check partial pull_request .github/workflows/release.yml
+  check true pull_request .github/workflows/other.yml
+  # The CHARGES map (PR 3a): each path charges its jobs, together the union; a path off the map runs every job.
+  CHARGED=data-layer check partial pull_request scripts/check-consistency.ts
+  CHARGED='deploy-stack deploy-stack-auth deploy-stack-brains deploy-stack-observability' check partial pull_request .github/ci/full-stack-up.sh
+  CHARGED='deploy-stack portable-server' check partial pull_request changes/smd-1.md .github/ci/typecheck.sh docs/a.md
+  CHARGED=deploy-stack check partial pull_request changes/smd-1.md .github/workflows/brain-checks.yml
+  check true pull_request changes/smd-1.md server-portable/api.ts
+  check true pull_request scripts/check-consistency.ts .github/workflows/brain-checks.yml
+  check true pull_request .github/ci/changes.sh .github/workflows/brain-checks.yml
   OLDMODE=000000 check true pull_request .github/workflows/brain-checks.yml
   MODE=000000 check true pull_request .github/workflows/brain-checks.yml
   MODE=100755 check true pull_request .github/workflows/brain-checks.yml
@@ -273,8 +344,9 @@ self_check() {
     got=$(sed -n 's/^skip=//p' "$out")
     if [ "$(grep -c '^skip=' "$out")" != 1 ] || [ "$got" != "${SKIP:-}" ]; then echo "changes.sh: the run for $event into $base after '$ops' wrote skip=$(tr '\n' ',' <<<"$got"), not '${SKIP:-}'" >&2; fails=$((fails + 1)); fi
   }
-  # A workflow for the by-job runs: the changes job, two gated jobs (g, and h
-  # with a heading of its own), and r, which nothing gates.
+  # A workflow for the by-job runs: the changes job, three gated jobs (g, h
+  # with a heading of its own, and data-layer, which CHARGES names), and r,
+  # which nothing gates.
   cat > "$dir/wf.yml" <<'EOF'
 name: f
 on: push
@@ -293,6 +365,11 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' h '))) }}
     steps:
       - run: echo h
+  data-layer:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' data-layer '))) }}
+    steps:
+      - run: echo data-layer
   r:
     steps:
       - run: echo r
@@ -306,7 +383,7 @@ EOF
   sub() { sed -i.bak "s/$1/$2/" "$WF" && rm -f "$WF.bak"; }
   # add_gated: a copy of h's block, as gated job n, at the workflow's end.
   # shellcheck disable=SC2317,SC2329 # as sub
-  add_gated() { awk '/^  h:/ { p = 1 } /^  r:/ { p = 0 } p' "$WF" | sed "s/^  h:/  n:/; s/' h '/' n '/; s/echo h/echo n/" > "$WF.n" && cat "$WF.n" >> "$WF" && rm -f "$WF.n"; }
+  add_gated() { awk 'p && /^  [a-z]/ { p = 0 } /^  h:/ { p = 1 } p' "$WF" | sed "s/^  h:/  n:/; s/' h '/' n '/; s/echo h/echo n/" > "$WF.n" && cat "$WF.n" >> "$WF" && rm -f "$WF.n"; }
   if ! command -v git > /dev/null; then echo "changes.sh: the run's cases need git, and there is none here" >&2; fails=$((fails + 1)); else
     run false pull_request main 'echo x >> docs/a.md'
     run false pull_request main 'echo x > docs/new.md; echo x > README.md'
@@ -326,15 +403,22 @@ EOF
     # The workflow read by job (PR 2): skip names the gated jobs whose block the edit leaves as it was.
     # shellcheck disable=SC2016 # run() evals it in the scratch repository, where $dir and $WF expand
     local wfb='mkdir -p .github/workflows && cp "$dir/wf.yml" "$WF"'
-    BASE_OPS=$wfb SKIP=h run true pull_request main 'sub "echo g" "echo g2"'
-    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'sub "echo r" "echo r2"'
-    BASE_OPS=$wfb SKIP=h run true pull_request main 'sub "echo g" "echo g2"; echo x >> docs/a.md'
+    BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'sub "echo g" "echo g2"'
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'sub "echo r" "echo r2"'
+    BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'sub "echo g" "echo g2"; echo x >> docs/a.md'
     # shellcheck disable=SC2016 # as above: $WF expands when run() evals the case
-    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'printf "  n:\n    steps:\n      - run: echo n\n" >> "$WF"'
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'printf "  n:\n    steps:\n      - run: echo n\n" >> "$WF"'
     # A gated job added runs on the pull request that adds it (review pass 2: the head's side of the compare).
-    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'add_gated'
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'add_gated'
     BASE_OPS=$wfb run true pull_request main 'sub "bun scripts" "bun  scripts"'
-    BASE_OPS=$wfb SKIP=g run true pull_request main "sub \"h's heading\" \"h's heading, reworded\""
+    BASE_OPS=$wfb SKIP='data-layer g' run true pull_request main "sub \"h's heading\" \"h's heading, reworded\""
+    # The CHARGES map (PR 3a): a record charges deploy-stack (not here), the checker data-layer; off the map, every job.
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts'
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p .github/workflows && echo x > .github/workflows/release.yml'
+    BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo g" "echo g2"'
+    BASE_OPS=$wfb run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; echo x >> server-portable/api.ts'
+    BASE_OPS=$wfb run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts; sub "echo g" "echo g2"'
     BASE_OPS=$wfb run true pull_request main 'sub "name: f" "name: f2"'
     BASE_OPS=$wfb run true pull_request main 'sub "runs-on: x" "runs-on: y"'
     BASE_OPS=$wfb run true pull_request main "sub \"changes' heading\" \"changes' heading, reworded\""
@@ -367,6 +451,8 @@ if [ "${1:-}" = --not-code ]; then
   while IFS= read -r f || [ -n "$f" ]; do if not_code "$f"; then printf '%s\n' "$f"; fi; done
   exit 0
 fi
+# --charges: CHARGES as it stands, a pattern and its jobs a line (check 53 reads it).
+if [ "${1:-}" = --charges ]; then printf '%s\n' "$CHARGES"; exit 0; fi
 # --blocks FILE: how cut_blocks cuts a workflow, a run of lines a line (check 51 reads it).
 if [ "${1:-}" = --blocks ]; then cut_blocks "${2:?--blocks takes a file}"; exit; fi
 

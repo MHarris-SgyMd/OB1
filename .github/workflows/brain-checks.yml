@@ -68,7 +68,8 @@ jobs:
   # code=false only then. One whose only other change is an edit of this file
   # runs the jobs whose block it edits, and skip= names the gated jobs whose
   # block is unchanged (PR 2; an edit outside the jobs, of this job or of
-  # repo-consistency, which runs the checker, runs them all).
+  # repo-consistency, which runs the checker, runs them all). A path its
+  # CHARGES map names counts against the gated jobs it gives alone (PR 3a).
   # Each gated job runs on any other answer. It fails open: a failed or
   # cancelled run of this job runs them all, and the aggregate lets them skip
   # only when this job succeeded and said code=false or named them. Any other

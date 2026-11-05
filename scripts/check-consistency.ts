@@ -619,6 +619,14 @@
  *      "always"), a contribution category not; a mis-cased, unspaced or colon
  *      header fails, and the rule is found by name. CI's commit-lint lints
  *      only a PR's own commits, so nothing else reads the config's categories
+ *  53. .github/ci/changes.sh's CHARGES — the gated jobs a path off the docs
+ *      allowlist can affect, which a pull request of only such paths runs —
+ *      is held to what names each path: a gated job whose steps name it in
+ *      a code line is one it charges, and the files whose code names it, as
+ *      an anchored path token with comments blanked, are exactly
+ *      JOB_MAP_READERS's, each with why no other gated job reaches it through
+ *      them; a new namer or a stale one fails (SMD-2435 PR 3a). Lexical, as
+ *      check 47 is. Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
@@ -11268,6 +11276,172 @@ function checkCommitCategories() {
   if (ticketRef({ type: "recipes", header: "[recipes] A recipe" })[0] !== true) fail(CONFIG, "ticket-ref holds a contribution category to an SMD ticket — a community PR carries none (check 52)");
 }
 checkCommitCategories();
+
+// ── 53: the changes job's CHARGES map is held to what names its paths (SMD-2435 PR 3a) ──
+//
+// changes.sh's CHARGES gives the gated jobs a path off the docs allowlist can
+// affect, and a pull request whose every such path is there skips the gated
+// jobs nothing charged. That holds while nothing else reads the path: so the
+// gated jobs whose steps name it, in a code line, are the ones it charges, and
+// the files whose code names it (comments blanked, as an anchored path token)
+// are exactly JOB_MAP_READERS's for it, each with why no other gated job
+// reaches it through that file. A new namer fails until it is read and listed,
+// or charged; a namer gone fails as stale. The reading is lexical, as check
+// 47's is: a path built from pieces is not seen, which PR 3b's derived map
+// replaces.
+/**
+ * Per CHARGES pattern, the files whose code names it and why no gated job
+ * beyond the ones it charges reaches it through them (SMD-2435's 3a survey).
+ */
+const JOB_MAP_READERS: Record<string, Record<string, string>> = {
+  "changes/*": {
+    ".github/workflows/release-steps.yml": "the release's steps, which release.yml alone calls; and the aggregate's rules refuse a gated job calling a reusable workflow",
+    "dashboard/smoke.ts": "\"changes\" is the change feed's page name, not the directory; deploy-stack runs it, which a record charges anyway",
+    "db/ingest-records.ts": "join(REPO_ROOT, \"changes\") only under --source fork, which no CI job passes; test-live builds its fork documents itself",
+    "releases.json": "a release's \"changes\" key, the change numbers it carries; nothing opens the records through it",
+    "scripts/assemble-release.ts": "the release cut, which the maintainer runs; no CI job runs it",
+    "scripts/changes-index.ts": "readChanges and readChangeEntries read the directory for release-artifacts (deploy-stack, charged) and assemble-release; ingest-records imports only headingOf and ticketsOf, which read no file",
+    "scripts/check-landing.ts": "the landing check, which repo-consistency alone runs and which always runs",
+    "scripts/fragments.ts": "a fragment's rule refusing a path to another fragment in its text; it reads the files its callers give it, release-artifacts' (deploy-stack, charged) and the checker's",
+    "scripts/release-artifacts.ts": "deploy-stack's release rehearsal (--rehearsal) reads every record: the job charged",
+    "server-portable/open-items.ts": "\"changes\" is an item problem's name, not a path",
+    "server-portable/test-rest-sql.ts": "has(\"changes\") reads a reply's key, not the directory",
+  },
+  "scripts/check-consistency.ts": {
+    "db/ci-parity.sh": "the local mirror of CI, which no CI job runs",
+    "integrations/test-writes.ts": "asserts over the checker's text (thoughtWritesAroundIn): data-layer, the job charged",
+    "scripts/gen-tools.ts": "a sentence in the note it writes into tools.json",
+    "scripts/gen-version.ts": "a sentence in the comment it writes into db/version.mjs",
+    "scripts/mechanism-yield.ts": "a sample commit body in its own cases",
+    "server-portable/tools.json": "the generated note's sentence; its readers read the tools, not the checker",
+  },
+  ".github/ci/typecheck.sh": {},
+  ".github/ci/full-stack-up.sh": {},
+  ".github/ci/auth-settings.sh": {},
+  ".github/ci/held-cases.sh": {},
+  ".github/ci/changes.sh": {},
+  ".github/ci/test-counts-page.ts": {
+    "db/ci-parity.sh": "the local mirror of CI, which no CI job runs",
+  },
+  ".github/workflows/release.yml": {
+    ".github/workflows/release-steps.yml": "the release's steps, naming the workflow that calls them",
+    "scripts/assemble-release.ts": "a sentence in its closing advice; the maintainer runs it",
+    "scripts/release-artifacts.ts": "a tag's message and a header written into the release's compose overlay; it reads no workflow",
+  },
+  ".github/workflows/release-steps.yml": {
+    ".github/workflows/release.yml": "the release calls its steps; and the aggregate's rules refuse a gated job calling a reusable workflow",
+  },
+  ".github/workflows/ci-shift.yml": {},
+  "db/ci-parity.sh": {},
+};
+/**
+ * No namers of a CHARGES path: the map's own home, which names every pattern in
+ * CHARGES, and this checker, which names them to check them and which
+ * repo-consistency alone runs, always.
+ */
+const JOB_MAP_HOMES = [CHANGES_SCRIPT, SELF];
+/** A CHARGES row: its pattern and the jobs it charges. */
+type ChargesRow = { pattern: string; jobs: string[] };
+/** CHARGES as CHANGES_SCRIPT prints it, or why it could not be read. */
+function chargesTable(): ChargesRow[] | string {
+  const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--charges"]);
+  if (r.exitCode !== 0) return `${CHANGES_SCRIPT} --charges exited ${r.exitCode}: ${r.stderr.toString().trim()}`;
+  return r.stdout.toString().split("\n").filter((l) => l.trim()).map((l) => {
+    const [pattern, jobs = ""] = l.split("\t");
+    return { pattern, jobs: jobs.split(" ").filter(Boolean) };
+  });
+}
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * How code names a CHARGES pattern: for a directory ("changes/*"), its name
+ * then a slash, or its name alone as a quoted string (join(ROOT, "changes"),
+ * a constant); for a file, its file name. Anchored, so thought_changes/ or a
+ * URL's /changes/ is not it.
+ */
+function chargesToken(pattern: string): RegExp {
+  if (pattern.endsWith("/*")) {
+    const dir = reEscape(pattern.slice(0, -2));
+    return new RegExp(`(?<![\\w./-])(?:\\.\\./)*${dir}/|["'\`]${dir}["'\`]`);
+  }
+  return new RegExp(`(?<![\\w.-])${reEscape(pattern.slice(pattern.lastIndexOf("/") + 1))}(?![\\w.-])`);
+}
+/** A file's code with its comments blanked, by its kind; null for a file this check does not read. */
+function codeForCharges(rel: string, text: string): string | null {
+  if (text.includes("\0")) return null;
+  if (/\.(?:[cm]?[jt]sx?)$/.test(rel)) return blanked(text, false);
+  if (/\.(?:sh|ya?ml|toml|py)$|(?:^|\/)(?:Dockerfile|[\w.-]+\.Dockerfile|\.dockerignore|\.gitignore)$/.test(rel)) return hashCommentsBlanked(text, SHELL_FILE.test(rel));
+  if (/\.sql$/.test(rel)) return text.replace(/--.*$/gm, "");
+  if (/\.json$/.test(rel)) return text;
+  return null;
+}
+/**
+ * What check 53 reports: CHARGES against JOB_MAP_READERS, the gated jobs, the
+ * files' code and the workflow's job blocks (each a job's lines, comments in).
+ */
+function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<string, string>>, gated: readonly string[], files: Map<string, string>, blocks: Map<string, string[]>): string[] {
+  const problems: string[] = [];
+  const patterns = table.map((r) => r.pattern);
+  for (const p of patterns.filter((p, i) => patterns.indexOf(p) !== i)) problems.push(`${CHANGES_SCRIPT}'s CHARGES names ${p} twice — the first wins, so the second is dead; keep one (check 53, SMD-2435)`);
+  for (const p of Object.keys(readers)) if (!patterns.includes(p)) problems.push(`JOB_MAP_READERS has ${p}, which CHARGES does not name — take it off, or add it to CHARGES (check 53, SMD-2435)`);
+  for (const { pattern, jobs } of table) {
+    if (!(pattern in readers)) problems.push(`CHARGES names ${pattern}, which JOB_MAP_READERS does not hold — add it, with the files whose code names it and why (check 53, SMD-2435)`);
+    for (const j of jobs) if (!gated.includes(j)) problems.push(`CHARGES charges ${pattern} to ${j}, which is no gated job — a job the changes job does not gate always runs (check 53, SMD-2435)`);
+    const token = chargesToken(pattern);
+    for (const [job, lines] of blocks) {
+      if (!gated.includes(job) || jobs.includes(job)) continue;
+      if (token.test(hashCommentsBlanked(lines.join("\n")))) problems.push(`job ${job}'s steps name ${pattern}, but CHARGES charges it only to ${jobs.join(", ") || "no gated job"} — a change to it would skip ${job}; charge ${job} too (check 53, SMD-2435)`);
+    }
+    const listed = readers[pattern] ?? {};
+    const namers = [...files].filter(([rel, code]) => rel !== pattern && !JOB_MAP_HOMES.includes(rel) && !(pattern.endsWith("/*") && rel.startsWith(pattern.slice(0, -1))) && token.test(code)).map(([rel]) => rel).sort();
+    for (const rel of namers) if (!(rel in listed)) problems.push(`${rel} names ${pattern} in its code, which CHARGES charges only to ${jobs.join(", ") || "no gated job"} — list it in JOB_MAP_READERS with why no other gated job reaches it through ${rel}, or charge the jobs that do (check 53, SMD-2435)`);
+    for (const rel of Object.keys(listed)) if (!namers.includes(rel)) problems.push(`JOB_MAP_READERS lists ${rel} for ${pattern}, but its code no longer names it — take it off (check 53, SMD-2435)`);
+  }
+  return problems;
+}
+function checkJobMap() {
+  const P = (pattern: string, jobs: string[]): ChargesRow => ({ pattern, jobs });
+  const blocksOf = (o: Record<string, string>) => new Map(Object.entries(o).map(([k, v]) => [k, v.split("\n")]));
+  const T = [P("changes/*", ["d"]), P("scripts/x.ts", ["l"]), P(".github/ci/s.sh", [])];
+  const R: Record<string, Record<string, string>> = { "changes/*": { "scripts/rel.ts": "the rehearsal" }, "scripts/x.ts": { "suite/t.ts": "an assertion over its text" }, ".github/ci/s.sh": {} };
+  // Each file's code as the real run reads it: comments blanked by its kind.
+  const F = (o: Record<string, string>) => new Map(Object.entries({ "scripts/rel.ts": `const d = join(ROOT, "changes");`, "suite/t.ts": `read("../scripts/x.ts")`, ...o }).map(([rel, text]) => [rel, codeForCharges(rel, text) ?? ""]));
+  const B = blocksOf({ d: "    steps:\n      - run: bun scripts/rel.ts", l: "    steps:\n      - run: bun t.ts" });
+  // [why, table, readers, files, blocks, phrases its problems say, in order]
+  const cases: [string, ChargesRow[], typeof R, Map<string, string>, Map<string, string[]>, string[]][] = [
+    ["the probe as written", T, R, F({}), B, []],
+    ["a comment naming a path", T, R, F({ "a.ts": "// reads changes/ and x.ts" }), B, []],
+    ["a word, a URL and another table's name", T, R, F({ "a.ts": `const u = "/changes/x"; const t = "thought_changes/"; const n = "x.tsv";` }), B, []],
+    ["a new reader of a directory", T, R, F({ "b.ts": `readdirSync("changes/")` }), B, ["b.ts names changes/*"]],
+    ["a new reader through a quoted name", T, R, F({ "b.ts": `join(ROOT, 'changes')` }), B, ["b.ts names changes/*"]],
+    ["a new reader of a file, by a relative path", T, R, F({ "b.ts": `import "../../scripts/x.ts"` }), B, ["b.ts names scripts/x.ts"]],
+    ["a listed reader that no longer names it", T, R, F({ "suite/t.ts": "nothing" }), B, ["no longer names it"]],
+    ["another gated job's step running a mapped script", T, R, F({}), blocksOf({ d: "    steps:\n      - run: bun x", l: "    steps:\n      - run: bash .github/ci/s.sh" }), ["job l's steps name .github/ci/s.sh"]],
+    ["an ungated job's step running it", T, R, F({}), blocksOf({ d: "", l: "", lint: "      - run: bash .github/ci/s.sh" }), []],
+    ["a gated job's comment naming it", T, R, F({}), blocksOf({ d: "", l: "      # runs .github/ci/s.sh elsewhere" }), []],
+    ["a charge to a job not gated", [P("changes/*", ["lint"]), T[1], T[2]], R, F({}), B, ["to lint, which is no gated job"]],
+    ["a pattern twice", [...T, P("changes/*", ["d"])], R, F({}), B, ["names changes/* twice"]],
+    ["a pattern CHARGES has and the readers lack", [...T, P("db/y.sh", [])], R, F({}), B, ["CHARGES names db/y.sh"]],
+    ["readers for a pattern CHARGES lacks", T, { ...R, "db/z.sh": {} }, F({}), B, ["JOB_MAP_READERS has db/z.sh"]],
+    ["a record naming its own directory", T, R, F({ "changes/smd-1.json": `"changes/"` }), B, []],
+  ];
+  const wrong = cases.map(([why, t, r, f, b, says]) => ({ why, says, got: jobMapProblems(t, r, ["d", "l"], f, b) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 53 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
+  const table = chargesTable();
+  if (typeof table === "string") return fail(CHANGES_SCRIPT, `check 53 cannot read CHARGES: ${table} (SMD-2435)`);
+  const files = new Map<string, string>();
+  for (const rel of execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean)) {
+    if (rel === WORKFLOW || rel.endsWith(".md")) continue;
+    let text: string;
+    try { text = readFileSync(join(ROOT, rel), "utf8"); } catch { continue; }
+    const code = codeForCharges(rel, text);
+    if (code !== null) files.set(rel, code);
+  }
+  const cut = changesCut(readFileSync(join(ROOT, WORKFLOW), "utf8"));
+  if ("refused" in cut) return; // check 51 reports a workflow the cut refuses
+  for (const msg of jobMapProblems(table, JOB_MAP_READERS, AGGREGATE_GATED, files, cut.regions)) fail(CHANGES_SCRIPT, msg);
+}
+checkJobMap();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
