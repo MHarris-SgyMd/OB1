@@ -2,7 +2,7 @@
 
 > One loop. One skill. Claude figures out what matters right now.
 
-A self-improving, time-aware personal assistant that runs in the background via Claude Code's `/loop` command. It checks your calendar, surfaces relevant knowledge from your Open Brain, tracks habits and health check-ins, and delivers proactive briefings via Telegram or Discord — adapting to your life over time.
+A self-improving, time-aware personal assistant that runs in the background via Claude Code's `/loop` command. It checks your calendar, surfaces relevant knowledge from your brain, tracks habits and health check-ins, and delivers proactive briefings via Telegram or Discord — adapting to your life over time.
 
 **This isn't a calendar tool. It's not a reminder app. It's a personal AI engine that runs your day and gets better at it every week.**
 
@@ -13,7 +13,7 @@ A self-improving, time-aware personal assistant that runs in the background via 
 > **You don't have to set this up manually.** This guide is detailed enough that Claude Code can do most of the setup for you. If you'd rather not walk through every step yourself, skip to [Quick Setup with Claude Code](#quick-setup-with-claude-code) — paste one prompt and Claude handles the plugin install, skill file creation, schema setup, and permissions configuration. Come back to the step-by-step sections if you want to understand what it built or customize further.
 > <!-- md028 -->
 > [!NOTE]
-> **This will not be perfect on day one.** That's by design. Life Engine is built to iterate — your first morning briefing will be rough, your tenth will be dialed in, and by week four the system is suggesting its own improvements based on what you actually use. The value comes from the feedback loop between you and the agent, powered by the structured context your Open Brain provides. Treat the first run as a starting point, not a finished product.
+> **This will not be perfect on day one.** That's by design. Life Engine is built to iterate — your first morning briefing will be rough, your tenth will be dialed in, and by week four the system is suggesting its own improvements based on what you actually use. The value comes from the feedback loop between you and the agent, powered by the structured context your brain provides. Treat the first run as a starting point, not a finished product.
 
 ---
 
@@ -23,7 +23,7 @@ This guide contains everything Claude Code needs to set up your entire Life Engi
 
 **Before you start**, you'll need:
 - Claude Code installed ([claude.ai/download](https://claude.ai/download))
-- A working Open Brain setup ([Getting Started Guide](../../docs/01-getting-started.md))
+- A working Daemonic Brain setup ([Getting Started Guide](../../docs/01-getting-started.md))
 - Google Calendar MCP connected to Claude Code
 - [Bun](https://bun.sh/) installed (`brew install oven-sh/bun/bun`)
 - A Telegram or Discord account (whichever you want briefings delivered to)
@@ -35,7 +35,7 @@ This guide contains everything Claude Code needs to set up your entire Life Engi
 **What Claude Code will do:**
 1. Install and configure the Telegram channel plugin
 2. Create the skill file with the full Life Engine prompt
-3. Run the database schema against your Open Brain's database
+3. Run the database schema against your brain's database
 4. Set up permissions for unattended operation
 5. Pause for you to complete Telegram pairing (requires your phone)
 6. Run a test cycle to confirm everything works
@@ -69,7 +69,7 @@ Every 30 minutes, Claude wakes up, checks the time, and decides what you need ri
 | Time | What Happens |
 |------|-------------|
 | **7:00 AM** | Pulls your calendar, gives you a daily rundown, reminds you about your morning jog |
-| **9:30 AM** | You've got a 10am client call — queries your Open Brain for that client's history, past conversations, open items and sends you a briefing |
+| **9:30 AM** | You've got a 10am client call — queries your brain for that client's history, past conversations, open items and sends you a briefing |
 | **12:00 PM** | No meetings for a bit — sends a quick check-in: "How are you feeling? Quick update and I'll track it" |
 | **3:00 PM** | "Your afternoon is clear. Here's what's still on your plate" |
 | **6:00 PM** | Day summary: meetings attended, tasks completed, habits tracked |
@@ -78,7 +78,7 @@ The key insight: **you don't build all of this on day one.**
 
 You start simple — maybe it just checks your calendar and sends you a Telegram message. That's it. Then Claude starts learning. It notices patterns, suggests additions:
 
-- *"Hey, you keep checking your Open Brain before client calls manually. Want me to add that to the skill?"*
+- *"Hey, you keep checking your brain before client calls manually. Want me to add that to the skill?"*
 - *"You haven't used the weather check in 2 weeks. Want me to drop it?"*
 - *"I notice you have recurring Monday standups. Should I prep a summary of last week's notes every Monday morning?"*
 
@@ -92,7 +92,7 @@ The skill evolves. Claude proposes changes, you approve them, and over time your
 - Using Claude Code's **Channels** for real-time two-way Telegram messaging
 - Building time-aware Claude Code skills that adapt behavior based on context
 - Connecting multiple MCP integrations into a single cohesive workflow
-- Querying your Open Brain for contextual knowledge surfacing
+- Querying your brain for contextual knowledge surfacing
 - Delivering proactive outputs via Telegram
 - Designing self-improving systems where Claude suggests its own enhancements
 
@@ -104,12 +104,12 @@ Before starting, you'll need:
 
 | Requirement | Status |
 |-------------|--------|
-| Working Open Brain setup ([Getting Started Guide](../../docs/01-getting-started.md)) | ☐ |
+| Working Daemonic Brain setup ([Getting Started Guide](../../docs/01-getting-started.md)) | ☐ |
 | Claude Code installed and working ([claude.ai/download](https://claude.ai/download)) | ☐ |
 | Google Calendar MCP connected to Claude Code | ☐ |
 | Telegram account + Bot created via [@BotFather](https://t.me/BotFather) | ☐ |
 | [Bun](https://bun.sh/) installed (`bun --version` to check) | ☐ |
-| A running Open Brain ([`SETUP.md`](../../SETUP.md)) with its MCP server reachable | ☐ |
+| A running Daemonic Brain ([`SETUP.md`](../../SETUP.md)) with its MCP server reachable | ☐ |
 
 ### Credential Tracker
 
@@ -161,7 +161,7 @@ TELEGRAM_BOT_TOKEN=
 
 **Data flows:**
 1. **Calendar → Claude**: What's coming up?
-2. **Open Brain → Claude**: What do I know about it?
+2. **Daemonic Brain → Claude**: What do I know about it?
 3. **Claude → You**: Here's what you need (sent via Telegram or Discord channel).
 4. **You → Claude**: Replies pushed into the session in real time via channel.
 5. **Claude → Life Engine Tables**: Log habits, moods, improvements
@@ -444,11 +444,11 @@ It should list your events using the `gcal_list_events` tool.
 
 ---
 
-## Step 3: Connect Your Open Brain
+## Step 3: Connect Your brain
 
-Your Open Brain is already deployed as a remote MCP server from the Getting Started guide.
+Your brain is already deployed as a remote MCP server from the Getting Started guide.
 
-### 3.1 Add Open Brain MCP to Claude Code
+### 3.1 Add Daemonic Brain MCP to Claude Code
 
 If not already connected:
 
@@ -456,23 +456,23 @@ If not already connected:
 claude mcp add --transport http open-brain http://127.0.0.1:8000/mcp --header "x-brain-key: YOUR_ACCESS_KEY"
 ```
 
-### 3.2 Verify Open Brain Access
+### 3.2 Verify Daemonic Brain Access
 
 Ask Claude Code:
 
 ```
-Search my Open Brain for anything related to "meetings" or "clients"
+Search my brain for anything related to "meetings" or "clients"
 ```
 
 It should query your thoughts using semantic search.
 
-✅ **Checkpoint:** Claude Code can search your Open Brain.
+✅ **Checkpoint:** Claude Code can search your brain.
 
 ---
 
 ## Step 4: Create the Life Engine Schema
 
-The Life Engine needs its own tables to track habits, moods, check-ins, and skill evolution. This extends your Open Brain — it doesn't replace it.
+The Life Engine needs its own tables to track habits, moods, check-ins, and skill evolution. This extends your brain — it doesn't replace it.
 
 ### 4.1 Run the Schema
 
@@ -651,7 +651,7 @@ This is where Life Engine becomes unique to you. Here's the progression:
 ### Week 1: Calendar + Telegram (Start Here)
 
 - Morning briefing with today's events
-- Pre-meeting prep from Open Brain
+- Pre-meeting prep from Daemonic Brain
 - That's it. Keep it simple.
 
 ### Week 2: Add Habits
@@ -707,7 +707,7 @@ No two Life Engines look the same. Yours adapts to your schedule, your habits, y
 | **Bun not found** | Install via `brew install oven-sh/bun/bun` or `curl -fsSL https://bun.sh/install \| bash` |
 | **Plugin not loading** | Check `~/.claude/channels/telegram/.env` exists with your bot token. Try `/reload-plugins` in the session |
 | **Calendar not showing events** | Run `/mcp` and verify Google Calendar is connected |
-| **Open Brain returns nothing** | Test with: *"Search my Open Brain for [topic]"* — you may need more captured thoughts |
+| **Daemonic Brain returns nothing** | Test with: *"Search my brain for [topic]"* — you may need more captured thoughts |
 | **Duplicate briefings** | The skill checks `life_engine_briefings` before sending. If duplicates occur, verify Supabase connection |
 | **Claude suggests too many changes** | The self-improvement protocol limits to 1 suggestion per 7 days. Adjust in the skill if needed |
 
@@ -769,7 +769,7 @@ The skill file (`.claude/skills/life-engine/SKILL.md`) is a prompt that Claude f
 
 Claude Code communicates with external services through MCP (Model Context Protocol) servers:
 - **Google Calendar MCP** — reads calendar events
-- **Open Brain MCP** — searches your knowledge base
+- **Daemonic Brain MCP** — searches your knowledge base
 - **Messaging Channel** — sends and receives messages via Telegram or Discord plugin (`reply`, `react`, `edit_message`)
 - **Supabase MCP** — reads/writes Life Engine tables
 
@@ -805,7 +805,7 @@ After setup, you'll have:
 
 - ✅ A Claude Code session running `/loop 30m /life-engine`
 - ✅ Proactive morning briefings on your phone via Telegram
-- ✅ Automatic meeting prep with context from your Open Brain
+- ✅ Automatic meeting prep with context from your brain
 - ✅ Habit tracking with reminders and completion logging
 - ✅ Mood and health check-ins logged to your database
 - ✅ Evening day summaries with habit and mood trends
@@ -818,7 +818,7 @@ After setup, you'll have:
 ## Next Steps
 
 - Add more habits and track streaks over time
-- Connect additional Open Brain extensions for richer context
+- Connect additional Daemonic Brain extensions for richer context
 - Experiment with different loop intervals (15m for busy days, 1h for relaxed days)
 - Build a dashboard page for your habit and mood data, as a plugin's page in the operator GUI ([`plugins/`](../../plugins/))
 - Share your Life Engine configuration with the community
@@ -832,7 +832,7 @@ After setup, you'll have:
 |---------|-------|----------------|
 | Supabase Project URL | `https://xxx.supabase.co` | Open Brain MCP, Life Engine tables |
 | Supabase Service Key | `eyJ...` | Database access |
-| OB1 MCP URL | `http://127.0.0.1:8000/mcp?key=xxx` (or the HTTPS proxy in front of it) | Knowledge search |
+| Daemonic Brain MCP URL | `http://127.0.0.1:8000/mcp?key=xxx` (or the HTTPS proxy in front of it) | Knowledge search |
 | Telegram Bot Token | `123456:ABC...` | Telegram channel plugin |
 | Google Calendar | (OAuth via Claude Code) | Calendar events |
 

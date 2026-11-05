@@ -70,12 +70,14 @@
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
  *
- * Consumers: the REST core (rest/app.ts) and mcp-server/; the six vendored extensions under
- * extensions/ (seven servers), which authenticated with `key !== expected` on a
- * URL query key and ran as the service role until they were made consumers of
- * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
- * integrations that compared the same way — nine MCP and HTTP servers, four
- * workers and one webhook receiver (SMD-1455, change 67). Each imports
+ * Consumers: the REST core (rest/app.ts) and mcp-server/; and the vendored
+ * recipes and integrations that compared with `key !== expected` — nine MCP and
+ * HTTP servers, four workers and one webhook receiver when they became
+ * consumers (SMD-1455, change 67), an HTTP API, four workers and the webhook
+ * receiver now. The six vendored extensions under extensions/ (seven servers),
+ * which authenticated with `key !== expected` on a URL query key and ran as the
+ * service role until they were made consumers of this module (SMD-1252, FORK.md
+ * change 64), are plugins since SMD-2311. Each vendored server imports
  * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
  * supabase/functions/, one level under which every function sits, and
  * `_shared/` beside it is the one place a shared module can live — so a

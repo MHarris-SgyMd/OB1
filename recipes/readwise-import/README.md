@@ -24,7 +24,7 @@ Pair it with the [readwise-capture integration](../../integrations/readwise-capt
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - The [readwise-books schema](../../schemas/readwise-books/) applied to your Supabase project
 - Recommended: the [enhanced-thoughts schema](../../schemas/enhanced-thoughts/) applied, so the idempotency check on re-runs hits the `source_type` index
 - A Readwise account with the access token endpoint enabled (any plan; no paid requirement for this recipe)
@@ -250,7 +250,7 @@ Check that your Open Brain MCP server is connected to the same Supabase project 
 
 ## What You Just Built
 
-Your entire Readwise library is now embedded in Open Brain. Every passage you've ever marked as worth remembering — across every book, article, podcast, and tweet — is searchable by meaning alongside everything else you've captured. Pair with the [readwise-capture integration](../../integrations/readwise-capture/) to make this a permanent feed rather than a one-time import.
+Your entire Readwise library is now embedded in Daemonic Brain. Every passage you've ever marked as worth remembering — across every book, article, podcast, and tweet — is searchable by meaning alongside everything else you've captured. Pair with the [readwise-capture integration](../../integrations/readwise-capture/) to make this a permanent feed rather than a one-time import.
 
 ---
 

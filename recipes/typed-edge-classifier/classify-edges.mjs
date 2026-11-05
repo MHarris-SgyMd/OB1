@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Typed Edge Classifier for Open Brain
+ * Typed Edge Classifier for Daemonic Brain
  *
  * Populates `public.thought_edges` with semantic reasoning relations
  * between thoughts (supports, contradicts, evolved_into, supersedes,
@@ -220,7 +220,7 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(
     [
-      "Typed Edge Classifier — Open Brain",
+      "Typed Edge Classifier — Daemonic Brain",
       "",
       "Usage: node classify-edges.mjs [flags]",
       "",

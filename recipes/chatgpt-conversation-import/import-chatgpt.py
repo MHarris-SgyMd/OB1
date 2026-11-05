@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Open Brain — ChatGPT Export Importer (v2)
+Daemonic Brain — ChatGPT Export Importer (v2)
 
 Extracts conversations from a ChatGPT data export (zip or extracted directory),
 filters trivial ones, extracts 2-5 structured knowledge thoughts per conversation
-via LLM, and loads them into your Open Brain instance.
+via LLM, and loads them into your Daemonic Brain instance.
 
 Supports both single conversations.json and the multi-file format
 (conversations-000.json through conversations-NNN.json) used in large exports.
@@ -706,7 +706,7 @@ def parse_date(s):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Import ChatGPT conversations into Open Brain",
+        description="Import ChatGPT conversations into Daemonic Brain",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -1013,7 +1013,7 @@ def main():
         for i, thought_data in enumerate(all_thoughts):
             # Build enriched metadata per thought
             metadata = {
-                # Existing OB1 fields (MCP-compatible)
+                # Existing Daemonic Brain fields (MCP-compatible)
                 "source": "chatgpt",
                 "type": thought_data["type"],
                 "topics": thought_data["topics"],
