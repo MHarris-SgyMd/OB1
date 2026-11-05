@@ -298,7 +298,7 @@ jobs:
       - run: echo r
   repo-consistency:
     steps:
-      - run: bun scripts/check-fork-consistency.ts
+      - run: bun scripts/check-consistency.ts
 EOF
   local WF=.github/workflows/fork-checks.yml
   # sub FROM TO: an edit of the workflow in the scratch repository, as BSD and GNU sed both take it.

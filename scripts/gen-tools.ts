@@ -7,7 +7,7 @@
  * `as const` so TypeScript can check a name against a `ToolName` union, which a
  * JSON file cannot carry. deploy/smoke.sh is bash (and the deploy CI job has no
  * bun), so it reads a JSON file, not the TS — this generates that file, and
- * check-fork-consistency.ts round-trips it (regenerate in memory, compare to
+ * check-consistency.ts round-trips it (regenerate in memory, compare to
  * the committed copy) so the two never drift.
  *
  *   bun scripts/gen-tools.ts        # rewrite server-portable/tools.json
@@ -23,7 +23,7 @@ import { TOOLS } from "../server-portable/tools.ts";
 const NOTE =
   "Generated from server-portable/tools.ts by scripts/gen-tools.ts — do not edit by hand. " +
   "tools.ts is the typed source of the MCP tool surface (SMD-1805); deploy/smoke.sh reads this JSON " +
-  "and check-fork-consistency.ts round-trips it against the source.";
+  "and check-consistency.ts round-trips it against the source.";
 
 /** The exact contents tools.json must have, given the source — one definition
  *  for the writer here and the round-trip check. Two-space indent, trailing

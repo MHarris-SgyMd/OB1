@@ -161,7 +161,7 @@ Plugin tables stay where SMD-2310 put them: schema `plugin_<name>`, owned by rol
 ## What n8n runs with
 
 - **Workflows live in the plugin's directory**, `plugins/<name>/workflows/*.json`. `deploy/orchestration/provision.ts` loads the enabled plugins' workflows from the checkout, in the same run that loads the templates today. A brain does not author workflows here; SMD-2274 decides whether it ever may.
-- **Check 31 reads them.** Today a plugin may hold only TypeScript, its migrations, a README and its metadata (`scripts/check-fork-consistency.ts:9155`). It gains workflow JSON, read against rules:
+- **Check 31 reads them.** Today a plugin may hold only TypeScript, its migrations, a README and its metadata (`scripts/check-consistency.ts:9155`). It gains workflow JSON, read against rules:
   - node types from an allowlist, with no Code node, no AI node, and none of Execute Workflow, Respond to Webhook, Wait or the n8n API node;
   - credentials only the `run` key's and those the manifest declares, every one pinned to its host, and none pinned to a host of the stack but `api` (so not `ollama`, `jev`, `orchestration-runner`, the coordinator or n8n itself);
   - every HTTP Request node credentialed, with a literal host, and every brain call made with the `run` credential to `http://api:8000`;

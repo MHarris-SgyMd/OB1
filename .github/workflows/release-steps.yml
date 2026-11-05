@@ -65,10 +65,10 @@ jobs:
           no-cache: true
 
       # Everything the rest of this job needs to know, checked first. On a tag:
-      # the tag names releases.json's last entry, FORK_VERSION equals it, the
+      # the tag names releases.json's last entry, BRAIN_VERSION equals it, the
       # range closes every migration on disk, no fragment sits in changes/, the
       # commit is on origin/main, Ollama is pinned. A rehearsal takes the tree
-      # as it is (version FORK_VERSION, image tag `rehearsal`).
+      # as it is (version BRAIN_VERSION, image tag `rehearsal`).
       - name: What this run releases
         id: facts
         env:

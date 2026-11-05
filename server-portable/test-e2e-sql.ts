@@ -25,7 +25,7 @@
 import { SQL } from "bun";
 import { answersHealth, applyMigrations, childPort, createAssert, migrationFiles, plantLedger, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
-import { FORK_VERSION } from "../db/version.mjs";
+import { BRAIN_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
 import { TOOL_NAMES } from "./tools.ts";
 import { hashKey } from "./auth.ts";
@@ -2520,7 +2520,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     `the ledger's highest is the tree's last file, ${treeLast}, and the brain is current (${db.highestMigration}, ${info.latestMigration}, ${info.ledgerStatus})`);
   assert(db.postgres === truth.pg && db.pgvector?.version === truth.vec && db.pgvector?.schema === "public",
     `Postgres and pgvector versions are the catalog's (${db.postgres}, ${db.pgvector?.version} in ${db.pgvector?.schema})`);
-  assert(db.schemaVersion === truth.schema_version && db.schemaVersion === FORK_VERSION, `the schema version is ob1_config's, which is FORK_VERSION (${db.schemaVersion})`);
+  assert(db.schemaVersion === truth.schema_version && db.schemaVersion === BRAIN_VERSION, `the schema version is ob1_config's, which is BRAIN_VERSION (${db.schemaVersion})`);
   assert(db.counts?.thoughts === truth.thoughts && db.counts?.thought_audit === truth.audit && db.counts?.thought_chunks === truth.chunks && db.counts?.ob1_entities === truth.entities && truth.thoughts > 0 && truth.audit > truth.thoughts,
     `the counts are the tables' (${JSON.stringify(db.counts)})`);
   assert(typeof db.databaseBytes === "number" && db.databaseBytes > 1_000_000, `the database size is a byte count (${db.databaseBytes})`);
@@ -2810,7 +2810,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
         `a role without SELECT on schema_migrations sees it present and unread as a refusal (${JSON.stringify(f.ledger)}, ${JSON.stringify(f.unread.ledger)})`);
       assert(f.counts?.thoughts === truth.thoughts && f.counts?.thought_chunks === null && f.unread["counts.thought_chunks"]?.reason === "refused" && f.unread["counts.ob1_entities"]?.reason === "refused",
         `…the counts it may read answer, the refused ones are named (${JSON.stringify(f.counts)})`);
-      assert(f.schemaVersion === FORK_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
+      assert(f.schemaVersion === BRAIN_VERSION && f.pgvector?.version === truth.vec, "…and the config and catalog reads stand");
       // set_config(…, true): the ceilings end with the read's transaction; the
       // one pooled connection it used keeps the role's own (no limit here).
       const [after] = await reader`SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt`;
@@ -2862,7 +2862,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     try {
       const f = await readDatabaseFacts(shadowed);
       assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && /reaches e2e_shadow\.schema_migrations first/.test(f.unread.ledger?.message ?? "")
-          && f.highestMigration === null && f.schemaVersion === FORK_VERSION,
+          && f.highestMigration === null && f.schemaVersion === BRAIN_VERSION,
         `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
     } finally {
       await shadowed.close();

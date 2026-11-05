@@ -14,10 +14,10 @@
  * spells it. semverCompare ignores build metadata, so the two forms order as
  * their cores do: a brain stamped `1.9.0+upstream.9543c29` is behind a `2.0.0`
  * server. The rules that pick the bump live in MAINTAINING.md's "Versioning"
- * section and are checked, not remembered (check-fork-consistency).
+ * section and are checked, not remembered (check-consistency).
  *
  * This module is node-only on purpose. It reads the filesystem and hashes files,
- * and it is imported by migrate.ts, preflight.ts and check-fork-consistency.ts.
+ * and it is imported by migrate.ts, preflight.ts and check-consistency.ts.
  * The sha rule lives here rather than in config.mjs, which the server imports
  * through server-portable/embed.ts (a top-level `node:crypto` import there
  * broke the Cloudflare Workers build, retired in SMD-3152).
@@ -52,10 +52,10 @@ export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
  * here (SMD-3317), so this is the last cut's string as it was written, not one
  * built from UPSTREAM_PIN.
  * The highest migration that upserts ob1_config.schema_version writes this
- * exact string (103 today); check-fork's 17d holds the two equal, and
+ * exact string (103 today); check-consistency's 17d holds the two equal, and
  * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const FORK_VERSION = "1.9.0+upstream.9543c29";
+export const BRAIN_VERSION = "1.9.0+upstream.9543c29";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -179,8 +179,8 @@ export function highestReleasedMigration(releases = readReleases()) {
 /**
  * The schema_version literal a migration template upserts into ob1_config, or
  * null when it writes none — the two INSERT shapes 044 and a cut's set-version
- * migration use. One definition (SMD-1860): check-fork-consistency's 17d holds
- * the highest writer equal to FORK_VERSION, and assemble-release.ts refuses a
+ * migration use. One definition (SMD-1860): check-consistency's 17d holds
+ * the highest writer equal to BRAIN_VERSION, and assemble-release.ts refuses a
  * cut whose highest migration does not write the version it is cutting.
  */
 export function schemaVersionValue(template) {
@@ -207,7 +207,7 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0+upstream.9543c29", "1.0.0+upstream.deadbee")), 0, "build metadata ignored");
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
-  bad += eq(sign(semverCompare("1.9.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.9.0 (the tenth release)");
+  bad += eq(sign(semverCompare("1.9.0", BRAIN_VERSION)), 0, "BRAIN_VERSION core is 1.9.0 (the tenth release)");
   // SMD-3317: from 2.0.0 the version is plain; a brain stamped in the old form orders by its core.
   bad += eq(sign(semverCompare("1.9.0+upstream.9543c29", "2.0.0")), -1, "a 1.x stamp with the pin is behind a plain 2.0.0");
   bad += eq(sign(semverCompare("2.0.0", "2.0.0+upstream.9543c29")), 0, "a plain version and the same core with the pin are equal");

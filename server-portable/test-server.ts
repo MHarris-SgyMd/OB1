@@ -4,7 +4,7 @@ import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LO
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
-import { FORK_VERSION } from "../db/version.mjs";
+import { BRAIN_VERSION } from "../db/version.mjs";
 import { mcpUnderTest, quietPort, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 /**
@@ -348,7 +348,7 @@ console.log("\n[7] initialize");
   // The generated version module's, which is db/version.mjs's (17e holds the
   // two equal) — a literal here said 1.0.0 through the 1.1.0 cut (SMD-2041).
   const info = result?.serverInfo as { version?: string } | undefined;
-  assert(info?.version === FORK_VERSION, `serverInfo.version is FORK_VERSION ${FORK_VERSION} (${info?.version})`);
+  assert(info?.version === BRAIN_VERSION, `serverInfo.version is BRAIN_VERSION ${BRAIN_VERSION} (${info?.version})`);
 
   // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
   // whichever was missing; 0.3.x took either, or none, and the patch went (change
@@ -490,7 +490,7 @@ console.log("\n[10b] brain_info answers with no database, and says why that half
   });
   const result = (await mcpBody(r))?.result as { isError?: boolean; content?: { text?: string }[] } | undefined;
   const text = result?.content?.[0]?.text ?? "";
-  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}(?:; this tree adds \\d{3}(?:–\\d{3})?, unreleased)?|no release range recorded)\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
+  assert(result?.isError !== true && new RegExp(`^Version: +${BRAIN_VERSION.replace(/[.+]/g, "\\$&")} \\((?:release range \\d{3}–\\d{3}(?:; this tree adds \\d{3}(?:–\\d{3})?, unreleased)?|no release range recorded)\\)`, "m").test(text), `the Version row carries BRAIN_VERSION and its release range (${text.split("\n")[0]})`);
   assert(/^Commit: +unknown$/m.test(text) && /^Store: +sql$/m.test(text), "…the commit (unknown here) and the store");
   assert(/^Database: +unavailable — .*DATABASE_URL is not set/m.test(text), `…and the database row names the store's refusal (${text.split("\n").find((l) => l.startsWith("Database"))?.slice(0, 70)})`);
 }
@@ -1135,7 +1135,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && toldQueueLocked.proposals === null && toldQueueLocked.unread.proposals?.reason === "timeout" && /not tried — a lock on supersession_proposals/.test(toldQueueLocked.unread.findings?.message ?? "") && queueSent === 1
       && toldOdd.findings === null && toldOdd.unread.findings?.reason === "error" && JSON.stringify(toldNone.findings) === JSON.stringify({ ...wantTold, posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, medianAnswerS: null }),
     `the findings posted are a stats read of 087's table, by outcome, the found apart; absent, null and unnamed; refused, malformed or behind a refused lock, unread (${JSON.stringify(told.findings)}, ${JSON.stringify(toldLocked.unread.findings)}, ${JSON.stringify(toldOdd.unread.findings)})`);
-  const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const fServer = { version: BRAIN_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
   const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
     renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)),
@@ -1562,7 +1562,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && heartbeatState({ ...bs, running: true, outcome: "failed" }) === "running a pass, its last pass failed (last stamped 15 min ago, every 300 s)",
     `heartbeatState words alive, failed, stale, stopped (fresh or not) and the alarm (${heartbeatState(ex)})`);
   assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);
-  const server0 = () => ({ version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
+  const server0 = () => ({ version: BRAIN_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
   heartbeatRows = [{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 10 }, { key: "heartbeat:x", value: "{}", at, age_s: 1 }];
   const withBeats = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000));
   heartbeatRows = [];
@@ -1577,7 +1577,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `the Workers row reads none stamped, or ? when not read (${noneRow} / ${lostRow})`);
 
 
-  const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const server = { version: BRAIN_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
   const ahead = await brainInfo(server, async () => planted(53), 1000);
   const aheadText = renderBrainInfo(ahead);
@@ -1907,7 +1907,7 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
     let info: Record<string, unknown> = {};
     try { info = JSON.parse(r.body); } catch { /* asserted below */ }
     assert(r.status === 200 && /application\/json/.test(r.type) && r.cors, `${label} → 200 JSON with CORS (${r.status}, ${r.type})`);
-    assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
+    assert(info.version === BRAIN_VERSION, `…version is BRAIN_VERSION (${info.version})`);
     assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
     assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
     const provider = info.provider as { status?: string; reprobeS?: unknown } | undefined;
@@ -1975,7 +1975,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     try { info = JSON.parse(refused.body); } catch { /* asserted below */ }
     assert(refused.status === 200 && refused.took < HEALTH_DEADLINE_MS && typeof info.database?.error === "string" && info.ledgerStatus === null,
       `keyed GET /health, the database refusing → the record with the database's error in ${Math.round(refused.took)} ms (${info.database?.error})`);
-    assert(info.version === FORK_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
+    assert(info.version === BRAIN_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
   } finally {
     quiet.proc.kill();
     refusing.proc.kill();

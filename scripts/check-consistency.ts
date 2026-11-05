@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * check-fork-consistency.ts
+ * check-consistency.ts
  *
  * Repo-wide versions of checks the upstream PR gate only applies to the
  * directories a given PR touches. Because the gate never looks at untouched
@@ -111,7 +111,7 @@
  *      two ways); MAINTAINING.md and FORK.md are each under FRONT_CEILING_BYTES
  *      and carry neither a `### N.` section (at any heading level) nor the
  *      index's markers, and changes/README.md's index block equals what
- *      scripts/fork-index.ts renders from the directory (SMD-3765 moved it
+ *      scripts/changes-index.ts renders from the directory (SMD-3765 moved it
  *      there from FORK.md); and every "FORK.md change N" / "FORK change N" /
  *      "changes/NNN" / "NNN change M" citation in a file git tracks or would
  *      track (untracked, not ignored), and every bare "change N" in the record
@@ -129,8 +129,9 @@
  *      that ships a migration fails), an SMD-#### ticket list; exactly one
  *      `## Changelog` (one to three plain lines naming every listed ticket and
  *      no other — 17b reads a version's tickets from CHANGELOG.md) followed
- *      by exactly one `## FORK`, nothing between them, the FORK body running
- *      to the end of the file with its first line the plain title (no heading
+ *      by exactly one `## Record` (`## FORK` before SMD-3765, never both),
+ *      nothing between them, the record running to the end of the file with
+ *      its first line the plain title (no heading
  *      mark, nothing on the second line, ending in every listed ticket — 17b
  *      reads a released ticket from that title) and no numbered heading of its
  *      own — the release step assigns the number and writes the heading
@@ -143,7 +144,7 @@
  *      change files' titles (prose, which names pending tickets, is not a
  *      source); a migration inside a released range keeps the sha the release
  *      froze; and
- *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
+ *      migration 044's schema_version equals db/version.mjs's BRAIN_VERSION
  *      (SMD-1804); and server-portable/version.ts is exactly what
  *      scripts/gen-version.ts renders from db/version.mjs, releases.json and
  *      db/migrations/ (17e, SMD-2041)
@@ -610,8 +611,14 @@
  *      may skip — no alias, merge key or flow style reaches across a block,
  *      and a file the cut refuses fails here as well as running every job
  *      (SMD-2435 PR 2). Its probe pins what it refuses and passes
+ *  52. scripts/commitlint.config.ts takes `[core]` for the project's own code
+ *      and `[fork]`, its name before SMD-3765: both read by the header, listed
+ *      in type-enum and held to ticket-ref, which is on (level 1 or more,
+ *      "always"), a contribution category not; a mis-cased, unspaced or colon
+ *      header fails, and the rule is found by name. CI's commit-lint lints
+ *      only a PR's own commits, so nothing else reads the config's categories
  *
- * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
+ * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
  * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
@@ -623,12 +630,13 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, stripSqlComments, supabaseIsmsIn } from "../db/config.mjs";
-import { CHANGES_DIR, END as INDEX_END, INDEX_FILE, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
-import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
+import { CHANGES_DIR, END as INDEX_END, INDEX_FILE, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./changes-index.ts";
+import { BRAIN_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
+import commitlintConfig from "./commitlint.config.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
 import { inlined as inlinedGrafana, INLINE_FILES } from "./inline-grafana.ts";
-import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
+import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./changes-index.ts";
 import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
 import type { Family, Problem, Registry, Tree } from "./connector-registry.ts";
 import { CATEGORIES, contributionDirs } from "./contributions.ts";
@@ -641,7 +649,7 @@ type Violation = { where: string; msg: string };
 const violations: Violation[] = [];
 const fail: (where: string, msg: string) => void = (where, msg) => violations.push({ where, msg });
 /** This script, as the `where` of a violation in its own probes and inventories. */
-const SELF = "scripts/check-fork-consistency.ts";
+const SELF = "scripts/check-consistency.ts";
 
 /** The slice of .github/metadata.schema.json this check reads: the required names, four fields' enums and sub-properties, and the `connectors` block (SMD-1933) when the schema carries it. */
 type MetadataSchema = {
@@ -3969,14 +3977,14 @@ function forkLayoutProblems({ entries, indexText, frontText, forkText, citations
     const sec = /^(#{1,6}) (\d+)\. /m.exec(text.replace(/^```[\s\S]*?^```/gm, "")); // a `# 1. fetch` comment in a fenced snippet is not a section
     if (sec) at(where, "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and ${INDEX_FILE} lists it`);
     // A second index here would go stale unseen, its links relative to changes/ (a merge
-    // of a branch whose fork-index.ts still wrote FORK.md could keep one).
+    // of a branch whose changes-index.ts still wrote FORK.md could keep one).
     if (text.includes(INDEX_START) || text.includes(INDEX_END)) at(where, "index-elsewhere", `carries the changes index's markers — the index is ${INDEX_FILE}'s alone; delete the block here`);
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > frontCeiling) at(where, "front-oversize", `is ${bytes} bytes; it stays under ${frontCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
   }
   let span: { s: number; e: number } | null = null;
   try { span = indexSpan(indexText); } catch (e) { at(INDEX_FILE, "index-missing", `${(e as Error).message} — the generated index lives between them`); }
-  if (span && indexText.slice(span.s, span.e) !== "\n" + renderIndex(numbered)) at(INDEX_FILE, "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
+  if (span && indexText.slice(span.s, span.e) !== "\n" + renderIndex(numbered)) at(INDEX_FILE, "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/changes-index.ts\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
     else if (c.name && byN.get(c.n)!.name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n)!.name} — the file was renamed under the link`); // has(c.n) held by the branch above
@@ -4141,12 +4149,13 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
 
 /**
  * 16: a changes/<ticket>.md fragment is well-formed — fragmentProblems lives in
- * scripts/fragments.ts, one definition for this check and the release step. A fragment replaces the
- * hand-numbered FORK section for new work: front matter naming a Keep a Changelog
- * type, a bump the migrations it lists allow, and the tickets and migrations it
- * touches; a Changelog body (1–3 lines) and a FORK body. A `bump: patch` that
- * ships a migration is the rule from the version scheme; a numbered heading in
- * the FORK body (`### N.` / `# N.`) is the mistake the fragment format exists to
+ * scripts/fragments.ts, one definition for this check and the release step. A
+ * fragment replaces the hand-numbered FORK.md section for new work: front matter
+ * naming a Keep a Changelog type, a bump the migrations it lists allow, and the
+ * tickets and migrations it touches; a Changelog body (1–3 lines) and a record
+ * (`## Record`, `## FORK` before SMD-3765). A `bump: patch` that ships a
+ * migration is the rule from the version scheme; a numbered heading in the
+ * record (`### N.` / `# N.`) is the mistake the fragment format exists to
  * prevent — the number is assigned at release, so a fragment cannot know its own.
  * A citation of an existing change number is fine; check 15 holds every citation
  * to a file (SMD-1917). A path to another fragment is not: the cut numbers every
@@ -4157,6 +4166,9 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
 function checkFragments() {
   const goodFrag = "---\ntype: added\nbump: minor\ntickets: [SMD-1804, SMD-1805]\nmigrations: [044]\n---\n\n## Changelog\nThe fork gets a version (SMD-1804, SMD-1805).\n\n## FORK\nA title (SMD-1804 / 1805)\n\nBody citing SMD-1804, migration 044 and change 79.\n";
   if (fragmentProblems(goodFrag).length) fail(SELF, `check 16 false-positives on a valid fragment (${fragmentProblems(goodFrag).join("; ")})`);
+  // The record's heading is `## Record` since SMD-3765; a fragment written under `## FORK` (goodFrag) stays valid.
+  const goodRecord = goodFrag.replace("## FORK\n", "## Record\n");
+  if (fragmentProblems(goodRecord).length) fail(SELF, `check 16 false-positives on a valid fragment under \`## Record\` (${fragmentProblems(goodRecord).join("; ")})`);
   // Each probe isolates one rule: its other lines carry the ticket, so dropping
   // the rule it names is the only way it passes. A third element names the file.
   for (const [probe, why, name] of [
@@ -4188,15 +4200,25 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
     ["no front matter here\n", "no front matter"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: 045\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a scalar `migrations:` (read as none, it passed while the cut refused \"migration 000\" — SMD-1870)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title (SMD-1)\n\nbody\n\n## FORK\nA title (SMD-1)\n\nbody\n", "both `## Record` and `## FORK`, one record under two names (SMD-3765)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title\n\nbody\n", "a `## Record` title that omits its ticket"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Notes\nkept nowhere\n\n## Record\nA title (SMD-1)\n\nbody\n", "a section between the Changelog and `## Record`"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\n", "an empty `## Record`"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n", "no record section at all"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title (SMD-1)\n\n### 103. A numbered heading\n", "a numbered heading in a `## Record` body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title that\nwraps (SMD-1)\n\nbody\n", "a `## Record` title wrapped onto a second line"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\n### A title (SMD-1)\n\nbody\n", "a heading as the `## Record` body's title"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Record\nA title (SMD-1)\n\nbody\n\n## Changelog\nx (SMD-1)\n", "a Changelog after the `## Record` body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nIts sibling `changes/smd-2.md` says why.\n", "a path to another fragment, which points at nothing once the cut numbers it (SMD-2047)"],
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
-    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## Record\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Record\nA title (SMD-1)\n\nThe old shape, quoted:\n\n```markdown\n## FORK\nold\n```\n", "a record quoting `## FORK` in a fence (SMD-3765)"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nThe mutant lists are at `fbedb39c:changes/smd-1.md`, and SMD-2's record says why; `changes/smd-NNNN.md` is the pattern.\n", "a fragment path pinned to a commit, a ticket named instead of a path, and the pattern written with letters"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
-  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.ts).
+  // Numbered files and stray names are check 15's; one definition of a fragment's name (changes-index.ts).
   for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
 }
 checkFragments();
@@ -4366,7 +4388,7 @@ checkFrozenMigrations();
 /**
  * 17d: the version a brain reports equals the version the tooling computes. The
  * highest-numbered migration that writes ob1_config.schema_version writes the
- * current version; it must be exactly db/version.mjs's FORK_VERSION, so the
+ * current version; it must be exactly db/version.mjs's BRAIN_VERSION, so the
  * string a brain reports (044 at the baseline, a later set-version migration
  * after a cut) and the string preflight and the assembler use cannot drift.
  */
@@ -4389,7 +4411,7 @@ function checkSchemaVersion() {
   if (writers.length === 0) return fail("db/migrations", "no migration writes ob1_config.schema_version — migration 044 should (SMD-1804)");
   writers.sort((a, b) => a.num - b.num);
   const current = writers[writers.length - 1];
-  if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
+  if (current.value !== BRAIN_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's BRAIN_VERSION is '${BRAIN_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
 
@@ -10409,8 +10431,8 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
-  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/fork-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; linked by the index fork-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
-  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/fork-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
+  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
   "docs/01-getting-started.md": { by: ["db/test-schema.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
@@ -11138,7 +11160,7 @@ checkJobBlocksCut();
  * a safe skip. A job renamed, or the checker moved, would otherwise drop out of the list with nothing failing.
  */
 const RUN_ALL_LINE = /^RUN_ALL_JOBS="([^"]*)"$/m;
-const CHECKER_RUN = "bun scripts/check-fork-consistency.ts";
+const CHECKER_RUN = "bun scripts/check-consistency.ts";
 function runAllProblems(script: string, doc: JobsDoc): string[] {
   const m = RUN_ALL_LINE.exec(script);
   if (!m) return [`has no RUN_ALL_JOBS="…" line, the jobs whose edit runs every job (check 51, SMD-2435)`];
@@ -11169,6 +11191,40 @@ function checkRunAllJobs() {
   for (const msg of runAllProblems(readFileSync(join(ROOT, CHANGES_SCRIPT), "utf8"), wf)) fail(CHANGES_SCRIPT, msg);
 }
 checkRunAllJobs();
+
+// ── 52: commitlint's categories — [core], and [fork] from before it (SMD-3765) ──
+//
+// commit-lint runs the config only over a PR's own commits, so a category
+// dropped from it, or one no longer held to ticket-ref, fails nothing until a
+// branch commits under it (a [fork] branch from before the rename, a quiet lost
+// warning). This reads the config itself.
+function checkCommitCategories() {
+  const CONFIG = "scripts/commitlint.config.ts";
+  const header = commitlintConfig.parserPreset.parserOpts.headerPattern;
+  // Found by name: a plugin reordered or added is no reason for the whole checker to throw.
+  const ticketRef = commitlintConfig.plugins.find((pl) => "ticket-ref" in pl.rules)?.rules["ticket-ref"];
+  if (!ticketRef) return fail(CONFIG, "no plugin defines ticket-ref — a [core] subject without its ticket goes unwarned (check 52, SMD-3765)");
+  // The rule's level (0 is off) and the type list commit-lint enforces, beside the header that reads them.
+  const rules: Record<string, readonly unknown[] | undefined> = commitlintConfig.rules;
+  const ticketRule = rules["ticket-ref"];
+  const [level, when] = Array.isArray(ticketRule) ? ticketRule : []; // a bare number fails below, not as a throw
+  if (typeof level !== "number" || level < 1) fail(CONFIG, "ticket-ref is switched off or missing from rules — its warning never fires (check 52)");
+  if (when !== "always") fail(CONFIG, `ticket-ref runs "${String(when)}", where "always" warns on a [core] subject without its ticket — "never" inverts it (check 52)`);
+  const types = rules["type-enum"]?.[2];
+  for (const type of ["core", "fork"]) if (!(Array.isArray(types) && types.includes(type))) fail(CONFIG, `type-enum does not list ${type} — commit-lint refuses a [${type}] subject the header reads (check 52, SMD-3765)`);
+  for (const [subject, type] of [["[core] A change (SMD-1)", "core"], ["[fork] A change (SMD-1)", "fork"], ["[recipes] A recipe", "recipes"]] as const) {
+    if (header.exec(subject)?.[1] !== type) fail(CONFIG, `its header pattern does not read ${JSON.stringify(subject)} as [${type}] — commit-lint would refuse it (check 52, SMD-3765)`);
+  }
+  for (const subject of ["[Core] A change (SMD-1)", "[core]A change (SMD-1)", "core: A change (SMD-1)"]) {
+    if (header.test(subject)) fail(CONFIG, `its header pattern takes ${JSON.stringify(subject)}, which the house grammar refuses (check 52)`);
+  }
+  for (const type of ["core", "fork"]) {
+    if (ticketRef({ type, header: `[${type}] A change` })[0] !== false) fail(CONFIG, `ticket-ref no longer warns on a [${type}] subject without its ticket (check 52, SMD-3765)`);
+    if (ticketRef({ type, header: `[${type}] A change (SMD-1)` })[0] !== true) fail(CONFIG, `ticket-ref warns on a [${type}] subject that ends in its ticket (check 52)`);
+  }
+  if (ticketRef({ type: "recipes", header: "[recipes] A recipe" })[0] !== true) fail(CONFIG, "ticket-ref holds a contribution category to an SMD ticket — a community PR carries none (check 52)");
+}
+checkCommitCategories();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //

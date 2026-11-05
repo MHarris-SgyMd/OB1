@@ -1,13 +1,17 @@
 /**
- * commitlint.config.ts — enforce the fork's commit grammar (SMD-1808).
+ * commitlint.config.ts — enforce the project's commit grammar (SMD-1808).
  *
  * NOT config-conventional: SMD-1804 declined Conventional Commits because the
  * house grammar is readable and the release fragment's type/bump fields feed
  * tooling. commitlint is the tool, not the grammar — a custom parserPreset makes
  * it enforce THIS grammar:
- *   [<category>] <subject>            where <category> is CLAUDE.md's PR set + fork/docs/resources
- *   a [fork] subject ends in (SMD-NNNN)                       — ticket-ref, warn
+ *   [<category>] <subject>            where <category> is CLAUDE.md's PR set + core/docs/resources
+ *   a [core] subject ends in (SMD-NNNN)                       — ticket-ref, warn
  *   every finding bullet of a review-pass body carries (caught: …)  — caught-tag, warn
+ * `[core]` is a change to the project's own code (SMD-3765). `[fork]`, its name
+ * before, is still accepted and held to the same rule, so a branch begun before
+ * the rename lints as it did; new commits say `[core]`. check-consistency's
+ * check 52 reads these categories, since commit-lint reads only a PR's commits.
  * No length cap: subjects run to ~1,169 characters by design (they are sentences),
  * and a cap would fail the record. The rule is SHAPE, not length.
  *
@@ -15,9 +19,9 @@
  * definition scripts/mechanism-yield.ts counts yield with, so the two cannot
  * disagree (the Verify: they report the same tagged count for a range).
  *
- * Run (no root package.json; the fork pins by exact version; --bun because bunx
- * otherwise honours the CLI's node shebang where node exists, and this config is
- * a .ts the fork loads under bun — SMD-1870):
+ * Run (no root package.json; the project pins by exact version; --bun because
+ * bunx otherwise honours the CLI's node shebang where node exists, and this
+ * config is a .ts loaded under bun — SMD-1870):
  *   bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from <base> --to <head>
  *   bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit <file>   (the hook)
  * Merge commits are commitlint's default ignore, so "Merge origin/main …" and
@@ -26,8 +30,10 @@
 
 import { isReviewPass, bulletsOf, readTag } from "./commit-grammar.ts";
 
-/** CLAUDE.md's contribution categories less plugins, plus the fork's own `fork`, `docs`, `resources`. */
-const CATEGORIES = ["fork", "extensions", "primitives", "recipes", "schemas", "integrations", "skills", "docs", "resources"];
+/** CLAUDE.md's contribution categories less plugins, plus the project's own `core`, `docs`, `resources` — and `fork`, `core`'s name before SMD-3765. */
+const CATEGORIES = ["core", "fork", "extensions", "primitives", "recipes", "schemas", "integrations", "skills", "docs", "resources"];
+/** The categories that are the project's own code, held to ticket-ref. */
+const OWN = new Set(["core", "fork"]);
 
 export default {
   parserPreset: {
@@ -40,12 +46,12 @@ export default {
   plugins: [
     {
       rules: {
-        // A [fork] subject ends in its ticket. A category contribution (e.g.
+        // A [core] subject ends in its ticket. A category contribution (e.g.
         // [recipes] …) is a community PR that need not carry an SMD ticket.
         "ticket-ref": ({ type, header }: { type?: string | null; header?: string | null }) => {
-          if (type !== "fork") return [true];
+          if (!OWN.has(type ?? "")) return [true];
           const ok = /\(SMD-\d+[^()]*\)\s*$/.test(header ?? "");
-          return [ok, "a [fork] subject should end in its ticket, (SMD-NNNN)"];
+          return [ok, `a [${type}] subject should end in its ticket, (SMD-NNNN)`];
         },
         // Only a review-pass commit is held to the tag, and only its FINDING
         // bullets (bulletsOf drops run-results and "green"/"verified" bullets).
