@@ -111,6 +111,7 @@ The standalone server kept its rows in `public.maintenance_tasks` and `public.ma
 
      If a row breaks one of these, the copy names the check and nothing is copied. Fix that row in `public` and run the block again.
    - **Leftover tables.** Once the plugin's answers look right, the old tables can be dropped by hand.
+3. Give the copied tasks their open items and priorities (SMD-3665, SMD-3666): call `sync_open_items` once with a write key (`POST /v1/plugins/home-maintenance/items/sync`). A copy writes the tables alone, so until then no copied task is in the brain's reads. A copied task reads as its priority not chosen (`priority_chosen` false): its medium is unknown in the brain, and its low, high or urgent is stated.
 
 ## Troubleshooting
 
