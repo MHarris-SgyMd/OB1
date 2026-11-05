@@ -23,7 +23,7 @@ Copy this block into a text editor and fill it in as you go.
 SOURCE FILTERING -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase Project URL:        ____________
   Supabase Service Role Key:   ____________
 

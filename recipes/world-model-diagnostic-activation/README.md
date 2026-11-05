@@ -109,7 +109,7 @@ That means the post promise stays true:
 
 - works in Claude
 - works in ChatGPT
-- compounds in Daemonic Brain when the brain connector exists
+- compounds in OB1 when the brain connector exists
 
 ## V2 Upgrade Path
 

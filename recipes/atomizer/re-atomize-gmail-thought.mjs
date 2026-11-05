@@ -16,7 +16,7 @@
  *      correspondents resolver.
  *
  * Prerequisites:
- *   - Daemonic Brain base setup
+ *   - Open Brain base setup
  *   - Enhanced-Thoughts-style schema (see README) — `thoughts.source_type`,
  *     `thoughts.metadata` jsonb, `entities`, `thought_entities`,
  *     `thought_edges`.

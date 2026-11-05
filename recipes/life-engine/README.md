@@ -116,7 +116,7 @@ Before starting, you'll need:
 Copy this and fill it in as you go — you'll reference these values throughout setup.
 
 ```
-# Daemonic Brain
+# Open Brain
 SUPABASE_PROJECT_URL=
 SUPABASE_SERVICE_KEY=
 OB1_MCP_URL=
@@ -152,7 +152,7 @@ TELEGRAM_BOT_TOKEN=
 │    ┌────┼────────────┬──────────────┐            │
 │    ▼    ▼            ▼              ▼            │
 │  📅    🧠          💬           📊             │
-│  Google  Daemonic Brain   Messaging    Life Engine   │
+│  Google  Open Brain   Messaging    Life Engine   │
 │  Calendar (Supabase   Channel      Tables        │
 │  MCP      MCP)       (plugin)      (Supabase)    │
 │                                                  │
@@ -444,9 +444,9 @@ It should list your events using the `gcal_list_events` tool.
 
 ---
 
-## Step 3: Connect Your Daemonic Brain
+## Step 3: Connect Your brain
 
-Your Daemonic Brain is already deployed as a remote MCP server from the Getting Started guide.
+Your brain is already deployed as a remote MCP server from the Getting Started guide.
 
 ### 3.1 Add Daemonic Brain MCP to Claude Code
 
@@ -461,7 +461,7 @@ claude mcp add --transport http open-brain http://127.0.0.1:8000/mcp --header "x
 Ask Claude Code:
 
 ```
-Search my Daemonic Brain for anything related to "meetings" or "clients"
+Search my brain for anything related to "meetings" or "clients"
 ```
 
 It should query your thoughts using semantic search.
@@ -476,7 +476,7 @@ The Life Engine needs its own tables to track habits, moods, check-ins, and skil
 
 ### 4.1 Run the Schema
 
-Run the included [`schema.sql`](schema.sql) against your brain's database — `psql "$DATABASE_URL" -f recipes/life-engine/schema.sql`, or Supabase's SQL Editor if that is where it lives. It contains the full schema with CHECK constraints, table comments, performance indexes, and an auto-update trigger. It grants nothing (Daemonic Brain, SMD-1810 — upstream's `GRANT … TO service_role` lines and its RLS are gone): the role that applies it owns the tables, and any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
+Run the included [`schema.sql`](schema.sql) against your Open Brain's database — `psql "$DATABASE_URL" -f recipes/life-engine/schema.sql`, or Supabase's SQL Editor if that is where it lives. It contains the full schema with CHECK constraints, table comments, performance indexes, and an auto-update trigger. It grants nothing (Daemonic Brain, SMD-1810 — upstream's `GRANT … TO service_role` lines and its RLS are gone): the role that applies it owns the tables, and any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
 
 ✅ **Checkpoint:** Run the verification query at the bottom of `schema.sql` — you should see 6 tables (`life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state`).
 
@@ -707,7 +707,7 @@ No two Life Engines look the same. Yours adapts to your schedule, your habits, y
 | **Bun not found** | Install via `brew install oven-sh/bun/bun` or `curl -fsSL https://bun.sh/install \| bash` |
 | **Plugin not loading** | Check `~/.claude/channels/telegram/.env` exists with your bot token. Try `/reload-plugins` in the session |
 | **Calendar not showing events** | Run `/mcp` and verify Google Calendar is connected |
-| **Daemonic Brain returns nothing** | Test with: *"Search my Daemonic Brain for [topic]"* — you may need more captured thoughts |
+| **Daemonic Brain returns nothing** | Test with: *"Search my brain for [topic]"* — you may need more captured thoughts |
 | **Duplicate briefings** | The skill checks `life_engine_briefings` before sending. If duplicates occur, verify Supabase connection |
 | **Claude suggests too many changes** | The self-improvement protocol limits to 1 suggestion per 7 days. Adjust in the skill if needed |
 

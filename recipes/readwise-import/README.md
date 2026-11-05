@@ -8,7 +8,7 @@
 
 ## What It Does
 
-One-shot backfill of your Readwise highlight history into Daemonic Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and stores each highlight as a thought with `source_type = 'readwise'`.
+One-shot backfill of your Readwise highlight history into Open Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and stores each highlight as a thought with `source_type = 'readwise'`.
 
 Idempotent: re-running it after new highlights arrive will skip everything already present (dedup by `readwise_highlight_id`) and import only the delta.
 
@@ -52,7 +52,7 @@ Copy this block into a text editor and fill it in as you go.
 READWISE IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase project URL:  ____________
   Service role key:      ____________
   OpenRouter API key:    ____________
@@ -207,7 +207,7 @@ After a successful run:
   - `source_type = 'readwise'`
   - `type = 'reference'`
   - `metadata` containing `readwise_highlight_id`, `readwise_book_id`, `book_title`, `book_author`, `highlighted_at`, `location`, `location_type`, `color`, `url`, and `tags`
-- Every highlight has a 1536-dim embedding, so semantic search in Daemonic Brain immediately surfaces them alongside your other thoughts.
+- Every highlight has a 1536-dim embedding, so semantic search in Open Brain immediately surfaces them alongside your other thoughts.
 
 From any MCP-connected AI you can now ask things like:
 - "What have I highlighted about stoicism?"

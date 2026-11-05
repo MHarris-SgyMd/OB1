@@ -38,7 +38,7 @@
  *   OPEN_BRAIN_URL            e.g. https://YOUR-PROJECT.supabase.co
  *   OPEN_BRAIN_SERVICE_KEY    service_role key (server-side only!)
  *
- *   And ONE of (OpenRouter is preferred to match the rest of Daemonic Brain's recipes):
+ *   And ONE of (OpenRouter is preferred to match the rest of OB1's recipes):
  *     OPENROUTER_API_KEY      sk-or-v1-...   (routes to Anthropic models)
  *     ANTHROPIC_API_KEY       sk-ant-...     (direct, retained for back-compat)
  *
@@ -261,7 +261,7 @@ function loadEnv() {
   }
   // Need at least one LLM provider key. Prefer OpenRouter to match the
   // multi-provider pattern in entity-extraction-worker (and so a single
-  // OPENROUTER_API_KEY can serve every recipe in Daemonic Brain).
+  // OPENROUTER_API_KEY can serve every recipe in OB1).
   const hasOpenrouter = Boolean(env.OPENROUTER_API_KEY);
   const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
   if (!hasOpenrouter && !hasAnthropic) {

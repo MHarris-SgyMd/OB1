@@ -13,7 +13,7 @@
  * dropping the recipient links.
  *
  * Prerequisites:
- *   - Daemonic Brain base setup
+ *   - Open Brain base setup
  *   - Enhanced-Thoughts-style schema (see README) — `thoughts.source_type`,
  *     `thoughts.metadata` jsonb, `entities`, `thought_entities`.
  *   - Thoughts previously imported with `source_type = 'gmail_export'`

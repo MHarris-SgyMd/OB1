@@ -24,7 +24,7 @@ Copy this block into a text editor and fill it in as you go.
 CHATGPT CONVERSATION IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase Project URL:  ____________
   Supabase Secret key:   ____________
   OpenRouter API key:    ____________

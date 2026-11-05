@@ -2,7 +2,7 @@
 
 ## What This Does
 
-Daemonic Brain's `capture` MCP tool classifies your input once and moves on — there is no mechanism to
+OB1's `capture` MCP tool classifies your input once and moves on — there is no mechanism to
 tell it when it got the type wrong. This recipe adds a learning loop on top of the existing capture flow: the
 classifier reports a confidence score, a per-type threshold gates whether to auto-classify or
 ask for confirmation, and every user response nudges that threshold up or down. Over time the
@@ -15,12 +15,12 @@ Intermediate
 
 ## Prerequisites
 
-- Daemonic Brain setup complete with the `thoughts` table populated
+- Open Brain setup complete with the `thoughts` table populated
 - An AI gateway configured (OpenRouter, Ollama, or any OpenAI-compatible endpoint)
 - Access to run SQL against your brain's database (`psql`, or any SQL client)
 - A capture interface you control — CLI script, Telegram bot, n8n workflow, or similar
   (this recipe is interface-agnostic; the gating logic sits between your interface and the
-  Daemonic Brain `capture` MCP call)
+  OB1 `capture` MCP call)
 - A trusted server-side environment for the reference implementation below
   (`capture-with-gating.ts` uses `SUPABASE_SERVICE_ROLE_KEY`, not a browser-safe anon key)
 
@@ -38,7 +38,7 @@ Intermediate
 ### Step 1: Run the schema migration
 
 Run `schema.sql` against your brain's database. This creates four tables alongside your
-existing Daemonic Brain schema — nothing existing is modified.
+existing OB1 schema — nothing existing is modified.
 
 ```bash
 psql "$DATABASE_URL" -f recipes/adaptive-capture-classification/schema.sql
@@ -53,7 +53,7 @@ psql "$DATABASE_URL" -f recipes/adaptive-capture-classification/schema.sql
 
 ### Step 2: Configure your capture types
 
-In `classifier_prompt.md`, edit the `{types}` list to match your Daemonic Brain schema. Daemonic Brain's
+In `classifier_prompt.md`, edit the `{types}` list to match your Open Brain schema. OB1's
 canonical types are:
 
 ```json
@@ -96,13 +96,13 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > invisible to dedup. It names no audit actor (a server with an access key passes
 > `actor: { name }` in the payload). It makes no vector, so the 2-argument form is
 > resolved and the row waits for the servers' vector mender (SMD-2889) or a re-embed
-> pass (`db/reembed.ts`); the Daemonic Brain capture MCP tool embeds as it captures, and is the
+> pass (`db/reembed.ts`); the OB1 capture MCP tool embeds as it captures, and is the
 > better call there. The classifier's `type`, `tags`, `project` and `due_date` ride
 > in `metadata` — `thoughts` has no such columns; a brain with the enhanced-thoughts
 > schema can write its `type` column beside the call, on a fresh row, as
 > `integrations/readwise-capture` does.
 
-Replace your current direct call to the Daemonic Brain `capture` MCP tool with the following pattern.
+Replace your current direct call to the OB1 `capture` MCP tool with the following pattern.
 
 ```
 CONSTANTS:
@@ -158,7 +158,7 @@ FUNCTION process_capture(raw_text, hint_type=null, hint_project=null):
 
 FUNCTION complete_capture(outcome_id, classified, accepted, user_correction=null):
 
-    # --- 6. Write to Daemonic Brain ---
+    # --- 6. Write to OB1 ---
     if accepted:
         call_ob1_capture(
             content  = classified.title,
@@ -243,7 +243,7 @@ GROUP BY model_a, model_b;
 Once wired up, your capture flow works like this:
 
 **High-confidence capture** — the classifier returns confidence 8/10 and the current
-threshold for `task` is 0.75. It auto-classifies, writes to Daemonic Brain, and silently nudges the
+threshold for `task` is 0.75. It auto-classifies, writes to OB1, and silently nudges the
 `task` threshold down by 0.02 (the system is performing well — it can be slightly more
 aggressive next time).
 
@@ -293,7 +293,7 @@ GROUP BY model;
 
 **Current `task` threshold:** 0.75
 
-**Decision:** 9/10 = 0.90 ≥ 0.75 → auto-classify. Written to Daemonic Brain immediately with no prompt.
+**Decision:** 9/10 = 0.90 ≥ 0.75 → auto-classify. Written to OB1 immediately with no prompt.
 `task` threshold nudges to 0.73.
 
 ---
@@ -315,8 +315,8 @@ GROUP BY model;
 
 **Decision:** 5/10 = 0.50 < 0.75 → confirmation prompt shown.
 
-User taps **Yes** → written to Daemonic Brain, `task` threshold nudges to 0.73.
-User taps **Decision** → re-classified as `decision`, written to Daemonic Brain, `task` threshold
+User taps **Yes** → written to OB1, `task` threshold nudges to 0.73.
+User taps **Decision** → re-classified as `decision`, written to OB1, `task` threshold
 nudges to 0.77 (auto-classify was wrong for this type — raise the bar slightly).
 
 ---
@@ -342,7 +342,7 @@ interface already handles typos, or your users type accurately, skip this table 
 The rest of the recipe functions without it. If you do use it, see `classifier_prompt.md`
 for guidance on domain vocabulary that should never be flagged as misspellings.
 
-**This recipe does not modify the Daemonic Brain `thoughts` table or any existing schema.** All four
+**This recipe does not modify the OB1 `thoughts` table or any existing schema.** All four
 tables are additive. Rolling back means dropping the four tables; nothing else is affected.
 
 ## Troubleshooting

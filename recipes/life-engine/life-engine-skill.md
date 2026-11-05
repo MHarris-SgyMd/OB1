@@ -87,7 +87,7 @@ All times are in the user's local timezone. Use the system clock — do not assu
 - Query `life_engine_checkins` for entries on `anchor_date`
 - Preview tomorrow's first event
 - Send evening summary via `reply`
-- **After the summary**, send a Daily Capture prompt asking the user to log a quick breadcrumb to Daemonic Brain. Format: "Did [thing] with/for [who]." When the user replies, use `capture_thought` to store the breadcrumb in Daemonic Brain (not a direct Supabase insert), `react` with 👍, and `reply` with a brief confirmation.
+- **After the summary**, send a Daily Capture prompt asking the user to log a quick breadcrumb to Open Brain. Format: "Did [thing] with/for [who]." When the user replies, use `capture_thought` to store the breadcrumb in Open Brain (not a direct Supabase insert), `react` with 👍, and `reply` with a brief confirmation.
 
 ### Quiet Hours (7:00 PM – 6:00 AM)
 

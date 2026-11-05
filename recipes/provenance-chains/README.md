@@ -28,7 +28,7 @@ Together, the schema + this recipe turn a flat thoughts table into a directed pr
 PROVENANCE CHAINS PIPELINE -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase URL:              ____________   (SUPABASE_URL)
   Service role key:          ____________   (SUPABASE_SERVICE_ROLE_KEY)
 
@@ -49,7 +49,7 @@ Legacy names (still accepted with a deprecation warning):
 
 ![Step 2](https://img.shields.io/badge/Step_2-Configure_Credentials-1E88E5?style=for-the-badge)
 
-1. Export your Supabase credentials (or put them in a `.env` file your shell sources). The canonical names match every other Daemonic Brain recipe:
+1. Export your Supabase credentials (or put them in a `.env` file your shell sources). The canonical names match every other OB1 recipe:
 
    ```bash
    export SUPABASE_URL="https://<project-ref>.supabase.co"
@@ -217,7 +217,7 @@ A: No — they serve different purposes. `sources_seen` tracks *where a thought 
 A: `trace_provenance` redacts restricted ancestors (content → NULL, `restricted=true` flag set on the node). `find_derivatives` hardcodes the restricted filter at the SQL layer — the MCP tool exposes no caller-visible override. If you need an admin path that returns restricted rows, wire a separate service-role-only RPC in a private recipe. Sensitivity is enforced at the SQL layer, not just the MCP layer.
 
 **Q: Why JSONB array instead of a `thought_parents` join table?**
-A: One row per derived thought is simpler for the common query pattern (walk upward) and for recipes to write. The GIN index makes reverse lookup (`derived_from @> '[...]'`) fast enough for the sizes Daemonic Brain targets (100K–1M thoughts). Swap to a join table later if provenance becomes a hot UI path.
+A: One row per derived thought is simpler for the common query pattern (walk upward) and for recipes to write. The GIN index makes reverse lookup (`derived_from @> '[...]'`) fast enough for the sizes Open Brain targets (100K–1M thoughts). Swap to a join table later if provenance becomes a hot UI path.
 
 **Q: How does this interact with `upsert_thought` deduplication?**
 A: `upsert_thought` deduplicates by `content_fingerprint`. If you re-capture a derived artifact with the same content, the fingerprint matches the existing row and no new thought is created. If you want to track "this digest regenerated on a new day" as a fresh row, change the content (e.g., prepend a timestamp) and set `supersedes` to the prior row's ID.

@@ -18,7 +18,7 @@ Pulls your Gmail history via the Gmail API and loads each email into Open Brain 
 - [Bun](https://bun.sh) 1.2+ installed
 - Google Cloud project with Gmail API enabled
 - Gmail API OAuth credentials (Client ID + Client Secret)
-- OpenRouter API key (same one from your Daemonic Brain setup)
+- OpenRouter API key (same one from your Open Brain setup)
 
 ## Credential Tracker
 
@@ -28,7 +28,7 @@ Copy this block into a text editor and fill it in as you go.
 EMAIL HISTORY IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase Project URL:  ____________
   Supabase Service Key:  ____________
   OpenRouter API Key:    ____________

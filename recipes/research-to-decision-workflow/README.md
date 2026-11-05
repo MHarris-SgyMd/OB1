@@ -31,7 +31,7 @@ The canonical reusable skills live here:
 RESEARCH-TO-DECISION WORKFLOW -- CREDENTIAL TRACKER
 ---------------------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Project URL:           ____________
   Secret key:            ____________
   OpenRouter API key:    ____________

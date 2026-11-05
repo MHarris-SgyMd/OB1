@@ -18,7 +18,7 @@ Walks candidate pairs of thoughts (pairs that share at least N entities via `tho
 - [`schemas/typed-reasoning-edges/`](../../schemas/typed-reasoning-edges/) applied (this recipe writes to `thought_edges`)
 - [`entity-extraction` schema (PR #197)](https://github.com/NateBJones-Projects/OB1/pull/197) applied — this is where candidate pairs come from (thoughts that share entities via `thought_entities`). You can skip this if you only ever pass explicit `--pair UUID_A,UUID_B`.
 - Node.js 18+
-- An LLM API key — `OPENROUTER_API_KEY` (preferred — one key covers every Daemonic Brain recipe) or `ANTHROPIC_API_KEY` (direct, retained for back-compat)
+- An LLM API key — `OPENROUTER_API_KEY` (preferred — one key covers every OB1 recipe) or `ANTHROPIC_API_KEY` (direct, retained for back-compat)
 
 ## Credential Tracker
 
@@ -28,7 +28,7 @@ Copy this block into a text editor and fill it in as you go.
 TYPED EDGE CLASSIFIER -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Project URL:           ____________   -> OPEN_BRAIN_URL
   Service-role secret:   ____________   -> OPEN_BRAIN_SERVICE_KEY
 
@@ -52,7 +52,7 @@ COST CAP FOR FIRST RUN
    export OPEN_BRAIN_URL="https://YOUR-PROJECT.supabase.co"
    export OPEN_BRAIN_SERVICE_KEY="..."   # service_role key — server-side only
 
-   # Option A — OpenRouter (preferred; one key works across every Daemonic Brain recipe)
+   # Option A — OpenRouter (preferred; one key works across every OB1 recipe)
    export OPENROUTER_API_KEY="sk-or-v1-..."
 
    # Option B — Anthropic direct (retained for back-compat)

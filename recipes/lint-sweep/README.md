@@ -43,7 +43,7 @@ Copy this block into a text editor and fill it in as you go.
 LINT SWEEP -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Connection string:          ____________   (SUPABASE_URL, postgres://…)
   (Legacy OPEN_BRAIN_URL is accepted as a fallback. SUPABASE_SERVICE_ROLE_KEY and
    OPEN_BRAIN_SERVICE_KEY are accepted and ignored — the credentials live in the URL.)
@@ -73,7 +73,7 @@ OPTIONAL (TIER 3 ONLY)
    ```
 
    > [!NOTE]
-   > This recipe reads the standard `SUPABASE_URL` name every other Daemonic Brain recipe reads — in Daemonic Brain a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
+   > This recipe reads the standard `SUPABASE_URL` name every other OB1 recipe reads — in Daemonic Brain a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
 
    <!-- -->
 

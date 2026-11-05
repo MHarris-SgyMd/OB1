@@ -63,7 +63,7 @@ The script groups typed edges by relation, truncates thought content to 300 char
 ENTITY-WIKI -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Project URL (OPEN_BRAIN_URL):          ____________
   Service role key (OPEN_BRAIN_SERVICE_KEY): ____________
 

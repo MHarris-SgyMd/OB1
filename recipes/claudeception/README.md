@@ -6,7 +6,7 @@
 
 **Created by [@jaredirish](https://github.com/jaredirish)**
 
-*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 

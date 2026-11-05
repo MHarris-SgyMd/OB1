@@ -20,7 +20,7 @@ Copy this block into a text editor and fill it in as you go.
 RECIPE NAME -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Project URL:           ____________
   Secret key:            ____________
   OpenRouter API key:    ____________

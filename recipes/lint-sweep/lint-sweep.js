@@ -90,7 +90,7 @@ function envVar(name) {
 // Resolve a variable that supports a legacy alias. Prefer `primary`; fall back
 // to `legacy`. If the legacy name is what actually resolved the value, log a
 // one-line deprecation warning (once per key) so consumers migrate to the
-// canonical SUPABASE_* names shared by every other Daemonic Brain recipe.
+// canonical SUPABASE_* names shared by every other OB1 recipe.
 const _deprecationWarned = new Set();
 function envVarWithLegacy(primary, legacy) {
   const fromPrimary = envVar(primary);

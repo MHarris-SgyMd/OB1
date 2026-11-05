@@ -8,7 +8,7 @@
 
 ## What It Is
 
-Most Daemonic Brain forks fix prompt drift in scattered prompt strings — when the morning briefing inflates a one-line task into a philosophical paragraph, you tweak the briefing's prompt; when the weekly summary smooths over contradictions, you tweak that one. The fixes don't compound, and the same failures keep reappearing under new names.
+Most Open Brain forks fix prompt drift in scattered prompt strings — when the morning briefing inflates a one-line task into a philosophical paragraph, you tweak the briefing's prompt; when the weekly summary smooths over contradictions, you tweak that one. The fixes don't compound, and the same failures keep reappearing under new names.
 
 This recipe replaces that pattern with a single source of truth: a numbered editorial policy (R1.1, R3.5, R10.2, …) that every synthesis prompt cites at the top of its system message, plus a weekly auditor server that audits compliance and posts critical findings to Slack.
 
@@ -47,7 +47,7 @@ Copy this block into a text editor and fill it in as you go.
 EDITORIAL POLICY + AUDITOR -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Postgres URL:              ____________  (SUPABASE_URL — the shim's name for it)
   OpenRouter API key:        ____________
   Slack bot token:           ____________

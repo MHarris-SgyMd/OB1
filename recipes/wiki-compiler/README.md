@@ -29,7 +29,7 @@ The result is a compiled wiki directory plus a manifest of what ran.
 
 ## Why This Matches The Promise
 
-This is the bridge between "Daemonic Brain as durable structured memory" and "LLM wiki as compiled understanding."
+This is the bridge between "Open Brain as durable structured memory" and "LLM wiki as compiled understanding."
 
 It gives you:
 

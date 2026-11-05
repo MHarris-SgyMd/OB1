@@ -22,7 +22,7 @@ This recipe complements [`recipes/email-history-import/`](../email-history-impor
 8. Parses **structured correspondents** (From/To/Cc into `{ name, email }` arrays) once at pull time so a downstream entity-resolver can upsert them as first-class entities without re-splitting headers.
 9. Emits a **pack file** (JSON) that your Daemonic Brain ingest pipeline can read.
 
-The recipe does **not** ingest into Supabase itself. It produces a pack that a downstream importer consumes. That separation keeps this recipe portable across brains with different ingest paths.
+The recipe does **not** ingest into Supabase itself. It produces a pack that a downstream importer consumes. That separation keeps this recipe portable across Open Brain deployments with different ingest paths.
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ Copy this block into a text editor and fill it in as you go.
 GMAIL SMART PULL -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Project URL:                ____________
   OpenRouter or Anthropic key:____________
 
@@ -244,7 +244,7 @@ The parsing happens once at pull time (RFC 2822–aware; handles quoted commas a
 
 The accompanying migration [`002_entities_canonical_email.sql`](./sql/002_entities_canonical_email.sql) adds the `canonical_email` column + indexes needed for that upsert path. It is idempotent and does not modify the core `thoughts` table.
 
-Writing the upsert job itself is out of scope for this recipe — the shape of an `entities` table varies across brains. The pack gives you clean, pre-parsed inputs so the job is ~50 lines of Supabase-client code.
+Writing the upsert job itself is out of scope for this recipe — the shape of an `entities` table varies across Open Brain deployments. The pack gives you clean, pre-parsed inputs so the job is ~50 lines of Supabase-client code.
 
 ## Atomization
 

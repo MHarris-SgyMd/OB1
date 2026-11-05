@@ -793,7 +793,7 @@ For meeting prep, capture a screenshot of the client's website or relevant dashb
 │                                                              │
 │  /life-engine fires                                          │
 │       │                                                      │
-│  1. Gather data (Calendar MCP + Daemonic Brain MCP + Supabase)         │
+│  1. Gather data (Calendar MCP + OB1 MCP + Supabase)         │
 │       │                                                      │
 │  2. Generate VO script (~100 words, conversational)          │
 │       │                                                      │

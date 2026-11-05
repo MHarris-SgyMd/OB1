@@ -48,7 +48,7 @@ Use this recipe when you want corpus-wide synthesis without depending on the ent
 WIKI-SYNTHESIS -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   OPEN_BRAIN_URL:           ____________   (https://<ref>.supabase.co)
   OPEN_BRAIN_SERVICE_KEY:   ____________   (Supabase service role key)
 

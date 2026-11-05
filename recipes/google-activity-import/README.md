@@ -8,7 +8,7 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-*Reviewed and merged by the Daemonic Brain maintainer team — thank you for building the future of AI memory!*
+*Reviewed and merged by the Open Brain maintainer team — thank you for building the future of AI memory!*
 
 </div>
 
@@ -34,7 +34,7 @@ Copy this block into a text editor and fill it in as you go.
 GOOGLE ACTIVITY IMPORT -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR DAEMONIC BRAIN SETUP
+FROM YOUR OPEN BRAIN SETUP
   Supabase Project URL:  ____________
   Supabase Secret key:   ____________
   OpenRouter API key:    ____________

@@ -189,7 +189,7 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
 
     One row per call: the batch bisection the raw insert needed for
     statement_timeout and for a duplicate aborting the whole batch goes with
-    it. A text Daemonic Brain already holds is not a unique violation but the
+    it. A text the brain already holds is not a unique violation but the
     function's `existed` — its metadata is merged, its vector replaced, and
     the highlight is counted as already present. The enhanced-thoughts
     columns the function does not know (source_type, type — the same for
