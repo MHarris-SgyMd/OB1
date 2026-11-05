@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 // ob1-fork (SMD-2144): this script paged PostgREST's `/<table>` route with a
-// service-role key, and this fork's stack runs no PostgREST. It reads the same
-// pages through compat/supabase-sql now — SUPABASE_URL is a postgres:// connection
-// string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live
-// in the URL), and a table that is not there is Postgres's 42P01 where PostgREST
-// answered PGRST205. The files it writes are the same. Run it from a checkout:
-// the import below is relative to this file.
+// service-role key, and Daemonic Brain's stack runs no PostgREST. It reads the
+// same pages through compat/supabase-sql now — SUPABASE_URL is a postgres://
+// connection string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the
+// credentials live in the URL), and a table that is not there is Postgres's 42P01
+// where PostgREST answered PGRST205. The files it writes are the same. Run it from
+// a checkout: the import below is relative to this file.
 /**
- * backup-brain.mjs -- Export the Open Brain tables to local JSON files.
+ * backup-brain.mjs -- Export the Daemonic Brain tables to local JSON files.
  *
  * Paginates through the brain's Postgres (1000 rows per query) and writes each
  * table to backup/<table>-YYYY-MM-DD.json. Shows progress and prints a summary.
@@ -34,12 +34,13 @@ const PAGE_SIZE = 1000;
 
 // Stock Open Brain only has `thoughts`. The other tables are from optional
 // companion contributions (entity extraction, smart ingest). Missing tables
-// are skipped at runtime so this recipe works against any Open Brain install.
-// On this fork the companions are `schemas/entity-extraction` (entities, edges;
-// thought_entities is migration 016's on a fork brain) and `schemas/smart-ingest`
-// (ingestion_jobs, ingestion_items); the fork's own tables — thought_audit,
-// thought_sources, thought_facets, ob1_entities and the rest — are not in this
-// list, and `pg_dump` is the whole-brain backup (README).
+// are skipped at runtime so this recipe works against any Daemonic Brain install.
+// In Daemonic Brain the companions are `schemas/entity-extraction` (entities,
+// edges; thought_entities is migration 016's on a migrated brain) and
+// `schemas/smart-ingest` (ingestion_jobs, ingestion_items); Daemonic Brain's
+// own tables — thought_audit, thought_sources, thought_facets, ob1_entities and
+// the rest — are not in this list, and `pg_dump` is the whole-brain backup
+// (README).
 const TABLES = [
   { name: "thoughts",         orderBy: "id", required: true  },
   { name: "entities",         orderBy: "id", required: false },
@@ -98,7 +99,7 @@ if (!SUPABASE_URL) {
   console.error(
     "ERROR: SUPABASE_URL not found.\n" +
     "Either export it or add it to .env.local in the current directory " +
-    "(a postgres:// connection string on this fork)."
+    "(a postgres:// connection string)."
   );
 } else {
   try {
@@ -294,7 +295,7 @@ async function main() {
     console.log(`Created ${backupDir}`);
   }
 
-  console.log(`\nOpen Brain Backup -- ${dateStr}`);
+  console.log(`\nDaemonic Brain Backup -- ${dateStr}`);
   console.log(`Target: ${backupDir}\n`);
 
   const results = [];

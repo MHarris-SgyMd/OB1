@@ -1,12 +1,12 @@
 # Wiki Compiler
 
-> The compiled view on demand layer for Open Brain: a recipe that turns structured thoughts and graph data into regenerable wiki artifacts you can run daily, weekly, or on demand.
+> The compiled view on demand layer for Daemonic Brain: a recipe that turns structured thoughts and graph data into regenerable wiki artifacts you can run daily, weekly, or on demand.
 
 ## What This Is
 
 This recipe is the composition layer Nate described in the video.
 
-It does **not** replace the Open Brain database. It sits on top of it and produces a browsable synthesis layer:
+It does **not** replace the Daemonic Brain database. It sits on top of it and produces a browsable synthesis layer:
 
 - the SQL database stays the source of truth
 - the graph and wiki pages are generated artifacts
@@ -56,7 +56,7 @@ This wrapper recipe packages those pieces into one reproducible workflow. It is 
 ## Architecture
 
 ```text
-Open Brain thoughts (SQL)
+Daemonic Brain thoughts (SQL)
         |
         v
 entity-extraction trigger + worker
@@ -83,7 +83,7 @@ compiled-wiki/ + compile-manifest.json
 
 ## Prerequisites
 
-- A working Open Brain install
+- A working Daemonic Brain install
 - The merged graph/wiki stack on `main`
 - Node.js 18+
 - A valid `.env.local` or shell env for the underlying recipes
@@ -111,7 +111,7 @@ Additional environment varies by phase:
 
 Nothing extra to install. This recipe is a wrapper around merged in-repo scripts.
 
-Run it from the Open Brain repo root so the downstream recipes can read your root `.env.local`:
+Run it from the Daemonic Brain repo root so the downstream recipes can read your root `.env.local`:
 
 ```bash
 node recipes/wiki-compiler/compile-wiki.mjs --help
@@ -239,7 +239,7 @@ Do **not** treat generated wiki pages as the source of truth.
 
 This recipe is built around the opposite rule:
 
-- capture raw facts and source material in Open Brain first
+- capture raw facts and source material in Daemonic Brain first
 - compile the wiki from that source
 - regenerate instead of manually patching summaries
 
@@ -249,7 +249,7 @@ That is what prevents wiki drift.
 
 After a successful run you should have:
 
-- a refreshed entity graph fed by structured Open Brain data
+- a refreshed entity graph fed by structured Daemonic Brain data
 - reasoning edges in `thought_edges`
 - per-entity wiki pages
 - topic synthesis pages

@@ -10,7 +10,7 @@
 
 This integration provides two workers, run under Bun against your Postgres, that improve thought quality after initial import:
 
-**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run stores the profile through the 3-argument `upsert_thought`, embedded, with the enhanced columns following on the fresh row, and both paths name the key as 008's audit actor (FORK.md change 71, SMD-1524) — the raw insert it replaced computed its own fingerprint and stored no vector. On this fork the worker's source and profile queries — filters on `metadata->>generated_by`, `->>artifact_type` and `->>subject` — run through the SQL shim's JSON-path columns (FORK.md change 73, SMD-1544); before that change the shim refused the column and the worker answered 500 at its first query, so nothing above had run. `integrations/test-writes.ts` drives both write paths against Postgres. Useful for generating "Who is X" summaries from scattered notes.
+**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run stores the profile through the 3-argument `upsert_thought`, embedded, with the enhanced columns following on the fresh row, and both paths name the key as 008's audit actor (FORK.md change 71, SMD-1524) — the raw insert it replaced computed its own fingerprint and stored no vector. In Daemonic Brain the worker's source and profile queries — filters on `metadata->>generated_by`, `->>artifact_type` and `->>subject` — run through the SQL shim's JSON-path columns (FORK.md change 73, SMD-1544); before that change the shim refused the column and the worker answered 500 at its first query, so nothing above had run. `integrations/test-writes.ts` drives both write paths against Postgres. Useful for generating "Who is X" summaries from scattered notes.
 
 **Metadata Normalization Worker** (`metadata-norm/index.ts`): Finds thoughts with weak metadata (catch-all type="reference", default importance=3, low-confidence topics) and re-evaluates them via LLM. Only applies changes when the reclassification confidence exceeds 0.8 and the change is material (different type, importance shift >= 2, or new topics where none existed). Marks reviewed thoughts to prevent re-processing.
 
@@ -41,7 +41,7 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ### 1. Check Out the Integration
 
-The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `integrations/test-auth.ts`). Nothing is copied anywhere and nothing is deployed but the two processes (SMD-1800; [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps).
+The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `integrations/test-auth.ts`). Nothing is copied anywhere and nothing is deployed but the two processes (SMD-1800; [Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps).
 
 ### 2. Run the Workers
 
@@ -62,7 +62,7 @@ export \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
@@ -72,7 +72,7 @@ export \
   ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
-`consolidation-bio` embeds the profile it writes, and embeddings come from OpenRouter or OpenAI only — with `ANTHROPIC_API_KEY` alone the worker answers 503 before it spends an LLM call. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
+`consolidation-bio` embeds the profile it writes, and embeddings come from OpenRouter or OpenAI only — with `ANTHROPIC_API_KEY` alone the worker answers 503 before it spends an LLM call. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on Daemonic Brain's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
 
 Optional tuning:
 
@@ -203,7 +203,7 @@ Solution: Ensure the knowledge graph schema is applied. The `consolidation_log` 
 ```
 consolidation-workers/
   _shared/           # Shared config and helpers (as in upstream's enhanced-mcp)
-    auth.ts          # Access keys — a copy of server-portable/auth.ts (this fork)
+    auth.ts          # Access keys — a copy of server-portable/auth.ts
     config.ts        # Constants, models, prompt, patterns
     helpers.ts       # Type coercion, embedding, metadata extraction
   bio/

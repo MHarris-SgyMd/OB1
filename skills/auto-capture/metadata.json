@@ -1,6 +1,6 @@
 {
   "name": "Auto-Capture",
-  "description": "Reusable skill pack that captures ACT NOW items and a session summary to Open Brain when a session ends.",
+  "description": "Reusable skill pack that captures ACT NOW items and a session summary to Daemonic Brain when a session ends.",
   "category": "skills",
   "author": {
     "name": "Jared Irish",

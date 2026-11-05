@@ -50,7 +50,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
 
 It reads and writes no thought. It reaches the core through `ctx.call` for its deadlines' open items alone.
 
-**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row. The column waits for a multi-user change that may never come (decided 2026-11-02).
+**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. Daemonic Brain is one operator's brain (SMD-1716), so every key that may read sees every row. The column waits for a multi-user change that may never come (decided 2026-11-02).
 
 ## Prerequisites
 

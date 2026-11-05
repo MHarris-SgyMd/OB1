@@ -4,7 +4,7 @@
 
 ## What It Does
 
-Queries your most recent Open Brain thoughts, groups them by type and topic, and delivers a formatted summary. You wake up to a digest of everything your brain captured yesterday.
+Queries your most recent Daemonic Brain thoughts, groups them by type and topic, and delivers a formatted summary. You wake up to a digest of everything your brain captured yesterday.
 
 There are two approaches — pick the one that fits your setup:
 
@@ -17,20 +17,20 @@ There are two approaches — pick the one that fits your setup:
 
 ## Approach A: Claude Code Scheduled Task
 
-Zero-infrastructure variant. If you already run Claude Code (or Claude Desktop's Code mode) with Open Brain MCP and Gmail MCP connected, this works today with no deployment.
+Zero-infrastructure variant. If you already run Claude Code (or Claude Desktop's Code mode) with Daemonic Brain MCP and Gmail MCP connected, this works today with no deployment.
 
 ### Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Claude Code or Claude Desktop (Code mode) with:
-  - Open Brain MCP connected
+  - Daemonic Brain MCP connected
   - Gmail MCP connected (for email delivery)
 
 ### How It Works
 
 Claude Code has built-in scheduled tasks (visible in Claude Desktop under the **Scheduled** tab). You install a skill file — a prompt template — that tells Claude what to do on each run:
 
-1. Query Open Brain for thoughts from the last 24 hours
+1. Query Daemonic Brain for thoughts from the last 24 hours
 2. Organize them into a scannable digest (grouped by type, with topic/people tags)
 3. Create a Gmail draft addressed to you
 
@@ -72,7 +72,7 @@ The task will appear in Claude Desktop's **Scheduled** tab.
 
 ![Step 3](https://img.shields.io/badge/Step_3-Test_Run_and_Approve_Tools-1E88E5?style=for-the-badge)
 
-Click **"Run now"** from the Scheduled tab to do an initial test. On the first run, Claude will ask for permission to use the Open Brain and Gmail MCP tools. Approve them once — future runs will remember.
+Click **"Run now"** from the Scheduled tab to do an initial test. On the first run, Claude will ask for permission to use the Daemonic Brain and Gmail MCP tools. Approve them once — future runs will remember.
 
 > [!TIP]
 > If you haven't captured any thoughts recently, the digest will say so. Capture a few test thoughts first via `capture_thought` to see the full format.
@@ -99,7 +99,7 @@ Solution: Claude Code must be running (or Claude Desktop must be open) at the sc
 Solution: Run it manually once via the Scheduled tab and approve the MCP tool permissions. They persist for future runs.
 
 **Issue: "No thoughts found" every day**
-Solution: Check that your Open Brain MCP is connected and has recent data. Run `list_thoughts` manually in a Claude Code session to verify.
+Solution: Check that your Daemonic Brain MCP is connected and has recent data. Run `list_thoughts` manually in a Claude Code session to verify.
 
 **Issue: Gmail draft not appearing**
 Solution: Verify your Gmail MCP connector is working. Try `gmail_create_draft` manually in a Claude session to test.
@@ -108,7 +108,7 @@ Solution: Verify your Gmail MCP connector is working. Try `gmail_create_draft` m
 
 ## Approach B: Scheduled Server (Planned)
 
-A fully self-contained approach: one HTTP server under Bun, on the shape every server here has ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)), fired by cron — or by `pg_cron` + `pg_net` where your Postgres has them — with an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
+A fully self-contained approach: one HTTP server under Bun, on the shape every server here has ([Run a Vendored Server](../../primitives/deploy-remote-mcp/)), fired by cron — or by `pg_cron` + `pg_net` where your Postgres has them — with an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
 
 ### Prerequisites (planned)
 
@@ -122,7 +122,7 @@ A fully self-contained approach: one HTTP server under Bun, on the shape every s
 DAILY DIGEST -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Postgres URL:          ____________
   OpenRouter API key:    ____________
 

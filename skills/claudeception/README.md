@@ -16,7 +16,7 @@ or `anthropic` in skill frontmatter, so `aiception` is the compatible replacemen
 
 ## What It Does
 
-Aiception watches for hard-won knowledge during real work: debugging breakthroughs, misleading errors, undocumented behavior, and repeatable workflow shortcuts. When the knowledge is specific, verified, and reusable, it helps turn that discovery into a new skill and records it back into Open Brain.
+Aiception watches for hard-won knowledge during real work: debugging breakthroughs, misleading errors, undocumented behavior, and repeatable workflow shortcuts. When the knowledge is specific, verified, and reusable, it helps turn that discovery into a new skill and records it back into Daemonic Brain.
 
 ## Supported Clients
 
@@ -27,7 +27,7 @@ Aiception watches for hard-won knowledge during real work: debugging breakthroug
 
 ## Prerequisites
 
-- Working Open Brain setup if you want duplicate checking and capture via `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want duplicate checking and capture via `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
 - An AI client that can load a reusable skill or prompt file
 - A place to save newly created skill files
 
@@ -49,9 +49,9 @@ Aiception watches for hard-won knowledge during real work: debugging breakthroug
 When the skill is working correctly, it should:
 
 - Identify which discoveries are worth preserving
-- Check Open Brain and local skill directories for duplicates
+- Check Daemonic Brain and local skill directories for duplicates
 - Draft a structured new skill with exact trigger conditions
-- Capture the new skill back into Open Brain so future sessions can find it
+- Capture the new skill back into Daemonic Brain so future sessions can find it
 
 ## Full Recipe
 

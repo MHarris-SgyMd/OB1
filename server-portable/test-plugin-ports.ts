@@ -36,7 +36,7 @@ if (!URL_) {
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
-/** The ported plugins, as each PR of SMD-2311 adds one: its section below drives it. */
+/** The learning path's plugins, the six SMD-2311 ported and any extension since (extensions/_template/AGENT_SPEC.md): each turned on for the migrator here, its section below drives it. */
 const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 

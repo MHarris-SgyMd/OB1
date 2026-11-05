@@ -2,7 +2,7 @@
 /**
  * synthesize-wiki.mjs — topic-scoped wiki synthesizer.
  *
- * Reads atomic thoughts from Open Brain's core `thoughts` table and
+ * Reads atomic thoughts from Daemonic Brain's core `thoughts` table and
  * asks an OpenAI-compatible Chat Completions endpoint to synthesize a
  * structured markdown article. Ships with one built-in synthesizer —
  * `autobiography` — that groups thoughts by year and produces a

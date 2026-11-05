@@ -34,9 +34,9 @@
  *   even if it was also opened; opened is what was only looked at, so the two
  *   sum to used), and — when the search rows carry a token
  *   estimate for what they returned — tokens per used id, MERIT's cost-adjusted
- *   utility in this fork's units. With a gold map (query text → relevant ids,
- *   from a hand-labelled fixture), the ignore rate: searches whose results held
- *   a gold id the caller never used.
+ *   utility in Daemonic Brain's units. With a gold map (query text → relevant
+ *   ids, from a hand-labelled fixture), the ignore rate: searches whose results
+ *   held a gold id the caller never used.
  *
  * What it refuses to pretend: with no action rows at all the report says so
  * ("n/a") instead of printing 0% over an empty join, and actions that attribute

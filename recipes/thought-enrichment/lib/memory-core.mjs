@@ -1,5 +1,5 @@
 /**
- * Core hashing, text normalization, and fetch utilities for Open Brain.
+ * Core hashing, text normalization, and fetch utilities for Daemonic Brain.
  */
 
 import crypto from "node:crypto";

@@ -19,7 +19,7 @@ Job hunting is an emotional grinder. You think you're failing because you got 3 
 
 A complete job search management system — companies, postings, applications, interviews, and contacts. The most complex extension in the learning path, with 5 tables and a link into your Professional CRM (Extension 5).
 
-On this fork the job hunt is a **plugin**: [`plugins/job-hunt`](../../plugins/job-hunt/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_job_hunt`, which the brain's migrator makes when the plugin is turned on.
+In Daemonic Brain the job hunt is a **plugin**: [`plugins/job-hunt`](../../plugins/job-hunt/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_job_hunt`, which the brain's migrator makes when the plugin is turned on.
 
 **Tables:**
 - `companies` — The organizations in your search

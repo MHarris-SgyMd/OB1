@@ -1,6 +1,6 @@
 # Lint Sweep
 
-> **On this fork (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway this fork's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 all three with `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
+> **In Daemonic Brain (SMD-2144).** `lint-sweep.js` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway Daemonic Brain's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Two reads changed with the transport: the "most recent" samples order by `created_at` (ids are uuids here, so `id desc` orders nothing), and Tier 2 reads `edges` by the columns `schemas/entity-extraction` gives it. Tier 1 and Tier 2 read `importance` (Tier 1 `source_type` too), Tier 3 all three with `type` — columns `schemas/enhanced-thoughts/schema.sql` adds to `thoughts`; a brain without it stops the sweep at its first read of those columns.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -10,7 +10,7 @@
 
 ## What It Does
 
-Lint Sweep is a read-only quality audit for your Open Brain. It runs the same way a code linter runs — scan the content, flag suspicious items, leave everything to a human to fix. Three cost tiers let you trade completeness for budget: Tier 1 runs entirely in SQL (free), Tier 2 walks the knowledge graph (free), and Tier 3 uses an LLM to sample a small batch of thoughts for contradictions and missing-links (capped LLM spend).
+Lint Sweep is a read-only quality audit for your brain. It runs the same way a code linter runs — scan the content, flag suspicious items, leave everything to a human to fix. Three cost tiers let you trade completeness for budget: Tier 1 runs entirely in SQL (free), Tier 2 walks the knowledge graph (free), and Tier 3 uses an LLM to sample a small batch of thoughts for contradictions and missing-links (capped LLM spend).
 
 Inspired by Andrej Karpathy's "lint the wiki" pattern and the [CRATE CLI](https://github.com/GuiminChen/CRATE) compile/ask/lint/ingest loop.
 
@@ -26,10 +26,10 @@ Tier 1 and Tier 2 run against your brain's Postgres through `compat/supabase-sql
 
 ## Prerequisites
 
-- Working [Open Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
+- Working [Daemonic Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
 - The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 those two and `type`; without it the sweep stops at its first read of those columns
-- (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent. On a fork brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
+- (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent. On a migrated brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
 - (Optional, Tier 3) An OpenRouter API key with credit available
 
 > [!IMPORTANT]
@@ -73,7 +73,7 @@ OPTIONAL (TIER 3 ONLY)
    ```
 
    > [!NOTE]
-   > This recipe reads the standard `SUPABASE_URL` name every other OB1 recipe reads — on this fork a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
+   > This recipe reads the standard `SUPABASE_URL` name every other OB1 recipe reads — in Daemonic Brain a `postgres://` connection string, the shape `compat/supabase-sql` takes — so a shared `.env.local` works across the whole repo. The legacy `OPEN_BRAIN_URL` name is still accepted (with a deprecation warning); `SUPABASE_SERVICE_ROLE_KEY` and `OPEN_BRAIN_SERVICE_KEY` are read and ignored.
 
    <!-- -->
 
@@ -133,7 +133,7 @@ All flags:
 
 ## Report Format
 
-The output is a self-contained markdown file ready for human review. Sample output from a small test brain (upstream's, with integer ids — on this fork a thought id is a uuid, so `#48221` reads `#2b3a2174-5158-…`):
+The output is a self-contained markdown file ready for human review. Sample output from a small test brain (upstream's, with integer ids — in Daemonic Brain a thought id is a uuid, so `#48221` reads `#2b3a2174-5158-…`):
 
 ```markdown
 ---
@@ -144,7 +144,7 @@ started_at: 2026-04-18T14:22:04.112Z
 finished_at: 2026-04-18T14:22:11.031Z
 ---
 
-# Open Brain Lint Sweep — 2026-04-18
+# Daemonic Brain Lint Sweep — 2026-04-18
 
 *Read-only audit. This script never mutates thoughts.*
 
@@ -182,7 +182,7 @@ On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the
 - Low-signal noise (importance ≤2, content <40 chars): **18**
 - Exact-duplicate fingerprint groups: **2**
   - fingerprint a1b2c3d4e5f6… → 2 copies (ids: 11032, 11418)
-- Rows missing content_fingerprint: **0** — on this fork migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).
+- Rows missing content_fingerprint: **0** — in Daemonic Brain, migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).
 
 ## Tier 2 — Graph-based lint (free)
 
@@ -219,7 +219,7 @@ After a successful run you should see:
 
 - A markdown report at the path you passed to `--report` (or `./lint-report-YYYY-MM-DD.md` by default).
 - Console output showing progress per tier and final counts — something like `[tier 1] done — 12847 total thoughts, 43 orphans-by-tag, 2 dup groups, 0 missing-fingerprint`.
-- No changes to your Open Brain. The result of the sweep is the report file — nothing else is written back to the database.
+- No changes to your brain. The result of the sweep is the report file — nothing else is written back to the database.
 
 The report is designed to be triaged by hand: scan each section, follow up on anything that looks real, ignore anything that is a false positive. Over several weeks you should see Tier 1 and Tier 2 counts shrink as you clean up obvious hygiene issues, leaving Tier 3 findings as the main source of ongoing work.
 
@@ -262,7 +262,7 @@ Run the sweep weekly with cron (Linux/macOS):
 
 Or with Windows Task Scheduler (`schtasks /create`), systemd timers, or a GitHub Actions scheduled workflow.
 
-After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings, and act on anything worth fixing via your normal Open Brain tooling.
+After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings, and act on anything worth fixing via your normal Daemonic Brain tooling.
 
 ## Troubleshooting
 
@@ -270,7 +270,7 @@ After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings
 Solution: Create `.env.local` in the same directory as `lint-sweep.js` with the connection string, or export it in your shell. Fall-through order is `process.env` → `.env.local` → `.env`; under `bun`, an `.env` or `.env.local` in the directory you run from is loaded into `process.env` first, so it wins over the script's own files. The legacy `OPEN_BRAIN_URL` name is still accepted (with a one-line deprecation warning).
 
 **Issue: `expected a postgres:// connection URL`**
-Solution: `SUPABASE_URL` still holds a Supabase project URL. On this fork it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
+Solution: `SUPABASE_URL` still holds a Supabase project URL. In Daemonic Brain it is the brain's `postgres://` connection string (`SETUP.md`); there is no PostgREST to reach, and the script refuses before any query.
 
 **Issue: `thoughts (recent 2000) → 42703 column "source_type" does not exist`** (under `--tier=2` alone: `thoughts (high importance) → 42703 column "importance" does not exist`)
 Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of the columns it adds to `thoughts` (Postgres names the first missing one), Tier 2 reads `importance`, Tier 3 those two and `type`.
@@ -279,7 +279,7 @@ Solution: Apply `schemas/enhanced-thoughts/schema.sql` — Tier 1 reads two of t
 Solution: The connection's role lacks SELECT on the table named — a table the role may not read is a refusal, never reported as absent. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the sweep reads; a read-only credential is a hand `GRANT SELECT ON thoughts, thought_entities, entities, edges TO <role>` instead.
 
 **Issue: Tier 1 shows `content_fingerprint column missing — see recipes/content-fingerprint-dedup`**
-Solution: Your brain predates the [content-fingerprint-dedup](../content-fingerprint-dedup/) primitive — apply that recipe (and the [fingerprint-dedup-backfill](../fingerprint-dedup-backfill/) recipe) to get duplicate detection. Not reachable on a fork brain, where migration 003 adds the column: this is an upstream brain reached by its `postgres://` string, and it and Tier 2's absent graph tables (42P01) are the only two conditions the sweep reads as absence rather than refusing.
+Solution: Your brain predates the [content-fingerprint-dedup](../content-fingerprint-dedup/) primitive — apply that recipe (and the [fingerprint-dedup-backfill](../fingerprint-dedup-backfill/) recipe) to get duplicate detection. Not reachable on a migrated brain, where migration 003 adds the column: this is an upstream brain reached by its `postgres://` string, and it and Tier 2's absent graph tables (42P01) are the only two conditions the sweep reads as absence rather than refusing.
 
 **Issue: Tier 2 reports `Graph tables absent`** (a table that exists but the role may not read is not this — that aborts the run with `42501`, above)
 Solution: Tier 2 requires the `entity-extraction` schema (`entities`, `edges`, `thought_entities`). If your brain predates that schema, see PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199), or skip Tier 2 entirely by running `--tier=1` and `--tier=3` separately.

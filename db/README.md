@@ -184,8 +184,8 @@ run, or a paste of the body left, is 030's to take back at its own place — the
 re-run reaches it. Judged before anything runs, in both modes, whenever 021
 will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
 otherwise; 023's call needs one too). A file not named `NNN_name.sql`, or two
-sharing a number, is refused at load, and by the fork checker on every push; a
-set without 021 is refused at load, since the file is named whole. Every
+sharing a number, is refused at load, and by the consistency checker on every
+push; a set without 021 is refused at load, since the file is named whole. Every
 refusal is collected and reported together, the re-run's included.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
@@ -340,26 +340,26 @@ thought_chunks` shows five columns since 013 added `context`.
 | `001_core_schema.sql` | `thoughts` table, three indexes, `updated_at` trigger | Guide step 2.2 |
 | `002_match_thoughts.sql` | Semantic search RPC | Guide step 2.3 |
 | `003_content_fingerprint.sql` | Fingerprint column, unique partial index, `upsert_thought` | Guide step 2.6 |
-| `004_upsert_thought_with_embedding.sql` | 3-arg atomic-capture overload | This fork |
-| `005_reject_non_object_payload.sql` | Reject a non-object `p_payload` instead of silently storing `{}` | This fork |
-| `006_embedding_config.sql` | Record the embedding contract so preflight can catch a later disagreement | This fork |
-| `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables. Since 022 a re-capture with a vector through the 3-arg form keeps the chunk rows only while the row's label vouches for them | This fork |
+| `004_upsert_thought_with_embedding.sql` | 3-arg atomic-capture overload | Daemonic Brain |
+| `005_reject_non_object_payload.sql` | Reject a non-object `p_payload` instead of silently storing `{}` | Daemonic Brain |
+| `006_embedding_config.sql` | Record the embedding contract so preflight can catch a later disagreement | Daemonic Brain |
+| `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables. Since 022 a re-capture with a vector through the 3-arg form keeps the chunk rows only while the row's label vouches for them | Daemonic Brain |
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
-| `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
-| `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
-| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library. The header's sizing of those bounds is arithmetic; SMD-1018 measured them at a million and ten million rows (FORK.md change 28, "At scale") and found the planner's GIN-or-HNSW choice, not the bounds, is what decides a filtered call there | This fork; upstream #417 |
+| `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | Daemonic Brain |
+| `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | Daemonic Brain, from Anthropic's Contextual Retrieval |
+| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library. The header's sizing of those bounds is arithmetic; SMD-1018 measured them at a million and ten million rows (FORK.md change 28, "At scale") and found the planner's GIN-or-HNSW choice, not the bounds, is what decides a filtered call there | Daemonic Brain; upstream #417 |
 | `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL that `renew_claims` (031) moves forward on a heartbeat, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the first consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
-| `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
-| `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` were not covered until 033 took the same lock. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
-| `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
-| `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
-| `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
-| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | This fork |
-| `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s row lock wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
+| `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | Daemonic Brain |
+| `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` were not covered until 033 took the same lock. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | Daemonic Brain |
+| `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | Daemonic Brain |
+| `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | Daemonic Brain; upstream `schemas/recency-boosted-match-thoughts` for the formula |
+| `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | Daemonic Brain |
+| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | Daemonic Brain |
+| `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s row lock wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | Daemonic Brain |
 
 Migrations 024 onward are described in `changes/`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
@@ -1037,11 +1037,11 @@ the census and `--status` read the tables — and, with no such row standing,
 warns when the listing is from before 070 (every listing fails there: the
 callers pass the third argument) or 029's two-argument form stands beside it
 (029 re-applied by hand lands it beside, and a call short of three arguments
-is then ambiguous and fails; the fork's callers pass three, which resolve). No
-verdict is written at apply time — a rejection is a reviewer's, with a name on
-it — and a `--reject-lineage` sweep is not taken until the flag has been used.
-DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC, as on 029's).
-test-schema [64], test-upgrade [20v], test-live [16];
+is then ambiguous and fails; Daemonic Brain's callers pass three, which
+resolve). No verdict is written at apply time — a rejection is a reviewer's,
+with a name on it — and a `--reject-lineage` sweep is not taken until the flag
+has been used. DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC,
+as on 029's). test-schema [64], test-upgrade [20v], test-live [16];
 `server-portable/test-preflight.ts` drives the census, the leftover-form and
 the older-body arms; the store and e2e suites read the column.
 
@@ -2062,11 +2062,11 @@ whose key equals it exactly, selected before the order and the cap; NULL every
 pass. 070's three-argument form is dropped first (another argument list is
 another function), and 029's two-argument one with it if a hand re-apply left
 it; a call of two or three arguments — a server or CLI from before the file —
-resolves to the new form through the default. The fork's callers pass four,
-always: 029 or 070 re-applied by hand lands its form beside 109's, and a call
-both forms take (under three arguments beside 029's, under four beside 070's)
-is then ambiguous and fails. An older server's preflight and an older CLI's
-`--status` read a brain at 109 as before 070 (they probe 070's signature):
+resolves to the new form through the default. Daemonic Brain's callers pass
+four, always: 029 or 070 re-applied by hand lands its form beside 109's, and a
+call both forms take (under three arguments beside 029's, under four beside
+070's) is then ambiguous and fails. An older server's preflight and an older
+CLI's `--status` read a brain at 109 as before 070 (they probe 070's signature):
 upgrade the server, never re-apply 070. The readers follow: the MCP tool and
 `GET /v1/proposals` take `judge_key` (1–200 of a pass key's own characters,
 `server-portable/pass-key.ts`: letters, digits and `. _ : / @ + -`, so a key
@@ -2109,12 +2109,12 @@ exactly, judged_at to the microsecond, the id) for the next call, and
 plpgsql, for the refusal. 109's four-argument form is dropped first (a RETURNS
 TABLE cannot gain a column), and 070's and 029's with it if a hand re-apply
 left them; a call of two, three or four arguments resolves through the
-defaults. The fork's callers pass seven. The readers follow: the MCP tool and
-`GET /v1/proposals` take `after` and answer `cursor` (null once no more follow)
-and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the cursor
-base64url of `["proposals", status, lineage, judge_key, confidence, judged_at,
-id]` so one listing's is refused by the other and one passed with other filters
-is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
+defaults. Daemonic Brain's callers pass seven. The readers follow: the MCP tool
+and `GET /v1/proposals` take `after` and answer `cursor` (null once no more
+follow) and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the
+cursor base64url of `["proposals", status, lineage, judge_key, confidence,
+judged_at, id]` so one listing's is refused by the other and one passed with
+other filters is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
 `consolidate.ts --list <status> --after <cursor>` lists the next page, a capped
 page printing the line to run, its `--list` and `--key` with the cursor
 (`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
@@ -2567,16 +2567,16 @@ the learning path's schemas, retired in 2.0.0 when the six became plugins
 
 ## Grants for a capturing role
 
-Every function this fork adds is `SECURITY INVOKER` — the policy migrations 010,
-012 and 015 state, and the default the capture writers in 005/007/008/022/025
-rely on — so the writes they make run as the connecting role, and since migration
-007 they reach past `thoughts`. A role granted `SELECT, INSERT, UPDATE, DELETE ON
-thoughts` and nothing else, as the getting-started guide's grant step gives, can
-capture nothing on a self-hosted brain: its first windowed capture fails on
-`thought_chunks`, and 008's audit trigger fails on `thought_audit` on its very
-first capture of any kind. (Supabase is unaffected — its `service_role` holds
-default privileges on the public schema, which is why the hosted path never hits
-this.)
+Every function Daemonic Brain adds is `SECURITY INVOKER` — the policy migrations
+010, 012 and 015 state, and the default the capture writers in
+005/007/008/022/025 rely on — so the writes they make run as the connecting role,
+and since migration 007 they reach past `thoughts`. A role granted `SELECT,
+INSERT, UPDATE, DELETE ON thoughts` and nothing else, as the getting-started
+guide's grant step gives, can capture nothing on a self-hosted brain: its first
+windowed capture fails on `thought_chunks`, and 008's audit trigger fails on
+`thought_audit` on its very first capture of any kind. (Supabase is unaffected —
+its `service_role` holds default privileges on the public schema, which is why
+the hosted path never hits this.)
 
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
@@ -3271,9 +3271,9 @@ answer budget sized to the text it sends (three times the estimated tokens plus
 and `qwen3.8:27b`), so an answer that will not end is cut in about a minute rather than
 running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
-taxes the repetition the runaways were measured to be: on the fork's brain that
-retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. Set
+taxes the repetition the runaways were measured to be: on the maintainer's brain
+that retry, with the budget sized to both measured models, extracted all 32
+thoughts one call could not finish, where windows alone reached 10 to 13. Set
 `OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
 local model with no penalty (SMD-2000) — the pass key on the rows stays the
 first model's, and the dump line records which model answered. The 27B never
@@ -3337,7 +3337,7 @@ thought is extracted in at most `OB1_EXTRACT_MAX_WINDOWS` windows (24 unset,
 call) — ~29,000 estimated tokens of text at the default window, and under
 twice that at most for a thought of more than one window, since `chunk.ts`
 fills a window with whole words and the last may run past the size. The bound
-was sized at four times the longest thought on the fork's brain; ingested
+was sized at four times the longest thought on the maintainer's brain; ingested
 documents broke that, and on one pass 8 of 53 thoughts (PDFs and pages of 26
 to 74 windows) were failed before any call with nothing in the graph. A
 thought over it is now extracted over its
@@ -3894,12 +3894,12 @@ the content of every thought goes to the provider rather than only the ones
 someone searches for. **Not suitable for regulated or patient-adjacent
 content** for that reason. `--dry-run` says how many thoughts a run would send
 before it sends any; `--limit` lets you look at twenty before committing to
-thousands. Measured on the fork's 441-issue corpus with `qwen2.5:7b` on local
-Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are worth
-about 5% like for like, since a local Ollama mostly serialises — and eleven to
-twenty-one of the longest issues exceeded the per-call timeout on a 7B model,
-varying by pass, until SMD-1879 measured those timeouts as answers that did
-not end and bounded them (above). Two hours for a corpus that size, then per
+thousands. Measured on Daemonic Brain's 441-issue corpus with `qwen2.5:7b` on
+local Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are
+worth about 5% like for like, since a local Ollama mostly serialises — and
+eleven to twenty-one of the longest issues exceeded the per-call timeout on a 7B
+model, varying by pass, until SMD-1879 measured those timeouts as answers that
+did not end and bounded them (above). Two hours for a corpus that size, then per
 capture. Note that `--timeout` above 300 s only took effect from SMD-1879 on:
 Bun's `fetch` cut an unstreamed call at its own 300 s idle timeout whatever the
 flag said; the three worker diallers (`providerCall`, `judgePair`,
@@ -4399,7 +4399,7 @@ thought with entities, recurring: every thought extracted after a run is judged
 against its older neighbours by the next run or a `--follow` process. Locally
 that is compute; on a hosted provider it is money per pair and BOTH thoughts'
 text goes to the provider. `--dry-run` says how many thoughts a run would
-judge before it judges any. Measured on the fork's 576-issue corpus at the
+judge before it judges any. Measured on Daemonic Brain's 576-issue corpus at the
 shipped `--k 3 --min-sim 0.6` with `qwen2.5:7b`: 517 pairs, one call per thought
 with entities, 21 minutes, about 1,750 prompt tokens a call; 13 proposals, six
 of them real on a hand grading — two per hundred thoughts, half worth accepting
@@ -5465,7 +5465,7 @@ them prints (FORK.md change 76 has the runs, measured on a shared machine).
 ### bench-plan.ts
 
 Whether the *unfiltered* `match_thoughts` reaches the HNSW index, at the width
-this fork ships (upstream #469, SMD-969). `bench-hnsw.ts` explains only the
+Daemonic Brain ships (upstream #469, SMD-969). `bench-hnsw.ts` explains only the
 filtered branches, at 64 dimensions; this one explains the unfiltered branch's
 own statement — read from the catalog, as section C above does — at
 `EMBEDDING_DIM`, under `EXPLAIN (ANALYZE, BUFFERS)`, at match_count 10, 50 and
@@ -5601,11 +5601,11 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 
 ## The stable tier — a brain rebuilt from the records (SMD-1806)
 
-The fork runs a brain on its own memory, so a migration meets real vectors before
-an operator does. That brain — the **stable** tier — holds nothing that is not
-rebuildable from the fork's records: FORK.md, the Linear board, the memory files
-and git. It is a *derived view* over the records, never the record itself, so a
-wipe costs one re-ingest, and that re-ingest is two commands:
+Daemonic Brain runs a brain on its own memory, so a migration meets real vectors
+before an operator does. That brain — the **stable** tier — holds nothing that
+is not rebuildable from Daemonic Brain's records: FORK.md, the Linear board, the
+memory files and git. It is a *derived view* over the records, never the record
+itself, so a wipe costs one re-ingest, and that re-ingest is two commands:
 
 ```bash
 # 1. the records → rows (bare: no vectors, no chunks yet)
@@ -5622,8 +5622,8 @@ agent-written capture is one source among several):
 
 | source | what | needs |
 | --- | --- | --- |
-| `fork` | the fork's changes, one `changes/*.md` file each (SMD-1917) | in the tree |
-| `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
+| `fork` | Daemonic Brain's changes, one `changes/*.md` file each (SMD-1917) | in the tree |
+| `commit` | git commit messages since the upstream pin (Daemonic Brain's whole delta) | in the tree; `--since <ref>` to move the range start |
 | `linear` | a corpus dump built by `evals/build-linear-corpus.ts` — each record's `issue`, through the Linear adapter: the row the board sync writes (SMD-1958) | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
 | `markdown` | a Markdown / Obsidian vault, through the Markdown adapter: every `.md` (any case) at any depth, a `Templates/` folder and dot-folders included and a symlink followed; only `.obsidian/`, `.trash/`, `.git/` and `node_modules/` are skipped, by name at any depth. One vault per brain: the identity is the note's name and the vault root is stored nowhere, so a second vault's note of the same name overwrites the first's across runs (SMD-2228) | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` as a path (a bare name is not resolved — SMD-2221); `--source markdown` takes the vault alone |
@@ -5832,8 +5832,8 @@ for a **scope** the operator cleared: `--allow <scope,scope>` or
 `linear:corpus`; a vault: its resolved root path; an item: the `scope` its
 emitter wrote, an export or a workspace), never a prefix and never "the
 whole workspace". The default is nothing; a record refused is counted per source
-and the refusal names the knob that clears it. The fork's own records (`fork`,
-`commit`, `memory`) are not external and are not gated.
+and the refusal names the knob that clears it. Daemonic Brain's own records
+(`fork`, `commit`, `memory`) are not external and are not gated.
 
 **The brain reports its tier.** `OB1_TIER` (`stable` | `canary` | `working`,
 default `stable`); the ingester stamps `ob1_config.tier` and `.last_ingest` on
@@ -6135,10 +6135,10 @@ goes on: a heartbeat is reporting, never a reason to stop.
 ## The board in the brain (SMD-1954)
 
 `ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
-rebuild. The fork's running brain needs the board **continuously**: a ticket filed
-while a session works should be findable in the next, and one that moves to Done
-should read Done. `sync-linear.ts` is that sweep, and the coordinator's
-`board-sync` pass (`OB1_PASSES`, SMD-3476) runs it on a schedule:
+rebuild. Daemonic Brain's running brain needs the board **continuously**: a
+ticket filed while a session works should be findable in the next, and one that
+moves to Done should read Done. `sync-linear.ts` is that sweep, and the
+coordinator's `board-sync` pass (`OB1_PASSES`, SMD-3476) runs it on a schedule:
 
 ```bash
 bun sync-linear.ts --url postgres://…                # one pass
@@ -6764,7 +6764,8 @@ it through the store's capped path (`SqlStore.resolveAgent`, which bounds
 `lock_timeout` — the raw call the workers ran did not), refusing a revoked key
 and warning when none is set. **Errors and actors:** one `classifyError`
 classifies a provider error into thought / transient / fatal for both workers
-(extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
+(extract adds the `max_tokens`→fatal rule as an option; a `--follow` worker
+reads it through `followerFault`, SMD-3311), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
 worker of either kind, and `reembed.ts`'s follower (SMD-2679), waits a database outage out — `databaseUnavailable`
@@ -6781,9 +6782,9 @@ connections (53300): the lookup opens a connection beside the pass's pool,
 refused for as long as the brain is at `max_connections`, so that one is still
 warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
 out the same way.
-- **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
+- **Outages:** a transient error past the pauses (a 408 among them, read through `followClassify`, where a one-shot run reads it as the request's: `followerFault`, SMD-3311), the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
 - **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text.
-- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; re-embed's follower never on a 429, a 503 or the model not served, and its probe tells a thought's 400 (answered) from the request's (refused too). With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; no follower on a 429, a 503 or the model not served, which make no suspect (`followClassify`'s backpressure; extract's and consolidate's since SMD-3311), and re-embed's probe tells a thought's 400 (answered) from the request's (refused too). With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
 - **Re-embed's follower** reads each thought's error by `followClassify`: the thought's only when it names the thought (its length, the egress gate, its data) or the provider answers the probe's text right after; else the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one). It has no pauses: one 5xx, 408, 429 or timeout is an outage, one coming back within a minute and a poll interval of the probe answering, nothing re-embedded since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
 

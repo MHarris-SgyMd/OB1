@@ -68,8 +68,8 @@ Some concepts show up in multiple extensions. Learn them once, apply them everyw
 
 | Primitive | What It Teaches | Used By |
 | --------- | --------------- | ------- |
-| [Run a Remote MCP Server](primitives/deploy-remote-mcp/) | Running a vendored recipe or integration server under Bun, behind HTTPS | Recipes and integrations; no extension since SMD-2311 |
-| [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | Recipes and integrations; no extension since SMD-2311 |
+| [Run a Vendored Server](primitives/deploy-remote-mcp/) | Running a vendored recipe or integration server (an HTTP API, a worker, a webhook receiver) under Bun, behind HTTPS | Recipes and integrations; no extension since SMD-2311 |
+| [Remote MCP Connection](primitives/remote-mcp/) | Connecting the brain's own connector to Claude Desktop, ChatGPT, Claude Code, Codex, Cursor, and other clients | All six extensions, each a plugin on that connector |
 | [Common Troubleshooting](primitives/troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
 | [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no schema here ships them (SMD-1810) | Background; no extension since SMD-2311 |
 | [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4, until SMD-2311 |

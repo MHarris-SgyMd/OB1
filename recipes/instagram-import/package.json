@@ -1,7 +1,7 @@
 {
   "name": "ob1-recipe-instagram-import",
   "version": "1.0.0",
-  "description": "Import Instagram data exports — DMs, comments, captions — into Open Brain",
+  "description": "Import Instagram data exports — DMs, comments, captions — into Daemonic Brain",
   "type": "module",
   "main": "import-instagram.mjs",
   "scripts": {

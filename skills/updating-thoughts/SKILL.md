@@ -2,9 +2,9 @@
 name: updating-thoughts
 description: |
   Use when editing, correcting, rewriting, re-tagging, re-classifying, or
-  annotating an existing Open Brain thought — "update that note", "fix the
+  annotating an existing Daemonic Brain thought — "update that note", "fix the
   thought about X", "add a status/tag to it", "mark it superseded". Uses the
-  update_thought MCP tool (on the core Open Brain connector, for a write key). Not for
+  update_thought MCP tool (on the core Daemonic Brain connector, for a write key). Not for
   creating a new thought (that is capture) or removing one (see
   deleting-thoughts).
 author: Ezana Azene
@@ -15,7 +15,7 @@ version: 1.2.0
 
 ## Overview
 
-`update_thought` is one of the core Open Brain MCP server's tools, listed for a
+`update_thought` is one of the core Daemonic Brain MCP server's tools, listed for a
 write-scoped key. Choosing *how* to update is the non-obvious part: tagging and rewriting
 behave and cost differently, and the tool acts on a thought's **UUID**, which
 it will not look up for you.
@@ -91,6 +91,6 @@ other keys still merge.
 ## Notes
 
 - New text that is already another thought's is refused (`Refused: that text already exists as another thought`; `REFUSED_DUPLICATE_CONTENT`): edit one of the two, or delete the other first.
-- Connector: the core Open Brain connector, with a write-scoped key (a read or
+- Connector: the core Daemonic Brain connector, with a write-scoped key (a read or
   capture key does not see `update_thought`). The standalone
   `update-thought-mcp` server retired with SMD-1931.

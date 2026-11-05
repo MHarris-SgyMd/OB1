@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * eval-longmemeval.ts — the fork's retrieval on LongMemEval-S, scored the way
- * the field publishes it.
+ * eval-longmemeval.ts — Daemonic Brain's retrieval on LongMemEval-S, scored the
+ * way the field publishes it.
  *
  * Every retrieval number in this directory is measured on one corpus, and
  * SMD-1039 records the consequence: the baseline saturates it, so each add-on
@@ -56,7 +56,7 @@
  * keyword arm's contribution is visible.
  *
  *   OB1_EVAL_LME=/path/longmemeval_s.json DATABASE_URL=postgres://... bun eval-longmemeval.ts
- *   OB1_EVAL_EMBED=qwen3-embedding:0.6b@1024   embedding spec (default: the fork's default model)
+ *   OB1_EVAL_EMBED=qwen3-embedding:0.6b@1024   embedding spec (default: Daemonic Brain's default model)
  *   OB1_EVAL_PHASE=load|score|both|windows   default both; load and windows are resumable
  *   OB1_EVAL_BATCH=32                        inputs per embedding request
  *   OB1_EVAL_MAX_QUESTIONS=20                score a prefix only (smoke test)

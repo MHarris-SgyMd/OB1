@@ -3,7 +3,7 @@ import type { Thought, ThoughtMetadata } from "./types";
 
 // ob1-fork (SMD-1524): insertThought writes `thoughts` with a raw INSERT, by design — the
 // recipe's Neon database is its own, built by sql/001-create-thoughts.sql from the guide's
-// shape, and this fork's upsert_thought is not in it. The row carries no content
+// shape, and Daemonic Brain's upsert_thought is not in it. The row carries no content
 // fingerprint, no model label and no audit actor; the README says so. Listed in
 // scripts/check-consistency.ts check 10's exceptions (FORK.md change 71).
 

@@ -25,13 +25,13 @@ The knowledge graph enables queries like "what projects does Sarah work on?" or 
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts`
 - **Knowledge graph schema** applied — install `schemas/knowledge-graph` to create the `entities`, `edges`, `thought_entities`, and `entity_extraction_queue` tables
 - At least one LLM API key: OpenRouter (recommended), OpenAI, or Anthropic
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/))
 
 ## Steps
 
 ### 1. Run the worker
 
-This worker runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server on this fork shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This worker runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and the access-key module from `../_shared/auth.ts` beside it (the same file every server in Daemonic Brain shares), and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \
@@ -41,11 +41,11 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/entity-extraction-worker/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. `integrations/test-auth.ts` starts it this way in CI. Whatever calls it on a schedule — cron, a scheduled workflow (the stack's `orchestration` profile runs n8n) — POSTs to its URL with the key (Step 4), and so does the smart-ingest server after a write when its `ENTITY_EXTRACTION_WORKER_URL` names this address (SMD-2110); a caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. `integrations/test-auth.ts` starts it this way in CI. Whatever calls it on a schedule — cron, a scheduled workflow (the stack's `orchestration` profile runs n8n) — POSTs to its URL with the key (Step 4), and so does the smart-ingest server after a write when its `ENTITY_EXTRACTION_WORKER_URL` names this address (SMD-2110); a caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The list is this worker's own environment. The worker writes, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The list is this worker's own environment. The worker writes, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback, in the same environment:
 

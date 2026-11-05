@@ -28,7 +28,7 @@ import { loadEnv } from "./env.ts";
  *
  * Called here rather than in each eval script because every one of them imports
  * this module, and a second place to configure the same key is how the two
- * disagree later — the defect this fork keeps finding.
+ * disagree later — the defect Daemonic Brain keeps finding.
  */
 loadEnv();
 

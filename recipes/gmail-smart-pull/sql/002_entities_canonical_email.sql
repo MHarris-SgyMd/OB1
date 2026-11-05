@@ -16,7 +16,7 @@
 --
 -- Prerequisite: this migration requires a `public.entities` table to exist
 -- (with at least `id`, `entity_type`, `canonical_name`, `normalized_name`).
--- If your Open Brain deployment doesn't have entities yet, install an
+-- If your Daemonic Brain deployment doesn't have entities yet, install an
 -- entities schema first (see other recipes under schemas/ that define one).
 -- The migration uses IF NOT EXISTS guards so re-running is safe.
 

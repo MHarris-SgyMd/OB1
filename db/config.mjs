@@ -153,7 +153,7 @@ export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODE
  * became local, leaving this hosted made the shipped pair incoherent: pointed at
  * Ollama, every capture logged a 404 for `openai/gpt-4o-mini` and stored a thought
  * with no topics, people or type. The server degrades rather than failing, so it
- * was quiet — which is exactly the kind of quiet this fork keeps removing.
+ * was quiet — which is exactly the kind of quiet Daemonic Brain keeps removing.
  *
  * NOT the top scorer, and the asymmetry with the embedding default is deliberate.
  * qwen3.8:27b is the only model to score a perfect 84/84, at 3.5s per capture and
@@ -246,8 +246,8 @@ export const KNOWN_MODEL_DIMS = {
  * OB1_CHUNK_TOKENS for it, or add the entry once it is measured. Hosted models
  * are deliberately absent (first review pass): a provider's document states
  * the MODEL's maximum input, not what the serving provider behind an
- * OpenRouter route admits, and this fork has no key to measure with. A WRONG
- * entry here truncates windows silently, which is the failure the windows
+ * OpenRouter route admits, and Daemonic Brain has no key to measure with. A
+ * WRONG entry here truncates windows silently, which is the failure the windows
  * exist to prevent, so a model that is not measured is not listed — it keeps
  * the fallback, which is exactly what it had.
  */
@@ -346,8 +346,8 @@ export const KNOWN_CHAT_MODEL_WINDOW = {
  *
  * EXTRACT_PROMPT_TOKENS is the rules and the delimiter with an empty thought,
  * as the qwen2.5 tokeniser counts them (`usage.prompt_tokens` 398). The answer
- * grows with the text, but not only with the text: on the fork's own brain,
- * 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
+ * grows with the text, but not only with the text: on the maintainer's own
+ * brain, 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
  * estimated input token (25 tokens per entity or edge row, compact JSON) with
  * a 95th percentile of 1.6 — and `qwen3.8:27b`, asked the same of four short,
  * dense notes it then extracted correctly, answered at 3.5 to 9.4 times the
@@ -453,11 +453,11 @@ export const EXTRACT_MIN_WINDOW_TOKENS = 64;
  * The most windows one thought is extracted in, by default — the per-thought
  * cost bound the 8,000-character cut used to be (fifth review pass of
  * SMD-1879). At the default window that is ~29,000 estimated tokens, ~115,000
- * characters. It was sized as four times the longest thought on the fork's
- * brain, and a thought over it was recorded failed with the count; ingested
- * documents broke the sizing (8 of 53 thoughts on one pass, 26 to 74 windows),
- * so a thought over it is now extracted over its first windows and recorded
- * succeeded with a caveat naming the coverage (SMD-2240,
+ * characters. It was sized as four times the longest thought on the
+ * maintainer's brain, and a thought over it was recorded failed with the count;
+ * ingested documents broke the sizing (8 of 53 thoughts on one pass, 26 to 74
+ * windows), so a thought over it is now extracted over its first windows and
+ * recorded succeeded with a caveat naming the coverage (SMD-2240,
  * server-portable/entities.ts). OB1_EXTRACT_MAX_WINDOWS overrides it
  * (resolveExtractMaxWindows).
  */
@@ -661,7 +661,7 @@ export const VERIFIED_NOT_MRL = new Set([
  * from this table is sent bare, which is correct for most of them:
  * `embeddinggemma` gains only 0.002 from its documented format, and applying
  * nomic's `search_query:`/`search_document:` prefixes measurably HURT retrieval in
- * this fork's benchmarks, so neither is listed.
+ * Daemonic Brain's benchmarks, so neither is listed.
  *
  * Changing a template silently invalidates every stored vector, exactly like
  * changing the model. Keying off the model name rather than a free-form setting
@@ -810,8 +810,8 @@ export function usableChunkContext(context, chunk) {
  * One line, and it still belongs here. The server composes it at capture, the
  * benchmark composes it to measure, and a backfill would compose it again; if
  * any of the three used a different separator the vectors would not be
- * comparable and nothing would say so. This fork's recurring defect is a value
- * defined twice.
+ * comparable and nothing would say so. Daemonic Brain's recurring defect is a
+ * value defined twice.
  *
  * An empty or missing context returns the window unchanged, which is what makes
  * a failed blurb degrade to today's behaviour rather than embedding a stray
@@ -825,8 +825,8 @@ export function composeChunkForEmbedding(context, chunk) {
 /**
  * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
  * parameter. Off by default: a silently shortened vector from a model that was not
- * trained for it is precisely the kind of quiet quality loss this fork tries to
- * make loud.
+ * trained for it is precisely the kind of quiet quality loss Daemonic Brain tries
+ * to make loud.
  *
  * Turn it on to use a model whose native width exceeds pgvector's 2000-dimension
  * HNSW ceiling. `qwen3-embedding:4b` is 2560 natively and unindexable, but scored
@@ -882,11 +882,12 @@ export function embeddingContract(record) {
  * query, so the one argument for off no longer holds and the default flips with
  * it.
  *
- * The costs did not change, and they are still real. Measured on this fork's own
- * corpus (db/bench-trgm.ts): the index does nothing below ~10,000 rows — the
- * planner correctly declines it — nothing at any scale for a common word, and
- * nothing for a pattern under three characters. It costs roughly +70 to +95
- * microseconds on every capture, and about as much storage as the table itself.
+ * The costs did not change, and they are still real. Measured on
+ * Daemonic Brain's own corpus (db/bench-trgm.ts): the index does nothing below
+ * ~10,000 rows — the planner correctly declines it — nothing at any scale for a
+ * common word, and nothing for a pattern under three characters. It costs
+ * roughly +70 to +95 microseconds on every capture, and about as much storage
+ * as the table itself.
  *
  * So a stock deployment below ~10,000 thoughts now pays that write cost for no
  * read benefit. That is the unflattering half, and it is the reason this stayed
@@ -1008,9 +1009,9 @@ export const CHUNK_CONTEXT = resolveChunkContext(ENV.OB1_CHUNK_CONTEXT);
  * db/test-support.ts and db/test-schema.ts — and until this existed each kept its
  * own pair of hardcoded `.replace()` calls. Two of them would have silently
  * ignored a new variable: a `{{TRGM_INDEX}}` nobody substitutes is not an error
- * in a `.replace()` chain, it is a literal left in the SQL. This fork's recurring
- * defect is a value defined twice, and adding a third variable to three copies is
- * how that happens again.
+ * in a `.replace()` chain, it is a literal left in the SQL. Daemonic Brain's
+ * recurring defect is a value defined twice, and adding a third variable to three
+ * copies is how that happens again.
  *
  * @param {{ dim?: number, model?: string, trgm?: boolean, chunkContext?: boolean, backfillLimit?: number | null, routeEstimateMinPages?: number }} overrides
  */
@@ -1367,9 +1368,9 @@ export const ACCEPTED_BY_MODEL_SQL =
 export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
 
 /**
- * Whether the fork's schema is in public: migration 001's `thoughts`, a table
- * or a partitioned one, by pg_class so a role's search_path does not hide it.
- * An SQL expression, read as a column (`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS
+ * Whether Daemonic Brain's schema is in public: migration 001's `thoughts`, a
+ * table or a partitioned one, by pg_class so a role's search_path does not hide
+ * it. An SQL expression, read as a column (`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS
  * present`) by migrate.ts's refusal of a plain run over a schema with no
  * ledger and preflight's ledger row, so the two judge one database alike
  * (SMD-3425).
@@ -1399,7 +1400,7 @@ export const LOCK_TIMEOUT_S = 10;
  * NNN_name.sql (the number is a file's identity and its order — `021.sql` or
  * `021-fix.sql` would sort before `021_…` and run at its number), or two files
  * sharing a number (two branches each adding "the next number" is how it
- * happens; the fork has renumbered twice; SMD-1421). One rule, read by
+ * happens; Daemonic Brain has renumbered twice; SMD-1421). One rule, read by
  * migrate.ts at load — every operator's run and every compose start — and by
  * scripts/check-consistency.ts on every push, where the collision is
  * made. Only .sql files are judged.
@@ -2374,14 +2375,14 @@ export async function alignVectorSearchPath(sql) {
 }
 
 /**
- * The table privileges this fork's SECURITY INVOKER functions need to run as
- * their caller. Every function 010/012/015 declares is SECURITY INVOKER, so the
- * writes they make — chunk rows, audit rows, work claims, entity rows — run as
- * the connecting role, not the definer, and reach beyond `thoughts` since 007.
- * Upstream never hit this: Supabase's `service_role` holds default privileges on
- * the public schema. A self-hosted role set up from the guide's `GRANT … ON
- * thoughts` alone can capture nothing — its first windowed capture fails on
- * `thought_chunks`, and the audit trigger fails on `thought_audit`.
+ * The table privileges Daemonic Brain's SECURITY INVOKER functions need to run
+ * as their caller. Every function 010/012/015 declares is SECURITY INVOKER, so
+ * the writes they make — chunk rows, audit rows, work claims, entity rows — run
+ * as the connecting role, not the definer, and reach beyond `thoughts`
+ * since 007. Upstream never hit this: Supabase's `service_role` holds default
+ * privileges on the public schema. A self-hosted role set up from the guide's
+ * `GRANT … ON thoughts` alone can capture nothing — its first windowed capture
+ * fails on `thought_chunks`, and the audit trigger fails on `thought_audit`.
  *
  * One list, grouped by the role that needs each group, each row naming the
  * migration that introduced the requirement. This is the single spelling:
@@ -2704,7 +2705,7 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ function: "lookup_agent_memory_key(text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/per-agent-identity" }),
-    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC, and takes the fork's uuid thought id — SMD-2128)
+    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC, and takes Daemonic Brain's uuid thought id — SMD-2128)
     Object.freeze({ table: "ingestion_jobs",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
     Object.freeze({ table: "ingestion_items", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
     Object.freeze({ sequence: "ingestion_jobs_id_seq",  privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
@@ -2869,7 +2870,7 @@ export const EXTRACTION_TRIGGER_WRITES = Object.freeze([
 /**
  * The opt-in query log (migration 034, SMD-1295) — the one spelling the server,
  * preflight and the tests share. `flag`/`on` is the env switch and its "on"
- * value (the fork's on/off idiom); `table` and `prune` are the objects 034
+ * value (Daemonic Brain's on/off idiom); `table` and `prune` are the objects 034
  * creates; `tools` lists the handlers that write each kind of row; `retentionEnv`
  * and `retentionDaysDefault` are prune_query_log's window. Off by default:
  * absent or any value other than `on` leaves the server writing nothing.
@@ -2886,7 +2887,7 @@ export const QUERY_LOG = Object.freeze({
   actionTools: Object.freeze(["fetch", "update_thought", "delete_thought"]),
 });
 
-/** True when a server env selects the query log on (the fork's "on" idiom). */
+/** True when a server env selects the query log on (Daemonic Brain's "on" idiom). */
 export function queryLogEnabled(env) {
   return (env?.[QUERY_LOG.flag] ?? "").toString().trim().toLowerCase() === QUERY_LOG.on;
 }
@@ -3119,24 +3120,24 @@ export function stripSqlComments(text) {
 }
 
 /**
- * What a `.sql` file may not run on this fork, each with the reason (SMD-1796).
- * Matched over the whole comment-stripped text, one hit per rule and line, so a
- * statement broken across lines is one hit — string literals included,
- * since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely as the
- * bare statement does — so a header that quotes one of these to explain its
- * absence is not a hit, and a statement is.
+ * What a `.sql` file may not run in Daemonic Brain, each with the reason
+ * (SMD-1796). Matched over the whole comment-stripped text, one hit per rule
+ * and line, so a statement broken across lines is one hit — string literals
+ * included, since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely
+ * as the bare statement does — so a header that quotes one of these to explain
+ * its absence is not a hit, and a statement is.
  */
 export const SUPABASE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "service_role", re: /\bservice_role\b/i,
     msg: "names Supabase's `service_role` — a Supabase-managed role that does not exist on plain Postgres, where the statement fails (`role \"service_role\" does not exist`) and stops the file; grant the connecting role with `migrate.ts --grant` (db/config.mjs ROLE_GRANTS) instead. String literals count (an EXECUTE string runs; a COMMENT ON … IS '…' is flagged too — reword it or move the word to a `--` comment)" }),
   Object.freeze({ name: "supabase-api-role", re: /\b(?:TO|FROM)\s+(?:(?:"?[A-Za-z_][A-Za-z0-9_]*"?|PUBLIC)\s*,\s*)*"?(?:authenticated|anon)\b"?/i,
-    msg: "grants to, revokes from or scopes a policy to Supabase's `authenticated`/`anon` — API roles that do not exist on plain Postgres (`role \"authenticated\" does not exist` stops the file); EXECUTE is PUBLIC's by default, and the fork's connecting role is granted through `migrate.ts --grant`" }),
+    msg: "grants to, revokes from or scopes a policy to Supabase's `authenticated`/`anon` — API roles that do not exist on plain Postgres (`role \"authenticated\" does not exist` stops the file); EXECUTE is PUBLIC's by default, and Daemonic Brain's connecting role is granted through `migrate.ts --grant`" }),
   Object.freeze({ name: "auth-schema", re: /\bauth\.(?:uid|role|jwt|email)\s*\(|\bauth\.users\b/i,
-    msg: "reaches GoTrue's `auth` schema (`auth.uid()`, `auth.role()`, `auth.users`), which exists only on Supabase — the statement fails elsewhere, and on Supabase the fork's operator is not an Auth user, so such a policy denies every row; the operator model is SMD-1716" }),
+    msg: "reaches GoTrue's `auth` schema (`auth.uid()`, `auth.role()`, `auth.users`), which exists only on Supabase — the statement fails elsewhere, and on Supabase Daemonic Brain's operator is not an Auth user, so such a policy denies every row; the operator model is SMD-1716" }),
   Object.freeze({ name: "supabase-prefix", re: /\bsupabase_[a-z0-9_]*/i,
     msg: "names a `supabase_`-prefixed role or schema, which exists only on Supabase" }),
   Object.freeze({ name: "rls", re: /\bENABLE\s+ROW\s+LEVEL\s+SECURITY\b|\bCREATE\s+POLICY\b/i,
-    msg: "enables row-level security or creates a policy — on this fork the connecting role is not the table's owner and has no BYPASSRLS, so RLS with no policy for it denies it every row, and every policy here was written for Supabase's roles; isolation is deferred by decision (SMD-1716), so drop the RLS block rather than port it" }),
+    msg: "enables row-level security or creates a policy — in Daemonic Brain the connecting role is not the table's owner and has no BYPASSRLS, so RLS with no policy for it denies it every row, and every policy here was written for Supabase's roles; isolation is deferred by decision (SMD-1716), so drop the RLS block rather than port it" }),
 ]);
 /**
  * Every SUPABASE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers

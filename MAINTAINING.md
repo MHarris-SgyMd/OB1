@@ -211,7 +211,7 @@ around a missing one: `capture_thought` is one call to `upsert_thought`, with
 no two-step fallback (`server-portable/store-sql.ts`), and preflight's
 "migration ledger" row warns of a brain behind the tree.
 
-A vendored extension, recipe or integration server under the category
+A vendored recipe or integration server under the category
 directories is not the brain. It is one HTTP process beside the stack,
 `bun <file>`, behind the same TLS proxy, never stdio
 (`primitives/deploy-remote-mcp/`). A contribution that adds operations to the

@@ -18,8 +18,8 @@ The output is not a fake-precise readiness score. It returns:
 - first/second/third build sequence
 - clear labels for `Firm finding`, `Inference`, and `Open question`
 
-If Open Brain search/capture tools are present, the skill also persists the
-intake, boundary audit, and final assessment back into OB1 so the diagnostic can
+If Daemonic Brain search/capture tools are present, the skill also persists the
+intake, boundary audit, and final assessment back into Daemonic Brain so the diagnostic can
 compound over time.
 
 ## Supported Clients
@@ -32,7 +32,7 @@ compound over time.
 
 ## Prerequisites
 
-- Optional but recommended: working Open Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../docs/01-getting-started.md))
+- Optional but recommended: working Daemonic Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../docs/01-getting-started.md))
 - Optional but recommended: the paired [World Model Diagnostic Activation recipe](../../recipes/world-model-diagnostic-activation/)
 - AI client that supports reusable skills/prompts, or a plain chat window for the direct-paste prompt
 
@@ -40,7 +40,7 @@ compound over time.
 
 1. Copy [`SKILL.md`](./SKILL.md) into your client's reusable-instructions location.
 2. Reload or restart the client.
-3. If you want persistence, verify the client can also see your base Open Brain `search_thoughts` and `capture_thought` tools.
+3. If you want persistence, verify the client can also see your base Daemonic Brain `search_thoughts` and `capture_thought` tools.
 
 For Claude Code, a common install path is:
 
@@ -62,7 +62,7 @@ cp skills/world-model-diagnostic/SKILL.md ~/.claude/skills/world-model-diagnosti
 Use this if you want the same workflow in a plain Claude or ChatGPT chat:
 
 ```text
-Use the World Model Diagnostic. Interview me for about 20 minutes to assess whether my company is ready for a world model. Ask about company size, industry, business model, the top 3-5 data sources ranked by fidelity, where decisions and editorial judgment currently live, which management layers have already been removed, how outcomes get recorded, and whether data capture happens as a byproduct of work or as separate documentation. Then map me to the right paradigm (vector database, structured ontology, or signal-fidelity), audit my top information flows by labeling each as "act on this" or "interpret this first," identify my biggest simulated-judgment exposures, and give me a first/second/third build sequence. Do not give me a readiness score. Label every conclusion as Firm finding, Inference, or Open question. If Open Brain search/capture tools are available, use them to check for prior context and persist the intake, boundary audit, and final assessment.
+Use the World Model Diagnostic. Interview me for about 20 minutes to assess whether my company is ready for a world model. Ask about company size, industry, business model, the top 3-5 data sources ranked by fidelity, where decisions and editorial judgment currently live, which management layers have already been removed, how outcomes get recorded, and whether data capture happens as a byproduct of work or as separate documentation. Then map me to the right paradigm (vector database, structured ontology, or signal-fidelity), audit my top information flows by labeling each as "act on this" or "interpret this first," identify my biggest simulated-judgment exposures, and give me a first/second/third build sequence. Do not give me a readiness score. Label every conclusion as Firm finding, Inference, or Open question. If Daemonic Brain search/capture tools are available, use them to check for prior context and persist the intake, boundary audit, and final assessment.
 ```
 
 ## Expected Outcome
@@ -75,7 +75,7 @@ When the skill is working correctly, the client should:
 - explicitly call out whether a boundary layer exists
 - return the top simulated-judgment exposures
 - produce a concrete first/second/third build sequence
-- persist three lean OB1 thoughts if capture tools are available
+- persist three lean thoughts to Daemonic Brain if capture tools are available
 
 ## Troubleshooting
 
@@ -85,7 +85,7 @@ Solution: Restore the boundary-audit step. The skill should force 5-10 concrete 
 **Issue: The model gives a readiness score anyway**
 Solution: Remove it. The skill should not pretend to know more than the interview supports.
 
-**Issue: Nothing gets saved to Open Brain**
+**Issue: Nothing gets saved to Daemonic Brain**
 Solution: Check that your base connector is enabled and that the client can actually see `search_thoughts` and `capture_thought`. The skill still works without them, but persistence depends on those tools being available.
 
 ## Notes for Other Clients
@@ -93,5 +93,5 @@ Solution: Check that your base connector is enabled and that the client can actu
 Tool names may be namespaced differently across clients. Keep the behavior the
 same even if the visible IDs change.
 
-If the client has no OB1 tools, run the diagnostic anyway and make it explicit
+If the client has no Daemonic Brain tools, run the diagnostic anyway and make it explicit
 that the result is not being persisted.

@@ -177,7 +177,7 @@ CREATE TRIGGER trg_queue_entity_extraction
   EXECUTE FUNCTION public.queue_entity_extraction();
 
 -- ============================================================
--- 8 + 9. ROW LEVEL SECURITY and GRANTS — removed on this fork (SMD-1796)
+-- 8 + 9. ROW LEVEL SECURITY and GRANTS — removed in Daemonic Brain (SMD-1796)
 --    Upstream's file ENABLEd ROW LEVEL SECURITY on the five tables with
 --    a policy FOR service_role and a SELECT policy FOR authenticated
 --    on each, then GRANTed ALL TO service_role, SELECT TO authenticated,

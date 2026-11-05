@@ -61,8 +61,8 @@ export type Refusal =
   | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null; ticketClosed: boolean } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy); ticketClosed: board-sync released it because its ticket closed (SMD-3600)
   | { code: "REFUSED_CLAIM_INPUT"; retryable: false; problem: ClaimProblem; message: string } // an argument 115 refused by its rule (SQLSTATE 22023); message: the database's words, which never carry a token
   | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
-  | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string; forced: boolean } // this key's agent id is not to hand while the registry may answer: its own claim made under it, by its token (forced: false), or a force, which the id classifies
-  | { code: "CLAIM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown"; id: string; forced: boolean } // …and the registry cannot answer this server until an operator acts
+  | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string; forced: boolean; lapsedAt?: string } // this key's agent id is not to hand while the registry may answer: its own claim made under it, by its token (forced: false), or a force, which the id classifies
+  | { code: "CLAIM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown"; id: string; forced: boolean; lapsedAt?: string } // …and the registry cannot answer this server until an operator acts
   // Priority assertions (116, SMD-3664): set_priority, clear_priority, priority_history. `item` is 116's normalised
   // form of the caller's own input, so neither refusal tells a capture-only key what exists.
   | { code: "ITEM_NOT_FOUND"; retryable: false; which: "item" | "due_ref"; item: PriorityItem } // the brain holds no such item (or due reference, `which`): a thought, ticket, entity or open item (117)
@@ -175,7 +175,8 @@ const FACTS: Facts = {
   CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver, ticketClosed: r.ticketClosed }),
   REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
   REFUSED_CLAIM_KEY: none,
-  CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced }),
+  // When the caller's own claim had lapsed (SMD-3705 review pass 1): another claim may cover its work by now.
+  CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced, ...(r.lapsedAt ? { lapsedAt: r.lapsedAt } : {}) }),
   // The item as 116 keys it — a uuid or a ticket key, the caller's own input normalised — and which argument named it.
   ITEM_NOT_FOUND: (r) => ({ which: r.which, item: r.item }),
   ITEM_NOT_YOURS: (r) => ({ item: r.item, dueRef: r.dueRef }),

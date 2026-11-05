@@ -19,7 +19,7 @@ Heavy File Ingestion stops agents from wasting expensive context on raw PDFs, sl
 - Python 3.10+
 - `uv` or `pip` for optional converter dependencies
 - AI client that can load a reusable skill file and run local commands
-- Working Open Brain setup if you want to pair this with Open Brain capture or retrieval flows ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want to pair this with Daemonic Brain capture or retrieval flows ([guide](../../docs/01-getting-started.md))
 
 ## Installation
 
