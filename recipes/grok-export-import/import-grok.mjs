@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Grok Export Import for Open Brain — an emitter of ingestion-contract items
+ * Grok Export Import for Daemonic Brain — an emitter of ingestion-contract items
  *
  * Parses xAI Grok conversation exports (JSON with MongoDB-style dates) and
  * prints one ingestion-contract item per conversation, one JSON object per

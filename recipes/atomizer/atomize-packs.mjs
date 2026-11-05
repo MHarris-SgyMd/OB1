@@ -4,7 +4,7 @@
  * files and split them into atomic single-topic memories via an LLM.
  *
  * Works on local JSON "pack" files (arrays of memory objects) exported from
- * any capture source before they are loaded into Open Brain. Each pack is a
+ * any capture source before they are loaded into Daemonic Brain. Each pack is a
  * JSON file whose memory array is either the top-level array, or nested
  * under `memories` or `safe_memories`.
  *
@@ -44,7 +44,7 @@ const env = loadEnv(path.join(__dirname, ".env.local"));
 
 // ── Paths & constants ───────────────────────────────────────────────────────
 
-// Default pack root follows the convention used by several OB1 recipes
+// Default pack root follows the convention used by several Daemonic Brain recipes
 // (daily-digest, panning-for-gold, etc.): a `data/atomic-memories/standard/`
 // tree where each source has its own sub-folder full of pack JSON files.
 const DEFAULT_DATA_ROOT = path.join(process.cwd(), "data", "atomic-memories");

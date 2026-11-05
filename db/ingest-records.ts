@@ -2,7 +2,7 @@
 /**
  * ingest-records.ts — rebuild the stable brain from the records it derives from.
  *
- * SMD-1806's first premise: the brain is a *derived view* over the fork's
+ * SMD-1806's first premise: the brain is a *derived view* over Daemonic Brain's
  * records — FORK.md, the Linear board, the memory files, the git history — never
  * the record itself. So the "stable" tier holds nothing that a wipe would lose:
  * its cost is one re-ingest. This is that ingest. It reads the sources below,
@@ -22,7 +22,8 @@
  *   bun db/reembed.ts        --url postgres://…            # rows → vectors + chunks
  *
  * Sources, and what each needs:
- *   fork     — the fork's changes, one changes/*.md file each (SMD-1917). In the tree; no flag.
+ *   fork     — Daemonic Brain's changes, one changes/*.md file each (SMD-1917).
+ *              In the tree; no flag.
  *   commit   — git commit messages since the upstream pin. In the tree; no flag.
  *   linear   — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear.
  *              Each record's `issue` goes through the Linear adapter
@@ -48,8 +49,8 @@
  * The adapter sources are EXTERNAL content and pass SMD-1813's allowlist:
  * every item names a scope (the corpus, a vault root, an export) and only a scope named
  * by `--allow <a,b>` / OB1_INGEST_ALLOW is ingested — default nothing, the
- * refusal counted and said. The fork's own records (fork, commit, memory) are
- * not external and are not gated.
+ * refusal counted and said. Daemonic Brain's own records (fork, commit, memory)
+ * are not external and are not gated.
  *
  *   bun db/ingest-records.ts --url … --dry-run             # count per source, write nothing
  *   bun db/ingest-records.ts --url … --source fork         # one source
@@ -161,9 +162,9 @@ export function recordId(source: string, key: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * One changes/*.md file as a fork Doc. SMD-1917 moved the fork's changes out of
- * FORK.md into one file each, in two shapes this reader handles through the
- * fragment parser they share with the release step (scripts/fragments.ts):
+ * One changes/*.md file as a fork Doc. SMD-1917 moved Daemonic Brain's changes
+ * out of FORK.md into one file each, in two shapes this reader handles through
+ * the fragment parser they share with the release step (scripts/fragments.ts):
  *
  *   - A rendered, numbered change (`NNN-slug.md`, e.g. 018-…): no front matter,
  *     the file opens `# N. Title` and the whole file is the change. The number
@@ -183,9 +184,9 @@ export function forkDocFromFile(slug: string, text: string): Doc {
     const tickets = Array.isArray(parsed.fm.tickets) ? (parsed.fm.tickets as string[]) : [];
     return { id: recordId("fork", slug), content: fork, source: "fork", meta: { change: null, ticket: tickets[0] ?? null, file: slug } };
   }
-  // A numbered rendered change: the fork's own parsers read the number and the
-  // owning ticket from the `# N. Title (SMD-…)` heading — the canonical pair the
-  // changes index shows — rather than the first SMD id anywhere in the body,
+  // A numbered rendered change: Daemonic Brain's own parsers read the number and
+  // the owning ticket from the `# N. Title (SMD-…)` heading — the canonical pair
+  // the changes index shows — rather than the first SMD id anywhere in the body,
   // which could be an incidental cross-reference ("superseded by", "unlike").
   const heading = headingOf(text);
   const change = heading?.n ?? (Number(slug.match(/^(\d+)-/)?.[1]) || null);
@@ -380,7 +381,7 @@ export function itemDocs(input: string | Uint8Array, label: string): { docs: Doc
  * The allowlist applied to a set of records: every record an adapter mapped
  * (it carries a structure — external content, whatever its source label) whose
  * scope is not cleared is set aside with the refusal's words (one line per
- * scope, not per record); the rest pass. The fork's own records carry no
+ * scope, not per record); the rest pass. Daemonic Brain's own records carry no
  * structure and always pass. Gating on the structure, not on a list of source
  * names, so an adapter added later cannot slip past the gate by its name
  * (first review pass).
@@ -410,10 +411,10 @@ export function allowlistOf(value: string | undefined): Allowlist {
 }
 
 /**
- * The fork's commit messages since the pin — its whole delta from upstream, the
- * same span FORK.md documents. Each commit is one Doc: the full message
- * (subject + body), the sha and author date. Records separated by 0x1e, fields
- * by 0x00, so a message's own newlines and blank lines survive.
+ * Daemonic Brain's commit messages since the pin — its whole delta from
+ * upstream, the same span FORK.md documents. Each commit is one Doc: the full
+ * message (subject + body), the sha and author date. Records separated by 0x1e,
+ * fields by 0x00, so a message's own newlines and blank lines survive.
  */
 export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
   const out = execFileSync("git", ["log", `${since}..HEAD`, "--no-color", "--format=%H%x00%aI%x00%B%x1e"], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -775,7 +776,7 @@ function selfCheck(): number {
   try { itemDocs(`${SAMPLE_LINE}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: { system: "chatgpt", key: "k2" } })}\n${JSON.stringify({ ...SAMPLE_ITEM, identity: 1 })}\n`, "--items out.jsonl"); } catch (e) { fileRefusal = e instanceof ItemsRefusal ? e.message : `wrong: ${(e as Error).name}`; }
   ok(/^--items out\.jsonl: line 3: identity: /.test(fileRefusal), `a malformed third line refuses the file, naming the flag, the line and the field (${fileRefusal.slice(0, 60)})`);
 
-  // The allowlist (SMD-1813): gated sources refuse by scope, one line per scope; the fork's own records pass.
+  // The allowlist (SMD-1813): gated sources refuse by scope, one line per scope; Daemonic Brain's own records pass.
   const gated = applyAllowlist([doc, { ...doc, id: "x" }, { id: "f", content: "c", source: "fork", meta: {} }], allowlistFrom(""));
   ok(gated.docs.length === 1 && gated.docs[0].source === "fork" && gated.refused.length === 2 && gated.reasons.length === 1 && /^linear: scope "linear:corpus" is not on the allowlist/.test(gated.reasons[0]) && /--allow "linear:corpus"/.test(gated.reasons[0]), `an empty allowlist refuses every gated record, says so once per scope, names the knob (${gated.reasons[0]})`);
   ok(applyAllowlist([doc], allowlistFrom(" linear:corpus , other ")).docs.length === 1, "a cleared scope passes (list trimmed)");
@@ -845,7 +846,7 @@ async function main(): Promise<void> {
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  // A blank OB1_TIER is unset (the fork's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
+  // A blank OB1_TIER is unset (Daemonic Brain's string-knob rule), defaulting to stable; a blank --tier is refused by the scanner, as every flag's blank value is.
   const tier = ((cli.value("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);

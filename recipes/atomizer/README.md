@@ -1,6 +1,6 @@
 # Atomizer
 
-> **On this fork (SMD-2126).** `audit-gmail-pipeline.mjs`, `re-atomize-gmail-thought.mjs` and `lib/entity-resolver.mjs` (`backfill-gmail-correspondents.mjs` through it) reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) — its thought writes through `upsert_thought` and `delete_thought` — is SMD-2140; the decision for the class is in `docs/vendored-disposition.md`. On a fork brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the fork's `record_thought_entities`; the decision says how.
+> **In Daemonic Brain (SMD-2126).** `audit-gmail-pipeline.mjs`, `re-atomize-gmail-thought.mjs` and `lib/entity-resolver.mjs` (`backfill-gmail-correspondents.mjs` through it) reach the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and Daemonic Brain's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) — its thought writes through `upsert_thought` and `delete_thought` — is SMD-2140; the decision for the class is in `docs/vendored-disposition.md`. On a migrated brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the brain's `record_thought_entities`; the decision says how.
 
 > Split compound multi-topic thoughts into atomic single-topic thoughts, plus Gmail-specific repair tooling for email ingestion pipelines.
 
@@ -15,7 +15,7 @@ This recipe ships two workflows:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Node.js 18+
 - An extended `thoughts` schema — you need the following on top of the base table:
   - `thoughts.source_type text` column

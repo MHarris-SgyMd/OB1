@@ -1,5 +1,5 @@
 -- ============================================
--- ChatGPT Conversations — OB1 Extension Schema
+-- ChatGPT Conversations — Daemonic Brain Extension Schema
 -- ============================================
 -- Opt-in table for storing conversation-level summaries
 -- with pyramid detail levels. Used with --store-conversations.
@@ -24,7 +24,7 @@
 
 CREATE TABLE IF NOT EXISTS chatgpt_conversations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID,                          -- NULL allowed; the importer fills it from USER_ID when set (this fork: a plain uuid — the note under Row Level Security)
+    user_id UUID,                          -- NULL allowed; the importer fills it from USER_ID when set (Daemonic Brain: a plain uuid — the note under Row Level Security)
 
     -- ChatGPT identifiers
     chatgpt_id TEXT UNIQUE,                 -- Original ChatGPT conversation ID
@@ -74,7 +74,7 @@ COMMENT ON TABLE chatgpt_conversations IS 'ChatGPT conversation summaries with p
 -- ----------------------------------------
 -- Row Level Security and grants
 -- ----------------------------------------
--- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- Daemonic Brain (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
 -- table here, with a policy `auth.uid() = user_id` FOR ALL, and GRANTed it TO
 -- service_role; the column above referenced auth.users(id) with DEFAULT
 -- auth.uid(). Those are Supabase's: on plain Postgres the REFERENCES stopped
@@ -86,7 +86,7 @@ COMMENT ON TABLE chatgpt_conversations IS 'ChatGPT conversation summaries with p
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this table
 -- (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables needs
--- nothing. Row-level security on this fork: SMD-1716.
+-- nothing. Row-level security in Daemonic Brain: SMD-1716.
 
 -- ----------------------------------------
 -- Indexes for performance

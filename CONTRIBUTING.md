@@ -36,12 +36,22 @@ This is a first-class path, not a workaround. Some of the best contributions com
 
 - **Extensions** are curated, ordered builds that form a progressive learning path. Each teaches new concepts through practical use. They include database schemas, MCP server code, and step-by-step instructions. If you want to propose a new extension, [open an issue](../../issues/new?template=extension-submission.yml) first.
 - **Primitives** are reusable concept guides that get referenced by multiple extensions. They teach a pattern (like RLS or shared access) once, so extensions can link to them instead of re-explaining. A primitive should be referenced by at least 2 extensions. [Propose one here](../../issues/new?template=primitive-submission.yml).
-- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working Open Brain. Open for community contributions.
+- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working brain. Open for community contributions.
 - **Plugins** add operations to the brain itself (SMD-2310). A plugin is a manifest in `plugins/<name>/`, not a server: the brain's REST core and MCP server serve its operations behind the brain's own keys and scopes, and its tables live in a Postgres schema of its own. A contribution that would once have been its own MCP server with its own keys is a plugin now. See [plugins/README.md](plugins/README.md).
 - **Skills** are standalone agent behaviors packaged as plain-text prompt/skill files. They are smaller than recipes: no full build required, just a reusable behavior you can install into Claude Code, Codex, Cursor, or a similar client. Open for community contributions.
 - If a prompt/skill behavior is reusable across multiple contributions, its canonical home is `skills/`. Recipes and other contributions should depend on it with `requires_skills` instead of keeping the canonical copy in their own folder. Recipe-local `*.skill.md` files are still allowed for tightly coupled glue, but they are not the preferred pattern for reusable behavior.
 
 Not sure where yours fits? Open a discussion issue first.
+
+## Naming the product
+
+The project is **Daemonic Brain**, and it grew out of Open Brain (SMD-1929). Name things in a contribution by one rule:
+
+- **Daemonic Brain names the product,** and the system a contribution captures to and searches: "a working Daemonic Brain setup", "the Daemonic Brain capture tool", "capture it to Daemonic Brain".
+- **One install is "a brain":** where the text means one install or one memory rather than the product, as in "a brain of your own", "each brain has its own keys", "search your brain".
+- **Open Brain names only the origin:** where the text says the project grew out of it, in a link to upstream's repository or docs, in a credit or an attribution, in text quoted from upstream, and for upstream's own products and services (its Supabase `open-brain-rest` endpoint, say). OB1 used as the product's name follows the same rule. OB1 as a repository's name stays.
+- **Identifiers stay as they are until SMD-3771 decides them.** These are the `OB1_*` settings, the `ob1-*` images, the `ob1_` SQL, the connector's server name and the compose project (`open-brain`), tool names such as `mcp__open-brain__capture_thought`, the `open-brain` tag and `requires.open_brain` in `metadata.json`, paths such as `.ob1/`, and repository names in URLs.
+- **A contribution's credit stays its author's:** a `metadata.json` `author` is never changed.
 
 ## Required Files
 
@@ -57,8 +67,8 @@ Every contribution lives in its own subfolder under the right category (e.g., `r
 
 Your contribution's README must include these sections:
 
-1. **What it does** — 1-2 sentences. What capability does this add to Open Brain?
-2. **Prerequisites** — What the user needs before starting (e.g., "Working Open Brain setup," "OpenRouter API key," "Node.js 18+")
+1. **What it does** — 1-2 sentences. What capability does this add to Daemonic Brain?
+2. **Prerequisites** — What the user needs before starting (e.g., "Working Daemonic Brain setup," "OpenRouter API key," "Node.js 18+")
 3. **Step-by-step instructions** — Numbered steps, copy-paste ready where possible. Don't skip steps. Don't assume knowledge that isn't in the prerequisites.
 4. **Expected outcome** — What should the user see when it's working? Be specific.
 5. **Troubleshooting** — At least 2-3 common issues and how to fix them.
@@ -131,7 +141,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - **"Next Steps"** linking to the next extension
 - **Tool audit link** — Any extension or integration that exposes MCP tools must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in its "Next Steps" or closing section. This helps users manage their tool surface area as they add extensions. The link is checked by the automated review.
 - **MCP tool annotations** — Any extension or integration that exposes MCP tools must mark read-only tools with `annotations: { readOnlyHint: true }` and write tools with `annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false }` unless the tool really can touch arbitrary external resources or destroy data. ChatGPT uses this metadata to distinguish read tools from write actions.
-- **New operations are a plugin, not a server** — A contribution that adds operations to the brain is a plugin (`plugins/<name>/`, see **Plugins** below): it has no server or keys of its own, and no database connection but the one the brain gives it. The vendored servers already under `integrations/` and `recipes/` keep their shape until they port (SMD-2690, SMD-2101; the extensions ported with SMD-2311): each is one HTTP process that runs under `bun <file>` and is connected by URL — the key as `?key=` on it, or in an `x-brain-key` header. Do NOT write a stdio server, a `claude_desktop_config.json` entry, or a server a client spawns. A change to one keeps its tests importing it: its entry in `SERVERS` in `integrations/test-auth.ts` (the comment above it lists the entry's fields; `LIVE` derives from it for a server on the shim) — the suite refuses a shim-importing server it does not start — and its writes driven in `integrations/test-writes.ts`. See [Run a Remote MCP Server](primitives/deploy-remote-mcp/) for that pattern.
+- **New operations are a plugin, not a server** — A contribution that adds operations to the brain is a plugin (`plugins/<name>/`, see **Plugins** below): it has no server or keys of its own, and no database connection but the one the brain gives it. The vendored servers already under `integrations/` and `recipes/` keep their shape until they port (SMD-2690, SMD-2101; the extensions ported with SMD-2311): each is one HTTP process that runs under `bun <file>` and is connected by URL — the key as `?key=` on it, or in an `x-brain-key` header. Do NOT write a stdio server, a `claude_desktop_config.json` entry, or a server a client spawns. A change to one keeps its tests importing it: its entry in `SERVERS` in `integrations/test-auth.ts` (the comment above it lists the entry's fields; `LIVE` derives from it for a server on the shim) — the suite refuses a shim-importing server it does not start — and its writes driven in `integrations/test-writes.ts`. See [Run a Vendored Server](primitives/deploy-remote-mcp/) for that pattern.
 
 **Plugins** additionally require (curated: discuss with maintainers first):
 - A manifest in `index.ts` built with `server-portable/plugin-sdk.ts`, imported and listed in `plugins/registry.ts`, its `name` the directory's
@@ -157,7 +167,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - If you declare `requires_skills`, your README must link to `skills/<slug>/` so users can install the dependency before following the rest of the guide
 - Keep reusable skill behavior in `skills/`. Use recipe-local skill files only when they are tightly coupled to that one contribution and not intended for reuse
 
-Check the `_template/` folder in each category for a starter README. The extension template contains HTML comments with detailed instructions for both human contributors and AI assistants.
+Check the `_template/` folder in each category for a starter README. The extension template holds both halves of an extension: the guide (`README.md`, `metadata.json`) and its plugin's code (`plugin/`: `index.ts`, `migrations/`, its own README and metadata), with `AGENT_SPEC.md` for an AI assistant generating one.
 
 ## metadata.json
 
@@ -166,7 +176,7 @@ Every contribution needs a `metadata.json` file. Here's the template:
 ```json
 {
   "name": "Email History Import",
-  "description": "Import your Gmail email history into Open Brain as searchable thoughts with sender, subject, and date metadata.",
+  "description": "Import your Gmail email history into your brain as searchable thoughts with sender, subject, and date metadata.",
   "category": "recipes",
   "author": {
     "name": "Matt Hallett",
@@ -232,7 +242,7 @@ Example for a recipe that depends on a reusable skill:
 ```json
 {
   "name": "Auto-Capture Protocol",
-  "description": "Workflow guidance for automatically storing evaluated ideas and session summaries in Open Brain at session close.",
+  "description": "Workflow guidance for automatically storing evaluated ideas and session summaries in your brain at session close.",
   "category": "recipes",
   "author": {
     "name": "Your Name",
@@ -263,7 +273,7 @@ Example for a recipe that depends on a reusable skill:
 **Description must include:**
 - What the contribution does
 - What it requires (services, tools)
-- Confirmation that you tested it on your own Open Brain instance
+- Confirmation that you tested it on a brain of your own
 
 ## Commit messages (the project's own changes)
 
@@ -378,7 +388,7 @@ As you contribute, you'll progress through these levels. Every level is achievab
 
 | Level | What it means | How you get here |
 | ----- | ------------- | ---------------- |
-| **Community Member** | You use Open Brain and participate in discussions | Show up — ask questions, report bugs, share ideas |
+| **Community Member** | You use Daemonic Brain and participate in discussions | Show up — ask questions, report bugs, share ideas |
 | **Contributor** | You've had at least one contribution merged (code or non-code) | Submit a PR (or have a mentor submit one with your attribution) that gets merged |
 | **Regular** | You're a consistent, trusted contributor | 3+ merged contributions, or sustained help reviewing/testing others' work |
 | **Maintainer** | You help review PRs, mentor new contributors, and shape the project | Invited by existing maintainers based on sustained, quality involvement |
@@ -402,6 +412,6 @@ Every PR is checked against these rules. All must pass before human review.
 11. **LLM clarity review** — *(Planned for v2)* Automated check that instructions are clear and complete
 12. **Scope check** — All changes are within the contribution folder(s)
 13. **Internal links** — All relative links in READMEs resolve to existing files
-14. **Plugins and the remote MCP pattern** — New operations are a plugin (`plugins/<name>/`): its SQL runs as roles that hold nothing on the core, and check 31 guards its code (no core table or other schema in its SQL, no role or transaction change, no import past the SDK and its own files). Every vendored recipe and integration server still to port is one HTTP process that runs under `bun <file>` and is reached by URL; its tests import it (an entry in `integrations/test-auth.ts`'s `SERVERS` list — the suite refuses a shim-importing server it does not start). No `claude_desktop_config.json`, no stdio servers, no `Deno` (check 11). See [plugins/README.md](plugins/README.md) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/)
+14. **Plugins and the vendored-server pattern** — New operations are a plugin (`plugins/<name>/`): its SQL runs as roles that hold nothing on the core, and check 31 guards its code (no core table or other schema in its SQL, no role or transaction change, no import past the SDK and its own files). Every vendored recipe and integration server still to port is one HTTP process that runs under `bun <file>` and is reached by URL; its tests import it (an entry in `integrations/test-auth.ts`'s `SERVERS` list — the suite refuses a shim-importing server it does not start). No `claude_desktop_config.json`, no stdio servers, no `Deno` (check 11). See [plugins/README.md](plugins/README.md) and [Run a Vendored Server](primitives/deploy-remote-mcp/)
 15. **Tool audit link** — Extensions and integrations must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in their README. This ensures users are aware of tool surface area management as they add capabilities
 16. **MCP tool annotations** — Read-only tools include `readOnlyHint: true`; write tools include `readOnlyHint: false`, `openWorldHint`, and `destructiveHint`

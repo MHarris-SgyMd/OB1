@@ -1,6 +1,6 @@
 ---
 name: panning-for-gold
-description: Use when processing voice transcripts, brain dumps, stream-of-consciousness notes, or any raw multi-topic capture. Extracts every idea thread, then evaluates each one with deep brainstorming, then captures results to Open Brain. Trigger on transcripts, exports, "process this", "pan for gold", "brain dump", "what did I say", or multi-topic markdown files.
+description: Use when processing voice transcripts, brain dumps, stream-of-consciousness notes, or any raw multi-topic capture. Extracts every idea thread, then evaluates each one with deep brainstorming, then captures results to Daemonic Brain. Trigger on transcripts, exports, "process this", "pan for gold", "brain dump", "what did I say", or multi-topic markdown files.
 author: Jared Irish
 version: 2.0.0
 ---
@@ -220,7 +220,7 @@ Evaluate this idea thoroughly:
 2. **Why did this excite them?** What need or desire does it serve?
 3. **Build vs Buy:** Does something already exist? Search GitHub. What's the delta?
 4. **Feasibility:** How hard is this? Time estimate. Dependencies.
-5. **Connections:** How does this connect to their existing thinking? (Use search_thoughts to find related Open Brain entries.)
+5. **Connections:** How does this connect to their existing thinking? (Use search_thoughts to find related Daemonic Brain entries.)
 6. **Verdict:** One of:
    - ACT NOW (high value, low effort, unblocks something)
    - RESEARCH MORE (promising but needs investigation)
@@ -288,9 +288,9 @@ Is there a human the user should contact before writing more code?
 ### Decisions
 ```
 
-## Phase 3.5: Capture to Open Brain
+## Phase 3.5: Capture to Daemonic Brain
 
-After writing the gold-found file, capture to Open Brain automatically (do not ask).
+After writing the gold-found file, capture to Daemonic Brain automatically (do not ask).
 
 > **Note:** If you already run an automatic session-capture workflow, keep this phase anyway. Panning-specific captures are more granular than a generic session summary.
 
@@ -300,7 +300,7 @@ After writing the gold-found file, capture to Open Brain automatically (do not a
 2. **Session summary** as one `capture_thought`:
    - `content`: "Panning session: [source], [N] threads, [M] ACT NOW, [K] RESEARCH MORE. Threads: [all thread titles + categories]. Gold-found: [file path]"
 
-This closes the flywheel: panning extracts and evaluates, OB1 stores, Gate 0 finds it next session.
+This closes the flywheel: panning extracts and evaluates, Daemonic Brain stores, Gate 0 finds it next session.
 
 ## Phase 4: Self-Improvement
 

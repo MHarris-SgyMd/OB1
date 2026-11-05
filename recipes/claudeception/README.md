@@ -19,7 +19,7 @@ is no longer compatible.
 
 A continuous learning system that extracts reusable knowledge from work sessions and codifies it into new AI coding tool skills. When you discover something non-obvious (a debugging technique, a workaround, an error resolution), Aiception evaluates whether it's worth preserving and creates a structured skill file automatically.
 
-**This is the meta-skill.** Every other recipe in OB1 does a specific thing. This one creates new things from the act of working.
+**This is the meta-skill.** Every other recipe in Daemonic Brain does a specific thing. This one creates new things from the act of working.
 
 ## What It Does
 
@@ -32,20 +32,20 @@ During normal work, Aiception watches for extractable knowledge:
 | Workflow optimization | Found a 3-step process that replaces a 10-step one | Skill documenting the shortcut |
 | Tool integration | Discovered undocumented API behavior | Skill with the actual behavior documented |
 
-Before creating, it searches Open Brain to check if the knowledge already exists. After creating, it captures the new skill to Open Brain so future sessions can find it.
+Before creating, it searches Daemonic Brain to check if the knowledge already exists. After creating, it captures the new skill to Daemonic Brain so future sessions can find it.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Claude Code installed and working
-- Open Brain MCP tools connected (`search_thoughts`, `capture_thought`)
+- Daemonic Brain MCP tools connected (`search_thoughts`, `capture_thought`)
 
 ### Credential Tracker
 
 ```
-From your existing Open Brain setup:
+From your existing Daemonic Brain setup:
 - Project URL: _______________
-- Open Brain MCP server connected: yes / no
+- Daemonic Brain MCP server connected: yes / no
 
 No additional credentials needed for this recipe.
 ```
@@ -90,20 +90,20 @@ New skills appear in `~/.claude/skills/[skill-name]/SKILL.md`. Each includes:
 When working correctly, you should see:
 
 - After non-obvious debugging sessions, a prompt asking whether to extract the knowledge
-- Before creating a skill, an Open Brain search confirming no duplicate exists
+- Before creating a skill, a Daemonic Brain search confirming no duplicate exists
 - New skill files appearing in `~/.claude/skills/` with structured content
-- After creation, the skill captured to Open Brain via `capture_thought`
+- After creation, the skill captured to Daemonic Brain via `capture_thought`
 - In future sessions, the skill fires automatically when trigger conditions match
 
 A typical week of active development produces 1-3 new skills. Not every session produces one, and that's correct. Over-extraction is an anti-pattern.
 
-## Open Brain Integration
+## Daemonic Brain Integration
 
-Aiception connects to Open Brain at two points:
+Aiception connects to Daemonic Brain at two points:
 
-**Before creating (search):** Queries `search_thoughts` with keywords from the discovery. If related knowledge already exists in Open Brain, it updates the existing skill instead of creating a duplicate.
+**Before creating (search):** Queries `search_thoughts` with keywords from the discovery. If related knowledge already exists in Daemonic Brain, it updates the existing skill instead of creating a duplicate.
 
-**After creating (capture):** Saves the new skill to Open Brain via `capture_thought` with tags like `skill-created`, the skill name, and relevant domain tags. This means future sessions across any project can find the skill via semantic search.
+**After creating (capture):** Saves the new skill to Daemonic Brain via `capture_thought` with tags like `skill-created`, the skill name, and relevant domain tags. This means future sessions across any project can find the skill via semantic search.
 
 **Example flow:**
 
@@ -135,8 +135,8 @@ The skill file format may differ, but the extraction process and quality criteri
 **Issue:** Skills aren't being discovered in future sessions.
 **Solution:** Check the `description` field in the skill's frontmatter. It needs specific trigger conditions (error messages, symptoms, tool names) for Claude Code's semantic matching to surface it. Vague descriptions like "helps with React" won't match.
 
-**Issue:** Open Brain search returns nothing but a similar skill exists locally.
-**Solution:** The skill may have been created before Open Brain integration was added. Run `/aiception` in retrospective mode to capture existing skills to Open Brain.
+**Issue:** Daemonic Brain search returns nothing but a similar skill exists locally.
+**Solution:** The skill may have been created before Daemonic Brain integration was added. Run `/aiception` in retrospective mode to capture existing skills to Daemonic Brain.
 
 **Issue:** Too many skills accumulating (30+).
 **Solution:** Review the 5 least-recently-modified skills. If they haven't fired in 30+ days, either the trigger conditions are too narrow (update them) or the knowledge is no longer relevant (deprecate). Add a `deprecated: true` note to the frontmatter rather than deleting.

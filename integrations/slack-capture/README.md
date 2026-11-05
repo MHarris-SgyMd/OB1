@@ -4,7 +4,7 @@
 
 Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
 
-> **On this fork (FORK.md change 71, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
+> **In Daemonic Brain (FORK.md change 71, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; Daemonic Brain's default is 1024, where the capture fails whole).
 
 ## Prerequisites
 
@@ -81,7 +81,7 @@ In Slack, open your capture channel and type: `/invite @Open Brain`
 
 ## Step 3: Run the Capture Server
 
-This is the brains of the operation. One HTTP server receives messages from Slack, generates an embedding, extracts metadata, stores everything in your brain's Postgres, and replies with a confirmation. It runs under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps for an MCP server).
+This is the brains of the operation. One HTTP server receives messages from Slack, generates an embedding, extracts metadata, stores everything in your brain's Postgres, and replies with a confirmation. It runs under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps).
 
 > **New to the terminal?** The "terminal" is the text-based command line on your computer. On Mac, open the app called **Terminal** (search for it in Spotlight). On Windows, open **PowerShell**. Everything below gets typed there, not in your browser.
 
@@ -249,7 +249,7 @@ Replace the values with:
 
 ### Put It Behind HTTPS
 
-Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789. The sample checks no Slack signature — anyone who learns the URL can post an event shaped like Slack's and store a thought — so keep the URL private, or add Slack's signing-secret check before exposing it for long — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. That URL is your **Capture URL**.
+Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789. The sample checks no Slack signature — anyone who learns the URL can post an event shaped like Slack's and store a thought — so keep the URL private, or add Slack's signing-secret check before exposing it for long — the same TLS proxy or tunnel that fronts the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. That URL is your **Capture URL**.
 
 Save this URL — you'll need it in Step 4.
 

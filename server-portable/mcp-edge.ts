@@ -62,7 +62,7 @@ export const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
   // Retry-After is not a CORS-safelisted response header, so a browser-hosted
   // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
-  // without this. The headers the fork means such a client to read are
+  // without this. The headers Daemonic Brain means such a client to read are
   // exposed: Retry-After, the busy refusal's retry delay (SMD-2106); and
   // WWW-Authenticate, the challenge at the public origin that names the
   // protected-resource document a client signs in from (SMD-2382). On a

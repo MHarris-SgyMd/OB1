@@ -15,7 +15,7 @@
 
 ## Prerequisites
 
-- Working Open Brain setup if this skill uses Open Brain tools ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if this skill uses Daemonic Brain tools ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Any extra services or tools this skill depends on
 

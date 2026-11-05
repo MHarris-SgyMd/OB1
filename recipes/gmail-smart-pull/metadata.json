@@ -1,6 +1,6 @@
 {
   "name": "Gmail Smart Pull",
-  "description": "Pull emails from Gmail into an Open Brain ingest pack with local sensitivity routing, engagement filtering, contact-based relationship tiers, and LLM atomization of long messages. Captures RFC 2822 threading headers and structured correspondents so email contacts can be promoted to first-class entities later.",
+  "description": "Pull emails from Gmail into a Daemonic Brain ingest pack with local sensitivity routing, engagement filtering, contact-based relationship tiers, and LLM atomization of long messages. Captures RFC 2822 threading headers and structured correspondents so email contacts can be promoted to first-class entities later.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",

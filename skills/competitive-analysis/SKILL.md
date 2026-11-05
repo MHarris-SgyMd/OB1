@@ -6,7 +6,7 @@ description: |
   Use for prompts like "analyze our competitors", "benchmark our pricing", "map the
   market", "who are we up against", or "build a SWOT". Best when you have a company
   or product, ideal customer profile, and competitor set or permission to discover
-  it. Optional Open Brain search and capture can pull prior notes and store the
+  it. Optional Daemonic Brain search and capture can pull prior notes and store the
   final brief.
 author: Nate B. Jones
 version: 1.0.0
@@ -52,7 +52,7 @@ Gather or confirm:
 
 Useful but optional:
 
-- prior positioning notes, customer objections, or recent competitive findings from Open Brain
+- prior positioning notes, customer objections, or recent competitive findings from Daemonic Brain
 
 ## Process
 
@@ -71,7 +71,7 @@ Useful but optional:
    - Call out where the market is crowded, under-served, or being misread.
 5. Produce an operator-ready brief.
    - Summarize the market map, major competitors, and recommended moves.
-6. Optionally use Open Brain.
+6. Optionally use Daemonic Brain.
    - Search for prior notes before repeating known findings.
    - Capture the finished brief or the highest-value strategic takeaways after the work is done.
 

@@ -1,6 +1,6 @@
 {
   "name": "Job Hunt Pipeline",
-  "description": "Complete job search management — companies, applications, interviews, and pipeline analytics with CRM integration. On this fork it is the job-hunt plugin, turned on in the brain itself (SMD-2311).",
+  "description": "Complete job search management — companies, applications, interviews, and pipeline analytics with CRM integration. In Daemonic Brain it is the job-hunt plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

@@ -53,7 +53,7 @@ Two tables of its own, in the schema `plugin_home_maintenance`, made by `migrati
 
 It reads and writes no thought. It reaches the core through `ctx.call` for its tasks' open items alone. The old schema's two triggers, `updated_at` and a task's dates moved on when work is logged, are `log_maintenance`'s own statements now, so no function lives in the plugin's schema.
 
-**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02).
+**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. Daemonic Brain is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02).
 
 ## Prerequisites
 

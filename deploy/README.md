@@ -247,8 +247,8 @@ OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 
 Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
-ignores (it does not ignore `.env.<name>`); the fork's checks refuse a tracked
-env file.
+ignores (it does not ignore `.env.<name>`); Daemonic Brain's checks refuse a
+tracked env file.
 `--env-file` replaces `deploy/.env` for that command, so give it on every
 compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
 env file names the canary's project, port, address, tier and profiles
@@ -373,12 +373,13 @@ there.
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
-first stack this fork ran on (podman on macOS) offered the database superuser and
-the MCP server to the whole LAN on a password and a key over plain HTTP. Since
-SMD-1844 every published port names its address, the default is loopback, and
-the database and Ollama are not published at all. `compose …` in this section
-stands for `podman compose -f deploy/compose.yaml …` (or `docker compose`) from
-the repo root, with whatever `-f` files the stack was started with.
+first stack Daemonic Brain ran on (podman on macOS) offered the database
+superuser and the MCP server to the whole LAN on a password and a key over plain
+HTTP. Since SMD-1844 every published port names its address, the default is
+loopback, and the database and Ollama are not published at all. `compose …` in
+this section stands for `podman compose -f deploy/compose.yaml …` (or `docker
+compose`) from the repo root, with whatever `-f` files the stack was started
+with.
 
 Inside the stack, each service is on the networks it needs and no other
 (SMD-2583; the ADR's "Two networks", `docs/operator-surface-tiers.md`), and
@@ -1726,9 +1727,9 @@ will not save a change made to it — it is provisioned (measured) — so save a
 copy, in a folder of your own, to keep one (the removal under "Alerts" deletes
 the Daemonic Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
 sharing externally", which writes `${DS_…}` placeholders) over
-`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Daemonic
-Brain` and `"editable": false` (a saved copy has its own of each; check 37
-says so), and run `bun scripts/inline-grafana.ts`, which writes
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title
+`Daemonic Brain` and `"editable": false` (a saved copy has its own of each;
+check 37 says so), and run `bun scripts/inline-grafana.ts`, which writes
 compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
 the disk under `lgtm-data` 92% full (measured on a podman machine; its
 write-ahead log's threshold is 90%), answering the collector "Ingester is
@@ -1917,11 +1918,11 @@ from (measured): remove them first, or after, with the folder command under
 
 ## Keeping the board in the brain
 
-The fork's own brain holds its Linear board — every issue in the Open Brain
-initiative's projects as one thought, in the shape the hand captures used. Until
-SMD-1954 that was a paste per ticket, and a ticket that moved to Done kept
-reading Backlog until someone pasted it again, which made a second row. The
-coordinator's `board-sync` pass is that sweep, unattended:
+The maintainer's own brain holds the project's Linear board — every issue in the
+Open Brain initiative's projects as one thought, in the shape the hand captures
+used. Until SMD-1954 that was a paste per ticket, and a ticket that moved to
+Done kept reading Backlog until someone pasted it again, which made a second
+row. The coordinator's `board-sync` pass is that sweep, unattended:
 
 ```bash
 # deploy/.env: LINEAR_API_KEY=lin_api_…  (and OB1_LINEAR_INITIATIVE when the
@@ -3220,7 +3221,7 @@ the same contract on the same port.
 
 ## Orchestration
 
-The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
+Daemonic Brain's orchestration tool is n8n (`../docs/orchestration-tool.md`,
 SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
 a cursor. The `orchestration` profile runs it beside the stack (SMD-2210).
 The image is n8n's, pinned by digest and never vendored.
@@ -3648,8 +3649,8 @@ and the run data the kit counts are not n8n's published contract. The kit
 runs this profile as it ships (`../evals/README.md`, "The orchestration
 profile (SMD-2210)").
 
-**Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
-under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
+**Licences** (Daemonic Brain's reading, not legal advice; the ADR's Gate 1). n8n
+is under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
 running the profile is running two non-OSI licences side by side.
 Installing an OB1 brain with the profile on a client's own infrastructure is
 inside both: n8n's FAQ permits consulting and installing on a client's
@@ -3659,7 +3660,7 @@ commercial product built on OB1 that competes with it is outside OB1's.
 ## Authorization server
 
 OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
-13–16): oidc-provider 9.12.2 in a small Bun service of the fork's own
+13–16): oidc-provider 9.12.2 in a small Bun service of Daemonic Brain's own
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
 `auth` profile runs it. It publishes no port: the proxy routes `/auth` and
 the three discovery paths outside it to it while it answers, and answers them

@@ -101,7 +101,7 @@ if (
   console.warn(
     "[eval] DEPRECATION: OPEN_BRAIN_URL / OPEN_BRAIN_SERVICE_KEY are the " +
     "legacy names. Prefer SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — every " +
-    "other OB1 recipe uses those and the fallback will be removed in a future " +
+    "other Daemonic Brain recipe uses those and the fallback will be removed in a future " +
     "release.",
   );
 }
@@ -421,7 +421,7 @@ async function gradeWithOpenRouter(prompt, model) {
       "Content-Type": "application/json",
       // OpenRouter recommends an app identifier so usage is traceable.
       "HTTP-Referer": "https://github.com/NateBJones-Projects/OB1",
-      "X-Title": "Open Brain Provenance Eval",
+      "X-Title": "Daemonic Brain Provenance Eval",
     },
     body: JSON.stringify({
       model,

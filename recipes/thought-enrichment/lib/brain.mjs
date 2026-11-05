@@ -1,7 +1,7 @@
 /**
  * The brain's client for the three scripts (SMD-2139): compat/supabase-sql
  * under bun. Until SMD-2139 each script spoke to PostgREST's `/thoughts` route
- * with a service-role key, and this fork's stack runs no PostgREST. Here
+ * with a service-role key, and Daemonic Brain's stack runs no PostgREST. Here
  * SUPABASE_URL is the brain's postgres:// connection string (the name did not
  * change), SUPABASE_SERVICE_ROLE_KEY is accepted and ignored — the credentials
  * live in the URL — and a variable in the environment wins over the recipe's
@@ -57,7 +57,7 @@ export function connect(env) {
   const url = (env.SUPABASE_URL || "").trim();
   if (!url) {
     throw new Error(
-      "SUPABASE_URL must be set — the brain's postgres:// connection string on this fork, " +
+      "SUPABASE_URL must be set — the brain's postgres:// connection string, " +
         "in the environment or in .env.local beside the scripts."
     );
   }
@@ -68,7 +68,7 @@ export function connect(env) {
     const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)?.[1];
     throw new Error(
       `SUPABASE_URL must be a postgres:// connection string; the value's scheme is ${scheme ? `"${scheme}:"` : "missing"} ` +
-        "(a Supabase project URL from an older .env.local is not this fork's value). " +
+        "(a Supabase project URL from an older .env.local is not Daemonic Brain's value). " +
         "The value is not printed: it carries the role's password."
     );
   }

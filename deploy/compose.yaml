@@ -35,11 +35,12 @@
 name: open-brain
 
 # The one place the Ollama image is named: the model server and the pull job
-# below run the same image, so a bump is one edit (the fork's recurring defect
-# is a value defined twice). Pinned to a release, not `:latest`, for the reason
-# postgres is: a floating tag moves under a working deployment. The release job
-# resolves this tag to a digest and writes `ollama/ollama@sha256:…` into the
-# release's compose overlay (SMD-1860; deploy/README.md, "Pinning a release").
+# below run the same image, so a bump is one edit (Daemonic Brain's recurring
+# defect is a value defined twice). Pinned to a release, not `:latest`, for the
+# reason postgres is: a floating tag moves under a working deployment. The
+# release job resolves this tag to a digest and writes `ollama/ollama@sha256:…`
+# into the release's compose overlay (SMD-1860; deploy/README.md, "Pinning a
+# release").
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
 
 # Every service's log, bounded (SMD-1849): the json-file driver, rotated at
@@ -713,7 +714,7 @@ services:
       OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
       # Opt-in trigram index. No fallback value here on purpose: db/config.mjs
       # owns the default, and a `:-off` written in would be a second copy of it —
-      # the defect this fork keeps finding. Unset simply means unset.
+      # the defect Daemonic Brain keeps finding. Unset simply means unset.
       OB1_TRGM_INDEX: ${OB1_TRGM_INDEX:-}
       # Migration 013 records this in ob1_config, so preflight can tell what the
       # schema was migrated under. Same no-fallback rule as above.
@@ -1374,7 +1375,7 @@ services:
   #   comments (db/board-findings.ts, SMD-2681; under the default deny,
   #   OB1_EGRESS_ALLOW=type:board-finding), LINEAR_COMMENT_API_KEY, never the
   #   same key, at most OB1_FINDINGS_POST_CAP (5) a day. A brain that is not
-  #   the fork's own never names it.
+  #   the maintainer's own never names it.
   # - `workers`, extraction and consolidation unattended (SMD-2424):
   #   `extract-entities.ts --follow` and `consolidate.ts --follow`, each
   #   draining its pool, then polling every OB1_EXTRACT_FOLLOW /

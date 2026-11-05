@@ -2871,10 +2871,10 @@ else {
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call
   // both take — under three arguments — is ambiguous (not unique) and fails,
-  // while the fork's callers pass seven (measured on Postgres, SMD-2313's
+  // while Daemonic Brain's callers pass seven (measured on Postgres, SMD-2313's
   // run-it, first review pass: the arm had said the older body answered). The
   // check counts the forms and warns naming 110, whose DROPs take the older forms.
-  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the seven-argument one \(029, 070 or 109 re-applied by hand over 110\): a call both forms take — under three arguments beside 029's, under four beside 070's, under five beside 109's — is ambiguous \(not unique\) and fails, so a reader passing fewer than five may error on the queue, while the fork's callers pass seven \(SMD-2313, SMD-3248, SMD-3249\)/;
+  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the seven-argument one \(029, 070 or 109 re-applied by hand over 110\): a call both forms take — under three arguments beside 029's, under four beside 070's, under five beside 109's — is ambiguous \(not unique\) and fails, so a reader passing fewer than five may error on the queue, while Daemonic Brain's callers pass seven \(SMD-2313, SMD-3248, SMD-3249\)/;
   const beside029 = await run(SQL_ENV);
   assert(beside029.code === 0 && besideRe.test(beside029.out) && /Apply db\/migrations\/110_listing_pages\.sql\./.test(fix(beside029.out, "lineage")),
          `029 re-applied over 110 leaves its two-argument listing beside 110's: a warning naming 110 (${lpLine(beside029.out).slice(0, 200)})`);
@@ -2890,7 +2890,7 @@ else {
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
   // A brain at 109 under this server: 109's four-argument listing alone (109
-  // applied over the ladder's 029 leftover, which it drops). Every fork caller
+  // applied over the ladder's 029 leftover, which it drops). Every caller here
   // passes 110's seven arguments, so every listing fails, naming the
   // seven-argument form; the check warns naming 110.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });
