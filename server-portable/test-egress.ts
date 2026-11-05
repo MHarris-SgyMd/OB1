@@ -134,7 +134,7 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
 {
   const remote = { base: "https://openrouter.ai/api/v1", local: false };
   const deny = resolveEgressPolicy({});
-  const subject: EgressSubject = { kind: "capture", actor: "ChatGPT", metadata: { source: "mcp", type: "reference", topics: ["Public", "ob1"] }, content: "Notes #public on the fork" };
+  const subject: EgressSubject = { kind: "capture", actor: "ChatGPT", metadata: { source: "mcp", type: "reference", topics: ["Public", "ob1"] }, content: "Notes #public in Daemonic Brain" };
 
   const refused = mayLeaveBox(subject, remote, deny);
   assert(!refused.allowed && refused.rule === "no-allow-term" && /OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(none set\) — the text was not sent to openrouter\.ai/.test(refused.reason),

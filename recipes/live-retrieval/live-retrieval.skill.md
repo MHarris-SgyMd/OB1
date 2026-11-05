@@ -1,9 +1,9 @@
 ---
 name: live-retrieval
 description: |
-  Automatically surfaces relevant Open Brain thoughts during active work. Fires on
+  Automatically surfaces relevant Daemonic Brain thoughts during active work. Fires on
   topic shifts (person names, project names, technologies mentioned). Silent on miss,
-  brief on hit. The read side of the Open Brain flywheel. Use proactively when the
+  brief on hit. The read side of the Daemonic Brain flywheel. Use proactively when the
   user starts discussing a recognizable topic, mentions a person by name, or shifts
   to a new subject area.
 author: Jared Irish
@@ -12,7 +12,7 @@ version: 1.0.0
 
 # Live Retrieval
 
-Surface relevant Open Brain thoughts when context signals suggest they would help.
+Surface relevant Daemonic Brain thoughts when context signals suggest they would help.
 Silent when nothing is found. Brief when something is.
 
 ## When to Fire
@@ -29,7 +29,7 @@ list_thoughts({ "limit": 5 })
 ```
 
 Surface as a brief note at the top of your first response:
-"OB1 context: [1-2 line summary of what's recent]"
+"Brain context: [1-2 line summary of what's recent]"
 
 If nothing relevant, say nothing.
 
@@ -63,7 +63,7 @@ Append a brief note to your response. Maximum 3 lines. Do not interrupt flow.
 Format:
 
 ```
-[OB1: Found 2 related thoughts]
+[Brain: Found 2 related thoughts]
 - "ACT NOW: [summary]" (captured March 14)
 - "[observation about this topic]" (captured March 11)
 ```
@@ -74,7 +74,7 @@ Say nothing. The user should never know a search happened and failed.
 
 ## Rules
 
-1. **Silent on miss.** No "I searched Open Brain and found nothing." Ever.
+1. **Silent on miss.** No "I searched Daemonic Brain and found nothing." Ever.
 2. **Brief on hit.** 3 lines max. The user's task is the priority, not the retrieval.
 3. **Dedup within session.** Track which thought IDs you've surfaced. Never show the same one twice.
 4. **No more than 3 retrievals per session.** After 3, stop searching. If you're hitting 3 before the session is half over, your topic detection is too sensitive.
@@ -103,7 +103,7 @@ After 10 sessions, review the log:
 - Not a brainstorm context loader (Panning for Gold handles that in Phase 2)
 - Not a full-text search tool (the user can call search_thoughts directly if they want that)
 
-This is the ambient, automatic, silent layer that makes Open Brain feel like it's thinking with you instead of just storing for you.
+This is the ambient, automatic, silent layer that makes Daemonic Brain feel like it's thinking with you instead of just storing for you.
 
 ## Failure Behavior
 

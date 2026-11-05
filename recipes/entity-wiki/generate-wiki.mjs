@@ -3,7 +3,7 @@
  * Entity Wiki — auto-generated wiki page per entity.
  *
  * For any person, project, topic, organization, tool, or place in your
- * Open Brain knowledge graph, this script aggregates every linked thought
+ * Daemonic Brain knowledge graph, this script aggregates every linked thought
  * and synthesizes a structured markdown wiki page via an LLM.
  *
  * Inspired by Karpathy's "LLM wiki" concept and the ExoCortex entity

@@ -6,7 +6,7 @@
 
 This skill turns a loose "analyze the competition" request into a structured competitive brief. It helps an AI client identify the relevant competitor set, compare positioning and packaging, call out real threats and openings, and end with recommended moves instead of a generic market summary.
 
-If you want the multi-step OB1 workflow that combines this with synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+If you want the multi-step Daemonic Brain workflow that combines this with synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ If you want the multi-step OB1 workflow that combines this with synthesis, meeti
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Public source access for competitor websites, pricing pages, docs, and announcements
 
@@ -51,7 +51,7 @@ When installed and invoked correctly, the skill should produce:
 - a comparison table across the dimensions that matter for the decision
 - a positioning or market-map view
 - explicit risks, opportunities, and recommended moves
-- optional Open Brain capture of the final brief or highest-value takeaways
+- optional Daemonic Brain capture of the final brief or highest-value takeaways
 
 ## Troubleshooting
 
@@ -66,4 +66,4 @@ Solution: Tighten the ICP or segment focus. "Accounting software" is too broad; 
 
 ## Notes for Other Clients
 
-This skill is portable because the core behavior is procedural, not tool-specific. Adapt the Open Brain tool names to whatever your client exposes, but preserve the same flow: frame the decision, compare the right dimensions, label inference, and finish with real strategic implications.
+This skill is portable because the core behavior is procedural, not tool-specific. Adapt the Daemonic Brain tool names to whatever your client exposes, but preserve the same flow: frame the decision, compare the right dimensions, label inference, and finish with real strategic implications.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Open Brain — Retroactive Metadata Extraction
+ * Daemonic Brain — Retroactive Metadata Extraction
  *
  * Finds thoughts missing LLM-extracted metadata (type, topics, people, etc.)
  * and backfills them using the same gpt-4o-mini extraction prompt that
@@ -141,7 +141,7 @@ async function updateThoughtMetadata(id: string, metadata: Record<string, unknow
 async function main() {
   const args = parseArgs();
 
-  console.log(`\nOpen Brain — Metadata Backfill`);
+  console.log(`\nDaemonic Brain — Metadata Backfill`);
   console.log(`  Source filter: ${args.source || "all"}`);
   console.log(`  Limit: ${args.limit}`);
   console.log(`  Batch size: ${args.batchSize}`);

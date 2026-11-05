@@ -177,7 +177,8 @@ const quoteName = (name: string) => `"${name.replace(/"/g, '""')}"`;
  * operator is the column's (the file that wants containment under a key has
  * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
  * 73): the bio worker's source and profile queries filter on `metadata->>…`,
- * and ident()'s refusal was a 500 at the worker's first query on the fork.
+ * and ident()'s refusal was a 500 at the worker's first query in
+ * Daemonic Brain.
  */
 const JSON_PATH = /^([A-Za-z_][A-Za-z0-9_]*)((?:->>?[A-Za-z_][A-Za-z0-9_]*)+)$/;
 
@@ -302,7 +303,7 @@ function shapeSql(rel: string): string {
   return `(SELECT c.oid::text || ':' || c.relnatts || ':' || md5(coalesce((SELECT string_agg(a.atttypid::text || '.' || a.atttypmod, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), '')) FROM pg_class c WHERE c.oid = ${rel})`;
 }
 
-/** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
+/** One store per connection URL: a server may create a client per request (the extension servers did), and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
 
 /**

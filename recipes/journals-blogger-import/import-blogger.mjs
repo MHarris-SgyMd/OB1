@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Journals/Blogger Import for Open Brain — an emitter of ingestion-contract items
+ * Journals/Blogger Import for Daemonic Brain — an emitter of ingestion-contract items
  *
  * Parses Google Blogger Atom XML exports and prints one ingestion-contract
  * item per post or comment, one JSON object per line, for the brain's

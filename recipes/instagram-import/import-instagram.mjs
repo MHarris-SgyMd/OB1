@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Instagram Import for Open Brain — an emitter of ingestion-contract items
+ * Instagram Import for Daemonic Brain — an emitter of ingestion-contract items
  *
  * Parses Instagram data exports (DM conversations, comments and post captions)
  * and prints one ingestion-contract item per thought, one JSON object per

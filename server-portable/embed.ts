@@ -716,8 +716,8 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: reasoningFields(env.OB1_METADATA_REASONING, "off"),
     subjectReasoning: reasoningFields(env.OB1_SUBJECT_REASONING, "on"),
-    // Seconds, as --ttl and --timeout are elsewhere in this fork; a timeout of
-    // zero would fail every call, so zero means the default too.
+    // Seconds, as --ttl and --timeout are elsewhere in Daemonic Brain; a
+    // timeout of zero would fail every call, so zero means the default too.
     timeoutMs: numberOr(env.OB1_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT_S, "positive") * 1000,
     egress: resolveEgressPolicy(env),
   };

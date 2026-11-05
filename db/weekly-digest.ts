@@ -5,8 +5,8 @@
  * decided by the egress gate. SMD-2239.
  *
  * This is the `db/` home for what `recipes/weekly-digest/weekly-digest.mjs` did
- * over PostgREST. That recipe was the fork's one true SINK: it paged the week's
- * rows and posted their synthesized text to a third party with no egress
+ * over PostgREST. That recipe was Daemonic Brain's one true SINK: it paged the
+ * week's rows and posted their synthesized text to a third party with no egress
  * handling at all — no OB1_EGRESS_*, no local declaration, no allowlist. Ported
  * onto a shim it would have read the table directly, below the server's egress
  * gate (SMD-1903), and sent whatever it paged. Here it reads through db/connect,

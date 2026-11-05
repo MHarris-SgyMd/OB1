@@ -19,7 +19,7 @@ The HVAC tech mentioned the pump was showing wear 18 months ago. The warranty on
 
 A maintenance scheduling and history system. Track recurring tasks, log completed work, and let your agent surface what needs attention before it becomes an emergency.
 
-On this fork the tracker is a **plugin**: [`plugins/home-maintenance`](../../plugins/home-maintenance/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_home_maintenance`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the tracker is a **plugin**: [`plugins/home-maintenance`](../../plugins/home-maintenance/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_home_maintenance`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `maintenance_tasks` — One-time or recurring tasks, each with its next due date and priority

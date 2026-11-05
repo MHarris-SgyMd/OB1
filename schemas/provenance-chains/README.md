@@ -11,10 +11,10 @@ Open Brain captures atomic thoughts, but as soon as you start synthesizing — w
 - `derivation_layer` (TEXT): `'primary'` (atomic capture) or `'derived'` (regenerable artifact). Defaults to `'primary'` so all existing rows keep working.
 - `supersedes` (UUID): optional pointer to a prior thought this one replaces — e.g., a regenerated digest replacing yesterday's.
 
-Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — the same names and argument lists, so the calls below run, but they return the fork's columns (no `derivation_layer`, `sensitivity_tier` or `restricted` flag), are `SECURITY INVOKER` and ungranted, and redact nothing by tier (025's header, departures 1 and 2) — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why). On plain Postgres — this fork's deploy — upstream's `GRANT`/`REVOKE` to Supabase's roles would fail (`role "authenticated" does not exist`), so they are gone too (SMD-1796): the two merges stay `REVOKE`d `FROM PUBLIC`, and `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on them.
+Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **In Daemonic Brain the first two are migrations 025 and 026's** — the same names and argument lists, so the calls below run, but they return Daemonic Brain's columns (no `derivation_layer`, `sensitivity_tier` or `restricted` flag), are `SECURITY INVOKER` and ungranted, and redact nothing by tier (025's header, departures 1 and 2) — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why). On plain Postgres — Daemonic Brain's deploy — upstream's `GRANT`/`REVOKE` to Supabase's roles would fail (`role "authenticated" does not exist`), so they are gone too (SMD-1796): the two merges stay `REVOKE`d `FROM PUBLIC`, and `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on them.
 
-- `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — upstream's walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction; the fork's (026) is a bounded walk-global BFS with the same depth and cycle columns and no redaction.
-- `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Upstream's always filters restricted rows out; the fork's (025) returns every derivative.
+- `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — upstream's walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction; Daemonic Brain's (026) is a bounded walk-global BFS with the same depth and cycle columns and no redaction.
+- `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Upstream's always filters restricted rows out; Daemonic Brain's (025) returns every derivative.
 - `merge_thought_provenance_metadata(thought_id UUID, provenance JSONB)` — atomically merges a provenance subtree into `metadata.provenance` server-side. The recipe uses this to avoid read-modify-write races with other writers (e.g., `eval.mjs`) that update the same `metadata` blob.
 - `merge_thought_eval_metadata(thought_id UUID, eval JSONB)` — is the race-free sibling for `eval.mjs`, avoiding stale-write conflicts with backfill's provenance merge. It performs a flat top-level `||` concat so eval's flat keys (`eval_score`, `eval_dimensions`, `eval_rationale`, `eval_graded_at`, `eval_grader`) replace their own values while preserving everything else (including `metadata.provenance`).
 
@@ -22,7 +22,7 @@ These functions power the **Provenance Chains Pipeline** recipe (backfill, eval,
 
 ### Provenance round-trip for stock RPC
 
-Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on `content_fingerprint` conflicts — not the new top-level `derived_from` / `derivation_layer` / `derivation_method` columns (on this fork, migration 025's `upsert_thought` writes `derived_from` and `supersedes` from the capture envelope; the two columns this file adds are still metadata-only). To keep provenance durable across re-captures, the recipe mirrors those fields into `metadata.provenance`. That mirror is applied via `merge_thought_provenance_metadata`, which atomically merges the subtree into `metadata.provenance` server-side, avoiding read-modify-write races with other writers (e.g., `eval.mjs` storing `eval_score`).
+Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on `content_fingerprint` conflicts — not the new top-level `derived_from` / `derivation_layer` / `derivation_method` columns (in Daemonic Brain, migration 025's `upsert_thought` writes `derived_from` and `supersedes` from the capture envelope; the two columns this file adds are still metadata-only). To keep provenance durable across re-captures, the recipe mirrors those fields into `metadata.provenance`. That mirror is applied via `merge_thought_provenance_metadata`, which atomically merges the subtree into `metadata.provenance` server-side, avoiding read-modify-write races with other writers (e.g., `eval.mjs` storing `eval_score`).
 
 ## Prerequisites
 
@@ -31,18 +31,18 @@ Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on 
 
 ### Canonical-schema compatibility
 
-Upstream's helpers `trace_provenance` and `find_derivatives` surfaced three fields — `type`, `source_type`, and `sensitivity_tier` — that the canonical `public.thoughts` table stores inside `metadata`, not as top-level columns, reading them via `metadata->>'…'`. On this fork the two helpers are migrations 025 and 026's, which read `type` and `source_type` the same way and have no tier; nothing in this file reads them any more.
+Upstream's helpers `trace_provenance` and `find_derivatives` surfaced three fields — `type`, `source_type`, and `sensitivity_tier` — that the canonical `public.thoughts` table stores inside `metadata`, not as top-level columns, reading them via `metadata->>'…'`. In Daemonic Brain the two helpers are migrations 025 and 026's, which read `type` and `source_type` the same way and have no tier; nothing in this file reads them any more.
 
 ### RLS compatibility
 
-The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. Upstream's helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design; on this fork that describes the two merge helpers this file installs, while `trace_provenance` and `find_derivatives` are 025 and 026's — `SECURITY INVOKER`, callable by the connecting role.
+The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. Upstream's helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design; in Daemonic Brain that describes the two merge helpers this file installs, while `trace_provenance` and `find_derivatives` are 025 and 026's — `SECURITY INVOKER`, callable by the connecting role.
 
 ### `derived_from` validation
 
-The migration only enforces that `derived_from` is NULL or a JSON array (on this fork that is 025's `thoughts_derived_from_is_array`; upstream's file added the same check as `thoughts_derived_from_is_array_check`, which is not added here). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
+The migration only enforces that `derived_from` is NULL or a JSON array (in Daemonic Brain that is 025's `thoughts_derived_from_is_array`; upstream's file added the same check as `thoughts_derived_from_is_array_check`, which is not added here). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
 
 - **Write time:** `recipes/provenance-chains/backfill.mjs` rejects any non-UUID ref (e.g., legacy `#123` integer references) with a clear error before it calls PATCH, so nothing malformed reaches PostgREST.
-- **Read time:** upstream's `trace_provenance` casts each element to `::uuid` inside its recursive CTE and its `find_derivatives` compares against a UUID-typed needle, so a non-UUID element surfaces as a `22P02 invalid_text_representation` error. **On this fork the opposite holds:** 025 and 026 keep only UUID-shaped elements before the cast, so a malformed element is dropped from the walk without an error — the write-time check is the only guard here.
+- **Read time:** upstream's `trace_provenance` casts each element to `::uuid` inside its recursive CTE and its `find_derivatives` compares against a UUID-typed needle, so a non-UUID element surfaces as a `22P02 invalid_text_representation` error. **In Daemonic Brain the opposite holds:** 025 and 026 keep only UUID-shaped elements before the cast, so a malformed element is dropped from the walk without an error — the write-time check is the only guard here.
 
 If you write to `derived_from` from code outside this recipe, mirror the UUID check before the PATCH.
 
@@ -64,7 +64,7 @@ SUPABASE (from your Open Brain setup)
 ![Step 1](https://img.shields.io/badge/Step_1-Run_Migration-1E88E5?style=for-the-badge)
 
 1. Apply [`schema.sql`](./schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role you connect as gets `EXECUTE` on the two `SECURITY DEFINER` merges the file installs, which stay `REVOKE`d `FROM PUBLIC` — the file itself grants nothing (this fork, SMD-1796).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role you connect as gets `EXECUTE` on the two `SECURITY DEFINER` merges the file installs, which stay `REVOKE`d `FROM PUBLIC` — the file itself grants nothing (Daemonic Brain, SMD-1796).
 
 The migration is idempotent — safe to re-run. It uses `ADD COLUMN IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, and `CREATE INDEX IF NOT EXISTS` throughout.
 
@@ -100,8 +100,8 @@ SELECT * FROM public.trace_provenance(
 -- Should return 0 rows on a fresh install (nothing has been marked derived yet).
 -- Note: upstream's helpers are service_role-only, so run these in the Supabase
 -- SQL Editor (which uses the service role) or via an edge function; PostgREST
--- calls as `authenticated` return 42501 permission denied there. On this fork
--- the two are 025's and run as the connecting role.
+-- calls as `authenticated` return 42501 permission denied there. In
+-- Daemonic Brain the two are 025's and run as the connecting role.
 SELECT * FROM public.find_derivatives(
   (SELECT id FROM public.thoughts LIMIT 1),
   50
@@ -112,9 +112,9 @@ SELECT * FROM public.find_derivatives(
 
 After running the migration:
 
-- `public.thoughts` has four columns for this: `derived_from JSONB` and `supersedes UUID`, migration 025's on this fork and possibly already set by 025's capture, beside the two this file adds, `derivation_method TEXT` and `derivation_layer TEXT NOT NULL DEFAULT 'primary'`.
+- `public.thoughts` has four columns for this: `derived_from JSONB` and `supersedes UUID`, migration 025's in Daemonic Brain and possibly already set by 025's capture, beside the two this file adds, `derivation_method TEXT` and `derivation_layer TEXT NOT NULL DEFAULT 'primary'`.
 - Every existing row has `derivation_layer = 'primary'` and `derivation_method` NULL — no data loss, no behavior change for existing MCP tools.
-- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER` and `REVOKE`d `FROM PUBLIC` — upstream granted them to `service_role` only (clients reached them through its edge function, never as `authenticated`); on this fork `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on both (SMD-1796).
+- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER` and `REVOKE`d `FROM PUBLIC` — upstream granted them to `service_role` only (clients reached them through its edge function, never as `authenticated`); in Daemonic Brain `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on both (SMD-1796).
 - Three indexes exist: `idx_thoughts_derived_from` (GIN), `idx_thoughts_derivation_layer` (btree), and `idx_thoughts_supersedes` (partial btree).
 - PostgREST schema cache has been reloaded (`NOTIFY pgrst, 'reload schema'`).
 
@@ -127,7 +127,7 @@ This migration assumes `public.thoughts.id` is a `UUID` — the canonical Open B
 - Inside `trace_provenance`, `jsonb_array_elements_text(...)::uuid` → `::bigint`
 - Inside `find_derivatives`, `jsonb_build_array(p_thought_id::text)` → `jsonb_build_array(p_thought_id)` (so GIN containment matches a JSON number instead of a JSON string)
 
-On this fork the two query functions are migrations 025 and 026's and `thoughts.id` is UUID by 001; the note applies to this file's two merge helpers and their `thought_id UUID` parameters only.
+In Daemonic Brain the two query functions are migrations 025 and 026's and `thoughts.id` is UUID by 001; the note applies to this file's two merge helpers and their `thought_id UUID` parameters only.
 
 `derived_from` stays JSONB in either case, but element storage format changes (string UUIDs vs JSON numbers).
 
@@ -136,10 +136,11 @@ On this fork the two query functions are migrations 025 and 026's and `thoughts.
 If you need to remove everything this migration added, run the block below. The rollback is lossy — any recorded provenance will be permanently dropped.
 
 ```sql
--- This fork: trace_provenance and find_derivatives are migrations 025/026's
--- here and are not dropped — nor are the derived_from and supersedes columns,
--- which 025 owns and upsert_thought writes, nor 025's two indexes on them,
--- idx_thoughts_derived_from and idx_thoughts_supersedes (SMD-1250).
+-- Daemonic Brain: trace_provenance and find_derivatives are migrations
+-- 025/026's here and are not dropped — nor are the derived_from and
+-- supersedes columns, which 025 owns and upsert_thought writes, nor 025's two
+-- indexes on them, idx_thoughts_derived_from and idx_thoughts_supersedes
+-- (SMD-1250).
 
 -- Drop the index this file added
 DROP INDEX IF EXISTS public.idx_thoughts_derivation_layer;
@@ -163,17 +164,17 @@ NOTIFY pgrst, 'reload schema';
 
 ## Next Steps
 
-Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function. On this fork those handlers read `restricted`, `derivation_layer` and `sensitivity_tier` from rows the fork's two functions do not return, `derivation_method` comes back from `metadata->>'derivation_method'` rather than the column this file adds (the backfill's rows show NULL there), and `find_derivatives` filters nothing — expect those fields undefined and every derivative listed (SMD-1250).
+Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function. In Daemonic Brain those handlers read `restricted`, `derivation_layer` and `sensitivity_tier` from rows Daemonic Brain's two functions do not return, `derivation_method` comes back from `metadata->>'derivation_method'` rather than the column this file adds (the backfill's rows show NULL there), and `find_derivatives` filters nothing — expect those fields undefined and every derivative listed (SMD-1250).
 
 ## Troubleshooting
 
 **Issue: "column already exists" error on re-run**
 Solution: Expected — the migration uses `ADD COLUMN IF NOT EXISTS`. The message is informational only. No harm done.
 
-**Issue: "operator does not exist: uuid = text" inside `trace_provenance`** (upstream's function; the fork's is 026's over a UUID id)
+**Issue: "operator does not exist: uuid = text" inside `trace_provenance`** (upstream's function; Daemonic Brain's is 026's over a UUID id)
 Solution: Your `thoughts.id` is not a UUID. See the [ID Type Note](#id-type-note) above — you need to change function parameter types to match your schema.
 
-**Issue: `find_derivatives` returns zero rows even when derivatives exist** (upstream's function; the fork's 025 canonicalises `derived_from` elements to lowercase UUID strings on write)
+**Issue: `find_derivatives` returns zero rows even when derivatives exist** (upstream's function; Daemonic Brain's 025 canonicalises `derived_from` elements to lowercase UUID strings on write)
 Solution: The function builds its GIN needle as a JSON **string** (`["<uuid>"]`). If you populated `derived_from` with JSON numbers (e.g., BIGINT IDs serialized as numbers), containment will not match. Either store UUIDs as JSON strings consistently, or modify the function per the [ID Type Note](#id-type-note).
 
 **Issue: PostgREST still returns old schema after migration**

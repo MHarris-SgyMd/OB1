@@ -1,6 +1,6 @@
 {
   "name": "Autodream Brain Sync",
-  "description": "Syncs Claude Code's local memory saves to Open Brain so memories are accessible from all AI clients and devices.",
+  "description": "Syncs Claude Code's local memory saves to Daemonic Brain so memories are accessible from all AI clients and devices.",
   "category": "skills",
   "author": {
     "name": "rumbitopi",

@@ -85,10 +85,10 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). (The Pro dashboard's per-item "view thought" link carried that UUID to its thought page from SMD-2128 until that dashboard retired with SMD-3309.)
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. In Daemonic Brain the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). (The Pro dashboard's per-item "view thought" link carried that UUID to its thought page from SMD-2128 until that dashboard retired with SMD-3309.)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/))
 
 ### Required RPCs
 
@@ -96,9 +96,9 @@ This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, the fork's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which the fork's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
+| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, Daemonic Brain's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which Daemonic Brain's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
 | `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
-| `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; the fork's thought id is a UUID — SMD-2128) |
+| `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; Daemonic Brain's thought id is a UUID — SMD-2128) |
 
 ## Credential Tracker
 
@@ -128,7 +128,7 @@ EMBEDDING (at least one required)
 
 ### 1. Run the server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape), its own `_shared/` helpers and two names from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's): `routable`, the request rebuilt where its URL will not parse (SMD-2595) — its key is still its own compare — and `listenOn`, the one IP address `OB1_LISTEN_HOST` names to listen on, every address unset (SMD-3323). It is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape), its own `_shared/` helpers and two names from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's): `routable`, the request rebuilt where its URL will not parse (SMD-2595) — its key is still its own compare — and `listenOn`, the one IP address `OB1_LISTEN_HOST` names to listen on, every address unset (SMD-3323). It is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \
@@ -138,7 +138,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `integrations/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `integrations/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
@@ -256,7 +256,7 @@ After completing setup, you should be able to:
 1. Send raw text to the `/smart-ingest` endpoint and receive extracted thoughts
 2. Use dry-run mode to preview extractions before committing
 3. Execute dry-run jobs to write thoughts to the database
-4. See new thoughts in your brain with `source_type = 'smart_ingest'`, each with its vector and `embedding_model`, and a `create_revision` item's thought pointing at the one it revises through `supersedes`; every item of a finished job is `executed` — its `result_thought_id` the thought it wrote or matched, where there was one — or `failed`, with its `error_message` (SMD-2128). The vectors this server makes are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536`); on this fork's default, `qwen3-embedding:4b` at 1024, `match_thoughts` refuses the vector and every item is skipped as `semantic_check_failed_skipped`
+4. See new thoughts in your brain with `source_type = 'smart_ingest'`, each with its vector and `embedding_model`, and a `create_revision` item's thought pointing at the one it revises through `supersedes`; every item of a finished job is `executed` — its `result_thought_id` the thought it wrote or matched, where there was one — or `failed`, with its `error_message` (SMD-2128). The vectors this server makes are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536`); on Daemonic Brain's default, `qwen3-embedding:4b` at 1024, `match_thoughts` refuses the vector and every item is skipped as `semantic_check_failed_skipped`
 5. Observe deduplication in action — re-sending the same text returns the existing job instead of creating duplicates
 
 ## Troubleshooting

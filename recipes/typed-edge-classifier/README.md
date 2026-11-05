@@ -1,6 +1,6 @@
 # Typed Edge Classifier
 
-> **On this fork (SMD-2126).** `classify-edges.mjs` reaches the brain as a PostgREST client — `${OPEN_BRAIN_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`OPEN_BRAIN_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`. On a fork brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the fork's `record_thought_entities`; the decision says how.
+> **In Daemonic Brain (SMD-2126).** `classify-edges.mjs` reaches the brain as a PostgREST client — `${OPEN_BRAIN_URL}/rest/v1/…` with a service-role key — and Daemonic Brain's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`OPEN_BRAIN_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`. On a migrated brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the brain's `record_thought_entities`; the decision says how.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -14,7 +14,7 @@ Walks candidate pairs of thoughts (pairs that share at least N entities via `tho
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [`schemas/typed-reasoning-edges/`](../../schemas/typed-reasoning-edges/) applied (this recipe writes to `thought_edges`)
 - [`entity-extraction` schema (PR #197)](https://github.com/NateBJones-Projects/OB1/pull/197) applied — this is where candidate pairs come from (thoughts that share entities via `thought_entities`). You can skip this if you only ever pass explicit `--pair UUID_A,UUID_B`.
 - Node.js 18+

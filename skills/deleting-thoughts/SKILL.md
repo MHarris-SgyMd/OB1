@@ -1,8 +1,8 @@
 ---
 name: deleting-thoughts
 description: |
-  Use when asked to delete, remove, purge, wipe, or "get rid of" an Open Brain
-  thought, or before calling delete_thought (a tool of the core Open Brain
+  Use when asked to delete, remove, purge, wipe, or "get rid of" a Daemonic Brain
+  thought, or before calling delete_thought (a tool of the core Daemonic Brain
   connector, registered for a write key), which deletes with no undo tool. Also use when tempted to delete a
   thought that is merely outdated or wrong. To edit or deprecate instead of
   removing, see updating-thoughts.
@@ -14,11 +14,11 @@ version: 1.1.0
 
 ## Overview
 
-`delete_thought` (on the core Open Brain connector, for a write key) performs a
+`delete_thought` (on the core Daemonic Brain connector, for a write key) performs a
 **permanent delete** — the row and its search chunks are gone the moment it
 returns, with no soft-delete and no restore tool. The audit trail keeps the
 previous content, so an operator can reconstruct a thought removed in error;
-nothing you can call undoes it. The
+nothing you can call undoes it. The upstream
 Open Brain maintainer's stance is **"deprecate and version rather than
 delete."** So deletion is a last resort, and every delete must target an id you
 verified this session.
@@ -92,7 +92,7 @@ was removed.
 
 ## Notes
 
-- Connector: the core Open Brain connector. It lists `delete_thought` only for
+- Connector: the core Daemonic Brain connector. It lists `delete_thought` only for
   a write-scoped key; a read or capture key does not see the tool at all. (The
   standalone `delete-thought-mcp` server retired with SMD-1931.)
 - Every delete is recorded in the brain's audit trail with the previous

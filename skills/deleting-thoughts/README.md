@@ -1,10 +1,10 @@
 # Deleting Thoughts
 
-> Safety-focused behavioral skill for removing an Open Brain thought with the `delete_thought` MCP tool.
+> Safety-focused behavioral skill for removing a Daemonic Brain thought with the `delete_thought` MCP tool.
 
 ## What It Does
 
-Guards the one destructive Open Brain operation. `delete_thought` is a hard,
+Guards the one destructive Daemonic Brain operation. `delete_thought` is a hard,
 irreversible delete, so this skill makes the client resolve the id via search,
 show the target, and confirm before firing — and steers "outdated/wrong" cases
 toward updating or deprecating instead of deleting.
@@ -15,12 +15,12 @@ toward updating or deprecating instead of deleting.
 - Codex
 - Grok
 - Any AI client that supports reusable skills, rules, or custom instructions and
-  is connected to the core Open Brain MCP server with a write-scoped key
+  is connected to the core Daemonic Brain MCP server with a write-scoped key
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A write-scoped key on your Open Brain connector — the core MCP server lists
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
+- A write-scoped key on your Daemonic Brain connector — the core MCP server lists
   `delete_thought` only for a write key (the standalone `delete-thought-mcp`
   server retired with SMD-1931)
 - A read tool (`search_thoughts` / `list_thoughts`) to resolve thought ids
@@ -62,7 +62,7 @@ Solution: That is an update, not a delete — tag it `superseded` via the
 
 ## Notes for Other Clients
 
-Client-agnostic: it names the tool (`delete_thought`) on the core Open Brain
+Client-agnostic: it names the tool (`delete_thought`) on the core Daemonic Brain
 connector, not a specific client. Adapt only the
 skills-directory path per client. Pairs with **updating-thoughts** for the
 non-destructive path.

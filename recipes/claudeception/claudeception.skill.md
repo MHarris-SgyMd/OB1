@@ -1,6 +1,6 @@
 ---
 name: aiception
-description: Continuous learning system that extracts reusable knowledge from work sessions. Triggers: (1) /aiception command, (2) "save this as a skill" or "extract a skill", (3) "what did we learn?", (4) After non-obvious debugging or trial-and-error discovery. Creates new skills when valuable, reusable knowledge is identified. Integrates with Open Brain to prevent duplicates.
+description: Continuous learning system that extracts reusable knowledge from work sessions. Triggers: (1) /aiception command, (2) "save this as a skill" or "extract a skill", (3) "what did we learn?", (4) After non-obvious debugging or trial-and-error discovery. Creates new skills when valuable, reusable knowledge is identified. Integrates with Daemonic Brain to prevent duplicates.
 author: Jared Irish
 version: 2.0.0
 ---
@@ -40,7 +40,7 @@ Before extracting, verify:
 
 ## Extraction Process
 
-### Step 1: Search Open Brain for Existing Knowledge
+### Step 1: Search Daemonic Brain for Existing Knowledge
 
 Before creating anything, check if this knowledge already exists:
 
@@ -117,9 +117,9 @@ Save to the appropriate location:
 - **Project-specific**: `.claude/skills/[skill-name]/SKILL.md`
 - **User-wide**: `~/.claude/skills/[skill-name]/SKILL.md`
 
-### Step 6: Capture to Open Brain
+### Step 6: Capture to Daemonic Brain
 
-After creating the skill, save it to Open Brain so future sessions can find it:
+After creating the skill, save it to Daemonic Brain so future sessions can find it:
 
 ```
 capture_thought({
@@ -138,8 +138,8 @@ Before finalizing, verify:
 - [ ] General enough to be reusable
 - [ ] No credentials or internal URLs included
 - [ ] Doesn't duplicate existing skills
-- [ ] Open Brain searched before creating
-- [ ] Open Brain captured after creating
+- [ ] Daemonic Brain searched before creating
+- [ ] Daemonic Brain captured after creating
 
 ## Retrospective Mode
 
@@ -167,7 +167,7 @@ rejects requests containing a `tags` field (returns "request/body/tags is read-o
 even though the GET response includes tags. The API also uses a different key than
 what's stored in the server's .env file.
 
-**Step 1 - Search Open Brain**: `search_thoughts("n8n workflow API tags read-only")`
+**Step 1 - Search Daemonic Brain**: `search_thoughts("n8n workflow API tags read-only")`
 No match found.
 
 **Step 2 - Check existing skills**: Search `~/.claude/skills/` for n8n-related skills.
@@ -189,7 +189,7 @@ n8n's REST API has undocumented constraints...
 
 **Step 4 - Save**: `~/.claude/skills/n8n-workflow-api-quirks/SKILL.md`
 
-**Step 5 - Capture to Open Brain**: Records the skill's existence for cross-session discovery.
+**Step 5 - Capture to Daemonic Brain**: Records the skill's existence for cross-session discovery.
 
 ## Anti-Patterns
 

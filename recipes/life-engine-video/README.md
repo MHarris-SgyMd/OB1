@@ -10,7 +10,7 @@ An add-on for [Life Engine](../life-engine/) that replaces (or supplements) text
 <!-- -->
 
 > [!NOTE]
-> **Expect iteration.** Your first rendered video will have timing issues, subtitle drift, or a voiceover script that sounds stilted. That's normal. Each render gives you feedback — adjust the VO script guidelines, tweak the subtitle chunking, tune the ElevenLabs voice settings. The structured data flowing from your Open Brain means the *content* improves automatically as your knowledge base grows. The *presentation* improves as you and your agent dial in the rendering pipeline together.
+> **Expect iteration.** Your first rendered video will have timing issues, subtitle drift, or a voiceover script that sounds stilted. That's normal. Each render gives you feedback — adjust the VO script guidelines, tweak the subtitle chunking, tune the ElevenLabs voice settings. The structured data flowing from your brain means the *content* improves automatically as your knowledge base grows. The *presentation* improves as you and your agent dial in the rendering pipeline together.
 
 ---
 
@@ -82,7 +82,7 @@ Life Engine Loop fires
         │
         ▼
   Gather briefing data
-  (calendar, OB1, habits)
+  (calendar, Daemonic Brain, habits)
         │
         ▼
   Generate VO script
@@ -176,7 +176,7 @@ life-engine-video/
 │   │   ├── TitleScene.tsx     # "Good Morning" opener
 │   │   ├── CalendarScene.tsx  # Today's events
 │   │   ├── HabitsScene.tsx    # Habit reminders
-│   │   ├── PrepScene.tsx      # Meeting prep from OB1
+│   │   ├── PrepScene.tsx      # Meeting prep from Daemonic Brain
 │   │   ├── SummaryScene.tsx   # Evening wrap-up
 │   │   └── ClosingScene.tsx   # Sign-off
 │   ├── shared/
@@ -233,7 +233,7 @@ export interface BriefingData {
   prep?: {
     meetingTitle: string;
     attendees: string[];
-    obContext: string[];   // relevant OB1 thoughts
+    obContext: string[];   // relevant Daemonic Brain thoughts
     talkingPoints: string[];
   };
 
@@ -678,7 +678,7 @@ a video briefing instead of (or in addition to) a text message.
 - NOT for check-in prompts (text is faster for quick interactions)
 
 ### Video briefing flow:
-1. Gather all briefing data (calendar, habits, OB1 context)
+1. Gather all briefing data (calendar, habits, Daemonic Brain context)
 2. Write a natural voiceover script (30-45 seconds spoken)
 3. Call ElevenLabs /with-timestamps API to generate audio + timing
 4. Save audio to ~/life-engine-video/public/voice.mp3
@@ -769,7 +769,7 @@ Place in `public/music.mp3`. The composition plays it at 12-15% volume under the
 
 ### Dynamic Scene Assembly
 
-Instead of fixed scene types, let Claude decide which scenes to include based on the data. If there are no habits, skip the habits scene. If there's a lot of OB1 context for a meeting, add an extra context scene. The composition adapts to the data.
+Instead of fixed scene types, let Claude decide which scenes to include based on the data. If there are no habits, skip the habits scene. If there's a lot of Daemonic Brain context for a meeting, add an extra context scene. The composition adapts to the data.
 
 ### Weekly Recap Videos
 

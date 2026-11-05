@@ -237,7 +237,7 @@ $$;
 --        you've added RLS policies you're comfortable with.
 -- ============================================================
 
--- This fork (SMD-1796): the grants the section above describes — the two
+-- Daemonic Brain (SMD-1796): the grants the section above describes — the two
 -- tables TO service_role, EXECUTE on crm_person_tiers TO authenticated and
 -- service_role — are gone. Those are Supabase's roles: on plain Postgres the
 -- first GRANT stops the file (`role "service_role" does not exist`).

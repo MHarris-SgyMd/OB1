@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Open Brain — Perplexity Export Importer
+Daemonic Brain — Perplexity Export Importer
 
 Extracts conversations and memories from a Perplexity data export (.xlsx),
 filters deleted/already-imported items, summarizes conversations into
-1-3 distilled thoughts via LLM, and loads everything into your Open Brain.
+1-3 distilled thoughts via LLM, and loads everything into your brain.
 
 Memory entries are ingested directly (already summarized by Perplexity).
 JSON profile rows (MEMORY_KEY empty, MEMORY_VALUE is a JSON object) are
@@ -638,7 +638,7 @@ def parse_date(s):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Import Perplexity conversations and memories into Open Brain",
+        description="Import Perplexity conversations and memories into Daemonic Brain",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:

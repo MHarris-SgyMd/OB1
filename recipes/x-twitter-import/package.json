@@ -1,7 +1,7 @@
 {
   "name": "ob1-recipe-x-twitter-import",
   "version": "1.0.0",
-  "description": "Import X (Twitter) data exports — tweets, DMs, Grok chats — into Open Brain",
+  "description": "Import X (Twitter) data exports — tweets, DMs, Grok chats — into Daemonic Brain",
   "type": "module",
   "main": "import-x-twitter.mjs",
   "scripts": {

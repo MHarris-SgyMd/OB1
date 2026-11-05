@@ -6,7 +6,7 @@
 ## What It Does
 
 This skill runs a weekly scan across a suggested universe of categories and
-companies, then reweights the analysis using what Open Brain already knows
+companies, then reweights the analysis using what Daemonic Brain already knows
 about the user. It produces a `diff, not digest`: what changed, why it
 matters, and what to watch next.
 
@@ -24,7 +24,7 @@ companies for any fast-moving market and keep the same structural-diff process.
 
 ## Prerequisites
 
-- Working Open Brain setup if you want memory search and capture
+- Working Daemonic Brain setup if you want memory search and capture
   ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - One of:
@@ -98,9 +98,9 @@ When installed and invoked correctly, the skill should produce:
 
 - a coverage note explaining what was scanned
 - 3-7 structural shifts instead of a long news list
-- user-specific implications pulled from Open Brain memory
+- user-specific implications pulled from Daemonic Brain memory
 - a watchlist for next week
-- optional capture of the weekly digest back into Open Brain
+- optional capture of the weekly digest back into Daemonic Brain
 
 ## Troubleshooting
 
@@ -110,7 +110,7 @@ constraint shifts, leverage shifts, broken assumptions, and exposed
 dependencies.
 
 **Issue: The final diff feels generic**
-Solution: Check that the client actually searched Open Brain first. This skill
+Solution: Check that the client actually searched Daemonic Brain first. This skill
 gets sharper when it can pull active projects, recurring interests, and prior
 digests before ranking the week's news.
 
@@ -126,6 +126,6 @@ See [references/live-search-upgrade.md](./references/live-search-upgrade.md).
 ## Notes for Other Clients
 
 This skill is portable because the logic is procedural. Any client that can
-load reusable instructions and access either Open Brain or a weekly source set
+load reusable instructions and access either Daemonic Brain or a weekly source set
 can run it. If the client has no live search, feed it a source packet and ask
 for the same structural-diff output.

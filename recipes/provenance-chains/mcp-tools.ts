@@ -6,7 +6,7 @@
 // Supabase project (adds the derived_from / derivation_* columns and the
 // trace_provenance / find_derivatives helper functions).
 //
-// The snippets below match the canonical Open Brain setup where
+// The snippets below match the canonical Daemonic Brain setup where
 // public.thoughts.id is a UUID. If your project has migrated thoughts to a
 // BIGINT primary key, swap z.string().uuid() for z.number().int().positive()
 // and update the id casts accordingly.
@@ -18,16 +18,17 @@
 //   - `getEmbedding`    (Tool 3 only) canonical index.ts helper — text → vector
 //   - `EMBEDDING_MODEL` (Tool 3 only) the model getEmbedding calls, as
 //                        OB1_EMBEDDING_MODEL spells it — the label migration
-//                        021 writes beside the vector (this fork's
+//                        021 writes beside the vector (Daemonic Brain's
 //                        server-portable/index.ts defines it; an older copy
 //                        hard-codes the model name in getEmbedding, so lift it
 //                        into a constant)
 //   - `extractMetadata` (Tool 3 only) canonical index.ts helper — text → metadata
-//                        (in this fork's server-portable/index.ts both helpers
-//                        take an EgressSubject second — whose text this is, for
-//                        the egress gate, SMD-1903 — so a paste-in against the
-//                        fork passes `{ kind: "capture", actor: <key name>,
-//                        content }`; the Edge Function copies take the text alone)
+//                        (in Daemonic Brain's server-portable/index.ts both
+//                        helpers take an EgressSubject second — whose text this
+//                        is, for the egress gate, SMD-1903 — so a paste-in against
+//                        Daemonic Brain passes `{ kind: "capture", actor: <key
+//                        name>, content }`; the Edge Function copies take the text
+//                        alone)
 //
 // Tool 3 (capture_derived_thought) is a WRITE tool and is deliberately a
 // SEPARATE tool from the canonical `capture_thought`, so the everyday
@@ -401,7 +402,7 @@ server.registerTool(
   {
     title: "Capture Derived Thought",
     description:
-      "Save a synthesized/derived artifact (digest, wiki, research summary, report) to Open Brain WITH its provenance. Use this instead of capture_thought ONLY when the thing you are saving was derived from other thoughts already in the brain. Records the parent thought IDs so 'why do I believe this?' and 'what uses this?' stay answerable.",
+      "Save a synthesized/derived artifact (digest, wiki, research summary, report) to Daemonic Brain WITH its provenance. Use this instead of capture_thought ONLY when the thing you are saving was derived from other thoughts already in the brain. Records the parent thought IDs so 'why do I believe this?' and 'what uses this?' stay answerable.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,

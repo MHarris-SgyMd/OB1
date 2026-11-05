@@ -1,5 +1,5 @@
 /**
- * commit-grammar.ts — the fork's commit-message grammar, in one place.
+ * commit-grammar.ts — Daemonic Brain's commit-message grammar, in one place.
  *
  * The pieces that read a commit subject and body: the review-pass number, the
  * finding bullets of a body, and the `(caught: …; held: …)` tag on a bullet.
@@ -7,8 +7,8 @@
  * scripts/commitlint.config.ts enforces them (SMD-1808) — so they live here,
  * imported by both, rather than defined twice. Pure string work: no git, no
  * process state, safe to import (mechanism-yield.ts runs a CLI on load; this
- * does not). The rule the fork already applies to SQL: call the function that
- * owns a rule.
+ * does not). The rule Daemonic Brain already applies to SQL: call the function
+ * that owns a rule.
  *
  *   bun scripts/commit-grammar.ts --self-check
  */

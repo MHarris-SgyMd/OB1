@@ -1,6 +1,6 @@
 {
   "name": "Professional CRM",
-  "description": "Track professional contacts, log interactions, manage opportunities, and connect your network to your thoughts. On this fork it is the professional-crm plugin, turned on in the brain itself (SMD-2311).",
+  "description": "Track professional contacts, log interactions, manage opportunities, and connect your network to your thoughts. In Daemonic Brain it is the professional-crm plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

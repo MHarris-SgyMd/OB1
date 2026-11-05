@@ -2,7 +2,7 @@
 
 A guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.
 
-> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them: a vendored MCP server in `integrations/` now first needs test-auth's MCP kind back, which held such a server and retired with SMD-3747 (its guard fails one); new operations on the brain are a plugin instead (`plugins/README.md`).
+> **Daemonic Brain (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them, and with them the MCP packages from the vendored servers' install. This tree takes no vendored MCP server (`integrations/test-auth.ts` fails one): new operations on the brain are a plugin instead (`plugins/README.md`), on the brain's own connector and behind its own scopes.
 
 ## When You Need This
 
@@ -46,7 +46,7 @@ Control operations per table:
 Before building a shared MCP server:
 
 - Working Open Brain installation with your primary MCP server
-- A PostgreSQL database with RLS support — the fork's stack, or a Supabase project
+- A PostgreSQL database with RLS support — Daemonic Brain's stack, or a Supabase project
 - Node.js 18+ installed
 - Understanding of database roles and permissions
 - The other person's Claude Desktop config access (or ability to share config)
@@ -247,14 +247,14 @@ The shared server's keys are its own environment, separate from the extension se
 
 ```bash
 # Mint a separate, named key for the shared server — read-scoped unless this
-# member should add or check off items (Step 3 of the Run a Remote MCP Server
+# member should add or check off items (Step 3 of the Run a Vendored Server
 # primitive shows the by-hand form). The HASH goes in MCP_HOUSEHOLD_ACCESS_KEYS;
 # the key goes in the other person's connector URL. From a checkout, in a
 # subshell so the cwd stays here:
 (cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
 ```
 
-The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` pins the packages the file imports.
+The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` pinned the packages the file imports.
 
 ### Step 5: Run It as a Separate Server
 

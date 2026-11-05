@@ -23,7 +23,7 @@ This schema is required by:
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A Postgres with the `thoughts` table already created (from the core setup) — the fork's stack, or a Supabase project
+- A Postgres with the `thoughts` table already created (from the core setup) — Daemonic Brain's stack, or a Supabase project
 - Recommended: [enhanced-thoughts](../enhanced-thoughts/) schema applied first — `get_book_highlights` filters on `source_type = 'readwise'`, which is a top-level column added by that extension. Without it, the RPC will not return rows.
 
 ## Credential Tracker
@@ -44,7 +44,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (Daemonic Brain, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
 3. Open **Table Editor** and confirm the `readwise_books` table appears with the expected columns
 4. Navigate to **Database > Functions** and verify two new functions exist: `get_book_highlights`, `increment_book_highlight_count`
 
