@@ -1671,7 +1671,7 @@ export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason:
 
 /** What the server process knows about itself — no database needed. */
 export interface ServerFacts {
-  /** FORK_VERSION (server-portable/version.ts). */
+  /** BRAIN_VERSION (server-portable/version.ts). */
   version: string;
   /** The migration range releases.json records for that version, or null. */
   releaseRange: readonly [number, number] | null;

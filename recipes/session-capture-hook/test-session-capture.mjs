@@ -467,7 +467,7 @@ let episodesLines;
     ask("also note SMD-1844's compose fix is merged already", { ...B, ts: t("10", "20") }), // a mention while anchored: no boundary
     say("Noted; the forwards are in.", { ...B, ts: t("10", "30") }),
     ask("now smd-1917: split FORK.md into one file per change", { ...B, ts: t("10", "40") }), // a new ticket, and the session then moves to its branch: episode 3 opens HERE
-    ...tool("e7", "Edit", { file_path: "/repo/wt/smd-1917-fork-md/scripts/fork-index.ts", old_string: "a", new_string: "b" }, "ok", { ...C, ts: t("10", "50") }),
+    ...tool("e7", "Edit", { file_path: "/repo/wt/smd-1917-fork-md/scripts/changes-index.ts", old_string: "a", new_string: "b" }, "ok", { ...C, ts: t("10", "50") }),
     say("Split done.", { ...C, ts: t("11", "00") }),
     compaction({ ...C, ts: t("11", "05") }),
     say("Pushed.", { ...C, ts: t("11", "06") }),
@@ -489,7 +489,7 @@ let episodesLines;
     "episode 1: its two asks, the outcome the assistant gave after the compaction and before the next ask, its own search, commit and file; the branch made after its first ask is its own; it ended at the compaction");
   assert(e2.prompts.length === 2 && /smd-1843/.test(e2.prompts[0]) && /SMD-1844's/.test(e2.prompts[1]) && e2.opened.kind === "compaction" && e2.opened.ticket === "SMD-1843" && [...e2.retrieved].join() === [uuid(12), uuid(13)].join() && [...e2.captured].join() === uuid(14) && e2.cwd === "/repo/wt/smd-1843-env" && [...e2.roots].join() === "/repo/main-wt,/repo/wt/smd-1843-env" && e2.closed.kind === "ticket" && e2.closed.ticket === "SMD-1917" && e2.first === t("10", "00") && e2.last === t("10", "30"),
     "episode 2: begun after the compaction with SMD-1843, the move to its worktree and branch its own; a mention of the earlier ticket while on its branch does not end it; ended when SMD-1917 was taken up, its span its content's");
-  assert(e3.prompts.length === 1 && /^now smd-1917/.test(e3.prompts[0]) && e3.opened.kind === "ticket" && e3.opened.ticket === "SMD-1917" && e3.branch === "michaelharris/smd-1917-fork-md" && e3.outcome === "Pushed." && [...e3.files].join() === "/repo/wt/smd-1917-fork-md/scripts/fork-index.ts" && e3.retrieved.size === 0 && e3.closed.kind === "compaction" && e3.last === t("11", "06"),
+  assert(e3.prompts.length === 1 && /^now smd-1917/.test(e3.prompts[0]) && e3.opened.kind === "ticket" && e3.opened.ticket === "SMD-1917" && e3.branch === "michaelharris/smd-1917-fork-md" && e3.outcome === "Pushed." && [...e3.files].join() === "/repo/wt/smd-1917-fork-md/scripts/changes-index.ts" && e3.retrieved.size === 0 && e3.closed.kind === "compaction" && e3.last === t("11", "06"),
     "episode 3: opened AT the ask naming the new ticket — typed on the old branch, the session moved to the ticket's branch before the next ask — with the file and the outcome that followed; ended at the second compaction");
   assert(e4.prompts.join() === "review for issues" && e4.opened.kind === "compaction" && e4.opened.ticket === undefined && [...e4.retrieved].join() === uuid(15) && !e4.closed && e4.first === t("11", "10") && e4.last === t("11", "20") && e4.sessionId === E_SID && e4.harness === "claude-code",
     "episode 4: begun after the second compaction, asked without a ticket, still open");

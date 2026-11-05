@@ -138,7 +138,7 @@ export const DEFAULT_EMBEDDING_DIM = 1024;
  * at all: pointing local model names at OpenRouter produces a 404 per capture, and
  * the embedding one is fatal rather than degraded. Overriding the provider means
  * overriding the models too, which SETUP.md says and
- * scripts/check-fork-consistency.ts enforces.
+ * scripts/check-consistency.ts enforces.
  */
 export const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434/v1";
 
@@ -1381,7 +1381,7 @@ export const LOCK_TIMEOUT_S = 10;
  * sharing a number (two branches each adding "the next number" is how it
  * happens; the fork has renumbered twice; SMD-1421). One rule, read by
  * migrate.ts at load — every operator's run and every compose start — and by
- * scripts/check-fork-consistency.ts on every push, where the collision is
+ * scripts/check-consistency.ts on every push, where the collision is
  * made. Only .sql files are judged.
  * @param {string[]} names
  * @returns {string | null}
@@ -1551,7 +1551,7 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
  * The compose service names a model endpoint may live at — the `ollama`
  * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
  * passes these to isLocalHostname (a service name is local: the compose
- * network), and check 14 of scripts/check-fork-consistency.ts holds
+ * network), and check 14 of scripts/check-consistency.ts holds
  * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
  * the file defaults to is one the container will call local (SMD-1843).
  */
@@ -2196,7 +2196,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
  * and it reads no file. A statement at the start of
  * a line, comments stripped first so a header quoting one is not it
  * (test-schema [10]'s rule). Read from the files, never typed: a list would
- * lag the next migration. scripts/check-fork-consistency.ts check 7 fails a
+ * lag the next migration. scripts/check-consistency.ts check 7 fails a
  * vendored file that redefines or drops one of these; test-schema [31] holds
  * the set to what preflight's remedies name.
  */
@@ -2368,7 +2368,7 @@ export async function alignVectorSearchPath(sql) {
  * preflight's `write privileges` check reads CAPTURE_WRITES, `migrate.ts
  * --grant` issues every group but the opt-in ones through grantStatements(), and db/README.md's
  * "Grants for a capturing role" is rendered from the same groups — a
- * check-fork-consistency check asserts the README names each table.
+ * check-consistency check asserts the README names each table.
  *
  * Privileges are the DML a group's functions actually run, no more: SELECT where
  * a function reads, and only the write verbs its statements use.
@@ -2905,7 +2905,7 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
  * because db/README.md documents privileges per group and an object can appear
  * in more than one with a different set (`ob1_config`: SELECT in `server`,
  * SELECT/INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
- * `server`, SELECT and INSERT in `community`). check-fork-consistency's privilege comparison reads it
+ * `server`, SELECT and INSERT in `community`). check-consistency's privilege comparison reads it
  * (SMD-1471).
  */
 export function grantRows(groups = ROLE_GRANT_GROUPS) {
@@ -3034,7 +3034,7 @@ export function grantVerifySql(role, merged) {
  * literals are literals). Newlines are kept, so a line number in the result is
  * a line number in the source (SMD-1796; the literal-aware strip SMD-1316 asked
  * for — a `--` inside a string no longer hides the rest of its line). Shared by
- * test-schema [10] and check-fork-consistency's Supabase-isms check through
+ * test-schema [10] and check-consistency's Supabase-isms check through
  * supabaseIsmsIn(); ownedFunctionsIn keeps its own coarser strip, which blanks
  * bodies whole because a CREATE inside one is not a definition.
  */
@@ -3176,7 +3176,7 @@ function sqlHitList(sql, rules) {
  * stand outside a quoted identifier. String literals are read, as
  * SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' || quote_ident(t)` runs
  * the truncate. A `--` comment quoting a statement is not a hit, so a header
- * may say why the file has none. check-fork-consistency check 21 holds every
+ * may say why the file has none. check-consistency check 21 holds every
  * .sql git tracks to these through destructiveSqlIn().
  */
 export const DESTRUCTIVE_SQL_RULES = Object.freeze([

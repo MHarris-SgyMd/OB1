@@ -29,7 +29,7 @@
 # the servers reach Postgres on the internal `data` network and Ollama on `egress`
 # by service name (the networks at the end of this file), and a tool run from
 # a checkout gets them through compose.host-ports.yaml (a second -f),
-# loopback again unless told otherwise. scripts/check-fork-consistency.ts
+# loopback again unless told otherwise. scripts/check-consistency.ts
 # check 13 refuses a mapping that drops the address (SMD-1844).
 
 name: open-brain
@@ -48,7 +48,7 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # keys as its k8s-file driver, and keeps one file: at max-size it truncates
 # rather than rotates, so the bound holds and the older lines go (measured on
 # podman 6.0.2; max-file is accepted and has no effect there). Every service
-# below names it, and check 29 of scripts/check-fork-consistency.ts holds
+# below names it, and check 29 of scripts/check-consistency.ts holds
 # that, so a service added without it fails CI.
 x-logging: &logging
   driver: json-file
@@ -109,7 +109,7 @@ x-otel-env: &otel-env
 # process a client on the network reaches — docs/orchestration-tool.md declined
 # the same socket for n8n. So adding a service is two edits in this file, the
 # service and its router here, and in check 28 of
-# scripts/check-fork-consistency.ts its router in PROXY_ROUTE_TABLE, which
+# scripts/check-consistency.ts its router in PROXY_ROUTE_TABLE, which
 # holds this table byte for byte, its mesh name in SERVICE_NETWORKS, which
 # holds who answers to each name, and its keys, mounts, build, confinement and
 # named volumes in SERVICE_KEYS, SERVICE_MOUNTS, SERVICE_BUILDS, CONFINEMENT
@@ -218,7 +218,7 @@ x-otel-env: &otel-env
 # joined it from SMD-2294 to SMD-2874) would answer to it beside this stack's.
 # The table holds no comment of its own: Traefik renders it as a Go template
 # first, so a comment line there is not inert, and check 28
-# (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
+# (scripts/check-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
 # byte (SMD-2658).
 x-proxy-routes: &proxy-routes |
   http:
@@ -324,7 +324,7 @@ x-proxy-routes: &proxy-routes |
 # The forwarder's script (SMD-2583): the stack's published port, in front of
 # the proxy, which is on internal networks alone. Inline here, as the route
 # table is, so a release's compose.yaml carries it with nothing else to fetch;
-# check 28 (scripts/check-fork-consistency.ts, FORWARDER_SCRIPT) holds it byte
+# check 28 (scripts/check-consistency.ts, FORWARDER_SCRIPT) holds it byte
 # for byte, and CI runs its --self-check. It holds no dollar sign, which
 # compose would read as a variable.
 x-forwarder: &forwarder |
@@ -894,7 +894,7 @@ services:
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server
       # declares (server-portable/root.ts, type Env) is forwarded now, and
-      # scripts/check-fork-consistency.ts check 14 fails on the next one that
+      # scripts/check-consistency.ts check 14 fails on the next one that
       # is not — a name in a comment, or on ollama-pull's command line, is not
       # a forward.
       OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
@@ -1857,7 +1857,7 @@ services:
       # the metadata model and sampling the blurbs use; the timeout; and the
       # egress gate. Not the server's anchor: a knob the server gains does not
       # reach the runner unless it is added here. The fallbacks are the
-      # server's, which check-fork-consistency holds equal to db/config.mjs.
+      # server's, which check-consistency holds equal to db/config.mjs.
       DATABASE_URL: postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD:-}@postgres:5432/openbrain
       OB1_TIER: ${OB1_TIER:-}
       OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
@@ -2026,7 +2026,7 @@ services:
   # observability profile's dashboard reads every series it names", which
   # also fails should Prometheus stop taking created-timestamp-zero-ingestion,
   # or Grafana stop loading or evaluating the alert rules (SMD-3050, check 38).
-  # Check 28 (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this
+  # Check 28 (scripts/check-consistency.ts, LGTM_SERVICE) holds this
   # service whole but its labels, which check 37 holds.
   #
   # Grafana's image signs anyone in as Admin unless told otherwise
@@ -2365,7 +2365,7 @@ configs:
   # Grafana loads at its start and opens on: deploy/observability/dashboard.json,
   # inline here as the route table is, so a release's compose.yaml carries it
   # with nothing else to fetch, each dollar sign doubled, since compose reads
-  # one as a variable. Check 37 (scripts/check-fork-consistency.ts) holds it
+  # one as a variable. Check 37 (scripts/check-consistency.ts) holds it
   # to that file, and the file to the names the stack writes.
   grafana-dashboard:
     content: |

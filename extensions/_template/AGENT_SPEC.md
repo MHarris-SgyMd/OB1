@@ -69,7 +69,7 @@ PostgreSQL DDL that runs against the brain's database with `psql -f`. Must follo
 
 3. **Include indexes** for columns that will be queried frequently (user_id + any filter columns).
 
-4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; this fork runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-fork-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). The `--grant` group this step once named, `ROLE_GRANTS.extensions`, retired with SMD-2311: an extension is a plugin now, its tables made by the brain's migrator under the plugin's own role (SMD-3747 rewrites this template).
+4. **No row-level security, no `GRANT`, nothing from Supabase's `auth` schema.** Upstream's template enabled RLS with a policy on `auth.uid()`; this fork runs one operator's brain on plain Postgres (SMD-1716), the server scopes rows by `DEFAULT_USER_ID`, and `scripts/check-consistency.ts` check 12 refuses `auth.*`, `service_role`, `authenticated`, `anon`, `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` in any `.sql` under the category directories (SMD-1810). The `--grant` group this step once named, `ROLE_GRANTS.extensions`, retired with SMD-2311: an extension is a plugin now, its tables made by the brain's migrator under the plugin's own role (SMD-3747 rewrites this template).
 
 5. **Never modify the core `thoughts` table.** Adding new tables is fine. Referencing `thoughts` via foreign key is fine. Altering or dropping `thoughts` columns is not.
 

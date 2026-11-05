@@ -109,7 +109,7 @@ vendored code, says in one sentence which side of this line it falls on
 `ob1_config`; `preflight` prints it beside the ledger's highest migration and
 warns, by name, when a brain is past its version's range or a server is older than
 the brain it serves. `db/version.mjs` is the one definition of the current version
-(`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
+(`BRAIN_VERSION`), and `migrate.ts --dry-run` names the release each pending
 migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
 baseline; each cut appends the migration that writes its version as the last file
 of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
@@ -118,14 +118,14 @@ version (`2.0.0`). The server reports its own at
 runtime — the MCP `initialize` reply, the `brain_info` tool and `GET /health` with a
 key — from `server-portable/version.ts`, generated from `db/version.mjs`,
 `releases.json` and `db/migrations/` by `scripts/gen-version.ts` and round-tripped
-by check-fork's 17e (SMD-2041).
+by check-consistency's 17e (SMD-2041).
 
 **A release is a tag naming three things**: the migration range it closes
 (the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin
 (recorded as data beside the version, not in it, from 2.0.0). The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
-drift at apply time; `check-fork-consistency` adds the rule that a renumber or
+drift at apply time; `check-consistency` adds the rule that a renumber or
 edit of a released migration fails at review time (a released migration is
 append-only; add a new file).
 
@@ -133,7 +133,7 @@ append-only; add a new file).
 hand at PR time, so every merge of `main` while a PR was in review renumbered a
 section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
 (front matter — `type`, `bump`, `tickets`, `migrations` — and a `## Changelog`
-and a `## FORK` body), with no change number; the release step assigns the
+and a `## Record` body, `## FORK` before SMD-3765), with no change number; the release step assigns the
 numbers once, at assembly, writing each fragment as the next
 `changes/NNN-<slug>.md` in merge order and regenerating the index in
 [`changes/README.md`](changes/README.md) (SMD-1804, SMD-1917). A fragment needs no
@@ -146,9 +146,9 @@ table and the files they are.
 record in `changes/`: `## [Unreleased]` first, one dated section per release with
 entries under the six headings, each entry ending in its ticket and migration
 numbers. The release step writes it and the change files from the same fragments in one commit,
-and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
-adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
-and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
+and `check-consistency` pairs the two both ways. Conventional Commits is **not**
+adopted — the fragment's fields give tooling what it needs, and the `[core]`
+prefix (`[fork]` until SMD-3765) and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
 upstream leftover no workflow ran, is removed so there is one release mechanism.)
 
 ## Cutting a release
@@ -162,7 +162,7 @@ ship at any time for an urgent fix, but carries no migration.
 **Two commits, on one branch, in this order** (SMD-1804, SMD-1860;
 `scripts/assemble-release.ts --write` enforces it):
 1. **The version.** Run `bun scripts/assemble-release.ts` (a dry run that touches
-   nothing) for the version it proposes. Bump `db/version.mjs`'s `FORK_VERSION` to
+   nothing) for the version it proposes. Bump `db/version.mjs`'s `BRAIN_VERSION` to
    it, and add the migration that writes it: a new `NNN_schema_version.sql`
    upserting `ob1_config.schema_version`, the highest migration on disk, so the
    range the cut freezes ends on the migration that names the release (check 17d
@@ -172,7 +172,7 @@ ship at any time for an urgent fix, but carries no migration.
    so a branch adding a migration renumbers past it when it merges `main` after
    the cut.
 2. **The release.** `bun scripts/assemble-release.ts --write`, which refuses a
-   tree whose `FORK_VERSION` or highest migration does not say the version it is
+   tree whose `BRAIN_VERSION` or highest migration does not say the version it is
    about to record, or one that is not clean. It writes each fragment as the next
    numbered `changes/NNN-<slug>.md`, regenerates `changes/README.md`'s index,
    writes the `CHANGELOG.md` section and the `releases.json` entry (its
@@ -225,7 +225,7 @@ vendored wholesale at the pin, so we ship its worst advice with its best under
 this repository's name. The rule (SMD-1251, change 51): **audit the tree once
 and hold the delta** — a standing check carries each audit so nothing quietly
 undoes it. Four rules are held today, each in
-`scripts/check-fork-consistency.ts` with counted, reasoned exceptions: shell
+`scripts/check-consistency.ts` with counted, reasoned exceptions: shell
 safety (check 6, change 51), core ownership (check 7, change 58), credential
 compares (check 8, changes 64 and 67 — the exception list has been empty since
 67) and writes around the functions that own a thought's content and vector
@@ -258,7 +258,7 @@ both ways: a script a step runs, from the same directory, with the same flags
 and environment, or an excuse with its reason (SMD-2903).
 
 **Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
-house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
+house grammar (`[core] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
 bullets) — `scripts/commitlint.config.ts`, which shares its tag parser with
 `scripts/mechanism-yield.ts` through `scripts/commit-grammar.ts`, so the check
 and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
@@ -281,8 +281,8 @@ is seven days old (a security update does not wait), grouping minor and patch
 releases and sending each major on its own. Read a major before it lands:
 actionlint looks an action's inputs up by tag, so it cannot check a SHA-pinned
 one's, and an input the new major dropped is ignored at run time with a
-warning. Dependabot's commits carry the house header, `[fork] Bump …`, through
-a prefix whose trailing space keeps it from writing `[fork]:`. Check 23 refuses
+warning. Dependabot's commits carry the house header, `[core] Bump …`, through
+a prefix whose trailing space keeps it from writing `[core]:`. Check 23 refuses
 a tag, a SHA with no tag comment, a `docker://` step image by tag, a `-latest`
 or expression-picked runner, and a `dependabot.yml` that Dependabot would refuse
 or that can open no PR. It holds a pin's shape, not its truth: a comment naming
@@ -303,7 +303,7 @@ its own `if:`, or as a docs-only PR's code job). So every job is required throug
 it, and a job added, renamed, split or run as a matrix changes nothing in the
 ruleset. The ruleset is a file, `.github/rulesets/main.json`, applied
 with `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
-and `check-fork-consistency` check 20 holds the file to that one context and the
+and `check-consistency` check 20 holds the file to that one context and the
 job to every other job in the workflow, so a job left out of its `needs:` fails
 CI by name. A push straight to `main` is refused, green checks or not: GitHub
 answers with one `remote: -` line per rule it applied.
@@ -427,12 +427,12 @@ The last row is the instructive one: it was introduced one commit after this
 section was written, by the person who wrote it, in a commit whose subject was
 removing duplication. Naming a pattern does not stop you repeating it — only a
 check does, which is why the row above it is now enforced by
-`scripts/check-fork-consistency.ts` rather than by intent.
+`scripts/check-consistency.ts` rather than by intent.
 
 The pattern is consistent enough to be a rule: **a default that appears in two
 files will be wrong in one of them, and the copy that goes stale is the one nobody
 runs directly.** Everything provider-facing now resolves through `db/config.mjs`,
-and `scripts/check-fork-consistency.ts` fails the build when compose, the
+and `scripts/check-consistency.ts` fails the build when compose, the
 embedding model, the metadata model and the base URL stop agreeing.
 
 The same rule applies to the suites. Three of them read a shipped default instead

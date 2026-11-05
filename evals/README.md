@@ -41,7 +41,7 @@ against `../server-portable`'s and `../db`'s exports — and CI runs it in the
 portable-server job (SMD-1932). `tsconfig.json` mirrors the server's;
 `package.json` pins `@types/bun`, `typescript` and `@types/node` at the server's
 versions, held in step across the type-checked directories by
-`check-fork-consistency` 18. The
+`check-consistency` 18. The
 harnesses that call `judgePair`, `extractEntities` and `resolveEmbedConfig`
 directly are the call sites a signature change used to reach by grep rather
 than by compiler. It needs `bun install` here (LanceDB's types included) and in
@@ -4579,7 +4579,7 @@ on to open. This loop captures it and gates PRs on it.
    brain, so the fixture can be committed without the corpus — but the `query`
    strings are the searcher's own words (personal data), so committing an export
    fixture from a real brain commits real queries; that is a maintainer's call.
-   `scripts/check-fork-consistency.ts` check 9 guards thought content (an
+   `scripts/check-consistency.ts` check 9 guards thought content (an
    allowlist: every committed string must be an id or free text under a known
    key), not query text. Attribution collapses distinct callers who typed the
    same query, and every anonymous (NULL-agent) caller, into one bucket — a proxy.
@@ -5462,7 +5462,7 @@ where the kind carries one, and the labelled set frozen as
 `fixtures/thought-kinds.json`.
 
 The fixture is ids and closed-vocabulary keys only — a kind is the list of ids
-that are it — so check-fork-consistency 9 admits it and the text stays in the
+that are it — so check-consistency 9 admits it and the text stays in the
 brain; the eval pulls content live. `bun eval-thought-kinds.ts --self-check`
 (in CI) probes the shape rules with mutants and validates the committed file.
 
@@ -5763,7 +5763,7 @@ quoted example tokens `migration 021` and `Edge0` read as held, the control's
 `Jev per-type gates` and `PR #119` read as failed — leaves the mention finding
 at 3 of 15 against 10 of 15 (p = 0.025); `actor_name` read as held would
 strengthen it; two more control calls a strict reader might question
-(`check-fork-consistency check 20`, `canary`) take it to 3 of 15 against 8 of
+(`check-consistency check 20`, `canary`) take it to 3 of 15 against 8 of
 15 (p = 0.13), past which it rests on the within-thought contrast and the two
 0.80 `PostgreSQL` rows in other thoughts. The control's held rate is the
 estimate of the 1.00 stratum's precision, with the interval fifteen or
@@ -5804,7 +5804,7 @@ mistyped, three unsourced inferences by the agent against the operator's word,
 and the cases where a mechanism should HURT — an agent's true fact on a
 subject the operator also spoke on, two true facts of one subject with
 different numbers. It lives in `write-path-corpus.ts`, not under `fixtures/`:
-check-fork-consistency check 9 reads every committed fixture as an allowlist
+check-consistency check 9 reads every committed fixture as an allowlist
 (a string is an id, or free text under four keys) and its own probes pin the
 "fictional content" case, so an exception would have to tell fiction from an
 export by file name. The rule stays whole; the corpus is source, typechecked

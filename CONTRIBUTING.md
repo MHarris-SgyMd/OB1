@@ -139,7 +139,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - Its tables, if any, as `migrations/NNN_name.sql`, which the migrator runs as the plugin's own role in its own schema
 - A README saying how to turn it on (`OB1_PLUGINS`) and what each operation answers
 - Tests over the REST core with the plugin enabled, as `server-portable/test-plugins.ts` and `test-plugins-sql.ts` drive the example
-- Check 31 of `scripts/check-fork-consistency.ts` passing (an accident guard, not a sandbox: review is the control): no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no global past `ctx` (`fetch`, `process`, `Bun` and their kin)
+- Check 31 of `scripts/check-consistency.ts` passing (an accident guard, not a sandbox: review is the control): no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no global past `ctx` (`fetch`, `process`, `Bun` and their kin)
 - Check 41 passing: its SQL names the columns it reads from its own tables and functions, never `*` or `RETURNING *`, so a server left running across a migration that adds a column keeps working (SMD-3302)
 
 **Primitives** additionally require:
@@ -271,9 +271,10 @@ Commits to the project's own code follow a small grammar, checked by `commitlint
 (SMD-1808) — not Conventional Commits (SMD-1804 declined it), just the house shape:
 
 - `[<category>] <subject>`, where `<category>` is one of the PR categories above
-  plus `fork`, `docs`, `resources`. `[fork]` is a change to the project itself
-  (the name is the fork era's).
-- A `[fork]` subject ends in its ticket, `(SMD-NNNN)` — the `ticket-ref` rule (a
+  plus `core`, `docs`, `resources`. `[core]` is a change to the project itself.
+  `[fork]`, its name until SMD-3765, is still accepted, so a branch begun before
+  the rename lints as it did; new commits say `[core]`.
+- A `[core]` subject ends in its ticket, `(SMD-NNNN)` — the `ticket-ref` rule (a
   warning).
 - On a review-pass commit, every finding bullet in the body carries a
   `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
@@ -322,15 +323,15 @@ than by editing a hand-numbered FORK.md section:
   images and the release (MAINTAINING.md, "Cutting a release"). **Do not
   hand-number a new change file or edit `CHANGELOG.md` by hand.** (Changes
   1–103 predate this and keep their numbers; a `### N.` section in
-  MAINTAINING.md or FORK.md is refused by `check-fork-consistency`.)
+  MAINTAINING.md or FORK.md is refused by `check-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
-  rather than editing an old one; `check-fork-consistency` enforces it.
+  rather than editing an old one; `check-consistency` enforces it.
 - A new migration, like a cut, moves what the server reports about itself: rerun
   `bun scripts/gen-version.ts`, which regenerates `server-portable/version.ts`
   (the tree's last migration, the version and its release range);
-  `check-fork-consistency`'s 17e names the command when the file is stale.
+  `check-consistency`'s 17e names the command when the file is stale.
 
-`check-fork-consistency` validates every fragment and the changelog shape, so a PR
+`check-consistency` validates every fragment and the changelog shape, so a PR
 that gets this wrong fails CI at one place.
 
 ## Connectors: a contribution that touches an external system
@@ -347,7 +348,7 @@ one external system per entry, its name first (a model provider it also uses is
 its own entry, not a parenthetical); add the artifact and its capabilities to
 the registry; add the vendor under `connectors` with the direction the
 capabilities derive; run `bun scripts/connector-registry.ts` to refresh the
-spec's tables. `check-fork-consistency` check 19 holds the declaration and the
+spec's tables. `check-consistency` check 19 holds the declaration and the
 registry equal, so the PR fails at one place until it is classified. Under the
 declaration sits a net for a contribution that declared nothing — its services
 (when the vendor is named first), its tags and the disposition table — which is
@@ -392,7 +393,7 @@ Every PR is checked against these rules. All must pass before human review.
 2. **Required files** — Both `README.md` and `metadata.json` exist in the contribution folder
 3. **Metadata valid** — `metadata.json` parses as valid JSON and passes the repo JSON Schema
 4. **No credentials** — No API keys, tokens, passwords, or secrets in any file
-5. **SQL safety** — A `.sql` file must never destroy existing rows: no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE`, or `DELETE FROM` without a `WHERE` of its own. `check-fork-consistency` check 21 reads every `.sql` for these as statements — a `--` comment quoting one is not a hit, a trigger that refuses one (`BEFORE TRUNCATE ON …`) is the rule applied, a `DELETE` with its `WHERE` on the next line is qualified — and names the file and line. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not; check 5)
+5. **SQL safety** — A `.sql` file must never destroy existing rows: no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE`, or `DELETE FROM` without a `WHERE` of its own. `check-consistency` check 21 reads every `.sql` for these as statements — a `--` comment quoting one is not a hit, a trigger that refuses one (`BEFORE TRUNCATE ON …`) is the rule applied, a `DELETE` with its `WHERE` on the next line is qualified — and names the file and line. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not; check 5)
 6. **Category-specific artifacts** — `recipes/` have code or detailed instructions, `schemas/` have SQL files, `integrations/` have code files, `skills/` have at least one plain-text skill file, `primitives/` have substantial READMEs (200+ words), `extensions/` have both SQL and code files
 7. **PR format** — Title starts with `[recipes]`, `[schemas]`, `[integrations]`, `[skills]`, `[primitives]`, or `[extensions]`
 8. **No binary blobs** — No files over 1MB, no `.exe`, `.dmg`, `.zip`, `.tar.gz`

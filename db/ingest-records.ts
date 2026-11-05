@@ -86,8 +86,8 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { PIPELINE_TIERS } from "./config.mjs";
 import { loadLinearCorpus, linearThoughtId, type LinearDoc } from "../evals/linear-corpus.ts";
-import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
-import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
+import { parseFragment, fragmentRecord } from "../scripts/fragments.ts";
+import { headingOf, ticketsOf } from "../scripts/changes-index.ts";
 import { AdapterRefusal, allowlistFrom, scopeRefusal, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
@@ -160,9 +160,10 @@ export function recordId(source: string, key: string): string {
  *   - A rendered, numbered change (`NNN-slug.md`, e.g. 018-…): no front matter,
  *     the file opens `# N. Title` and the whole file is the change. The number
  *     comes from the filename, the ticket from the text.
- *   - A pending fragment (`smd-NNNN.md`): front matter + `## Changelog` + `## FORK`.
- *     The `## FORK` body is the change as written; the ticket(s) come from the
- *     front matter, and the change number is not assigned until release (null).
+ *   - A pending fragment (`smd-NNNN.md`): front matter + `## Changelog` +
+ *     `## Record` (`## FORK` before SMD-3765). The record is the change as
+ *     written; the ticket(s) come from the front matter, and the change
+ *     number is not assigned until release (null).
  *
  * FORK.md itself is the fork era's record, not the changes, so it is not read
  * here (SMD-1806 / SMD-1917; SMD-3765).
@@ -170,7 +171,7 @@ export function recordId(source: string, key: string): string {
 export function forkDocFromFile(slug: string, text: string): Doc {
   const parsed = parseFragment(text);
   if (parsed) {
-    const fork = fragmentSection(parsed.body, "FORK") ?? parsed.body.trim();
+    const fork = fragmentRecord(parsed.body) ?? parsed.body.trim();
     const tickets = Array.isArray(parsed.fm.tickets) ? (parsed.fm.tickets as string[]) : [];
     return { id: recordId("fork", slug), content: fork, source: "fork", meta: { change: null, ticket: tickets[0] ?? null, file: slug } };
   }
@@ -665,6 +666,8 @@ function selfCheck(): number {
   const pending = forkDocFromFile("smd-1806", "---\ntype: added\nbump: minor\ntickets: [SMD-1806]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-1806)\n\n## FORK\n\nThe title line (SMD-1806)\n\nthe record body.");
   ok(pending.meta.change === null && pending.meta.ticket === "SMD-1806", "a pending fragment: no change number yet, ticket from the front matter");
   ok(pending.content.startsWith("The title line (SMD-1806)") && /the record body/.test(pending.content) && !/## Changelog/.test(pending.content), "…and the content is the `## FORK` body alone");
+  const pendingRecord = forkDocFromFile("smd-3765", "---\ntype: changed\nbump: patch\ntickets: [SMD-3765]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-3765)\n\n## Record\n\nThe title line (SMD-3765)\n\nthe record body.");
+  ok(pendingRecord.content.startsWith("The title line (SMD-3765)") && !/## Changelog/.test(pendingRecord.content), "…and a fragment's `## Record`, the heading's name since SMD-3765, is read the same way");
 
   const fm = memoryFrontmatter("---\nname: a-slug\ndescription: a one-line summary\nmetadata:\n  modified: 2026-09-22T03:00:00.000Z\n---\n\nthe body\nline two\n");
   ok(fm.name === "a-slug" && fm.description === "a one-line summary" && fm.modified === "2026-09-22T03:00:00.000Z", "frontmatter fields read");

@@ -4,11 +4,11 @@
  *
  * One definition of what a fragment is — its parts AND its rules
  * (fragmentProblems) — shared by the check that validates them
- * (check-fork-consistency.ts, check 16) and the release step that consumes
+ * (check-consistency.ts, check 16) and the release step that consumes
  * them (assemble-release.ts), so the two cannot disagree and a cut refuses
  * what CI would (SMD-1917). Plain string work, no Bun API.
  */
-import { ticketsOf } from "./fork-index.ts";
+import { ticketsOf } from "./changes-index.ts";
 
 /** Front matter as parsed: a scalar per key, or a list for `[a, b]` / `- item` forms. */
 export type FragmentFrontMatter = Record<string, string | string[]>;
@@ -39,17 +39,41 @@ export function parseFragment(text: string): { fm: FragmentFrontMatter; body: st
 }
 
 /**
+ * The record section's heading: `## Record` since SMD-3765, `## FORK` before it.
+ * Both are read, so a fragment written before the rename needs no edit; one
+ * fragment carrying both is refused (fragmentProblems).
+ */
+export const RECORD_HEADINGS = ["Record", "FORK"];
+
+/**
  * A `## <name>` body from a fragment: null when the heading is absent, "" when it
- * is there and empty. `## Changelog` runs to the next `## `; `## FORK` runs to
- * the END of the file — the record may carry `## ` sub-headings of its own, as
- * changes 19 and 79 do, so a second-level heading cannot end it (a Changelog
- * placed after it is refused by fragmentProblems).
+ * is there and empty. `## Changelog` runs to the next `## `; the record (`## Record`,
+ * or `## FORK`) runs to the END of the file — it may carry `## ` sub-headings of
+ * its own, as changes 19 and 79 do, so a second-level heading cannot end it (a
+ * Changelog placed after it is refused by fragmentProblems).
  */
 export function fragmentSection(body: string, name: string): string | null {
-  const m = new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)([\\s\\S]*?)${name === "FORK" ? "$" : "(?=\\n## |$)"}`).exec(body);
+  const toEnd = RECORD_HEADINGS.includes(name);
+  const m = new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)([\\s\\S]*?)${toEnd ? "$" : "(?=\\n## |$)"}`).exec(body);
   if (!m) return null;
   const text = m[1].trim();
-  return name !== "FORK" && text.startsWith("## ") ? "" : text; // an empty section: the lazy capture ran into the next heading
+  return !toEnd && text.startsWith("## ") ? "" : text; // an empty section: the lazy capture ran into the next heading
+}
+
+/** The heading a fragment's record sits under — `Record`, or `FORK` in one written before SMD-3765 — or null with neither. */
+export function recordHeading(body: string): string | null {
+  return RECORD_HEADINGS.find((h) => headingAt(body, h) >= 0) ?? null;
+}
+
+/** A fragment's record body: under `## Record`, or `## FORK` in one written before SMD-3765. */
+export function fragmentRecord(body: string): string | null {
+  const h = recordHeading(body);
+  return h === null ? null : fragmentSection(body, h);
+}
+
+/** Where a `## <name>` heading starts in a fragment's body, or -1. */
+function headingAt(body: string, name: string): number {
+  return body.search(new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)`));
 }
 
 export const FRAGMENT_TYPES = new Set(["added", "changed", "deprecated", "removed", "fixed", "security"]);
@@ -58,11 +82,12 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
 /**
  * What is wrong with a fragment's text, in words — nothing when it is well
  * formed: front matter naming a Keep a Changelog type, a bump the migrations it
- * lists allow, SMD-#### tickets and three-digit migrations; before the FORK
- * body exactly one `## Changelog` — one to three plain lines (no bullet, heading
+ * lists allow, SMD-#### tickets and three-digit migrations; before the record
+ * exactly one `## Changelog` — one to three plain lines (no bullet, heading
  * or list marker; the release step writes the `- `) naming every listed ticket
- * and no other — then `## FORK`, nothing between them (a section there is written
- * nowhere); the FORK body runs to the end of the file, its first line the plain
+ * and no other — then `## Record` (`## FORK` before SMD-3765, never both),
+ * nothing between them (a section there is written nowhere); the record runs to
+ * the end of the file, its first line the plain
  * title ending in every ticket the front matter lists (check 17b reads a
  * released ticket from that title once it is a numbered file), nothing on the
  * second line, `## ` sub-headings of its own kept, and no numbered heading; and
@@ -93,8 +118,11 @@ export function fragmentProblems(text: string, name?: string): string[] {
   for (const mig of migrations) if (!/^\d{3}$/.test(String(mig))) problems.push(`migrations: ${JSON.stringify(mig)} is not a three-digit number`);
   if (fm.bump === "patch" && migrations.length > 0) problems.push(`bump: patch cannot ship a migration (migrations: ${migrations.join(", ")}) — a migration is additive, at least a MINOR`);
   const changelog = fragmentSection(body, "Changelog");
-  const fork = fragmentSection(body, "FORK");
-  const forkAt = body.search(/(?:^|\n)## FORK[ \t]*(?:\n|$)/);
+  const both = RECORD_HEADINGS.every((h) => headingAt(body, h) >= 0);
+  if (both) problems.push("carries both `## Record` and `## FORK` — one record section, `## Record` (its name since SMD-3765)");
+  const rec = recordHeading(body) ?? "Record";
+  const fork = fragmentSection(body, rec);
+  const forkAt = headingAt(body, rec);
   const changelogAt = body.search(/(?:^|\n)## Changelog[ \t]*(?:\n|$)/);
   if (changelog === null) problems.push("missing a `## Changelog` section");
   else if (changelog === "") problems.push("the `## Changelog` section is empty — one to three lines for CHANGELOG.md, ending in the ticket and migration numbers");
@@ -109,27 +137,27 @@ export function fragmentProblems(text: string, name?: string): string[] {
     const missing = declared.filter((t) => !named.has(t));
     const extra = [...named].filter((t) => !declared.includes(t));
     if (missing.length) problems.push(`the \`## Changelog\` body does not name ${missing.join(", ")} — it ends in every ticket the front matter lists; the release pairing reads a version's tickets from it`);
-    if (extra.length) problems.push(`the \`## Changelog\` body names ${extra.join(", ")}, which the front matter does not list — CHANGELOG.md would pair a version with a ticket it does not carry; cite the other ticket in the FORK body instead`);
+    if (extra.length) problems.push(`the \`## Changelog\` body names ${extra.join(", ")}, which the front matter does not list — CHANGELOG.md would pair a version with a ticket it does not carry; cite the other ticket in the record instead`);
   }
   // One of each section, in order, nothing between: a second `## Changelog` or a
-  // `## Notes` before `## FORK` is content the cut writes nowhere.
+  // `## Notes` before the record is content the cut writes nowhere.
   const headingsBeforeFork = [...body.slice(0, forkAt < 0 ? body.length : forkAt).matchAll(/(?:^|\n)## ([^\n]*)/g)].map((m) => m[1].trim());
   if (headingsBeforeFork.filter((h) => h === "Changelog").length > 1) problems.push("two `## Changelog` sections — one, of one to three lines");
-  for (const h of headingsBeforeFork) if (h !== "Changelog") problems.push(`a \`## ${h}\` section before \`## FORK\` — the cut writes it nowhere; a fragment is \`## Changelog\` then \`## FORK\` (put the rest in the record)`);
-  if (fork === null) problems.push("missing a `## FORK` section");
-  else if (fork === "") problems.push("the `## FORK` section is empty — its first line is the title, then the record");
-  else if (changelogAt > forkAt) problems.push("the `## Changelog` section sits after `## FORK` — the FORK body runs to the end of the file (its own `## ` sub-headings included), so the Changelog comes first");
+  for (const h of headingsBeforeFork) if (h !== "Changelog" && !(both && RECORD_HEADINGS.includes(h))) problems.push(`a \`## ${h}\` section before \`## ${rec}\` — the cut writes it nowhere; a fragment is \`## Changelog\` then \`## Record\` (put the rest in the record)`);
+  if (fork === null) problems.push("missing a `## Record` section");
+  else if (fork === "") problems.push(`the \`## ${rec}\` section is empty — its first line is the title, then the record`);
+  else if (changelogAt > forkAt) problems.push(`the \`## Changelog\` section sits after \`## ${rec}\` — the record runs to the end of the file (its own \`## \` sub-headings included), so the Changelog comes first`);
   else {
     const [first, second = ""] = fork.split("\n");
-    if (/^#/.test(first)) problems.push("the `## FORK` body opens with a heading — its first line is the plain title (what follows `# N. ` once numbered); the release step writes the heading");
-    else if (second.trim() !== "") problems.push("the `## FORK` body's title runs onto a second line — one line for the title, then a blank line, then the record (a wrapped title would become the file's first paragraph)");
+    if (/^#/.test(first)) problems.push(`the \`## ${rec}\` body opens with a heading — its first line is the plain title (what follows \`# N. \` once numbered); the release step writes the heading`);
+    else if (second.trim() !== "") problems.push(`the \`## ${rec}\` body's title runs onto a second line — one line for the title, then a blank line, then the record (a wrapped title would become the file's first paragraph)`);
     else {
       const named = new Set(ticketsOf(first));
       const missing = tickets.filter((t) => /^SMD-\d+$/.test(t) && !named.has(t));
-      if (missing.length) problems.push(`the \`## FORK\` title does not end in ${missing.join(", ")} — the title names every ticket the front matter lists, as "(SMD-1 / 2)", so the release pairing can read them from the numbered file`);
+      if (missing.length) problems.push(`the \`## ${rec}\` title does not end in ${missing.join(", ")} — the title names every ticket the front matter lists, as "(SMD-1 / 2)", so the release pairing can read them from the numbered file`);
     }
     const prose = fork.replace(/^```[\s\S]*?^```/gm, ""); // a `# 1. install` comment in a fenced snippet is not a heading
-    if (/\n#{1,6} \d+\. |# change \d+/i.test("\n" + prose)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading");
+    if (/\n#{1,6} \d+\. |# change \d+/i.test("\n" + prose)) problems.push(`the \`## ${rec}\` body carries a numbered heading — the release step assigns the change number and writes the \`# N.\` heading`);
   }
   // A path to a fragment dies at the cut: the release step numbers every fragment
   // and rewrites no mention of one. Five pending fragments held eight such paths,

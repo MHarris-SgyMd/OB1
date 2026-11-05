@@ -2028,7 +2028,7 @@ warmed session, review pass 3). A migration that changes
 ob1_refresh_set_readers();` and `SELECT * FROM
 ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
 to `node_settled_types()` alone runs only the first. Check 39 of
-`scripts/check-fork-consistency.ts` holds both for a lifecycle change and the
+`scripts/check-consistency.ts` holds both for a lifecycle change and the
 first for a settled one. It reads canonical forms only, with every literal's
 inside blanked: each definition of a set anywhere in the file — a string, a
 body, a qualified name or a `RENAME TO` included — must be a line starting
@@ -6687,7 +6687,7 @@ OB1_EGRESS_ALLOW=type:digest bun weekly-digest.ts --url …    # post to Telegra
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
 pins `@types/bun`, `typescript` and `@types/node` at the server's versions
-(`check-fork-consistency` 18 holds the type-checked directories in step). The workers,
+(`check-consistency` 18 holds the type-checked directories in step). The workers,
 benches and suites import `../server-portable/*.ts` and are the first callers
 to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
@@ -7216,7 +7216,7 @@ asserts 749 properties (at migration 032), including:
   the call and moves nothing
 - **a vendored schema applied to a migrated brain replaces no function a
   migration owns** (SMD-1250): the owned set is read from the migration files
-  as `scripts/check-fork-consistency.ts` check 7 reads it, and the three last
+  as `scripts/check-consistency.ts` check 7 reads it, and the three last
   definers preflight's remedies spell are pinned; `schemas/enhanced-thoughts/schema.sql`
   applied whole leaves every owned body and overload byte for byte while its
   own columns and functions arrive; then what upstream's file did — 003's

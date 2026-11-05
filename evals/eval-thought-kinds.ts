@@ -11,7 +11,7 @@
  * will be trusted and wrong. So the whole brain was labelled by hand against a
  * candidate axis first, and this harness holds that labelled set: the fixture
  * (`fixtures/thought-kinds.json`) is ids and labels ONLY — every value is a
- * thought id or a closed-vocabulary key, so check-fork-consistency 9 accepts it
+ * thought id or a closed-vocabulary key, so check-consistency 9 accepts it
  * and the content stays where it is; the eval pulls the text live.
  *
  * The axis. `kind` is the EPISTEMIC kind — what kind of statement the thought

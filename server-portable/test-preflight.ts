@@ -3627,17 +3627,17 @@ else {
   // highest migration, and two warnings that are never a refusal — a brain from
   // before 044, and a server older than the brain it serves.
   {
-    const { FORK_VERSION } = await import("../db/version.mjs");
+    const { BRAIN_VERSION } = await import("../db/version.mjs");
     const okVer = await run(SQL_ENV);
     // The ledger is unpopulated in this harness (the schema is applied without
     // recording schema_migrations rows), so "highest migration" reads "unknown"
     // here; a real migrate.ts run records the rows and prints the number.
-    assert(new RegExp(`schema version\\s+${rx(FORK_VERSION)} · highest migration (?:\\d+|unknown)`).test(okVer.out),
+    assert(new RegExp(`schema version\\s+${rx(BRAIN_VERSION)} · highest migration (?:\\d+|unknown)`).test(okVer.out),
            `a migrated brain reports schema_version beside the highest migration (${okVer.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
 
     await claims.unsafe("UPDATE ob1_config SET value = '9.9.9+upstream.deadbee' WHERE key = 'schema_version'");
     const older = await run(SQL_ENV);
-    assert(new RegExp(`schema version\\s+the brain is at 9\\.9\\.9\\+upstream\\.deadbee but this server is ${rx(FORK_VERSION)} — a server older than the brain`).test(older.out),
+    assert(new RegExp(`schema version\\s+the brain is at 9\\.9\\.9\\+upstream\\.deadbee but this server is ${rx(BRAIN_VERSION)} — a server older than the brain`).test(older.out),
            `a brain ahead of the server warns the server is older, with a remedy (${older.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
     const olderJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
     assert(olderJson.ok === true && olderJson.checks.some((c) => c.name === "schema version" && c.status === "warn"),
@@ -3647,9 +3647,9 @@ else {
     // warns as the pinned one does, and a plain stamp of the server's own core is the server's release.
     await claims.unsafe("UPDATE ob1_config SET value = '9.9.9' WHERE key = 'schema_version'");
     const olderPlain = await run(SQL_ENV);
-    assert(new RegExp(`schema version\\s+the brain is at 9\\.9\\.9 but this server is ${rx(FORK_VERSION)} — a server older than the brain`).test(olderPlain.out),
+    assert(new RegExp(`schema version\\s+the brain is at 9\\.9\\.9 but this server is ${rx(BRAIN_VERSION)} — a server older than the brain`).test(olderPlain.out),
            `a plain stamp ahead of the server warns as a pinned one does (${olderPlain.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
-    const core = FORK_VERSION.split("+")[0];
+    const core = BRAIN_VERSION.split("+")[0];
     await claims.unsafe(`UPDATE ob1_config SET value = '${core}' WHERE key = 'schema_version'`);
     const sameCore = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+schema version\\s+${rx(core)} · highest migration (?:\\d+|unknown)`).test(sameCore.out),
@@ -3661,7 +3661,7 @@ else {
            `a brain with no schema_version warns to apply 044 (${absent.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
 
     // Restore the baseline so the --json ok run below is clean.
-    await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+    await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${BRAIN_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   }
 
   // The status surface (SMD-3476 PR 3): one set of rows — the coordinator's,

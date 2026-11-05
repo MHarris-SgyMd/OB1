@@ -740,7 +740,7 @@ reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
 migration are generated into `version.ts` by `scripts/gen-version.ts` (the
-image carries no `db/migrations/` for the server to read; check-fork's 17e round-trips the file, and in a
+image carries no `db/migrations/` for the server to read; check-consistency's 17e round-trips the file, and in a
 checkout preflight's `version module` row compares it with `db/migrations/`, so
 rerun the script after adding a migration). The commit is the image's
 `OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
@@ -1212,7 +1212,7 @@ MCP tools do rather than a copy of it:
   spans and log records batched, the AsyncLocalStorage context manager and the
   W3C propagator.
 
-`scripts/check-fork-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
+`scripts/check-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
 and `root.ts` for what a move would leave behind: an import outside the file's list, a
 SQL call or `fetch`, the store named outside `root.ts`'s wiring.
 
