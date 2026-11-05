@@ -2078,7 +2078,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
             const asked = { at: readAt };
-            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; the subject sweep's streakPoison). */
+            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
             let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
