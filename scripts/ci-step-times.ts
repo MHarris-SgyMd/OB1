@@ -36,7 +36,7 @@
  * reads them. A run not read, or being re-run, among the window's newest 26 fails it after the report (a warning may
  * have moved); an older one is a warning. The run reported on (--through's, or a listed window's newest) not read
  * fails it with no report; re-run since the list, it reads nothing, exit 0, as when the list shows it re-run. With
- * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Fork Checks run on
+ * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Brain Checks run on
  * main.
  *
  * With --shift, the list's call, and a run's read among those a gap fails it for (the newest 26 and the run reported
@@ -49,7 +49,7 @@
  *   --step <regex>        steps whose name matches, case-insensitive; default every step of a second or more in
  *                         some run (chosen by name across the runs, so each reads every run it ran in; a step's name
  *                         is taken to be unique in its job, as GitHub's are today)
- *   --workflow <name>     default "Fork Checks"
+ *   --workflow <name>     default "Brain Checks", with its runs as "Fork Checks" before SMD-3765 (DEFAULT_WORKFLOWS)
  *   --branch <name>       default main
  *   --days <n>            runs created in the last n × 24 hours, default 7, at most 400 (GitHub keeps a run 400 days)
  *   --last <n>            the newest n completed runs instead, at most 500; with --shift the newest n up to the
@@ -106,6 +106,18 @@ type Run = { jobs: Job[]; headSha: string; createdAt: string; attempt?: number; 
 
 /** The most runs one `gh run list` returns here; a window that fills it is said to be cut short. */
 const LIST_LIMIT = 500;
+
+/**
+ * The names the default workflow has run under, newest first: "Brain Checks", and "Fork Checks" until SMD-3765
+ * renamed its file (fork-checks.yml) and its name. A default listing reads main's runs of either, so a window across
+ * the rename reads the jobs and steps of both, which kept their names; a --workflow lists the one it names.
+ */
+export const DEFAULT_WORKFLOWS = ["Brain Checks", "Fork Checks"];
+
+/** The runs of a `gh run list` (its workflowName) that belong to one of `names`. */
+export function ofWorkflows<T extends { workflowName?: string }>(runs: T[], names: string[]): T[] {
+  return runs.filter((r) => names.includes(r.workflowName ?? ""));
+}
 
 /** Seconds from one ISO time to another, or null when either is missing or the order is wrong (a step never run). */
 export function seconds(from?: string | null, to?: string | null): number | null {
@@ -720,6 +732,9 @@ async function selfCheck(): Promise<number> {
     "where it landed: a run on the line is not over it, nor counts toward half; a spike third from the end of the 10 does not stretch it, one second from the end does (half of two); the first of the 10 can be it");
   ok(whole("20") === 20 && Number.isNaN(whole("0x10")) && Number.isNaN(whole(" 20")) && Number.isNaN(whole("1e1")) && Number.isNaN(whole(true)),
     "a whole number in digits alone");
+  const ofRename = [{ databaseId: 3, workflowName: "Brain Checks" }, { databaseId: 2, workflowName: "CI shift" }, { databaseId: 1, workflowName: "Fork Checks" }, { databaseId: 0 }];
+  ok(ofWorkflows(ofRename, DEFAULT_WORKFLOWS).map((r) => r.databaseId).join() === "3,1" && ofWorkflows(ofRename, ["CI shift"]).map((r) => r.databaseId).join() === "2",
+    "a default listing keeps the workflow's runs under its name and its name before SMD-3765, and drops another workflow's and a nameless one");
   const fifty = Array.from({ length: 50 }, (_, i) => String(i + 1));
   ok(!needsWiderList(fifty, "50", 40) && !needsWiderList(fifty, "40", 40) && needsWiderList(fifty, "39", 40) && needsWiderList(fifty, "x", 40) && !needsWiderList(fifty, undefined, 40),
     "the whole list is read only when the short one holds fewer than --last runs up to --through");
@@ -810,10 +825,16 @@ if (import.meta.main) {
   const runsOpt = typeof opts["--runs"] === "string" ? opts["--runs"] : undefined;
   if (runsOpt !== undefined) for (const f of ["--branch", "--days", "--last", "--workflow", "--through"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
   const repo = typeof opts["--repo"] === "string" ? ["--repo", opts["--repo"]] : [];
-  const workflow = String(opts["--workflow"] ?? "Fork Checks"), branch = String(opts["--branch"] ?? "main");
+  const namedWorkflow = typeof opts["--workflow"] === "string";
+  const workflows = namedWorkflow ? [String(opts["--workflow"])] : DEFAULT_WORKFLOWS;
+  const workflow = workflows[0], branch = String(opts["--branch"] ?? "main");
+  // A named workflow is asked of gh; the default lists the branch's runs of every workflow and keeps its names', so
+  // the runs from before the rename stay in a window. Other workflows' runs take places in the list: twice the room.
+  const byWorkflow = namedWorkflow ? ["--workflow", workflow] : [];
+  const room = namedWorkflow ? 1 : 2;
   // A shift reads main's own runs: a fork's pull request from a branch it named main lists as main too.
   const event = shift ? ["--event", "push"] : [];
-  const where = `${workflow} on ${branch}${shift ? " (push)" : ""}`;
+  const where = `${workflow}${namedWorkflow ? "" : ` (or ${DEFAULT_WORKFLOWS.slice(1).join(", ")}, its name before SMD-3765)`} on ${branch}${shift ? " (push)" : ""}`;
   // The summary's line for an exit before the report: a red run with an empty summary says nothing.
   const summaryNote = (text: string) => appendSummary(`**${text}**`);
   // A failure: with --shift, an annotation and a line in the summary too, so a red run says why.
@@ -839,9 +860,9 @@ if (import.meta.main) {
     console.log(`${ids.length} run${ids.length === 1 ? "" : "s"} named${ids.length < named.length ? ` (${named.length - ids.length} named again, read once)` : ""}`);
   } else if (last !== undefined) {
     const list = async (limit: number) => {
-      const got = await listRuns(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--limit", String(limit), "--json", "databaseId,status"]);
+      const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--limit", String(Math.min(limit * room, LIST_LIMIT)), "--json", "databaseId,status,workflowName"]);
       if (!got.ok) stop(`gh run list failed: ${got.error}`);
-      return (got.json as { databaseId: number; status: string }[]).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
+      return ofWorkflows(got.json as { databaseId: number; status: string; workflowName?: string }[], workflows).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
     };
     // --through names the newest run or near it, as the workflow does; one further back, with fewer than `last` runs
     // up to it in the short list, takes the whole list (~30 s). Runs still going take places in it, so 10 spare.
@@ -851,9 +872,9 @@ if (import.meta.main) {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
-    const got = await listRuns(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
+    const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt,workflowName"]);
     if (!got.ok) stop(`gh run list failed: ${got.error}`);
-    const runs = got.json as { databaseId: number; status: string; createdAt: string }[];
+    const runs = ofWorkflows(got.json as { databaseId: number; status: string; createdAt: string; workflowName?: string }[], workflows);
     // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
     const oldest = Math.min(...runs.map((r) => Date.parse(r.createdAt)));
     if (runs.length >= LIST_LIMIT && oldest >= cutoff) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);

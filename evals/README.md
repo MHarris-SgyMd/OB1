@@ -6809,7 +6809,7 @@ at the test split's base rate, scored on the same rows:
   project), balanced accuracy 0.505. No shape rule separates the code
   identifiers either: under rubric v1 they are invalid, and under the
   maintainer's decision below they are entities.
-- **What the self-check holds.** `--self-check` is a fork-checks step.
+- **What the self-check holds.** `--self-check` is a brain-checks step.
   - The gate is a post-filter with no other path to the graph. Off, it keeps
     every candidate with the extractor's type: today's graph. That is
     `gate()`'s identity, held by the self-check, not a live measurement.

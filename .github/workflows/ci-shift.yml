@@ -1,7 +1,7 @@
-# A warning when a Fork Checks job or step on main got slower (SMD-3467).
+# A warning when a Brain Checks job or step on main got slower (SMD-3467).
 #
 # Two slowdowns landed unnoticed in a week: SMD-3155's canary case, 113 →
-# 155 s, and SMD-2679 PR 4b's sleep cell, 196 → 269 s. After each Fork Checks
+# 155 s, and SMD-2679 PR 4b's sleep cell, 196 → 269 s. After each Brain Checks
 # run on main this reads the newest 40 of main's push runs and names any job
 # or step whose last 3 runs all went over its line, the median of the 10
 # before them plus max(30 s, 20%), as a warning on this run and a table in its
@@ -31,13 +31,13 @@ name: CI shift
 
 on:
   workflow_run:
-    workflows: ["Fork Checks"]
+    workflows: ["Brain Checks"]
     types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
       run:
-        description: "The Fork Checks run on main to read through (default: the newest completed)"
+        description: "The Brain Checks run on main to read through (default: the newest completed)"
         required: false
 
 permissions:
