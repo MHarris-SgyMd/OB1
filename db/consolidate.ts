@@ -94,7 +94,9 @@
  *   - a pair's timeout after which a one-token probe gets no answer either.
  * In each case the thought goes back to the pool unrecorded and the follower
  * probes the judge model until it answers. A thought that fails the same way
- * right after a probe answered is recorded failed. A follower probes once
+ * right after a probe answered is recorded failed — unless every error of its
+ * streak was the provider holding calls back (a 429, a 503, the model not
+ * served), which makes no suspect (SMD-3311). A follower probes once
  * before it writes anything, and refuses an unserved model, a refused key or
  * a wrong base URL with exit 2.
  *
@@ -164,7 +166,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -1741,8 +1743,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The pass's caller aborted it (abortInHand): the worker sets the thought back.
         if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
-        // else is the provider's and is classified by the caller.
-        if (timedOut(e)) {
+        // else is the provider's and is classified by the caller. Under --follow
+        // an answer whose words say "timed out" that followerFault reads as the
+        // provider's (a gateway's 408 "Request timed out", a 429 saying so) is
+        // the caller's, an outage as extract's is (SMD-3311 review pass 2); any
+        // other — a deadline with no answer, a 400 saying so — is this pair's,
+        // probed as before (review pass 3).
+        if (timedOut(e) && !(FOLLOW && followerFault(e).kind === "transient")) {
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.
@@ -2072,6 +2079,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
             const asked = { at: readAt };
+            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+            let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 // A wait for a slot on the model-call seam is not the call's time (review pass 3).
@@ -2108,7 +2117,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                const kind = classifyError(e);
+                // Under --follow through followClassify's split, as extract-entities.ts reads it (followerFault, SMD-3311).
+                const { kind, suspect } = FOLLOW ? followerFault(e) : { kind: classifyError(e), suspect: true };
+                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599), as extract-entities.ts reads it: a
@@ -2121,7 +2132,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
-                  if (outage.begin(msg, b.thought_id) === "outage") {
+                  if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
