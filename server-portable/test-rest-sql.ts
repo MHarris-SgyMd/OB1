@@ -1224,7 +1224,7 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
         && lapsedAwayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\. It had lapsed at \S+, and stays lapsed until a renewal lands/.test(lapsedAwayMcp.text) && /with none, carry on\.$/.test(lapsedAwayMcp.text) && lapsedAwayMcp.sc.lapsedAt === lapsedLeaseEnd
         && lapsedAway.body.lapsedAt === lapsedLeaseEnd && lapsedAwayRenew.status === 503 && lapsedAwayRenew.body.cause === "registry_away" && lapsedAwayRenew.body.id === lapsedOwnId && lapsedAwayRenew.body.lapsedAt === lapsedAway.body.lapsedAt
         && awayRow?.released_at === null && await claimsOn("pr 1") === 1,
-      `SMD-3705: the registry unreachable, the same claim_work answers 503 CLAIM_UNATTRIBUTED registry_away with Retry-After, as renew_claim does; still no takeover (${lapsedAway.status} ${lapsedAway.body.cause} ${lapsedAway.headers.get("retry-after")} | ${lapsedAwayRenew.status} ${lapsedAwayRenew.body.cause} | ${lapsedAwayMcp.text.slice(0, 80)})`);
+      `SMD-3705: the registry unreachable, the same claim_work answers 503 CLAIM_UNATTRIBUTED registry_away with Retry-After, as renew_claim does, its lapse check ending "carry on" with no operator's "either way"; still no takeover (${lapsedAway.status} ${lapsedAway.body.cause} ${lapsedAway.headers.get("retry-after")} | ${lapsedAwayRenew.status} ${lapsedAwayRenew.body.cause} | ${lapsedAwayMcp.text.slice(0, 80)})`);
   } finally {
     await sql`DROP FUNCTION resolve_agent(text, text, text)`;
     await sql`ALTER FUNCTION resolve_agent_smd3598_real(text, text, text) RENAME TO resolve_agent`;
