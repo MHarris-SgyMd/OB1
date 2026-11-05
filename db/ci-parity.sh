@@ -20,7 +20,7 @@
 #
 #   ./db/ci-parity.sh
 #
-# Check 35 in scripts/check-fork-consistency.ts holds this list to the workflow:
+# Check 35 in scripts/check-consistency.ts holds this list to the workflow:
 # every script a fork-checks.yml step runs is a `run` or `nodb` line here, from
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
@@ -276,7 +276,7 @@ free_rows() {
   # because CI runs them and this script exists to be CI's local equivalent —
   # leaving them out let two stale tool-count assertions reach a pull request
   # while this reported all green.
-  nodb .                 scripts/check-fork-consistency.ts
+  nodb .                 scripts/check-consistency.ts
   nodb .                 recipes/session-capture-hook/test-session-capture.mjs
   nodb dashboard          test-oauth.ts
   nodb .                 deploy/forwarder.ts --self-check

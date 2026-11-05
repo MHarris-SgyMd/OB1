@@ -138,7 +138,7 @@ export const DEFAULT_EMBEDDING_DIM = 1024;
  * at all: pointing local model names at OpenRouter produces a 404 per capture, and
  * the embedding one is fatal rather than degraded. Overriding the provider means
  * overriding the models too, which SETUP.md says and
- * scripts/check-fork-consistency.ts enforces.
+ * scripts/check-consistency.ts enforces.
  */
 export const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434/v1";
 
@@ -535,11 +535,15 @@ export function startRefusalRemedy(kind, worker) {
   if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";
   if (worker === "reembed" && kind === "provider") return "the provider refused the embedding probe: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
   switch (kind) {
-    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model";
+    // The subject sweep's beside the extraction pass's: the sleep row carries the kind alone (SMD-3306 PR 6b-1's review
+    // pass 1), its switch run in the stack (review pass 2, walkthrough: from a checkout, the egress gate's default
+    // deny), after up -d coordinator for a change to deploy/.env (review pass 3, walkthrough: compose run reads
+    // deploy/.env afresh, a running coordinator keeps its own).
+    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model; a subject pool another run named is the sweep's to switch, which pools again, in the stack (podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with, docker compose alike, after up -d coordinator for a change to deploy/.env; the scheduler's runs take the rest), or set OB1_SUBJECT_REASONING back to the named pool's in deploy/.env and recreate the coordinator (up -d coordinator) — the log names which";
     case "identity": return "an unset OB1_WORKER_KEY needs a key minted (cd server-portable && bun keygen.ts --name workers --scope capture): its line in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the coordinator (up -d coordinator); OB1_WORKER_KEY set without MCP_ACCESS_KEYS needs both, as the server has them; a revoked, unlisted or forward-scope worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the coordinator (up -d coordinator)";
     case "model": return "pull the model its log names, or set OB1_JUDGE_MODEL or OB1_EXTRACT_ESCALATE_MODEL to one the provider serves — OB1_METADATA_MODEL names the extraction key, so another one there is the key's switch too (bun db/extract-entities.ts --switch-key)";
     case "provider": return "the provider refused a one-token call: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
-    case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>)";
+    case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>); or, the subject sweep's, grant the roles its log names what it names — its own the door's and the pool's grants, and before the first pool is named each capturing role the claims' (cd db && bun migrate.ts --url <the owner's url> --grant <role> --groups …)";
     case "egress": return "the egress policy refuses every call the pass would make (OB1_EGRESS_* in deploy/.env; this preflight's egress rows say why)";
     case "lookup": return "the worker key's lookup did not name the key, and the egress policy admits that actor alone: its log says why the lookup failed (too many connections, a lock)";
     case "usage": return "a setting its log names is not one the service takes — decimal digits, in its range (the coordinator's guard, board-sync's interval or findings cap) — so set it in deploy/.env, then recreate the coordinator (up -d coordinator); or a pass refused the options the scheduler gave it, which no setting mends: report that, with the log";
@@ -1290,6 +1294,22 @@ export function summariseCorpusByModel(rows, atModel, acceptedRows = []) {
 export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the operator: ";
 
 /**
+ * The subject pool's keys begin so (server-portable/subject.ts's subjectPoolKey,
+ * migration 113's ob1_config.subject_pool_key), beside extraction's `extract:`
+ * and re-embed's `reembed:` (SMD-3306).
+ */
+export const SUBJECT_POOL_PREFIX = "subjects:";
+
+/**
+ * The hang's mark a following subject sweep writes in a hung thought's pending
+ * claim, its last_error, the hang's words after it (db/subject-sweep.ts's rule;
+ * SMD-3306 PR 6b-1): a third meaning of that column, beside a failure's and a
+ * succeeded row's caveat, on a subject pool's pending or claimed row alone.
+ * Here, not in the sweep, so the store's retry clears it too.
+ */
+export const HUNG_MARK = "hung the provider once: ";
+
+/**
  * The accepted vectors by label, for the same reduction: per embedding_model,
  * how many rows with a vector have an accepted row — standing: nothing has
  * written the thought since the attempt READ it, claimed_at (015 keeps it on
@@ -1381,7 +1401,7 @@ export const LOCK_TIMEOUT_S = 10;
  * sharing a number (two branches each adding "the next number" is how it
  * happens; the fork has renumbered twice; SMD-1421). One rule, read by
  * migrate.ts at load — every operator's run and every compose start — and by
- * scripts/check-fork-consistency.ts on every push, where the collision is
+ * scripts/check-consistency.ts on every push, where the collision is
  * made. Only .sql files are judged.
  * @param {string[]} names
  * @returns {string | null}
@@ -1551,7 +1571,7 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
  * The compose service names a model endpoint may live at — the `ollama`
  * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
  * passes these to isLocalHostname (a service name is local: the compose
- * network), and check 14 of scripts/check-fork-consistency.ts holds
+ * network), and check 14 of scripts/check-consistency.ts holds
  * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
  * the file defaults to is one the container will call local (SMD-1843).
  */
@@ -2196,7 +2216,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
  * and it reads no file. A statement at the start of
  * a line, comments stripped first so a header quoting one is not it
  * (test-schema [10]'s rule). Read from the files, never typed: a list would
- * lag the next migration. scripts/check-fork-consistency.ts check 7 fails a
+ * lag the next migration. scripts/check-consistency.ts check 7 fails a
  * vendored file that redefines or drops one of these; test-schema [31] holds
  * the set to what preflight's remedies name.
  */
@@ -2368,7 +2388,7 @@ export async function alignVectorSearchPath(sql) {
  * preflight's `write privileges` check reads CAPTURE_WRITES, `migrate.ts
  * --grant` issues every group but the opt-in ones through grantStatements(), and db/README.md's
  * "Grants for a capturing role" is rendered from the same groups — a
- * check-fork-consistency check asserts the README names each table.
+ * check-consistency check asserts the README names each table.
  *
  * Privileges are the DML a group's functions actually run, no more: SELECT where
  * a function reads, and only the write verbs its statements use.
@@ -2905,7 +2925,7 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
  * because db/README.md documents privileges per group and an object can appear
  * in more than one with a different set (`ob1_config`: SELECT in `server`,
  * SELECT/INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
- * `server`, SELECT and INSERT in `community`). check-fork-consistency's privilege comparison reads it
+ * `server`, SELECT and INSERT in `community`). check-consistency's privilege comparison reads it
  * (SMD-1471).
  */
 export function grantRows(groups = ROLE_GRANT_GROUPS) {
@@ -3034,7 +3054,7 @@ export function grantVerifySql(role, merged) {
  * literals are literals). Newlines are kept, so a line number in the result is
  * a line number in the source (SMD-1796; the literal-aware strip SMD-1316 asked
  * for — a `--` inside a string no longer hides the rest of its line). Shared by
- * test-schema [10] and check-fork-consistency's Supabase-isms check through
+ * test-schema [10] and check-consistency's Supabase-isms check through
  * supabaseIsmsIn(); ownedFunctionsIn keeps its own coarser strip, which blanks
  * bodies whole because a CREATE inside one is not a definition.
  */
@@ -3176,7 +3196,7 @@ function sqlHitList(sql, rules) {
  * stand outside a quoted identifier. String literals are read, as
  * SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' || quote_ident(t)` runs
  * the truncate. A `--` comment quoting a statement is not a hit, so a header
- * may say why the file has none. check-fork-consistency check 21 holds every
+ * may say why the file has none. check-consistency check 21 holds every
  * .sql git tracks to these through destructiveSqlIn().
  */
 export const DESTRUCTIVE_SQL_RULES = Object.freeze([

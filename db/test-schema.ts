@@ -1087,7 +1087,7 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    * SMD-1796 (what SMD-1316 asked for): a `--` inside a string literal no
    * longer hides the rest of its line, and a dollar-quoted body is scanned
    * within, its own comments stripped. The rules are SUPABASE_SQL_RULES — the
-   * list check-fork-consistency holds every .sql under schemas/ and db/ to —
+   * list check-consistency holds every .sql under schemas/ and db/ to —
    * so the migrations and the community schemas answer to one spelling, and
    * [40] runs the same scan over schemas/ from inside this suite.
    */
@@ -3543,7 +3543,7 @@ console.log("\n[30] Migration 031: renew_claims moves every lease the worker hol
 
 console.log("\n[31] A vendored schema applied to a migrated brain replaces no function a migration owns — and what upstream's did (SMD-1250)");
 {
-  // The owned set, read from the files as scripts/check-fork-consistency.ts
+  // The owned set, read from the files as scripts/check-consistency.ts
   // check 7 reads it. Three names preflight's remedies spell as the last
   // definer are pinned here: when one moves, so must the remedy.
   const owned = ownedFunctionsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
@@ -4753,7 +4753,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const schemaFiles = communitySchemaFiles();
   assert(schemaFiles.length >= 13 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064; the set otherwise grows), the four with prerequisites among them`);
 
-  // The rule check-fork-consistency holds these files to, from inside the
+  // The rule check-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
   // on the three shapes the old `--`-to-end-of-line strip could not tell apart:
   // a literal carrying `--` followed by a statement on the same line, a

@@ -18,7 +18,7 @@
 # which is what makes compose recreate; an inline config alone does not).
 # The table holds no comment of its own: Traefik renders it as a Go template
 # first, so a comment line there is not inert, and check 28
-# (scripts/check-fork-consistency.ts, HOOKS_ROUTE_TABLE) holds it byte for
+# (scripts/check-consistency.ts, HOOKS_ROUTE_TABLE) holds it byte for
 # byte (SMD-2658).
 
 x-hooks-route: &hooks-route |

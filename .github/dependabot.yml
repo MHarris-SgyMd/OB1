@@ -1,6 +1,6 @@
 # Dependabot moves the workflows' action pins (SMD-2093). Every `uses:` in
 # .github/workflows/ names a full commit SHA with its tag in a trailing
-# comment, and check-fork-consistency check 23 refuses a tag; this is what
+# comment, and check-consistency check 23 refuses a tag; this is what
 # keeps those pins current, one PR a week, grouped, so no action pin is edited
 # by hand. It rewrites the SHA and the comment together.
 #
@@ -27,9 +27,9 @@ updates:
     groups:
       actions-minor-and-patch:
         update-types: [minor, patch]
-    # The house header, `[fork] Bump …`. The trailing space matters: Dependabot
+    # The house header, `[core] Bump …`. The trailing space matters: Dependabot
     # appends a colon to a prefix that ends in a letter, a digit, `)` or `]`
-    # (dependabot-core's pr_name_prefixer.rb), and `[fork]: Bump …` fails
+    # (dependabot-core's pr_name_prefixer.rb), and `[core]: Bump …` fails
     # commitlint's header rule. The missing (SMD-NNNN) is a warning there.
     commit-message:
-      prefix: "[fork] "
+      prefix: "[core] "
