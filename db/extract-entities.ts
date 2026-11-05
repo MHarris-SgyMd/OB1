@@ -1188,6 +1188,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
   /** Each worker's model call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
   /**
    * The hard stop's count for each worker, which the worker's own release

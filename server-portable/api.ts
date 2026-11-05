@@ -90,6 +90,10 @@ if (SERVES_ON_BUN) {
   void startTelemetry(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
+  // Background calls — the mender's, the reprobe's, a detached job's, a webhook's deferred work — held to
+  // OB1_BACKGROUND_SLOTS' share, beside the brain's other processes' (SMD-3379 PR 2b-1); off when unset, or with no
+  // database to keep the share in. Before the mender and the reprobe start: the reprobe probes at once (review pass 5).
+  const slots = process.env.DATABASE_URL ? installBackgroundSlots({ url: process.env.DATABASE_URL, raw: process.env.OB1_BACKGROUND_SLOTS }) : null;
   // The vector mender (SMD-2889), as the MCP server starts one: a tick acts
   // only under the store's leader lock, so the two servers' menders take
   // turns, and this one goes on mending once the MCP endpoint is
@@ -106,10 +110,6 @@ if (SERVES_ON_BUN) {
   const reprobe = reprobeIntervalFrom(process.env.OB1_PROVIDER_REPROBE_INTERVAL);
   if (reprobe.problem) console.warn(reprobe.problem);
   const reprober = core.startProviderReprobe(reprobe.intervalS);
-  // Background calls — the mender's, the reprobe's, a detached job's, a webhook's deferred work — held to
-  // OB1_BACKGROUND_SLOTS' share, beside the brain's other processes' (SMD-3379 PR 2b-1); off when unset, or with no
-  // database to keep the share in.
-  const slots = process.env.DATABASE_URL ? installBackgroundSlots({ url: process.env.DATABASE_URL, raw: process.env.OB1_BACKGROUND_SLOTS }) : null;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
     graceMs: grace.graceS * 1000,

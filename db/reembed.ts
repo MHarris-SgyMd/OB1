@@ -2035,6 +2035,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let abortedInHand = 0;
   /** Each worker's embedding call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   let beats = 0;
   /** Worker ids with leases possibly outstanding, for a forced exit. */
   const activeWorkers = new Set<string>();

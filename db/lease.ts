@@ -490,9 +490,10 @@ export type InHandAbort = (olderThanMs?: number) => number;
  * which the engine joins with the hard stop's for the calls; when it began —
  * the thought taken up, the admit gate last passed or a provider pause ended;
  * whether it has no call to abort now (at the gate, in a pause, in the
- * decider's call); and whether it was aborted.
+ * decider's call); whether it was aborted; and whether a wait for a slot
+ * aborts it (`abortWaiting`: the pass stopping).
  */
-export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean };
+export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean };
 
 /**
  * The calls a pass's workers hold, behind its InHandAbort (SMD-3379 PR 1b-2):
@@ -500,13 +501,19 @@ export type InHandCall = { abort: AbortController; since: number; waiting: boole
  * with it; abortInHand aborts each entry at least `olderThanMs` old that is
  * not waiting, and does nothing while `inert()` — the pass stopping, the run
  * returned. One place for the three claim workers, so the rule cannot drift
- * between them (review pass 3).
+ * between them (review pass 3). `abortWaiting`, at the pass's first stop,
+ * aborts each call waiting for a slot on the model-call seam's hook, and each
+ * that starts waiting after it, so the thought goes back to the pool rather
+ * than the stop waiting out other processes' calls (SMD-3379 PR 2b-1, review
+ * pass 5: a SIGTERM waited 36 s on a slot, past which the coordinator's grace
+ * kills).
  */
-export function inHandCalls(inert: () => boolean): { begin(workerId: string): InHandCall; get(workerId: string): InHandCall | undefined; end(workerId: string): void; abortInHand: InHandAbort } {
+export function inHandCalls(inert: () => boolean): { begin(workerId: string): InHandCall; get(workerId: string): InHandCall | undefined; end(workerId: string): void; abortInHand: InHandAbort; abortWaiting(): number } {
   const calls = new Map<string, InHandCall>();
+  let noWait = false;
   return {
     begin(workerId) {
-      const call = { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false };
+      const call = { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false, noWait };
       calls.set(workerId, call);
       return call;
     },
@@ -526,7 +533,24 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
       }
       return n;
     },
+    abortWaiting() {
+      noWait = true;
+      let n = 0;
+      for (const c of calls.values()) {
+        c.noWait = true;
+        if (c.waiting && waitAborted(c)) n++;
+      }
+      return n;
+    },
   };
+}
+
+/** Aborts a call in hand that waits for a slot once its pass is stopping (`abortWaiting`); whether it did. */
+function waitAborted(c: InHandCall): boolean {
+  if (!c.noWait || c.aborted) return false;
+  c.aborted = true;
+  c.abort.abort(new AbortedInHand());
+  return true;
 }
 
 /**
@@ -564,6 +588,7 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
       before = c?.waiting;
       if (c) c.waiting = true;
       also?.waiting();
+      if (c) waitAborted(c);
     },
     running() {
       if (waiting === 0 || --waiting > 0) return;
