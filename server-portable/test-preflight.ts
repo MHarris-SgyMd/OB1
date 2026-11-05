@@ -4696,6 +4696,18 @@ else {
       const modelDown = fix((await run(LOG_ON)).out, "sleep");
       assert(/The subject sweep was set down for this period \(model\) — the judge model is not served: pull the model its log names, or set OB1_JUDGE_MODEL to one the provider serves; a setting mended/.test(modelDown) && !/OB1_EXTRACT_ESCALATE_MODEL|--switch-key/.test(modelDown),
         `a set-down for the judge model unserved names OB1_JUDGE_MODEL, not extraction's settings (${modelDown})`);
+      // The sweep's own statement hold (N9) is a statement's, not a set-down's: its fix the statement's, the other passes
+      // running on; and another pass's statement hold beside the sweep's key hold ends without that, the hold's fix
+      // saying the sweep is held (review pass 1, mutants: a statement hold read as a set-down; the ending read off a
+      // judge hold alone).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "statement", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const sweepStmt = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "statement", until: null }, { pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const stmtBesideKey = fix((await run(LOG_ON)).out, "sleep");
+      assert(/subjects held until a restart: a statement passed its statement_timeout.*; the other passes run on meanwhile\./.test(sweepStmt) && !/set down|The subject sweep is held/.test(sweepStmt)
+             && /extract held until a restart: a statement passed its statement_timeout/.test(stmtBesideKey) && !/the other passes run on meanwhile/i.test(stmtBesideKey)
+             && /The subject sweep is held: ob1_config names a subject pool/.test(stmtBesideKey),
+        `the sweep's statement hold has the statement's fix, the other passes running on, and beside its key hold another pass's statement fix does not say they run on (${sweepStmt} | ${stmtBesideKey})`);
       // …and beside consolidation's hold alike, any pass's (SMD-3306 PR 6b-1's review pass 6, mutant: extraction's
       // alone lived); and where no line says a failed pass's cause — a stopped row ended failed, or a pass waiting on
       // its provider taking the line — the hold's fix names another pass's failure, never that the other passes run on

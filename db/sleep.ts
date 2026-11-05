@@ -2702,7 +2702,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           subjectsLeft = true;
           err(subjectsDownLine(subjectsDown, " for this period"));
         }
-        // Its run ended failed on its own word; a throw or a 0 unasked says none, so the period's outcome is set here.
+        // Failed whatever its run's own end said: a refusal, an end of its own and a throw end its row failed (its
+        // finally), a 0 unasked says stopped (review pass 1, mutant: dropped, only a 0 unasked would tell).
         words.subjects = "failed";
       }
       sayAside();
