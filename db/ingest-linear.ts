@@ -48,6 +48,8 @@ export type LinearIssue = {
   updatedAt: string;
   archivedAt: string | null;
   priorityLabel: string;
+  /** The day it is due, YYYY-MM-DD, or null (SMD-3666). Absent from a dump built before it was fetched. */
+  dueDate?: string | null;
   state: { name: string; type: string };
   project: { id: string; name: string } | null;
   parent: { identifier: string } | null;
@@ -72,7 +74,7 @@ export const RELATIONS_BOUND = 25;
  * (SMD-1958). The self-check holds it to the type: every key of a LinearIssue
  * is selected.
  */
-export const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } } relations(first: ${RELATIONS_BOUND}) { nodes { type relatedIssue { identifier } } } inverseRelations(first: ${RELATIONS_BOUND}) { nodes { type issue { identifier } } }`;
+export const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel dueDate state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } } relations(first: ${RELATIONS_BOUND}) { nodes { type relatedIssue { identifier } } } inverseRelations(first: ${RELATIONS_BOUND}) { nodes { type issue { identifier } } }`;
 /** The facet that is the issue's clock — the sync's watermark, and the pipeline's rule against an older record (ingest-contract.ts `watermark`). */
 export const WATERMARK_KEY = "linear_updated_at";
 
@@ -100,6 +102,10 @@ export function autolinkTargets(text: string): string[] {
  * issue is live), so a facet that goes away is patched away too: an issue
  * archived then restored would otherwise keep `archived_at` forever, since the
  * patch compares the keys the new facets name (SMD-1954, second review pass).
+ * `due_date` alone is written only when the issue carries `dueDate` (SMD-3666):
+ * every fetch does, null included, but a dump built before it was fetched has
+ * none, and its null merged over a row would wipe the day board-sync wrote
+ * (review pass 1).
  */
 export function issueFacets(issue: LinearIssue): Record<string, unknown> {
   return {
@@ -109,6 +115,8 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
     status: issue.state.name,
     status_type: issue.state.type,
     priority: issue.priorityLabel,
+    // The day Linear says it is due (SMD-3666): board-sync states it with the priority, from this facet.
+    ...("dueDate" in issue ? { due_date: issue.dueDate ?? null } : {}),
     labels: labelNames(issue),
     parent: issue.parent?.identifier ?? null,
     url: issue.url,
@@ -314,6 +322,8 @@ export const linearAdapter: Adapter<LinearIssue> = {
       createdAt: issue.createdAt,
       watermark: { key: WATERMARK_KEY, value: issue.updatedAt },
       derived: derivedSections(issue),
+      // Linear's priority and due day, on the ticket the row is the record of (SMD-3666).
+      priority: { scale: "linear", value: issue.priorityLabel, due: issue.dueDate ?? null, on: { kind: "ticket", key: issue.identifier } },
     };
   },
 };

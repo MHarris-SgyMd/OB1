@@ -611,24 +611,24 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # extensions (change 64; none since SMD-2311 made the six plugins and retired the seventh) and the recipes' and integrations' MCP
-      # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
-      # _shared/auth.ts beside it, a byte copy. One MCP stack across the
-      # tree's installs — the test fails if server-portable's or mcp-server's
-      # shared pins drift from these.
+      # extensions until SMD-2311 made the six plugins (change 64), and the
+      # recipes' and integrations' HTTP APIs, workers and webhook receiver
+      # (change 67) — through a _shared/auth.ts beside it, a byte copy. Their
+      # suites and install live in integrations/ since SMD-3747. One MCP stack
+      # across the tree's installs — the test fails if server-portable's or
+      # mcp-server's shared pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
-        working-directory: extensions
+        working-directory: integrations
         run: bun install --frozen-lockfile
 
       # Imported as modules — each server's default export's `fetch`, the shape
       # `bun <file>` serves (SMD-1799) — their packages from this install: a
-      # wrong or revoked key is refused, a read-scoped key never sees a tool that
-      # writes, is told so by a route that writes and may only dry-run a worker,
-      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
-      # started under `bun` for real and answered over its port (change 74). No
-      # database.
+      # wrong or revoked key is refused, a read-scoped key is told so by a route
+      # that writes and may only dry-run a worker, every copy is byte for
+      # byte auth.ts. Then every server on the SQL shim is started under `bun`
+      # for real and answered over its port (change 74). No database.
       - name: Scoped access keys reach every vendored server
-        working-directory: extensions
+        working-directory: integrations
         run: bun test-auth.ts
 
       # The two suites the job started after the installs (SMD-3470), waited
@@ -1427,11 +1427,11 @@ jobs:
       # and the row it leaves is compared with the row update_thought leaves
       # for the same edit. Late in the job because it applies those sidecars.
       - name: Install the vendored servers' pinned test dependencies
-        working-directory: extensions
+        working-directory: integrations
         run: bun install --frozen-lockfile
 
       - name: Vendored writers leave what update_thought leaves
-        working-directory: extensions
+        working-directory: integrations
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
