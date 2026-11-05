@@ -625,7 +625,7 @@
  *      a code line is one it charges; the files whose code names it, as an
  *      anchored path token with comments blanked, are exactly
  *      JOB_MAP_READERS's, each with why; a gated job whose steps run such a
- *      reader is charged unless READER_RUNS excuses that invocation; a code
+ *      reader that opens the path is charged, with no exceptions; a code
  *      file compat-shim reads by content charges it; a stale entry, a row
  *      naming no tracked path, or a HOLDS_THE_CUT other than the checker and
  *      changes.sh fails (SMD-2435 PR 3a). Lexical and one hop deep, as
@@ -11293,34 +11293,41 @@ checkCommitCategories();
 // 47's is: a path built from pieces is not seen, which PR 3b's derived map
 // replaces.
 /**
- * Per CHARGES pattern, the files whose code names it and why no gated job
- * beyond the ones it charges reaches it through them (SMD-2435's 3a survey).
+ * Per CHARGES pattern, the files whose code names it, each `reads` (it opens
+ * the path, so every gated job whose steps run it is charged, no exceptions)
+ * or `names` (the path is only a word, a key or a message in it), with why
+ * (SMD-2435's 3a survey; review pass 6 replaced per-run exemptions, which
+ * took a fix in four passes running).
  */
-const JOB_MAP_READERS: Record<string, Record<string, string>> = {
+/** A reader of a CHARGES path: one that opens it, or one in whose text it is only a word, a key or a message. */
+type MapReader = { reads: string } | { names: string };
+const reads = (why: string): MapReader => ({ reads: why });
+const names = (why: string): MapReader => ({ names: why });
+const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
   "changes/*": {
-    ".github/workflows/release-steps.yml": "the release's steps, which release.yml alone calls; and the aggregate's rules refuse a gated job calling a reusable workflow",
-    "dashboard/smoke.ts": "\"changes\" is the change feed's page name, not the directory; deploy-stack runs it, which a record charges anyway",
-    "dashboard/src/routes/changes/+page.server.ts": "\"changes\" is the change feed route's name, not the directory",
-    "dashboard/src/routes/+error.svelte": "a route check, pathname.endsWith('changes'), not the directory",
-    "dashboard/src/routes/+layout.svelte": "the change feed's nav entry, not the directory",
-    "dashboard/src/routes/changes/+page.svelte": "PageData['changes'] and a test id, the page's data key, not the directory",
-    "db/ingest-records.ts": "join(REPO_ROOT, \"changes\") under --source fork or all, the default; every CI run passes --source items or markdown, or --self-check, and test-live builds its fork documents itself",
-    "releases.json": "a release's \"changes\" key, the change numbers it carries; nothing opens the records through it",
-    "scripts/assemble-release.ts": "the release cut, which the maintainer runs; no CI job runs it",
-    "scripts/changes-index.ts": "readChanges and readChangeEntries read the directory for release-artifacts (deploy-stack, charged) and assemble-release; ingest-records imports only headingOf and ticketsOf, which read no file",
-    "scripts/check-landing.ts": "the landing check, which repo-consistency alone runs and which always runs",
-    "scripts/fragments.ts": "a fragment's rule refusing a path to another fragment in its text; it reads the files its callers give it: the checker's, assemble-release's and ingest-records' (under --source fork or all, which no CI run passes)",
-    "scripts/release-artifacts.ts": "deploy-stack's release rehearsal (--rehearsal) reads every record: the job charged",
-    "server-portable/open-items.ts": "\"changes\" is an item problem's name, not a path",
-    "server-portable/test-rest-sql.ts": "has(\"changes\") reads a reply's key, not the directory",
+    ".github/workflows/release-steps.yml": reads("the release's steps read the records through release-artifacts; release.yml alone calls them, and the aggregate's rules refuse a gated job calling a reusable workflow"),
+    "dashboard/smoke.ts": names("\"changes\" is the change feed's page name"),
+    "dashboard/src/routes/changes/+page.server.ts": names("\"changes\" is the change feed route's name"),
+    "dashboard/src/routes/+error.svelte": names("a route check, pathname.endsWith('changes')"),
+    "dashboard/src/routes/+layout.svelte": names("the change feed's nav entry"),
+    "dashboard/src/routes/changes/+page.svelte": names("PageData['changes'] and a test id, the page's data key"),
+    "db/ingest-records.ts": reads("join(REPO_ROOT, \"changes\") under --source fork or all, the default, so every gated job running it is charged, its --self-check too"),
+    "releases.json": names("a release's \"changes\" key, the change numbers it carries"),
+    "scripts/assemble-release.ts": reads("the release cut, which the maintainer runs and no CI job does"),
+    "scripts/changes-index.ts": reads("readChanges and readChangeEntries, which release-artifacts and assemble-release call"),
+    "scripts/check-landing.ts": reads("the landing check, which repo-consistency alone runs and which always runs"),
+    "scripts/fragments.ts": reads("it reads the fragments its callers give it: the checker, assemble-release and ingest-records"),
+    "scripts/release-artifacts.ts": reads("deploy-stack's release rehearsal (--rehearsal) reads every record"),
+    "server-portable/open-items.ts": names("\"changes\" is an item problem's name"),
+    "server-portable/test-rest-sql.ts": names("has(\"changes\") reads a reply's key"),
   },
   "scripts/check-consistency.ts": {
-    "db/ci-parity.sh": "the local mirror of CI, which no CI job runs",
-    "integrations/test-writes.ts": "asserts over the checker's text (thoughtWritesAroundIn): data-layer, the job charged",
-    "scripts/gen-tools.ts": "a sentence in the note it writes into tools.json",
-    "scripts/gen-version.ts": "a sentence in the comment it writes into db/version.mjs",
-    "scripts/mechanism-yield.ts": "a sample commit body in its own cases",
-    "server-portable/tools.json": "the generated note's sentence; its readers read the tools, not the checker",
+    "db/ci-parity.sh": reads("the local mirror of CI runs the checker; no CI job runs it"),
+    "integrations/test-writes.ts": reads("asserts over the checker's text (thoughtWritesAroundIn), in data-layer"),
+    "scripts/gen-tools.ts": names("a sentence in the note it writes into tools.json"),
+    "scripts/gen-version.ts": names("a sentence in the comment it writes into db/version.mjs"),
+    "scripts/mechanism-yield.ts": names("a sample commit body in its own cases"),
+    "server-portable/tools.json": names("the generated note's sentence"),
   },
   ".github/ci/typecheck.sh": {},
   ".github/ci/full-stack-up.sh": {},
@@ -11328,15 +11335,15 @@ const JOB_MAP_READERS: Record<string, Record<string, string>> = {
   ".github/ci/held-cases.sh": {},
   ".github/ci/changes.sh": {},
   ".github/ci/test-counts-page.ts": {
-    "db/ci-parity.sh": "the local mirror of CI, which no CI job runs",
+    "db/ci-parity.sh": reads("the local mirror of CI runs it; no CI job runs ci-parity.sh"),
   },
   ".github/workflows/release.yml": {
-    ".github/workflows/release-steps.yml": "the release's steps, naming the workflow that calls them",
-    "scripts/assemble-release.ts": "a sentence in its closing advice; the maintainer runs it",
-    "scripts/release-artifacts.ts": "a tag's message and a header written into the release's compose overlay; it reads no workflow",
+    ".github/workflows/release-steps.yml": names("the release's steps, naming the workflow that calls them"),
+    "scripts/assemble-release.ts": names("a sentence in its closing advice"),
+    "scripts/release-artifacts.ts": names("a tag's message and a header written into the release's compose overlay"),
   },
   ".github/workflows/release-steps.yml": {
-    ".github/workflows/release.yml": "the release calls its steps; and the aggregate's rules refuse a gated job calling a reusable workflow",
+    ".github/workflows/release.yml": reads("the release calls its steps; the aggregate's rules refuse a gated job calling a reusable workflow"),
   },
   ".github/workflows/ci-shift.yml": {},
   "db/ci-parity.sh": {},
@@ -11359,25 +11366,6 @@ function chargesTable(): ChargesRow[] | string {
   });
 }
 const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/**
- * A listed reader's runs that do not read a path it names, by CHARGES
- * pattern, reader and gated job, each with why (review pass 1): a job whose
- * steps run a reader is charged by the reader's path unless it is here, so a
- * new runner of a reader is seen. Keyed by the pattern first, so a run that
- * reads one path a reader names stays charged by another; and each names the
- * invocation it excuses, which every line of the job running the reader must
- * hold, so another run of it is seen too (review pass 4).
- */
-type ReaderRun = { invocation: string; why: string };
-const READER_RUNS: Record<string, Record<string, Record<string, ReaderRun>>> = {
-  "changes/*": {
-    "db/ingest-records.ts": { "db-schema": { invocation: "ingest-records.ts --self-check", why: "its --self-check reads no record" } },
-    "server-portable/test-rest-sql.ts": { "data-layer": { invocation: "test-rest-sql.ts", why: "its \"changes\" is a reply's key, not the directory, however it runs" } },
-  },
-  ".github/workflows/release.yml": {
-    "scripts/release-artifacts.ts": { "deploy-stack": { invocation: "release-artifacts.ts", why: "it names release.yml in a message and in a header it writes, however it runs; it reads no workflow" } },
-  },
-};
 /** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips and the files it reads. */
 type CodemodWalk = { skip: string[]; code: RegExp; marked: Set<string> };
 /**
@@ -11431,7 +11419,7 @@ function codeForCharges(rel: string, text: string): string | null {
  * What check 53 reports: CHARGES against JOB_MAP_READERS, the gated jobs, the
  * files' code and the workflow's job blocks (each a job's lines, comments in).
  */
-function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<string, string>>, gated: readonly string[], files: Map<string, string>, blocks: Map<string, string[]>, runs: Record<string, Record<string, Record<string, ReaderRun>>> = {}, walk: CodemodWalk | null = null): string[] {
+function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<string, MapReader>>, gated: readonly string[], files: Map<string, string>, blocks: Map<string, string[]>, walk: CodemodWalk | null = null): string[] {
   const problems: string[] = [];
   const patterns = table.map((r) => r.pattern);
   for (const p of patterns.filter((p, i) => patterns.indexOf(p) !== i)) problems.push(`${CHANGES_SCRIPT}'s CHARGES names ${p} twice — the first wins, so the second is dead; keep one (check 53, SMD-2435)`);
@@ -11448,28 +11436,14 @@ function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<stri
     const namers = [...files].filter(([rel, code]) => rel !== pattern && !JOB_MAP_HOMES.includes(rel) && !(pattern.endsWith("/*") && rel.startsWith(pattern.slice(0, -1))) && token.test(code)).map(([rel]) => rel).sort();
     for (const rel of namers) if (!(rel in listed)) problems.push(`${rel} names ${pattern} in its code, which CHARGES charges only to ${jobs.join(", ") || "no gated job"} — list it in JOB_MAP_READERS with why no other gated job reaches it through ${rel}, or charge the jobs that do (check 53, SMD-2435)`);
     for (const rel of Object.keys(listed)) if (!namers.includes(rel)) problems.push(`JOB_MAP_READERS lists ${rel} for ${pattern}, but its code no longer names it — take it off (check 53, SMD-2435)`);
-    // One hop (review pass 1): a gated job whose steps run a listed reader reads the path through it, unless READER_RUNS says why not.
-    for (const rel of Object.keys(listed)) {
+    // One hop (review passes 1 and 6): a gated job whose steps run a reader that opens the path reads it through that
+    // reader, and is charged; a reader that only names it charges nothing.
+    for (const [rel, kind] of Object.entries(listed)) {
+      if (!("reads" in kind)) continue;
       const runsIt = chargesToken(rel);
       for (const [job, lines] of blocks) {
         if (!gated.includes(job) || jobs.includes(job)) continue;
-        const running = hashCommentsBlanked(lines.join("\n"), true).split("\n").filter((l) => runsIt.test(l));
-        if (!running.length) continue;
-        const excused = runs[pattern]?.[rel]?.[job];
-        if (!excused) problems.push(`job ${job}'s steps name ${rel}, which reads ${pattern}, but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${job}, or say in READER_RUNS why its run of ${rel} does not read ${pattern} (check 53, SMD-2435)`);
-        // Each run on a line needs its own excused invocation (review pass 5): `x --self-check && x --dry-run` runs x twice.
-        const runsOn = (l: string) => (l.match(new RegExp(runsIt.source, `g${runsIt.flags.replace("g", "")}`)) ?? []).length;
-        const excusedOn = (l: string) => l.split(excused?.invocation ?? "\0").length - 1;
-        if (excused) for (const l of running.filter((l) => excusedOn(l) < runsOn(l))) problems.push(`job ${job} runs ${rel} as \`${l.trim()}\`, not as READER_RUNS's excused \`${excused.invocation}\` — charge ${job}, or excuse this run too (check 53, SMD-2435)`);
-      }
-    }
-    // A READER_RUNS exemption that excuses nothing is stale (review pass 2), so none waits to excuse a later run.
-    for (const [rel, byJob] of Object.entries(runs[pattern] ?? {})) {
-      if (!(rel in listed)) { problems.push(`READER_RUNS excuses ${rel}'s runs for ${pattern}, but JOB_MAP_READERS does not list ${rel} for it — take it off (check 53, SMD-2435)`); continue; }
-      const runsIt = chargesToken(rel);
-      for (const [job, { invocation }] of Object.entries(byJob)) {
-        const lines = blocks.get(job);
-        if (!gated.includes(job) || jobs.includes(job) || !lines || !hashCommentsBlanked(lines.join("\n"), true).split("\n").some((l) => runsIt.test(l) && l.includes(invocation))) problems.push(`READER_RUNS excuses job ${job}'s run of ${rel} for ${pattern}, but ${job} ${!gated.includes(job) ? "is no gated job" : jobs.includes(job) ? `is charged by ${pattern} already` : `does not run ${rel} as \`${invocation}\``} — take it off (check 53, SMD-2435)`);
+        if (runsIt.test(hashCommentsBlanked(lines.join("\n"), true))) problems.push(`job ${job}'s steps name ${rel}, which reads ${pattern}, but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${job} (check 53, SMD-2435)`);
       }
     }
     // The codemod walks every file CODE matches outside SKIP_DIRS's top-level directories, by content: such a path charges compat-shim.
@@ -11509,7 +11483,7 @@ function checkJobMap() {
   const P = (pattern: string, jobs: string[]): ChargesRow => ({ pattern, jobs });
   const blocksOf = (o: Record<string, string>) => new Map(Object.entries(o).map(([k, v]) => [k, v.split("\n")]));
   const T = [P("changes/*", ["d"]), P("scripts/x.ts", ["l"]), P(".github/ci/s.sh", [])];
-  const R: Record<string, Record<string, string>> = { "changes/*": { "scripts/rel.ts": "the rehearsal" }, "scripts/x.ts": { "suite/t.ts": "an assertion over its text" }, ".github/ci/s.sh": {} };
+  const R: Record<string, Record<string, MapReader>> = { "changes/*": { "scripts/rel.ts": reads("the rehearsal") }, "scripts/x.ts": { "suite/t.ts": reads("an assertion over its text") }, ".github/ci/s.sh": {} };
   // Each file's code as the real run reads it: comments blanked by its kind.
   const F = (o: Record<string, string>) => new Map(Object.entries({ "scripts/rel.ts": `const d = join(ROOT, "changes");`, "suite/t.ts": `read("../scripts/x.ts")`, ...o }).map(([rel, text]) => [rel, codeForCharges(rel, text) ?? ""]));
   const B = blocksOf({ d: "    steps:\n      - run: bun scripts/rel.ts", l: "    steps:\n      - run: bun t.ts" });
@@ -11540,31 +11514,14 @@ function checkJobMap() {
     ["a Svelte file importing a record", T, R, F({ "r/+page.svelte": `<script>import s from "../changes/smd-1.md?raw";</script>` }), B, ["r/+page.svelte names changes/*"]],
     ["a shebang script with no extension", T, R, F({ "hooks/pre": "#!/bin/sh\nls changes/" }), B, ["hooks/pre names changes/*"]],
     ["a word ending in the name, quoted", T, R, F({ "a.ts": `say("the row changes"); const v = "x changes";` }), B, []],
-    // review pass 1: a gated job running a listed reader is charged by its path, unless READER_RUNS says why not
+    // review pass 1: a gated job running a reader that opens the path is charged by it
     ["another gated job running a listed reader", T, R, F({}), blocksOf({ d: "      - run: bun scripts/rel.ts", l: "      - run: bun scripts/rel.ts" }), ["job l's steps name scripts/rel.ts, which reads changes/*"]],
     ["the reader's job dropped from its row", [P("changes/*", []), T[1], T[2]], R, F({}), B, ["job d's steps name scripts/rel.ts, which reads changes/*"]],
   ];
   // An exemption for one path a reader names covers that path alone (review pass 1).
-  const exempted = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "scripts/x.ts": { "scripts/rel.ts": { d: { invocation: "rel.ts", why: "elsewhere" } } } });
-  // An exemption covers the invocation it names (review pass 4): d runs `bun scripts/rel.ts`, excused only as `rel.ts --check`.
-  const narrow = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "changes/*": { "scripts/rel.ts": { d: { invocation: "rel.ts --check", why: "its check reads nothing" } } } });
-  if (narrow.length !== 2 || !narrow[0].includes("not as READER_RUNS's excused `rel.ts --check`") || !narrow[1].includes("does not run scripts/rel.ts as `rel.ts --check`")) fail(SELF, `check 53 lets an exemption for one invocation excuse another (its own probe): ${JSON.stringify(narrow)} (SMD-2435)`);
-  const twice = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), blocksOf({ d: "      - run: bun scripts/rel.ts --check && bun scripts/rel.ts --write", l: "" }), { "changes/*": { "scripts/rel.ts": { d: { invocation: "rel.ts --check", why: "its check reads nothing" } } } });
-  if (twice.length !== 1 || !twice[0].includes("not as READER_RUNS's excused `rel.ts --check`")) fail(SELF, `check 53 lets a second run of a reader hide on its excused run's line (its own probe): ${JSON.stringify(twice)} (SMD-2435)`);
-  const broad = jobMapProblems([P("changes/*", []), T[1], T[2]], R, ["d", "l"], F({}), B, { "changes/*": { "scripts/rel.ts": { d: { invocation: "scripts/rel.ts", why: "its every run reads nothing" } } } });
-  if (broad.length) fail(SELF, `check 53 refuses an exemption naming the invocation the job runs (its own probe): ${JSON.stringify(broad)} (SMD-2435)`);
-  if (!exempted.some((m) => m.includes("job d's steps name scripts/rel.ts, which reads changes/*"))) fail(SELF, `check 53 lets an exemption for scripts/x.ts excuse a run of scripts/rel.ts reading changes/* (its own probe): ${JSON.stringify(exempted)} (SMD-2435)`);
-  // A stale exemption fails (review pass 2): [why, the runs, what its one problem says].
-  const X = (invocation = "rel.ts"): ReaderRun => ({ invocation, why: "x" });
-  const staleRuns: [string, Record<string, Record<string, Record<string, ReaderRun>>>, string][] = [
-    ["an exemption for a reader not listed", { "changes/*": { "scripts/gone.ts": { l: X() } } }, "does not list scripts/gone.ts"],
-    ["an exemption for a job that does not run the reader", { "changes/*": { "scripts/rel.ts": { l: X() } } }, "l does not run scripts/rel.ts"],
-    ["an exemption for a job charged already", { "changes/*": { "scripts/rel.ts": { d: X() } } }, "is charged by changes/* already"],
-    ["an exemption for a job not gated", { "changes/*": { "scripts/rel.ts": { lint: X() } } }, "is no gated job"],
-  ];
-  const staleWrong = staleRuns.map(([why, runs, says]) => ({ why, says, got: jobMapProblems(T, R, ["d", "l"], F({}), B, runs) }))
-    .filter((c) => c.got.length !== 1 || !c.got[0].includes(c.says));
-  if (staleWrong.length) fail(SELF, `check 53 no longer reads a stale READER_RUNS entry as written: ${JSON.stringify(staleWrong)} (SMD-2435)`);
+  // A reader that only names the path charges nothing when another gated job runs it (review pass 6).
+  const named = jobMapProblems(T, { ...R, "changes/*": { "scripts/rel.ts": names("a page name") } }, ["d", "l"], F({}), blocksOf({ d: "", l: "      - run: bun scripts/rel.ts" }));
+  if (named.length) fail(SELF, `check 53 charges a job for running a reader that only names the path (its own probe): ${JSON.stringify(named)} (SMD-2435)`);
   const probeWalk = { skip: ["scripts", "db"], code: /\.(ts|tsx|js|mjs)$/, marked: new Set(["db/m.ts"]) };
   // [why, row, what its problems say]: the codemod's walk, whose job is gated in this probe as "compat-shim".
   const walkCases: [string, ChargesRow, string[]][] = [
@@ -11576,7 +11533,7 @@ function checkJobMap() {
     ["a directory holding a walked code file", P("tools/*", []), ["tools/x.ts is a file compat-shim reads by its content"]],
     ["a marked code file in a skipped directory", P("db/m.ts", []), ["db/m.ts is a file compat-shim reads by its content (it holds"]],
   ];
-  const walkWrong = walkCases.map(([why, row, says]) => ({ why, says, got: jobMapProblems([row], { [row.pattern]: {} }, ["d", "compat-shim"], new Map([["tools/x.ts", ""]]), new Map(), {}, probeWalk) }))
+  const walkWrong = walkCases.map(([why, row, says]) => ({ why, says, got: jobMapProblems([row], { [row.pattern]: {} }, ["d", "compat-shim"], new Map([["tools/x.ts", ""]]), new Map(), probeWalk) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
   if (walkWrong.length) fail(SELF, `check 53 no longer reads the codemod's walk as written: ${JSON.stringify(walkWrong)} (SMD-2435)`);
   const wrong = cases.map(([why, t, r, f, b, says]) => ({ why, says, got: jobMapProblems(t, r, ["d", "l"], f, b) }))
@@ -11616,7 +11573,7 @@ function checkJobMap() {
     if (!step.includes(CODEMOD_MARKER) || !step.includes(`grep -v ${CODEMOD_MARKER_SKIP}`)) fail(WORKFLOW, `job ${CODEMOD_JOB} no longer greps for ${CODEMOD_MARKER} and leaves out ${CODEMOD_MARKER_SKIP} (grep -v), which check 53 reads as the files its parse step builds — say the new walk in CODEMOD_MARKER and CODEMOD_MARKER_SKIP (check 53, SMD-2435)`);
     for (const rel of tracked) if (walk.code.test(rel) && !rel.includes(CODEMOD_MARKER_SKIP)) { try { if (readFileSync(join(ROOT, rel), "utf8").includes(CODEMOD_MARKER)) walk.marked.add(rel); } catch { /* unreadable: not built either */ } }
   }
-  for (const msg of jobMapProblems(table, JOB_MAP_READERS, AGGREGATE_GATED, files, cut.regions, READER_RUNS, typeof walk === "string" ? null : walk)) fail(CHANGES_SCRIPT, msg);
+  for (const msg of jobMapProblems(table, JOB_MAP_READERS, AGGREGATE_GATED, files, cut.regions, typeof walk === "string" ? null : walk)) fail(CHANGES_SCRIPT, msg);
 }
 checkJobMap();
 

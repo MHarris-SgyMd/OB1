@@ -54,7 +54,7 @@ RUN_ALL_JOBS="changes repo-consistency"
 # holds the cut, and this file, whose cut the base's copy applies to the
 # head's workflow, unheld by check 51 when the two cuts differ.
 HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
-CHARGES="changes/*	deploy-stack
+CHARGES="changes/*	deploy-stack db-schema
 scripts/check-consistency.ts	data-layer
 .github/ci/typecheck.sh	portable-server
 .github/ci/full-stack-up.sh	deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability
@@ -272,7 +272,7 @@ self_check() {
   check false pull_request docs/01-getting-started.md
   check false pull_request README.md recipes/x/README.md "docs/a b.md" docs/img/shot.png docs/diagram.svg
   check false pull_request db/README.md
-  CHARGED=deploy-stack check partial pull_request changes/smd-1.md
+  CHARGED='db-schema deploy-stack' check partial pull_request changes/smd-1.md
   check true pull_request docs/a.md docs/subject-anchored-claims.md
   check true pull_request integrations/telegram-capture/README.md
   check true pull_request recipes/schema-aware-routing/README.md
@@ -310,8 +310,8 @@ self_check() {
   # The CHARGES map (PR 3a): each path charges its jobs, together the union; a path off the map runs every job.
   CHARGED=data-layer check partial pull_request scripts/check-consistency.ts
   CHARGED='deploy-stack deploy-stack-auth deploy-stack-brains deploy-stack-observability' check partial pull_request .github/ci/full-stack-up.sh
-  CHARGED='deploy-stack portable-server' check partial pull_request changes/smd-1.md .github/ci/typecheck.sh docs/a.md
-  CHARGED=deploy-stack check partial pull_request changes/smd-1.md .github/workflows/brain-checks.yml
+  CHARGED='db-schema deploy-stack portable-server' check partial pull_request changes/smd-1.md .github/ci/typecheck.sh docs/a.md
+  CHARGED='db-schema deploy-stack' check partial pull_request changes/smd-1.md .github/workflows/brain-checks.yml
   check true pull_request changes/smd-1.md server-portable/api.ts
   check true pull_request scripts/check-consistency.ts .github/workflows/brain-checks.yml
   check true pull_request .github/ci/changes.sh .github/workflows/brain-checks.yml
