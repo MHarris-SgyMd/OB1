@@ -245,7 +245,7 @@ abstains wrongly — it abstains on 230 rows where bare labels abstain on 214
 above; on
 open-domain tasks it is a gain of 3.5 points that stops just short of p 0.05
 on 231 items. The tier keeps `It is` (the author's current engine, and
-JevBench's direction), and neither set is the fork's own workload: which
+JevBench's direction), and neither set is Daemonic Brain's own workload: which
 framing a spike's decisions want is that spike's first measurement.
 
 ## Licences

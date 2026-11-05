@@ -6,7 +6,7 @@
 -- small helper views/functions for querying by session, plus
 -- documentation via COMMENT ON.
 --
--- This fork (SMD-1796): the view below needs its own SELECT — a role's
+-- Daemonic Brain (SMD-1796): the view below needs its own SELECT — a role's
 -- SELECT on `thoughts` does not reach a view over it — so after applying
 -- this file run, from db/, `bun migrate.ts --url … --grant <role>` again;
 -- its `community` group names thought_provenance. The function is

@@ -131,4 +131,4 @@ The `entity_extraction_queue` table isn't installed, so views 7-8 were skipped. 
 This is normal for a fresh install with no thoughts. Capture a few thoughts first, then query the views.
 
 **Permission denied on a view**
-The file grants nothing (this fork, SMD-1810 — upstream's `GRANT … TO service_role` lines are gone): the role that applied it owns the views, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).
+The file grants nothing (Daemonic Brain, SMD-1810 — upstream's `GRANT … TO service_role` lines are gone): the role that applied it owns the views, and a role other than the tables' owner is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **recipes** group).

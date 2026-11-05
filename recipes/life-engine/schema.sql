@@ -154,18 +154,18 @@ COMMENT ON TABLE life_engine_state IS 'Key-value store for Life Engine runtime s
 -- ----------------------------------------
 -- Row Level Security and grants
 -- ----------------------------------------
--- This fork (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the six
--- tables here — with no policy, as "a safety net to block anon/authenticated
--- access", since its skill wrote through service_role, which bypasses RLS —
--- and GRANTed each TO service_role. Those are Supabase's: on plain Postgres
--- the first GRANT stopped the file (`role "service_role" does not exist`),
--- and RLS with no policy denied every row to any role but the tables' owner —
--- the skill's own writes, where it connects as anything else. Removed.
--- Grant the role your server connects as instead — from db/:
+-- Daemonic Brain (SMD-1810): upstream's file ENABLEd ROW LEVEL SECURITY on the
+-- six tables here — with no policy, as "a safety net to block
+-- anon/authenticated access", since its skill wrote through service_role, which
+-- bypasses RLS — and GRANTed each TO service_role. Those are Supabase's: on
+-- plain Postgres the first GRANT stopped the file (`role "service_role" does
+-- not exist`), and RLS with no policy denied every row to any role but the
+-- tables' owner — the skill's own writes, where it connects as anything else.
+-- Removed. Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers this file's
 -- six tables (SELECT, INSERT, UPDATE, DELETE); a role that owns the tables
--- needs nothing. Row-level security on this fork: SMD-1716.
+-- needs nothing. Row-level security in Daemonic Brain: SMD-1716.
 
 -- ----------------------------------------
 -- Indexes for performance
