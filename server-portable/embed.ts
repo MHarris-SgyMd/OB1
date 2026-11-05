@@ -181,8 +181,8 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
 /**
  * One call to the OpenAI-compatible provider: URL join, headers, the timeout
  * and its name, the status attached, the error body capped, the JSON parsed.
- * The server's embedding, blurb and
- * metadata calls and the bulk passes' all come through here, so the next
+ * The server's embedding, blurb and metadata calls and the bulk passes' all
+ * come through here, so the next
  * request-level concern — a Retry-After read, a request id — is added once.
  * Before this the timeout rewrap was hand-written three times with three try
  * scopes, and the one that closed after fetch() let a deadline passing during

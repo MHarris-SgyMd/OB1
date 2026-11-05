@@ -1122,7 +1122,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   await Bun.sleep(50);
   await Promise.all(tracked);
   assert(classedStatus === 202 && lateStatus === 500 && JSON.stringify(classes) === JSON.stringify(["handler live", "work background", "discard live", "late discard background"]),
-    `a hook's handler and its discard run live, inside the delivery's request; its deferred work background, and a discard deferred after the 500 has gone (${JSON.stringify(classes)})`);
+    `a hook's handler and its discard run live, inside the delivery's request; its deferred work background, and a discard deferred after the handler failed (${JSON.stringify(classes)})`);
   const ranAtStringy = ran;
   r = await post("stringy");
   await Promise.all(tracked);

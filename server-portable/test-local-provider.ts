@@ -1707,6 +1707,37 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
       setModelCallHook(before);
     }
   }
+  // The seam's context for 2b's and 2c's hooks (review pass 3): asPass labels a call's pass, and withCallWaits tells a
+  // worker's observer of each call's wait on the hook — a fan-out's two calls held, the entry holding no call to abort
+  // until the last runs, and a wait inside one idleWhile already holds leaving it held.
+  {
+    const { modelCall, asPass, withCallWaits } = await import("./model-call.ts");
+    const { inHandCalls, callWaitsFor } = await import("../db/lease.ts");
+    const holds = new Map<string, number>([["a", 200], ["b", 400]]);
+    const seenPasses: (string | undefined)[] = [];
+    const before = setModelCallHook(async (call, run) => { seenPasses.push(call.pass); await Bun.sleep(holds.get(call.purpose) ?? 0); return run(); });
+    try {
+      const calls2 = inHandCalls(() => false);
+      const entry = calls2.begin("w");
+      entry.since = Date.now() - 10_000;
+      const at = (ms: number) => Bun.sleep(ms).then(() => ({ waiting: entry.waiting, aborted: calls2.abortInHand(5000) }));
+      const [, , mid, late] = await asPass("extract", () => withCallWaits(callWaitsFor(() => calls2.get("w")), () => Promise.all([
+        modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "a" }, async () => "a"),
+        modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "b" }, async () => "b"),
+        at(100),
+        at(300),
+      ])));
+      const after = { waiting: entry.waiting, fresh: Date.now() - entry.since < 1000 };
+      // Inside an idleWhile (the decider's call), the entry stays held through the seam's wait and after it.
+      const nested = calls2.begin("n");
+      nested.waiting = true;
+      await withCallWaits(callWaitsFor(() => calls2.get("n")), () => modelCall({ type: "decide", model: undefined, base: PROVIDER, purpose: "a" }, async () => "d"));
+      assert(JSON.stringify(seenPasses) === '["extract","extract",null]' && mid.waiting && mid.aborted === 0 && late.waiting && late.aborted === 0 && !after.waiting && after.fresh && nested.waiting,
+        `a pass's calls carry its label; while either of a fan-out's calls waits on the hook the entry holds no call to abort, its time starting when the last runs; inside an idleWhile it stays held (${JSON.stringify({ seenPasses, mid, late, after, nested: nested.waiting })})`);
+    } finally {
+      setModelCallHook(before);
+    }
+  }
   // A file that sends a model request goes through the seam: it imports it. A file-level guard — a second, bare fetch in
   // a file that imports the seam passes it — over the servers', the REST core's and db/'s files, a fetch's first 200
   // characters read for a model path or a path variable.

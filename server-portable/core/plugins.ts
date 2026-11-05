@@ -411,8 +411,8 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     // Work, which runs after the answer, starts a trace of its own linked to the delivery's request, as a job's body
     // does; a discard runs before a failed delivery's 500, inside its request, so it stays that request's child (SMD-1849 PR 2d).
     // So too its model calls: work's are background, as a job's are, though the request's context started it — nobody
-    // waits on them — and a discard's stay the request's, live, but for one deferred after the 500 has gone, from a
-    // timer the handler left (`late`), which nobody waits on either (SMD-3379 PR 2a, review passes 1 and 2).
+    // waits on them — and a discard's stay the request's, live, but for one deferred after the handler failed, from a
+    // timer it left (`late`), which the 500 does not wait on (SMD-3379 PR 2a, review passes 1 and 2).
     const run = () =>
       new Promise<void>((resolve) => setImmediate(resolve))
         .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => (what === "work" || late ? asBackground(work) : work())))

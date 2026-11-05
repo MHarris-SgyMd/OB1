@@ -197,7 +197,8 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -447,6 +448,12 @@ export function abortedNote(extraction: Extraction): string {
  * as the CLI's stack dump always showed; run()'s own client is closed first.
  */
 export async function run(opts: ExtractOptions): Promise<number> {
+  // Its model calls labelled with the pass, for the model-call seam's hook (SMD-3379 PR 2a).
+  return asPass("extract", () => runPass(opts));
+}
+
+/** run's body, inside its pass's label. */
+async function runPass(opts: ExtractOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
   /** A refusal of the options themselves: said, reported as the start's `usage`, 2. */
   const usage = (line: string): number => {
@@ -1231,6 +1238,32 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     };
   }
 
+  /**
+   * The stall clock of the thought a worker holds, paused while its calls wait
+   * for a slot on the model-call seam's hook, as the admit gate's wait pauses
+   * it: held from then, its `since` moved on by the wait (SMD-3379 PR 2a). A
+   * wait inside one the gate already paused leaves the gate's.
+   */
+  function stallWaits(workerId: string): CallWaits {
+    let mine: { at: number } | null = null;
+    return {
+      waiting() {
+        const held = inHand.get(workerId);
+        if (!held || held.pausedAt !== undefined) return;
+        mine = { at: Date.now() };
+        held.pausedAt = mine.at;
+      },
+      running() {
+        const held = inHand.get(workerId);
+        if (mine && held && held.pausedAt === mine.at) {
+          held.since += Date.now() - mine.at;
+          held.pausedAt = undefined;
+        }
+        mine = null;
+      },
+    };
+  }
+
   /** The hard stop's count on the thought a worker has in hand (093's note_extraction_stop), before its lease goes back: the function counts only for the holder. */
   async function noteStop(workerId: string, t = inHand.get(workerId)): Promise<void> {
     if (!t || !keeping) return;
@@ -1570,7 +1603,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId, asked, attempt > 0);
+                // A wait for a slot on the model-call seam is neither the call's time nor the thought's held (review pass 3).
+                outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId), stallWaits(workerId)), () => processRow(row, workerId, asked, attempt > 0));
               } catch (e) {
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
