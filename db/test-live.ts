@@ -126,14 +126,15 @@ if (!URL_) {
  * run ~50 s under. SMD-3734 cut timers in long (~25 s locally) and the rest
  * (~10 s), from jobs of 277 s and 297 s on PR 643's run 41790596461, so long
  * had room under sleep's 282 s and the rest was still the longest. SMD-3306
- * PR 6b-1's sweep cases then took [10h] from ~96 s to ~300-320 s projected on
- * CI, and SMD-3733 took [38] back to ~262 s, so sleep takes [5d], [10g] and
- * [37b] beside [38], long [9f], [10e], [17] and [39], extract keeps [10f]
- * beside [10h], and the rest takes [10] and [41]: on main 46da8d31's CI section
- * times, sleep ~306 s, long ~308 and the rest ~306, extract [10h]'s own, the
- * floor while it is one section, against ~440-460 for extract with main's
- * cells. A cell's job runs ~15-25 s past its live step, so a section added to
- * a cell adds to the run's length once that cell's job is the run's longest.
+ * PR 6b-1's sweep cases then took [10h] from ~100 s to ~300-320 s projected
+ * on CI, and SMD-3733 took [38] back to ~262 s, so sleep takes [5d], [10g]
+ * and [37b] beside [38], long [9f], [10e], [17] and [39], extract keeps [10f]
+ * beside [10h], and the rest takes [10] and [41]: on main 1d5ab515's CI
+ * section times, sleep ~307 s, long ~307 and the rest ~254, extract [10h]'s
+ * own, the floor while it is one section, against ~440-460 for extract with
+ * main's cells. A cell's job runs ~15-25 s past its live step, so a section
+ * added to a cell adds to the run's length once that cell's job is the run's
+ * longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
