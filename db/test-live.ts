@@ -28,7 +28,7 @@
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
+ * (SHARDS below). Brain Checks runs the four side by side, one matrix cell each,
  * every one on a database of its own (SMD-3048, SMD-3169), and so does
  * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
  * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the

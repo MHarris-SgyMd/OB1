@@ -1334,7 +1334,7 @@ async function selfCheck(): Promise<number> {
   // reaches the ingester. On shortened bounds, each case's asserted bound
   // written in them, so the cases do not wait out the service's 6 s grace and
   // 2 s drain; and side by side, each its own pipeline (SMD-3198: 41 s, nearly
-  // all timers, twice a Fork Checks run).
+  // all timers, twice a Brain Checks run).
   const quick: StepTimings = { killGraceMs: 1000, secondTermMs: 200, drainMs: 300 };
   const T = 2;
   const bounded = each([

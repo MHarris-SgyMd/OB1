@@ -265,11 +265,11 @@ house grammar (`[core] … (SMD-NNNN)`, and `(caught: …)` on a review pass's f
 bullets) — `scripts/commitlint.config.ts`, which shares its tag parser with
 `scripts/mechanism-yield.ts` through `scripts/commit-grammar.ts`, so the check
 and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
-checksum) with `shellcheck` over `fork-checks.yml`'s `run:` steps; the workflow
+checksum) with `shellcheck` over `brain-checks.yml`'s `run:` steps; the workflow
 now sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
 locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
-*required* on `main` (SMD-1856), through "Fork Checks passed" since SMD-3168
+*required* on `main` (SMD-1856), through "Brain Checks passed" since SMD-3168
 (below).
 
 **The runner image and every action are pinned (SMD-2093).** Every job runs on
@@ -297,10 +297,10 @@ does anything move the database jobs' pgvector image. The rehearsal runs as a
 job of its own whose token only reads (SMD-2111).
 
 **`main` carries a ruleset (SMD-1856, SMD-3168).** One required check,
-"Fork Checks passed", on a head up to date with `main` and satisfied only by a
+"Brain Checks passed", on a head up to date with `main` and satisfied only by a
 run of the Actions app; changes only through a pull request; no deletion, **no
-force-push**, and no bypass actors — it applies to admins too. "Fork Checks
-passed" is `fork-checks.yml`'s job `fork-checks-passed`, which needs every other
+force-push**, and no bypass actors — it applies to admins too. "Brain Checks
+passed" is `brain-checks.yml`'s job `brain-checks-passed`, which needs every other
 job, runs even when one failed, and fails unless each succeeded (or skipped: by
 its own `if:`, or as a docs-only PR's code job). So every job is required through
 it, and a job added, renamed, split or run as a matrix changes nothing in the
@@ -310,6 +310,15 @@ and `check-consistency` check 20 holds the file to that one context and the
 job to every other job in the workflow, so a job left out of its `needs:` fails
 CI by name. A push straight to `main` is refused, green checks or not: GitHub
 answers with one `remote: -` line per rule it applied.
+
+Renaming the aggregate job changes the one context the ruleset requires, so the
+file and the ruleset move together: apply the new `main.json` with the command
+above just before the PR that renames the job merges, then merge it at once. A
+PR whose branch is still on the old workflow reports the old check, which the
+ruleset no longer requires, so it waits until it merges `main`, as the strict
+rule makes every PR do. The workflow was `fork-checks.yml`, "Fork Checks", its job "Fork
+Checks passed", until SMD-3765; `scripts/ci-step-times.ts` reads main's runs
+under either name, so a CI shift's window spans the rename.
 
 **"Schema migrations" runs `test-schema.ts` twice at once (SMD-2092).** One
 step runs the suite at the default width and at 768 in the background, each to

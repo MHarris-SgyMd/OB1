@@ -1163,8 +1163,8 @@ function selfCheck(): never {
   check(nm.startsWith(test + "\n\n" + NAMES_HEAD) && nm.indexOf(pairContext(pair)) >= 0 && nm.indexOf(pairContext(pair)) < nm.indexOf("<shared_names>\n1. SMD-9\n   A: a excerpt\n   B: b excerpt\n</shared_names>") && nm.endsWith(WALK_ANSWER), "the names candidate's message");
   check(walkMessages(pair, test, [])[0].content.includes("<shared_names>\n(none found)\n</shared_names>"), "no names found is said");
   // The names: every kind a plain match reads, each as its name.
-  const kinds = "In `decidePair`, SMD-949, db/consolidate.ts, PR 470, PR #471, #472, /health, v1.9.0, migration 055, thought_audit, tests/backup.test.ts, .github/workflows/fork-checks.yml, OB1_SLEEP_BUDGET, StdioServerTransport and camelCase; not https://host/mcp, e.g. or 3.14.";
-  check([...namesIn(kinds).keys()].sort().join(" ") === ["decidePair", "SMD-949", "db/consolidate.ts", "#470", "#471", "#472", "/health", "v1.9.0", "migration 055", "thought_audit", "tests/backup.test.ts", ".github/workflows/fork-checks.yml", "OB1_SLEEP_BUDGET", "StdioServerTransport", "camelCase"].sort().join(" "), "every kind of name, and nothing else");
+  const kinds = "In `decidePair`, SMD-949, db/consolidate.ts, PR 470, PR #471, #472, /health, v1.9.0, migration 055, thought_audit, tests/backup.test.ts, .github/workflows/brain-checks.yml, OB1_SLEEP_BUDGET, StdioServerTransport and camelCase; not https://host/mcp, e.g. or 3.14.";
+  check([...namesIn(kinds).keys()].sort().join(" ") === ["decidePair", "SMD-949", "db/consolidate.ts", "#470", "#471", "#472", "/health", "v1.9.0", "migration 055", "thought_audit", "tests/backup.test.ts", ".github/workflows/brain-checks.yml", "OB1_SLEEP_BUDGET", "StdioServerTransport", "camelCase"].sort().join(" "), "every kind of name, and nothing else");
   // Inside a URL only its ticket-like id and its PR or issue number; a /pull/N path outside one is not a PR's name.
   const linked = "See https://github.com/Org-SgyMd/MyRepo/pull/473 and https://tracker.example/issue/SMD-3203/a_title, repo/pull/9.";
   check([...namesIn(linked).keys()].sort().join(" ") === "#473 SMD-3203", "a URL's ticket id and PR number alone");

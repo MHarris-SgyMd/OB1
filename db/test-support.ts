@@ -824,7 +824,7 @@ export type CountLine = { suite: string; variant: string | null; job: string | n
 
 /**
  * Append this run's counts to the file TEST_COUNTS_ENV names, one JSON line,
- * when it is set: each Fork Checks job that runs suites sets it and uploads the
+ * when it is set: each Brain Checks job that runs suites sets it and uploads the
  * file (check-consistency.ts 50 holds that a job setting it uploads it and
  * is published), and on a push to main the lines are published to the wiki's
  * Test-counts page (SMD-3614, SMD-3709).
@@ -906,7 +906,7 @@ export function createAssert(): {
       // A suite that names no variant is told apart by its flags (eval-write-path.ts --gate).
       recordCount({ variant: variant ?? (process.argv.slice(2).join(" ") || null), assertions: passed + failed, passed, failed, skipped, docFailed });
       console.log(`\n${"─".repeat(52)}`);
-      // Fork Checks' schema step, its data-layer legs (behind a +<s>s stamp,
+      // Brain Checks' schema step, its data-layer legs (behind a +<s>s stamp,
       // SMD-3468) and Portable server's background pair grep this line from
       // each log for their closing summaries (`^[0-9]+ assertions: `,
       // SMD-2092, SMD-2219, SMD-3470), as db/ci-parity.sh does for its rows:

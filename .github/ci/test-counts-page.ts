@@ -1,5 +1,5 @@
 /**
- * The wiki's Test-counts page, from the count lines Fork Checks' jobs uploaded
+ * The wiki's Test-counts page, from the count lines Brain Checks' jobs uploaded
  * (SMD-3614). A suite's assertion total is a fact about a commit's run, not
  * documentation: report() in db/test-support.ts appends one JSON line a run to
  * the file OB1_TEST_COUNTS names, each job uploads its file, and the workflow's
@@ -51,7 +51,7 @@ export function renderPage(lines: CountLine[], needs: Needs, at: { sha: string; 
   const out = [
     "# Test counts",
     "",
-    "Each Fork Checks suite's assertion total on `main`, as the run of the last push to `main` counted it. Fork Checks writes this page (SMD-3614); an edit by hand is replaced at the next push.",
+    "Each Brain Checks suite's assertion total on `main`, as the run of the last push to `main` counted it. Brain Checks writes this page (SMD-3614); an edit by hand is replaced at the next push.",
     "",
     `Commit [\`${at.sha.slice(0, 12)}\`](https://github.com/${at.repo}/commit/${at.sha}) · [its run](${at.runUrl}) · ${at.now.toISOString().replace(/\.\d+Z$/, "Z")}`,
     "",

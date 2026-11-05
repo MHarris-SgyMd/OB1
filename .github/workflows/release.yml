@@ -37,7 +37,7 @@
 # GHCR and create no release. The release job's token runs every action in
 # release-steps.yml with publish rights, so each `uses:` there is a full commit
 # SHA (the tag in a trailing comment), and its runner image is named;
-# fork-checks.yml's header has the rule and what holds it (SMD-2093).
+# brain-checks.yml's header has the rule and what holds it (SMD-2093).
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash in
 # release-steps.yml only runs docker and gh. It refuses a tag that does not

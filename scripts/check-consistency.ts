@@ -156,7 +156,7 @@
  *      version, so one directory bumping alone loads two bun-types into the
  *      db and evals programs, whose ../server-portable imports pull the
  *      server's copy), its tsconfig compilerOptions equal the server's, and
- *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
+ *      .github/workflows/brain-checks.yml runs `bunx tsc --noEmit` under it
  *      exactly once — a step of its own, or a directory a
  *      .github/ci/typecheck.sh step names, which runs them side by side
  *      (SMD-3202), and which check 18 then runs against a stub bunx: a tsc
@@ -192,38 +192,40 @@
  *      named excuses
  *  20. main's ruleset is a record in the tree — .github/rulesets/main.json, the
  *      body `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input`
- *      applies — and it requires one check, "Fork Checks passed": the job
- *      fork-checks-passed in .github/workflows/fork-checks.yml, which needs
+ *      applies — and it requires one check, "Brain Checks passed": the job
+ *      brain-checks-passed in .github/workflows/brain-checks.yml, which needs
  *      every other job, runs if: always(), lets only the jobs with an if: of
  *      their own skip (AGGREGATE_MAY_SKIP: commit-lint and
  *      publish-test-counts), and the jobs the changes job gates only when it
  *      said code=false (AGGREGATE_GATED, each needing it and running under
- *      GATED_IF, which fails open; SMD-2435), on which no job it
- *      needs sets continue-on-error or calls a reusable workflow, which runs
- *      on ubuntu-24.04 with no key beyond the few allowed on it or its step,
- *      and whose one step is held verbatim and run on its own cases
- *      (SMD-3168); every check is pinned to the Actions app
- *      (integration_id 15368), strict up-to-date is on and enforced on
- *      create, the four rules — deletion, non-fast-forward, pull-request with
- *      no required review and none of the four review flags, required-status-
- *      checks with its parameters — are present once each, the one optional
- *      rule — merge-queue, which GitHub refuses on a user-owned repository
- *      and the record adds the day this one is organisation-owned — at most
- *      once and, when present, with the fork's merge method, every entry
- *      judged on its own merge commit and no PR waiting for another
- *      (SMD-1857), no other type is, the target is the default branch and
- *      nothing else, the bypass list is empty and enforcement is active; and
- *      no other job reports a check under the aggregate's name. A matrix and a
- *      name with an expression are allowed now, since the record names no job
- *      but the one. The rules are rulesetProblems and aggregateProblems, pure
- *      functions their probes run on in-memory records (twenty-seven ruleset
- *      mutants, one accepted addition, nine non-probes; thirty-four aggregate
- *      mutants, four accepted shapes and an empty skip list two ways, four
- *      non-probes; one other-workflow name
- *      clash; sixteen names mayReportAs must allow or refuse; a
- *      5,000-expression name answered at once) and AGGREGATE_RUN under bash on ten cases; every workflow in
- *      .github/workflows is read for a job carrying the aggregate's name; the workflow is parsed with Bun.YAML (SMD-1856,
- *      SMD-3168); no exceptions
+ *      GATED_IF, which fails open; SMD-2435), on which no job it needs sets
+ *      continue-on-error or calls a reusable workflow, which runs on
+ *      ubuntu-24.04 with no key beyond the few allowed on it or its step, and
+ *      whose one step is held verbatim and run on its own cases (SMD-3168);
+ *      every check is pinned to the Actions app (integration_id 15368), strict
+ *      up-to-date is on and enforced on create, the four rules — deletion,
+ *      non-fast-forward, pull-request with no required review and none of the
+ *      four review flags, required-status- checks with its parameters — are
+ *      present once each, the one optional rule — merge-queue, which GitHub
+ *      refuses on a user-owned repository and the record adds the day this one
+ *      is organisation-owned — at most once and, when present, with the fork's
+ *      merge method, every entry judged on its own merge commit and no PR
+ *      waiting for another (SMD-1857), no other type is, the target is the
+ *      default branch and nothing else, the bypass list is empty and
+ *      enforcement is active; no other job reports a check under the
+ *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
+ *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
+ *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
+ *      and a name with an expression are allowed now, since the record names no
+ *      job but the one. The rules are rulesetProblems and aggregateProblems,
+ *      pure functions their probes run on in-memory records (twenty-seven
+ *      ruleset mutants, one accepted addition, nine non-probes; thirty-four
+ *      aggregate mutants, four accepted shapes and an empty skip list two ways,
+ *      four non-probes; one other-workflow name clash; sixteen names
+ *      mayReportAs must allow or refuse; a 5,000-expression name answered at
+ *      once) and AGGREGATE_RUN under bash on ten cases; every workflow in
+ *      .github/workflows is read for a job carrying the aggregate's name; the
+ *      workflow is parsed with Bun.YAML (SMD-1856, SMD-3168); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
@@ -425,7 +427,7 @@
  *      read. That a digest is its tag's image is the registry's fact: CI's
  *      "The stack runs the pinned Bun" asks the running forwarder
  *  34. every suite is run (SMD-2895): each `test-*` script in a file git
- *      tracks or would track is one a fork-checks.yml step runs — `bun` or
+ *      tracks or would track is one a brain-checks.yml step runs — `bun` or
  *      `node` naming it from the step's working-directory, the job's or a `cd`
  *      in the step, where its failure fails the job (no `continue-on-error`,
  *      `if: false`, `${{ false }}` or `|| true`), a comment line or a quoted
@@ -438,7 +440,7 @@
  *      server-portable/test-jobs.ts had passed unrun for weeks; `eval-*`
  *      files are measurements, not suites, and are not read
  *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
- *      fork-checks.yml step runs (check 34's reader) is a `run` line of
+ *      brain-checks.yml step runs (check 34's reader) is a `run` line of
  *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
  *      does not, from a directory the step may run it from, with the same
  *      flags and environment (the database URLs aside), a matrix job read
@@ -538,7 +540,7 @@
  *      the runner's process list shows it; pass it by name (`-e NAME`) from
  *      the shell's environment (SMD-3351). It reads that flag alone, not a
  *      curl header or a URL. Its probe pins what it refuses and passes
- *  44. each directory a fork-checks.yml step may run a script from (check
+ *  44. each directory a brain-checks.yml step may run a script from (check
  *      34's reader) that holds a package.json has a bunfig.toml setting
  *      `[install] auto = "disable"`, so an import its job's installs do not
  *      resolve fails instead of Bun fetching it from npm; Bun reads the
@@ -548,7 +550,7 @@
  *  45. no .md file states a suite's assertion count — a suite beside
  *      `N assertions/passed/checks/cases/tests` or a tally, `NN assertions`
  *      with no suite named, a command's `# N` comment, prose read by
- *      paragraph so a wrapped count is seen — since Fork Checks publishes each to the wiki's Test-counts page
+ *      paragraph so a wrapped count is seen — since Brain Checks publishes each to the wiki's Test-counts page
  *      on a push to main (SMD-3614, SMD-3655); changes/, CHANGELOG.md, two
  *      dated analyses and FORK.md's change rows keep theirs as records. Its
  *      probe pins what it refuses and passes
@@ -565,7 +567,7 @@
  *      non-comment line, read from the root or from the naming file's own
  *      directory; a lexical reading, so a path built from pieces, a template
  *      or a directory walk is not seen) is on .github/ci/changes.sh's
- *      allowlist of paths that skip Fork Checks' code jobs (SMD-2435), unless
+ *      allowlist of paths that skip Brain Checks' code jobs (SMD-2435), unless
  *      NAMED_NOT_READ lists it with exactly the files that name it and the
  *      reason none reads it for a gated job — so a suite that starts reading
  *      a README fails here until the allowlist denies it or the entry names
@@ -575,7 +577,7 @@
  *  48. every job of every workflow under .github/workflows/ sets
  *      timeout-minutes, a whole number from 1 to 60 written in digits:
  *      GitHub's default is 360 minutes, and a hung job runs that long — in
- *      fork-checks.yml holding the required "Fork Checks passed" pending
+ *      brain-checks.yml holding the required "Brain Checks passed" pending
  *      (SMD-2094). A job that calls a reusable workflow is passed over, since
  *      GitHub takes no limit there. Its probe pins what it refuses and passes
  *  49. this file's own check numbers hold together: no number listed here
@@ -591,7 +593,7 @@
  *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
  *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
  *      two took 47, within a day). Its probe pins what it refuses and passes
- *  50. fork-checks.yml's publish-test-counts downloads the `test-counts-*`
+ *  50. brain-checks.yml's publish-test-counts downloads the `test-counts-*`
  *      artifacts by pattern, each into its own directory, and needs exactly
  *      the jobs that upload one; each such job uploads one,
  *      `test-counts-<its key>` (with a matrix, `-` and expressions naming
@@ -626,6 +628,7 @@ import { CHANGES_DIR, END as INDEX_END, INDEX_FILE, START as INDEX_START, FIRST_
 import { BRAIN_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
 import commitlintConfig from "./commitlint.config.ts";
+import { DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS } from "./ci-step-times.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
 import { inlined as inlinedGrafana, INLINE_FILES } from "./inline-grafana.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./changes-index.ts";
@@ -4443,7 +4446,7 @@ await checkVersionModule();
  */
 const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client", "mcp-server"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
-const WORKFLOW = ".github/workflows/fork-checks.yml";
+const WORKFLOW = ".github/workflows/brain-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
 /** The script that type-checks the directories it names side by side (SMD-3202), each relative to the repository root; a step that runs it is a tsc step for each. Its whole `run:`, as TSC_STEP's is. */
 const TSC_SCRIPT = ".github/ci/typecheck.sh";
@@ -4456,7 +4459,7 @@ type TsConfig = { compilerOptions?: Record<string, unknown> };
 type TypecheckSurface = { packages: Record<string, PackageJson | undefined>; tsconfigs: Record<string, TsConfig | undefined>; tscSteps: string[] };
 /** The probe's surface: every directory present with every field, so a mutation can reach in. */
 type TypecheckProbe = { packages: Record<string, { devDependencies: Record<string, string> }>; tsconfigs: Record<string, { compilerOptions: Record<string, unknown> }>; tscSteps: string[] };
-/** .github/workflows/fork-checks.yml as tscStepsIn reads it: jobs, their steps, a step's `run` and `working-directory` — every level optional, as the `?.`s say. */
+/** .github/workflows/brain-checks.yml as tscStepsIn reads it: jobs, their steps, a step's `run` and `working-directory` — every level optional, as the `?.`s say. */
 type WorkflowDoc = { jobs?: Record<string, { steps?: { run?: unknown; "working-directory"?: string }[] } | undefined> } | null | undefined;
 function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSurface) {
   const problems: [string, string][] = [];
@@ -4932,8 +4935,8 @@ type RulesetDoc = {
 /** The workflow as aggregateProblems reads it: a job's display name is its `name`, else its key — what GitHub reports the check as. */
 type JobsDoc = { jobs?: Record<string, { name?: unknown; if?: unknown; needs?: unknown; steps?: unknown } | null | undefined> | null } | null | undefined;
 /** The one job the record requires (SMD-3168), by key and by the display name GitHub reports its check under. */
-const AGGREGATE_JOB = "fork-checks-passed";
-const AGGREGATE_NAME = "Fork Checks passed";
+const AGGREGATE_JOB = "brain-checks-passed";
+const AGGREGATE_NAME = "Brain Checks passed";
 /** The `if:` the aggregate runs under, as written either way: always, so a failed need does not skip it into a pass. */
 const AGGREGATE_IF = ["always()", "${{ always() }}"];
 /** The step's NEEDS, every need's result as JSON. */
@@ -4976,7 +4979,7 @@ const AGGREGATE_CASES: [why: string, needs: string, maySkip: string, passes: boo
  * The keys the aggregate job, its step and the step's env may carry, and no
  * others (review pass 1): `continue-on-error` on either, a step `if:`, a
  * `shell:` or a job's `defaults:`, or an env that moves PATH, would each turn a
- * failed verdict into a passing job — "Fork Checks passed" green with a job red.
+ * failed verdict into a passing job — "Brain Checks passed" green with a job red.
  */
 const AGGREGATE_JOB_KEYS = ["name", "runs-on", "if", "needs", "steps", "timeout-minutes"];
 const AGGREGATE_STEP_KEYS = ["name", "id", "env", "run", "timeout-minutes"];
@@ -5102,20 +5105,20 @@ function mayReportAs(name: string, target: string): "carries" | "could render as
 const MAY_REPORT_CASES: [name: string, answer: "carries" | "could render as" | null][] = [
   ["Schema against real Postgres (${{ matrix.shard }})", null],
   ["${{ inputs.label }} tests", null],
-  ["Fork Checks (${{ matrix.os }})", null],
+  ["Brain Checks (${{ matrix.os }})", null],
   ["Images, stack from them, notes", null],
-  ["Fork Checks passe${{ x }}d!", null],
-  ["Fork ${{ x }} Checks ${{ y }} passed ${{ z }}", null],
-  ["Fork Checks pa${{ x }}ks passed", null],
+  ["Brain Checks passe${{ x }}d!", null],
+  ["Brain ${{ x }} Checks ${{ y }} passed ${{ z }}", null],
+  ["Brain Checks pa${{ x }}ks passed", null],
   ["", null],
-  ["Fork Checks passed", "carries"],
-  ["fork checks PASSED (old)", "carries"],
-  ["${{ x }}Fork Checks passed extra", "carries"],
+  ["Brain Checks passed", "carries"],
+  ["brain checks PASSED (old)", "carries"],
+  ["${{ x }}Brain Checks passed extra", "carries"],
   ["${{ matrix.label }}", "could render as"],
-  ["Fork Checks ${{ matrix.word }}", "could render as"],
-  ["${{ 'Fork' }} Checks ${{ 'pass' }}ed", "could render as"],
-  ["${{ fromJSON('{\"a\":{\"b\":\"Fork Checks\"}}').a.b }} passed", "could render as"],
-  ["Fork Checks pass${{ x", "could render as"],
+  ["Brain Checks ${{ matrix.word }}", "could render as"],
+  ["${{ 'Brain' }} Checks ${{ 'pass' }}ed", "could render as"],
+  ["${{ fromJSON('{\"a\":{\"b\":\"Brain Checks\"}}').a.b }} passed", "could render as"],
+  ["Brain Checks pass${{ x", "could render as"],
 ];
 /**
  * Jobs, other than the aggregate, whose display name could report a check
@@ -5279,7 +5282,7 @@ const RULESET_ACCEPTED: [why: string, mutate: (g: RulesetProbe) => RulesetProbe]
 const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, says: string][] = [
   ["a record that does not require the aggregate", (g) => { g.rules[3].parameters!.required_status_checks = []; return g; }, `does not require "${AGGREGATE_NAME}"`],
   ["a job's own name required beside the aggregate", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Repo consistency", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Repo consistency", which is not'],
-  ["a look-alike of the aggregate's name required beside it", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Fork Checks\u00a0passed", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Fork Checks\\u00a0passed", which is not'],
+  ["a look-alike of the aggregate's name required beside it", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Brain Checks\u00a0passed", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Brain Checks\\u00a0passed", which is not'],
   ["a required check no job is named", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Old job", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Old job", which is not'],
   ["a required check with no context", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, "has no context"],
   ["strict off", (g) => { g.rules[3].parameters!.strict_required_status_checks_policy = false; return g; }, "strict_required_status_checks_policy is not true"],
@@ -5362,8 +5365,8 @@ const AGGREGATE_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says
   ["another job named as the aggregate", (j) => { (j.a as Record<string, unknown>).name = AGGREGATE_NAME; return j; }, `job a is named "${AGGREGATE_NAME}", which carries`],
   ["another job named by an expression whose text carries the aggregate's name", (j) => { (j.a as Record<string, unknown>).name = `\${{ '${AGGREGATE_NAME}' }}`; return j; }, "which carries"],
   ["another job named wholly by an expression (a matrix value)", (j) => { (j.a as Record<string, unknown>).name = "${{ matrix.label }}"; return j; }, "which could render as"],
-  ["another job named in part by an expression that could complete the name", (j) => { (j.a as Record<string, unknown>).name = "Fork Checks ${{ matrix.word }}"; return j; }, "which could render as"],
-  ["another job named by an expression with a `}}` inside a quoted string", (j) => { (j.a as Record<string, unknown>).name = `\${{ fromJSON('{"a":{"b":"Fork Checks"}}').a.b }} passed`; return j; }, "which could render as"],
+  ["another job named in part by an expression that could complete the name", (j) => { (j.a as Record<string, unknown>).name = "Brain Checks ${{ matrix.word }}"; return j; }, "which could render as"],
+  ["another job named by an expression with a `}}` inside a quoted string", (j) => { (j.a as Record<string, unknown>).name = `\${{ fromJSON('{"a":{"b":"Brain Checks"}}').a.b }} passed`; return j; }, "which could render as"],
   ["another job named as the aggregate in another case", (j) => { (j.a as Record<string, unknown>).name = AGGREGATE_NAME.toLowerCase(); return j; }, "which carries"],
   ["a needed job that calls a reusable workflow", (j) => { (j.a as Record<string, unknown>).uses = "./.github/workflows/called.yml"; return j; }, "job a calls the reusable workflow"],
   ["the aggregate's job continue-on-error", (j) => { aggOf(j)["continue-on-error"] = true; return j; }, "sets continue-on-error, which check 20 does not allow on it"],
@@ -5432,6 +5435,31 @@ function aggregateRunPasses(needs: string, maySkip: string): boolean | string {
     const err = e as { status?: number | null; code?: string };
     return typeof err.status === "number" ? false : `bash did not run (${err.code ?? "no exit status"})`;
   }
+}
+const SHIFT_WORKFLOW = ".github/workflows/ci-shift.yml";
+/** What is wrong with ci-shift.yml's trigger for a checks workflow called `name`, or null: it names that one name. */
+function shiftTriggerProblem(name: unknown, shiftDoc: unknown): string | null {
+  const names = (shiftDoc as { on?: { workflow_run?: { workflows?: unknown } } } | null)?.on?.workflow_run?.workflows;
+  if (typeof name === "string" && name !== "" && Array.isArray(names) && names.length === 1 && names[0] === name) return null;
+  return `on.workflow_run.workflows is ${JSON.stringify(names ?? null)}, not [${JSON.stringify(name ?? null)}], ${WORKFLOW}'s name — CI shift would never run after it (check 20, SMD-3765)`;
+}
+/** [the checks workflow's name, ci-shift.yml as parsed, passes?] — what shiftTriggerProblem must refuse and pass. */
+const SHIFT_TRIGGER_PROBES: [unknown, unknown, boolean][] = [
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Brain Checks"] } } }, true],
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Fork Checks"] } } }, false],
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Brain Checks", "Fork Checks"] } } }, false],
+  ["Brain Checks", { on: { workflow_dispatch: {} } }, false],
+  ["Brain Checks", null, false],
+  [undefined, { on: { workflow_run: { workflows: [undefined] } } }, false],
+  ["", { on: { workflow_run: { workflows: [""] } } }, false],
+];
+/**
+ * What is wrong with ci-step-times' default listing for this workflow, or null: its first name and file are this
+ * workflow's, so a CI shift's list keeps this workflow's runs (the rest are the names it had before).
+ */
+function listingNamesProblem(name: unknown, path: string, names: readonly string[], paths: readonly string[]): string | null {
+  if (typeof name === "string" && names[0] === name && paths[0] === path) return null;
+  return `DEFAULT_WORKFLOWS starts ${JSON.stringify(names[0] ?? null)} and DEFAULT_WORKFLOW_PATHS ${JSON.stringify(paths[0] ?? null)}, where ${path} is named ${JSON.stringify(name ?? null)} — a CI shift's default listing would keep none of its runs (check 20, SMD-3765)`;
 }
 function checkRulesetRecord() {
   // Self-test: a record every rule accepts passes; each mutant reports exactly
@@ -5524,6 +5552,21 @@ function checkRulesetRecord() {
   try { doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc; } catch (e) { return fail(WORKFLOW, `does not parse: ${(e as Error).message} — check 20 has no job list to hold the record to (SMD-1856)`); }
   if (!doc?.jobs || !Object.keys(doc.jobs).length) return fail(WORKFLOW, "has no jobs check 20 can read — nothing for the one required check to need (SMD-1856)");
   for (const [where, msg] of [...aggregateProblems(doc), ...rulesetProblems(ruleset)]) fail(where, msg);
+  // ci-shift.yml runs after this workflow by its name (workflow_run), which a rename of either leaves silently
+  // unmatched: CI shift would never run again (SMD-3765 renamed "Fork Checks" to "Brain Checks").
+  for (const [name, shiftDoc, want] of SHIFT_TRIGGER_PROBES) {
+    if ((shiftTriggerProblem(name, shiftDoc) === null) !== want) fail(SELF, `check 20's ci-shift trigger rule ${want ? "refuses" : "passes"} ${JSON.stringify(shiftDoc)} for a workflow named ${JSON.stringify(name)} (its own probe)`);
+  }
+  let shiftDoc: unknown = null;
+  try { shiftDoc = Bun.YAML.parse(readFileSync(join(ROOT, SHIFT_WORKFLOW), "utf8")); } catch { shiftDoc = null; }
+  const shiftProblem = shiftTriggerProblem((doc as { name?: unknown }).name, shiftDoc);
+  if (shiftProblem) fail(SHIFT_WORKFLOW, shiftProblem);
+  // ci-step-times keeps the workflow's runs by its name and file: a rename that misses its list empties CI shift's window.
+  if (listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks", "Fork Checks"], [WORKFLOW]) !== null || listingNamesProblem("Brain Checks", WORKFLOW, ["Fork Checks"], [WORKFLOW]) === null
+    || listingNamesProblem("Brain Checks", WORKFLOW, ["Brain Checks"], [".github/workflows/fork-checks.yml"]) === null
+    || listingNamesProblem(undefined, WORKFLOW, [], [WORKFLOW]) === null) fail(SELF, "check 20's listing-names rule no longer reads its probes as written (its own probe)");
+  const listingProblem = listingNamesProblem((doc as { name?: unknown }).name, WORKFLOW, DEFAULT_WORKFLOWS, DEFAULT_WORKFLOW_PATHS);
+  if (listingProblem) fail("scripts/ci-step-times.ts", listingProblem);
   // Every other workflow, for a job that would report a check under the one
   // context (review pass 1); one that does not parse is check 23's to report.
   const workflowsDir = join(ROOT, ".github", "workflows");
@@ -7208,11 +7251,11 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
 }
 // ── 40: every healthcheck probes every second until its service is up (SMD-3194) ──
 /**
- * 40: every healthcheck in the stack's compose files — each service's, and each `x-` anchor's a service merges
- * in — has a start period longer than zero and probes every second within it, until it first passes. Docker's
- * start interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written
- * without them holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75
- * waits of 5.0–5.6 s a Fork Checks run before this). A disabled healthcheck (`disable: true`, or a test of
+ * 40: every healthcheck in the stack's compose files — each service's, and each `x-` anchor's a service merges in —
+ * has a start period longer than zero and probes every second within it, until it first passes. Docker's start
+ * interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written without them
+ * holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75 waits of 5.0–5.6 s a
+ * Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
  * `NONE`) has nothing to probe and is passed over.
  */
 const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml"];
@@ -8161,7 +8204,7 @@ checkSecretsOnArgv();
 
 // ── 45: no doc states a suite's assertion count, which the wiki's Test-counts page carries (SMD-3614, SMD-3655) ──
 /**
- * 45: a count is a fact about a commit's run, so Fork Checks publishes each
+ * 45: a count is a fact about a commit's run, so Brain Checks publishes each
  * suite's to the wiki's Test-counts page on a push to main, and no `.md` file
  * states one: a count in a doc is an edit every PR that adds an assertion
  * makes, and the line two such PRs conflict on. It fails:
@@ -8277,7 +8320,7 @@ function checkCountsInDocs() {
   for (const f of names) {
     if (f.startsWith("changes/") || f === "CHANGELOG.md" || COUNT_RECORDS.includes(f) || !existsSync(join(ROOT, f))) continue;
     for (const line of countLinesIn(readFileSync(join(ROOT, f), "utf8"), f)) {
-      fail(`${f}:${line}`, `states a suite's assertion count — Fork Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614, SMD-3655)`);
+      fail(`${f}:${line}`, `states a suite's assertion count — Brain Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614, SMD-3655)`);
     }
   }
 }
@@ -9858,7 +9901,7 @@ function checkBunPins() {
   if (!ref) { fail(BUN_PIN_REF, "names no `FROM oven/bun:<version>`, which check 33 holds every Bun pin to (SMD-2894)"); return; }
   const files = citationFiles().filter((rel) => !rel.startsWith("changes/") && rel !== "CHANGELOG.md");
   const workflows = files.filter((rel) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(rel));
-  if (!workflows.includes(".github/workflows/fork-checks.yml") || !files.includes(BUN_PIN_REF)) fail(SELF, "check 33's listing does not reach fork-checks.yml and the server's Dockerfile — the listing is broken, not the tree clean");
+  if (!workflows.includes(".github/workflows/brain-checks.yml") || !files.includes(BUN_PIN_REF)) fail(SELF, "check 33's listing does not reach brain-checks.yml and the server's Dockerfile — the listing is broken, not the tree clean");
   const setup: BunPin[] = [];
   for (const rel of workflows) {
     try { setup.push(...setupBunPinsIn(rel, Bun.YAML.parse(readFileSync(join(ROOT, rel), "utf8")))); } catch (e) { fail(rel, `does not parse, so check 33 cannot read its setup-bun steps: ${(e as Error).message}`); }
@@ -9871,12 +9914,12 @@ checkBunPins();
 
 // ── 34. Every suite is run (SMD-2895) ────────────────────────────────────────
 //
-// fork-checks.yml exists because upstream's suites ran in no workflow and one
+// brain-checks.yml exists because upstream's suites ran in no workflow and one
 // asserted the opposite of production for months. The fork repeated it in
 // small: db/test-weekly-digest.ts (31 assertions, SMD-2239) and
 // server-portable/test-jobs.ts (45, SMD-2273) were listed in no step, so they
 // passed when someone ran them by hand and were checked by nothing else. A
-// suite is a `test-*` script; a step of fork-checks.yml, the workflow every
+// suite is a `test-*` script; a step of brain-checks.yml, the workflow every
 // pull request runs, runs it when its `run` calls bun or node on it, read from
 // the step's working-directory, the job's or the workflow's, or a directory a
 // `cd` in the same step names (which of those applies is the shell's to say, so
@@ -9901,7 +9944,7 @@ checkBunPins();
 // unrun, which is the loud direction. What no workflow should run is named in
 // SUITES_NOT_RUN with why, and an entry there that a workflow does run is
 // stale.
-const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
+const SUITE_WORKFLOW = ".github/workflows/brain-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
   "server-portable/test-support.ts": "the server suites' shared helpers, imported by them; it runs nothing itself",
@@ -10172,7 +10215,7 @@ function checkSuitesRun() {
   // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
   // were either missed, the reading is broken, not the tree clean.
   for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
-    if (!run.some((r) => r.path === known)) fail(SELF, `check 34 does not read ${known} as run by fork-checks.yml — the reading is broken, not the tree clean`);
+    if (!run.some((r) => r.path === known)) fail(SELF, `check 34 does not read ${known} as run by brain-checks.yml — the reading is broken, not the tree clean`);
   }
   for (const [where, detail] of suiteProblems(suites, run, SUITES_NOT_RUN)) fail(where, `${detail} (check 34, SMD-2895)`);
 }
@@ -10184,7 +10227,7 @@ checkSuitesRun();
  * directory it runs from sets `[install] auto = "disable"`. It reads that directory's file alone, not a parent's. So
  * a step whose job lacked an install passed on whatever npm served: test-live's [9] and test-search-path ran
  * server-portable/preflight.ts on a zod fetched at run time, since db-live installed db/ alone (SMD-2978). Each
- * directory a fork-checks.yml step may run a script from (check 34's reader: the step's working-directory and each
+ * directory a brain-checks.yml step may run a script from (check 34's reader: the step's working-directory and each
  * `cd` it names) that holds a package.json carries a bunfig.toml that sets it. A directory with no package.json is
  * not read: it has no install of its own to hold to, and a file at the root would reach every command run from it,
  * recipes with installs of their own included (changes/291's Not taken). So a script run from the root, deploy/ or
@@ -10221,7 +10264,7 @@ function checkNoAutoInstall() {
   // Three directories many steps run from: were any missed, the reading is broken. A cd's directory is check 34's
   // probe's to hold ("a cd in a subshell, behind a timeout"); no package directory is reached by a cd alone today.
   for (const known of ["db", "server-portable", "extensions"]) {
-    if (!dirs.includes(known)) fail(SELF, `check 44 does not read ${known}/ as a directory fork-checks.yml runs a script from — the reading is broken, not the tree clean`);
+    if (!dirs.includes(known)) fail(SELF, `check 44 does not read ${known}/ as a directory brain-checks.yml runs a script from — the reading is broken, not the tree clean`);
   }
   for (const d of dirs) {
     const p = join(ROOT, d, "bunfig.toml");
@@ -10401,7 +10444,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
-  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
+  "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
   "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
@@ -10431,7 +10474,7 @@ function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<s
 const namesDocs = (f: string): boolean => (/\.(ts|mts|mjs|cjs|js|sh|py|ya?ml|json|toml|svelte)$/.test(f) || /(^|\/)[^/]*Dockerfile[^/]*$/.test(f)) && f !== SELF && f !== CHANGES_SCRIPT;
 function checkChangesAllowlist() {
   const fileProbes: [string, boolean][] = [
-    [".github/workflows/fork-checks.yml", true], ["deploy/compose.yaml", true], ["deploy/smoke.sh", true], ["server-portable/Dockerfile", true],
+    [".github/workflows/brain-checks.yml", true], ["deploy/compose.yaml", true], ["deploy/smoke.sh", true], ["server-portable/Dockerfile", true],
     ["extensions/package.json", true], ["server-portable/bunfig.toml", true], ["db/config.d.mts", true], ["x/y.cjs", true],
     ["deploy/orchestration/runner.Dockerfile", true], ["dashboard/src/routes/+page.svelte", true], ["evals/rerank-crossencoder.py", true],
     ["db/config.mjs", true], [SELF, false], [CHANGES_SCRIPT, false], ["docs/a.md", false], ["db/migrations/001_x.sql", false],
@@ -10472,11 +10515,11 @@ function checkChangesAllowlist() {
     if (allowed.has(d) && listed) {
       const fresh = by.filter((f) => !listed.by.includes(f));
       const gone = listed.by.filter((f) => !by.includes(f));
-      if (fresh.length) fail(d, `is named by ${fresh.join(", ")} too, beside what NAMED_NOT_READ in ${SELF} lists, and ${CHANGES_SCRIPT} lets a change to it alone skip Fork Checks' code jobs — deny it there if that file reads it for a gated job, or add the file to its entry with the reason it does not (check 47, SMD-2435)`);
+      if (fresh.length) fail(d, `is named by ${fresh.join(", ")} too, beside what NAMED_NOT_READ in ${SELF} lists, and ${CHANGES_SCRIPT} lets a change to it alone skip Brain Checks' code jobs — deny it there if that file reads it for a gated job, or add the file to its entry with the reason it does not (check 47, SMD-2435)`);
       if (gone.length) fail(SELF, `NAMED_NOT_READ lists ${gone.join(", ")} as naming ${d}, which no longer ${gone.length === 1 ? "does" : "do"} — take ${gone.length === 1 ? "it" : "them"} off the entry (check 47, SMD-2435)`);
       continue;
     }
-    if (allowed.has(d) && !listed) fail(d, `is named by ${by.slice(0, 3).join(", ")}${by.length > 3 ? ` and ${by.length - 3} more` : ""}, and ${CHANGES_SCRIPT} lets a change to it alone skip Fork Checks' code jobs — deny it there if a gated job reads it, or add it to NAMED_NOT_READ in ${SELF} with the reason none does (check 47, SMD-2435)`);
+    if (allowed.has(d) && !listed) fail(d, `is named by ${by.slice(0, 3).join(", ")}${by.length > 3 ? ` and ${by.length - 3} more` : ""}, and ${CHANGES_SCRIPT} lets a change to it alone skip Brain Checks' code jobs — deny it there if a gated job reads it, or add it to NAMED_NOT_READ in ${SELF} with the reason none does (check 47, SMD-2435)`);
   }
   for (const [d, { why }] of Object.entries(NAMED_NOT_READ)) {
     if (!namedBy.has(d)) fail(SELF, `NAMED_NOT_READ lists ${d}, which no tracked code names now — take it off (check 47, SMD-2435)`);
@@ -10488,7 +10531,7 @@ checkChangesAllowlist();
 // ── 48: every workflow job has a time limit (SMD-2094) ──
 /**
  * 48: a job with no `timeout-minutes` runs to GitHub's default of 360 minutes. A hung lease, deadlock or container
- * wait in a fork-checks.yml job would hold "Fork Checks passed", the one required check, pending for six hours, and
+ * wait in a brain-checks.yml job would hold "Brain Checks passed", the one required check, pending for six hours, and
  * nothing would say so, since pending reads as running (SMD-2094). So every job of every workflow sets one, a whole
  * number from 1 to 60 written in digits: no expression, which this check cannot read, none over an hour, which no
  * job here needs (release's 60 is the most), and no `15.0`, `0xF`, `+15` or `015`, which YAML reads as 15 but
@@ -10527,7 +10570,7 @@ function jobTimeoutProblems(file: string, text: string): [string, string][] {
   for (const [key, job] of Object.entries(jobs as Record<string, unknown>)) {
     if (!job || typeof job !== "object" || typeof (job as { uses?: unknown }).uses === "string") continue;
     const limit = (job as { "timeout-minutes"?: unknown })["timeout-minutes"];
-    if (limit === undefined) problems.push([file, `job ${key} sets no timeout-minutes, so a hang in it runs to GitHub's 360 minutes (in fork-checks.yml, holding the required check pending that long) — give it a whole number of minutes, at least three times its longest run (check 48, SMD-2094)`]);
+    if (limit === undefined) problems.push([file, `job ${key} sets no timeout-minutes, so a hang in it runs to GitHub's 360 minutes (in brain-checks.yml, holding the required check pending that long) — give it a whole number of minutes, at least three times its longest run (check 48, SMD-2094)`]);
     else if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 60) problems.push([file, `job ${key} sets timeout-minutes ${JSON.stringify(limit)} — a whole number of minutes from 1 to 60, written in digits, not an expression (check 48, SMD-2094)`]);
     else {
       // The value passes; so must its writing, which YAML reads as 15 from 15.0, 0xF, +15 and 015 alike.
@@ -10798,7 +10841,7 @@ checkCheckNumbers();
  * page only if its upload ends before the download, and the page, which names the needed jobs that reported nothing,
  * does not name it. A need that uploads no counts is named on every page as a job that reported none. And a job
  * uploads no counts unless it sets OB1_TEST_COUNTS, where report() in db/test-support.ts appends each suite run's
- * line, and uploads that file or its directory. So in fork-checks.yml:
+ * line, and uploads that file or its directory. So in brain-checks.yml:
  * - publish-test-counts downloads `test-counts-*` by its pattern alone (no `name:`, which download-artifact takes
  *   instead), each artifact into its own directory (no merge-multiple, which puts them in one, where files of one
  *   name overwrite each other);
@@ -11077,9 +11120,9 @@ checkCommitCategories();
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
 // ci-parity.sh is CI's local equivalent, and nothing held it to the workflow:
-// by SMD-2895 it missed fourteen of the suites fork-checks.yml runs and every
+// by SMD-2895 it missed fourteen of the suites brain-checks.yml runs and every
 // --self-check step, and ran the suites of CI's database-free jobs with
-// DATABASE_URL set. Each script a fork-checks.yml step runs (check 34's reader:
+// DATABASE_URL set. Each script a brain-checks.yml step runs (check 34's reader:
 // the same directories, flags, quoting and swallowed failures) is a line of
 // ci-parity.sh's — `run` where the step sets DATABASE_URL, `nodb` where it does
 // not — from one of the directories the step may run it from, with the same
