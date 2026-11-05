@@ -9,7 +9,7 @@
 import { networkInterfaces } from "node:os";
 import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { listenHostFrom, routable } from "./auth.ts";
-import { createCore, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
+import { createCore, installBackgroundSlots, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -106,6 +106,9 @@ if (SERVES_ON_BUN) {
   const reprobe = reprobeIntervalFrom(process.env.OB1_PROVIDER_REPROBE_INTERVAL);
   if (reprobe.problem) console.warn(reprobe.problem);
   const reprober = core.startProviderReprobe(reprobe.intervalS);
+  // Background calls — the mender's, the reprobe's — held to OB1_BACKGROUND_SLOTS' share, beside the brain's other
+  // processes' (SMD-3379 PR 2b-1); off when unset, or with no database to keep the share in.
+  const slots = process.env.DATABASE_URL ? installBackgroundSlots({ url: process.env.DATABASE_URL, raw: process.env.OB1_BACKGROUND_SLOTS }) : null;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
     graceMs: grace.graceS * 1000,
@@ -122,6 +125,7 @@ if (SERVES_ON_BUN) {
     endOpen: () => {
       mender?.stop();
       reprober.stop();
+      void slots?.uninstall();
       cutOpenRequests();
     },
     onCut: () => {

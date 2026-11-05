@@ -578,6 +578,47 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
   };
 }
 
+/**
+ * A deadline that stops counting while its calls wait for a slot on the
+ * model-call seam's hook (SMD-3379 PR 2b-1): `signal` aborts with a
+ * TimeoutError once `ms` of the calls' own time has passed, `waits` pauses and
+ * resumes it — callWaitsFor's `also`, told at its first wait and its last
+ * run — and `dispose` clears its timer. Consolidation's per-pair bound, one
+ * for a pair's calls (the judge's, or decide mode's three), which a wait for a
+ * slot would otherwise eat into.
+ */
+export function pausableTimeout(ms: number): { signal: AbortSignal; waits: CallWaits; dispose(): void } {
+  const ac = new AbortController();
+  let left = ms;
+  let since = Date.now();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = () => ac.abort(new DOMException("The operation timed out.", "TimeoutError"));
+  const arm = () => {
+    since = Date.now();
+    timer = setTimeout(fire, Math.max(0, left));
+  };
+  arm();
+  return {
+    signal: ac.signal,
+    waits: {
+      waiting() {
+        if (timer === null || ac.signal.aborted) return;
+        clearTimeout(timer);
+        timer = null;
+        left -= Date.now() - since;
+      },
+      running() {
+        if (timer !== null || ac.signal.aborted) return;
+        arm();
+      },
+    },
+    dispose() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
 /** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */
 export class AbortedInHand extends Error {
   constructor() {

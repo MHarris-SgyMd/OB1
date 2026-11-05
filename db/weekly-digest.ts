@@ -58,6 +58,7 @@
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
 import { providerCall, providerEndpoint, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
 import fs from "node:fs";
@@ -494,6 +495,8 @@ if (import.meta.main) {
   );
 
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const outputRaw = (cli.value("output") ?? "telegram").trim();
   if (outputRaw !== "telegram" && outputRaw !== "stdout" && outputRaw !== "file") {
     console.error(`--output must be telegram|stdout|file, got: ${outputRaw}`);

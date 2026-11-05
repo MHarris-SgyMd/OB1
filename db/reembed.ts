@@ -483,6 +483,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
 import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, waitOut, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -2757,6 +2758,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 if (import.meta.main) {
   const cli = commandLine("reembed.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const workers = cli.int("workers", { absent: 2, min: 1, max: MAX_WORKERS });
   const batch = cli.int("batch", { absent: 8, min: 1, max: MAX_BATCH });
   const modes = {

@@ -15037,6 +15037,29 @@ if (want("16")) {
   const secondC = await consolidateInProcess();
   assert(same(untimed(secondC), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondC.code})`);
 
+  // The pair's bound counts its calls' own time (SMD-3379 PR 2b-1): a hook holding each judge call 1.5 s, as a wait for
+  // a slot would, under --timeout 1 — the wait pauses the bound, so the pair is judged, not timed out.
+  const slotOlder = await seed("slotcase: the first note on the shared kettle.", 9, 3, ["slotcase"]);
+  const slotNewer = await seed("slotcase: the second note on the shared kettle.", 9, 0, ["slotcase"]);
+  let heldJudge = 0;
+  const hookBeforeSlot = setModelCallHook(async (call, run) => {
+    if (call.purpose === "judge") {
+      heldJudge++;
+      await Bun.sleep(1500);
+    }
+    return run();
+  });
+  let slotRun: { code: number; stdout: string; stderr: string } | null = null;
+  try {
+    slotRun = await consolidateInProcess({ timeout: 1, workers: 1 });
+  } finally {
+    setModelCallHook(hookBeforeSlot);
+  }
+  const slotStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${slotNewer}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+  assert(heldJudge >= 1 && slotStatus === "succeeded" && !/timed out/.test(`${slotRun?.stdout}${slotRun?.stderr}`),
+         `a judge call held 1.5 s before it runs, under a 1 s pair bound: the wait pauses the bound, the pair judged, nothing timed out (${heldJudge} held; ${slotStatus}; ${`${slotRun?.stdout}${slotRun?.stderr}`.trim().split("\n").slice(-2).join(" | ")})`);
+  for (const id of [slotOlder, slotNewer]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
   assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /one is out of date, which not stated/.test(list.out),

@@ -59,6 +59,8 @@ export type Env = {
    * index.ts and api.ts, whose menders take turns under the store's leader lock.
    */
   OB1_VECTOR_MEND_INTERVAL?: string;
+  /** Background calls' share of each model server's slots (SMD-3379 PR 2b-1, slots.ts): unset or off, none held. */
+  OB1_BACKGROUND_SLOTS?: string;
   /**
    * Seconds between re-probes of a local embedding provider that does not
    * answer (provider-health.ts, SMD-2890): whole seconds from 1 to 3600, `0`

@@ -931,6 +931,13 @@ services:
       # provider answers (SMD-2889). Unset, 60. The REST core reads it; a
       # leader lock lets one mend at a time, where two run on one database.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
+      # Background calls held to a share of each model server's slots (SMD-3379
+      # PR 2b-1): types with optional per-model overrides, e.g.
+      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, kept across the brain's
+      # processes by advisory locks; a live call takes none. Unset or off, none
+      # is held. The REST core reads it, and the coordinator hands it to its
+      # passes.
+      OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
       # way /models cannot show), 1 to 3600, 0 or off for the start's probe
