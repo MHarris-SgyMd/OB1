@@ -21,8 +21,9 @@ REPLACE all instances of:
     plugin's directory and OB1_PLUGINS name
   - "extension_name" with the tool prefix: the slug, hyphens as underscores
   - "N" with its place in the learning path. The path is six, curated: a
-    new extension takes the next number, and its row goes into this table in
-    every guide, extensions/README.md's and plugins/README.md's
+    new extension takes the next number, its row goes into this table in
+    every guide, extensions/README.md's and plugins/README.md's, and every
+    guide's "Extension N of 6" heading counts it
 
 DELETE this comment block before submitting your PR.
 =============================================================================

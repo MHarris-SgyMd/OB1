@@ -16,7 +16,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
 - An entry in `MCP_ACCESS_KEYS` that is not `name:read|write|capture|forward:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
 - A key's scope is what you expect: a read-scoped key does not see the tools that write, and a server whose only tools write shows it nothing
-- Try minting a new key: Step 3 of [Getting Started](../../docs/01-getting-started.md) for the brain's connector ([Remote MCP Connection](../remote-mcp/), "Keys and Scope", says how to swap it in), or Step 3 of [Run a Vendored Server](../deploy-remote-mcp/) for a vendored server; then update your Connection URL
+- Try minting a new key. For the brain's connector: Step 3 of [Getting Started](../../docs/01-getting-started.md), swapped in as [Remote MCP Connection](../remote-mcp/)'s "Keys and Scope" says, then update your Connection URL. For a vendored server: Step 3 of [Run a Vendored Server](../deploy-remote-mcp/), then restart it and give its callers the new key
 
 **"Tools don't appear in Claude Desktop"**
 - The connector dials from Anthropic's side: the URL must be HTTPS and reachable from the internet (Step 6.1 of [Getting Started](../../docs/01-getting-started.md)); `http://127.0.0.1:…` works only for a client on this machine
@@ -53,7 +53,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
 **"permission denied"**
-- The role in `SUPABASE_URL` needs grants on the recipe's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the recipe tables too — the **recipes** group (`db/README.md`, "Grants for a capturing role"). An extension's tables are its plugin's since SMD-2311, under the plugin's own role. The schemas grant nothing themselves; a role that owns the tables needs nothing
+- The role in `SUPABASE_URL` needs grants on the recipe's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the recipe tables too — the **recipes** group for a recipe's own SQL, the **community** group for the tables under `schemas/` (`db/README.md`, "Grants for a capturing role"). An extension's tables are its plugin's since SMD-2311, under the plugin's own role. The schemas grant nothing themselves; a role that owns the tables needs nothing
 - Check that `user_id` values are valid UUIDs
 
 **"Foreign key violation" errors**
