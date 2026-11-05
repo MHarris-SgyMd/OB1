@@ -2,7 +2,7 @@
 name: auto-capture-claude-code
 description: |
   Claude Code adapter for the auto-capture skill. Extends auto-capture with
-  automatic session-end hooks that capture transcripts to Daemonic Brain without
+  automatic session-end hooks that capture transcripts to Open Brain without
   manual intervention. Use this when you want every meaningful Claude Code
   session to be preserved automatically — not just the ones where you
   remember to say "wrap up".
@@ -43,7 +43,7 @@ Together they ensure no valuable session falls through the cracks.
    and session metadata via stdin as JSON.
 2. The hook script (`session-end-capture.mjs`) reads the transcript, filters out
    short or agent-only sessions, and formats the content.
-3. The formatted transcript is POSTed to the Daemonic Brain REST ingest endpoint
+3. The formatted transcript is POSTed to the Open Brain REST ingest endpoint
    (or smart-ingest edge function) for automatic thought extraction.
 4. Failed captures are saved to a local retry queue and retried on subsequent
    session ends.
@@ -99,7 +99,7 @@ extends it — it does not replace it.
 4. Restart Claude Code to pick up the hook.
 
 5. End a test session with at least 3 user messages and verify a capture appears
-   in your Daemonic Brain thoughts.
+   in your Open Brain thoughts.
 
 ## Adapting the Script
 
@@ -122,7 +122,7 @@ to your setup:
 When working correctly:
 
 - Every meaningful Claude Code session (3+ user turns, non-agent, non-restricted)
-  is automatically ingested into Daemonic Brain for thought extraction.
+  is automatically ingested into Open Brain for thought extraction.
 - Failed captures are queued locally and retried on subsequent session ends.
 - Short, agent, and restricted sessions are silently skipped.
 - All outcomes are logged to `logs/ambient-capture.log` for debugging.

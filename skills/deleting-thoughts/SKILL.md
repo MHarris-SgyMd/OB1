@@ -18,7 +18,7 @@ version: 1.1.0
 **permanent delete** — the row and its search chunks are gone the moment it
 returns, with no soft-delete and no restore tool. The audit trail keeps the
 previous content, so an operator can reconstruct a thought removed in error;
-nothing you can call undoes it. The
+nothing you can call undoes it. The upstream
 Open Brain maintainer's stance is **"deprecate and version rather than
 delete."** So deletion is a last resort, and every delete must target an id you
 verified this session.

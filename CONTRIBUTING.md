@@ -36,7 +36,7 @@ This is a first-class path, not a workaround. Some of the best contributions com
 
 - **Extensions** are curated, ordered builds that form a progressive learning path. Each teaches new concepts through practical use. They include database schemas, MCP server code, and step-by-step instructions. If you want to propose a new extension, [open an issue](../../issues/new?template=extension-submission.yml) first.
 - **Primitives** are reusable concept guides that get referenced by multiple extensions. They teach a pattern (like RLS or shared access) once, so extensions can link to them instead of re-explaining. A primitive should be referenced by at least 2 extensions. [Propose one here](../../issues/new?template=primitive-submission.yml).
-- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working Daemonic Brain. Open for community contributions.
+- **Recipes** are standalone builds — they add a capability without being part of the learning path. No ordering, no prerequisites beyond a working brain. Open for community contributions.
 - **Plugins** add operations to the brain itself (SMD-2310). A plugin is a manifest in `plugins/<name>/`, not a server: the brain's REST core and MCP server serve its operations behind the brain's own keys and scopes, and its tables live in a Postgres schema of its own. A contribution that would once have been its own MCP server with its own keys is a plugin now. See [plugins/README.md](plugins/README.md).
 - **Skills** are standalone agent behaviors packaged as plain-text prompt/skill files. They are smaller than recipes: no full build required, just a reusable behavior you can install into Claude Code, Codex, Cursor, or a similar client. Open for community contributions.
 - If a prompt/skill behavior is reusable across multiple contributions, its canonical home is `skills/`. Recipes and other contributions should depend on it with `requires_skills` instead of keeping the canonical copy in their own folder. Recipe-local `*.skill.md` files are still allowed for tightly coupled glue, but they are not the preferred pattern for reusable behavior.
@@ -47,10 +47,10 @@ Not sure where yours fits? Open a discussion issue first.
 
 The project is **Daemonic Brain**, and it grew out of Open Brain (SMD-1929). Name things in a contribution by one rule:
 
-- **Daemonic Brain names the product:** its setup, its tools, its connector and what it does ("a working Daemonic Brain setup", "the Daemonic Brain capture tool").
-- **One memory is "a brain":** "capture it to your brain", "search the brain".
-- **Open Brain names only the origin:** where the text says the project grew out of it, in a link to upstream's repository or docs, in a credit or an attribution, or in text quoted from upstream. OB1 used as the product's name follows the same rule. OB1 as a repository's name stays.
-- **Identifiers stay as they are until SMD-3771 decides them.** These are the `OB1_*` settings, the `ob1-*` images, the `ob1_` SQL, the `open-brain` connector and compose project, tool names such as `mcp__open-brain__capture_thought`, and repository names in URLs.
+- **Daemonic Brain names the product,** and the system a contribution captures to and searches: "a working Daemonic Brain setup", "the Daemonic Brain capture tool", "capture it to Daemonic Brain".
+- **One install is "a brain":** where the text means one install or one memory rather than the product, as in "a brain of your own", "each brain has its own keys", "search your brain".
+- **Open Brain names only the origin:** where the text says the project grew out of it, in a link to upstream's repository or docs, in a credit or an attribution, in text quoted from upstream, and for upstream's own products and services (its Supabase `open-brain-rest` endpoint, say). OB1 used as the product's name follows the same rule. OB1 as a repository's name stays.
+- **Identifiers stay as they are until SMD-3771 decides them.** These are the `OB1_*` settings, the `ob1-*` images, the `ob1_` SQL, the connector's server name and the compose project (`open-brain`), tool names such as `mcp__open-brain__capture_thought`, the `open-brain` tag and `requires.open_brain` in `metadata.json`, paths such as `.ob1/`, and repository names in URLs.
 - **A contribution's credit stays its author's:** a `metadata.json` `author` is never changed.
 
 ## Required Files

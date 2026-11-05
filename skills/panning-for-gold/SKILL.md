@@ -300,7 +300,7 @@ After writing the gold-found file, capture to Daemonic Brain automatically (do n
 2. **Session summary** as one `capture_thought`:
    - `content`: "Panning session: [source], [N] threads, [M] ACT NOW, [K] RESEARCH MORE. Threads: [all thread titles + categories]. Gold-found: [file path]"
 
-This closes the flywheel: panning extracts and evaluates, the brain stores, Gate 0 finds it next session.
+This closes the flywheel: panning extracts and evaluates, Daemonic Brain stores, Gate 0 finds it next session.
 
 ## Phase 4: Self-Improvement
 

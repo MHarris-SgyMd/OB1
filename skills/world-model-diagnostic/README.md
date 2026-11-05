@@ -19,7 +19,7 @@ The output is not a fake-precise readiness score. It returns:
 - clear labels for `Firm finding`, `Inference`, and `Open question`
 
 If Daemonic Brain search/capture tools are present, the skill also persists the
-intake, boundary audit, and final assessment back into the brain so the diagnostic can
+intake, boundary audit, and final assessment back into Daemonic Brain so the diagnostic can
 compound over time.
 
 ## Supported Clients
@@ -75,7 +75,7 @@ When the skill is working correctly, the client should:
 - explicitly call out whether a boundary layer exists
 - return the top simulated-judgment exposures
 - produce a concrete first/second/third build sequence
-- persist three lean thoughts to the brain if capture tools are available
+- persist three lean thoughts to Daemonic Brain if capture tools are available
 
 ## Troubleshooting
 
