@@ -65,6 +65,8 @@ db/*.ts
 !db/worker-bootstrap.ts
 !db/lease.ts
 !db/pass-stamp.ts
+# ...and priority-writers.ts, whether the pipeline and board-sync may state priorities (SMD-3666).
+!db/priority-writers.ts
 !evals/linear-corpus.ts
 # ...and the coordinator's (SMD-3476): the server image carries db/coordinator.ts
 # and the core passes it runs, with their import graph — db/test-coordinator.ts

@@ -302,7 +302,7 @@ run of the Actions app; changes only through a pull request; no deletion, **no
 force-push**, and no bypass actors — it applies to admins too. "Brain Checks
 passed" is `brain-checks.yml`'s job `brain-checks-passed`, which needs every other
 job, runs even when one failed, and fails unless each succeeded (or skipped: by
-its own `if:`, or as a docs-only PR's code job). So every job is required through
+its own `if:`, or as a job the PR can't affect). So every job is required through
 it, and a job added, renamed, split or run as a matrix changes nothing in the
 ruleset. The ruleset is a file, `.github/rulesets/main.json`, applied
 with `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,

@@ -6,7 +6,7 @@
 	const cited = $derived(form && 'cited' in form ? form.cited : undefined);
 </script>
 
-<svelte:head><title>Delete · {data.thought.title} · Open Brain</title></svelte:head>
+<svelte:head><title>Delete · {data.thought.title} · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Delete a thought</h1>

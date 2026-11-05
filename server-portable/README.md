@@ -1,6 +1,6 @@
 # server-portable
 
-The Open Brain REST core (`api.ts`) and the core every brain operation runs
+The Daemonic Brain REST core (`api.ts`) and the core every brain operation runs
 in. It began as a runtime-neutral build of the MCP server, so the runtime could
 be chosen last, with the same tools and wire behaviour as upstream's Edge
 Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
