@@ -3,15 +3,9 @@
  * check-landing.ts — what a landing must carry (SMD-1857).
  *
  * A landing is one pull request's worth of change reaching `main`. CI sees it
- * as the `pull_request` event, whose range is the PR's base and head; and, the
- * day `main` merges through GitHub's merge queue (refused on this user-owned
- * repository — SMD-1984 moves it), as the `merge_group` event, whose range is
- * `main`'s tip and the merge result the queue built, one first-parent commit
- * per queued PR (the record pins the queue's merge method to MERGE, so each is
- * that PR's merge commit, and `git diff c^1 c` is exactly what the PR added; a
- * first-parent commit with one parent means the live queue is not merging as
- * the record says, and the run stops on that rather than reading each commit
- * as a PR).
+ * as the `pull_request` event, whose range is the PR's base and head. `main`
+ * has no merge queue (decided 2026-10-25; SMD-3336 took out the merge-group
+ * path built for one), so a pull request is the only landing there is.
  *
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
  * db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ ships a changes/smd-NNNN.md
@@ -21,14 +15,14 @@
  * numbered, and records itself in releases.json — the manifest written beside a
  * fragment deleted is its signature. Tests and docs are exempt by PATH — a
  * `test-*.ts` / `*.test.ts` file or a Markdown file inside those directories
- * asks no fragment — rather than by a label, because the merge group's run
- * carries no pull request and the workflow's token reads none. The rule is
+ * asks no fragment — rather than by a label, so the rule reads the change
+ * alone and holds whoever opened the PR. The rule is
  * landingProblem, one pure function over a landing's change list, and the git
  * reading is the thin part around it: `--name-status -z --no-renames`, so a
  * non-ASCII path is not C-quoted past the prefix test and a file moved out of
  * a directory shows as its deletion there.
  *
- * Run: bun scripts/check-landing.ts --event pull_request|merge_group --from <sha> --to <sha>
+ * Run: bun scripts/check-landing.ts --from <base sha> --to <head sha>
  * Exit: 0 every landing carries what it must; 1 one did not (each named with
  * the files that asked); 2 the arguments, the range or this script's own
  * probes did not make sense — never the PR's fault.
@@ -141,35 +135,25 @@ function changesBetween(a: string, b: string): Change[] {
 /** A sha shortened for a label; anything else (a ref name) as given. */
 const short = (s: string) => (/^[0-9a-f]{40}$/.test(s) ? s.slice(0, 8) : s);
 
-/** The landings in a range, each as [label, changes]: one for a pull request; one per first-parent commit for a merge group. Throws, in words, on a range that is not what the event promises. */
-function landings(event: string, from: string, to: string): [label: string, changes: Change[]][] {
-  if (event === "pull_request") {
-    const base = git(["merge-base", from, to]).trim();
-    const changes = changesBetween(base, to);
-    if (!changes.length) throw new Error(`the range ${from}...${to} (merge base ${short(base)}) changes nothing — a pull request has a diff; these are the wrong shas`);
-    return [[`${short(from)}...${short(to)} (merge base ${short(base)})`, changes]];
-  }
-  const commits = git(["rev-list", "--first-parent", "--reverse", `${from}..${to}`]).split("\n").filter(Boolean);
-  if (!commits.length) throw new Error(`the range ${from}..${to} holds no landing — a merge group with nothing in it, or the wrong shas`);
-  return commits.map((c) => {
-    const [, ...parents] = git(["rev-list", "--parents", "-n", "1", c]).trim().split(" ");
-    const subject = git(["log", "-1", "--format=%s", c]).trim();
-    if (parents.length < 2) throw new Error(`${short(c)} "${subject}" has one parent — the queue did not merge it; the record pins merge_method MERGE, under which every first-parent commit of a group is one PR's merge commit, so the live ruleset has drifted from .github/rulesets/main.json (re-apply it)`);
-    return [`${short(c)} ${subject}`, changesBetween(`${c}^1`, c)];
-  });
+/** A pull request's landing as [label, changes], from its base and head. Throws, in words, on a range that changes nothing. */
+function landing(from: string, to: string): [label: string, changes: Change[]] {
+  const base = git(["merge-base", from, to]).trim();
+  const changes = changesBetween(base, to);
+  if (!changes.length) throw new Error(`the range ${from}...${to} (merge base ${short(base)}) changes nothing — a pull request has a diff; these are the wrong shas`);
+  return [`${short(from)}...${short(to)} (merge base ${short(base)})`, changes];
 }
 
 if (import.meta.main) {
   const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
-  const event = arg("event"), from = arg("from"), to = arg("to");
-  if (!event || !["pull_request", "merge_group"].includes(event) || !from || !to) {
-    console.error("usage: bun scripts/check-landing.ts --event pull_request|merge_group --from <sha> --to <sha>");
+  const from = arg("from"), to = arg("to");
+  if (!from || !to) {
+    console.error("usage: bun scripts/check-landing.ts --from <base sha> --to <head sha>");
     process.exit(2);
   }
   const self = selfTest();
   if (self.length) { for (const s of self) console.error(`  ${s}`); console.error("\ncheck-landing's own probes fail — the script, not the landing."); process.exit(2); }
   let found: [string, Change[]][];
-  try { found = landings(event, from, to); } catch (e) { console.error(`cannot read the range as a ${event}: ${(e as Error).message}`); process.exit(2); }
+  try { found = [landing(from, to)]; } catch (e) { console.error(`cannot read the range as a pull request: ${(e as Error).message}`); process.exit(2); }
   const problems: string[] = [];
   for (const [label, changes] of found) {
     const problem = landingProblem(changes);

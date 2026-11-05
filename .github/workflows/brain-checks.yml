@@ -14,7 +14,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -56,9 +55,11 @@ defaults:
 # hit its limit. The limits count a job's own run, not its wait for a runner
 # (check 48, SMD-2094).
 
+# A newer push to a pull request cancels the run it supersedes; a push to main
+# never cancels one, so every merge's run reaches its end (SMD-3173).
 concurrency:
   group: brain-checks-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── What the change can affect (SMD-2435) ─────────────────────────────────
@@ -127,28 +128,19 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
-      # PR of the group, one first-parent merge commit each — whose change
+      # What a landing must carry (SMD-1857): a PR whose change
       # touches db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ beyond tests and docs
-      # ships a changes/smd-NNNN.md fragment. Read from the range the event
-      # gives, so it holds on a merge group's result as on a PR's head. GitHub
-      # refuses a merge queue on this user-owned repository (SMD-1984), so today
-      # the pull_request path is the one that runs; the merge_group path is
-      # ready. The migration-number rule (5b) and the rest of
-      # check-consistency below run on whichever tree is checked out. A PR
-      # into another branch is not a landing yet; it is asked when it reaches
-      # main.
+      # ships a changes/smd-NNNN.md fragment, read from the PR's base and head.
+      # Main merges no other way: it has no merge queue (SMD-3336). The
+      # migration-number rule (5b) and the rest of check-consistency below run
+      # on whichever tree is checked out. A PR into another branch is not a
+      # landing yet; it is asked when it reaches main.
       - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
-        if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
         env:
-          EVENT: ${{ github.event_name }}
           PR_FROM: ${{ github.event.pull_request.base.sha }}
           PR_TO: ${{ github.event.pull_request.head.sha }}
-          MG_FROM: ${{ github.event.merge_group.base_sha }}
-          MG_TO: ${{ github.event.merge_group.head_sha }}
-        run: |
-          if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
-          bun scripts/check-landing.ts --event "$EVENT" --from "$from" --to "$to"
+        run: bun scripts/check-landing.ts --from "$PR_FROM" --to "$PR_TO"
 
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
@@ -5169,7 +5161,7 @@ jobs:
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
-  # A pull request, the merge queue and a manual run publish nothing.
+  # A pull request and a manual run publish nothing.
   # contents: write, on this job alone, is what pushes to the wiki's
   # repository; the token stays out of the clone's config (an extraheader on
   # each git call) and out of the checkout.
@@ -5229,9 +5221,8 @@ jobs:
     name: Commit messages
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
-    # are the range, and commitlint ignores the merge commit the queue creates.
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    # Nothing to lint on a plain push; a PR's own commits are the range.
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5242,15 +5233,11 @@ jobs:
           bun-version: "1.4.3"
       - name: commitlint the pushed range against the house grammar
         env:
-          EVENT: ${{ github.event_name }}
           PR_FROM: ${{ github.event.pull_request.base.sha }}
           PR_TO: ${{ github.event.pull_request.head.sha }}
-          MG_FROM: ${{ github.event.merge_group.base_sha }}
-          MG_TO: ${{ github.event.merge_group.head_sha }}
         run: |
-          if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
-          echo "Linting $from..$to"
-          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$from" --to "$to"
+          echo "Linting $PR_FROM..$PR_TO"
+          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$PR_FROM" --to "$PR_TO"
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
@@ -5287,8 +5274,8 @@ jobs:
   # `if: always()` because a job whose needs failed is otherwise skipped, and
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
-  # own `if:` runs it on pull requests and the merge queue alone, and
-  # publish-test-counts, whose own runs it on a push to main alone; and, only
+  # own `if:` runs it on pull requests alone, and publish-test-counts, whose own
+  # runs it on a push to main alone; and, only
   # when the changes job succeeded and said code=false, the jobs it gates, or
   # when it succeeded, those its skip names (SMD-2435), so a cancelled run's
   # unstarted jobs never pass. The step is
