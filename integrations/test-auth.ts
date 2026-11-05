@@ -139,8 +139,9 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // HTTPS stubs supabase-js took went with it); `kind` picks the assertions; a REST server
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
-// reads may call; STACK (db/test-support.ts) and this directory's package.json for a new
-// npm package (the pin guard then holds the other two installs to it); a TEXT_ONLY entry for a file
+// reads may call; a package.json of the server's own folder for a new npm package, with a
+// `bun install --frozen-lockfile` step for that folder in each fork-checks.yml job that runs
+// this suite (this directory's install is the MCP stack alone, held below); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
@@ -473,7 +474,7 @@ const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\|
     .filter((f) => !f.includes("node_modules") && onShim(f)).sort()
     .flatMap((f) => { const m = ENTRY_SHAPE.exec(readFileSync(join(ROOT, f), "utf8")); return m ? [{ f, held: m[1] !== undefined }] : []; });
   const inTree = tails.map((t) => t.f);
-  assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here (${inTree.length}: ${inTree.join(", ")})`);
+  assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here, each by its entry in SERVERS above (${inTree.length}: ${inTree.join(", ")}; not started: ${inTree.filter((f) => !LIVE.some((l) => l.file === f)).join(", ") || "none"})`);
   const unheld = tails.filter((t) => !t.held).map((t) => t.f);
   assert(unheld.length === 0, `…and each spreads listenOn(process.env.OB1_LISTEN_HOST) between port and fetch (${unheld.join(", ") || "all do"})`);
 }
@@ -770,8 +771,8 @@ for (const s of SERVERS) {
 }
 {
   // No vendored file builds @hono/mcp's transport: the MCP kind that held such a server (built per request, its
-  // reply kept alive, its allow-list naming the browser headers) retired with the last of them (SMD-3747). A new
-  // vendored MCP server brings that kind back first. (The Next.js route on Vercel builds the SDK's own transport, on
+  // reply kept alive, its allow-list naming the browser headers) retired with the last of them (SMD-3747). New
+  // operations on the brain are a plugin (plugins/README.md), not a vendored MCP server. (The Next.js route on Vercel builds the SDK's own transport, on
   // Node, from its own install; it is not a Bun server.)
   // An MCP server, by what it imports (@hono/mcp, the v1 SDK's server, the v2 server or node packages) or by a
   // server transport it builds (the spellings probed below: spaced, namespaced, generic; Streamable HTTP, SSE or stdio).
@@ -782,7 +783,7 @@ for (const s of SERVERS) {
   const scripts = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}").scanSync({ cwd: ROOT })]
     .filter((f) => !f.split("/").includes("node_modules") && f !== "integrations/test-auth.ts" && f !== "integrations/test-writes.ts");
   const building = scripts.filter((f) => TRANSPORT.test(readFileSync(join(ROOT, f), "utf8"))).sort();
-  assert(building.join() === VERCEL_ROUTE, `no vendored script imports an MCP server package or builds an MCP server transport, so none needs the retired MCP kind; the Vercel route alone, on Node from its own install (${building.join(", ") || "none"})`);
+  assert(building.join() === VERCEL_ROUTE, `no vendored script imports an MCP server package or builds an MCP server transport, so none needs the retired MCP kind; the Vercel route alone, on Node from its own install. New operations on the brain are a plugin, not a vendored MCP server: plugins/README.md (${building.join(", ") || "none"})`);
   const caught = ["new WebStandardStreamableHTTPServerTransport(", "new StreamableHTTPTransport(", "new  StreamableHTTPTransport (", "new\nStreamableHTTPTransport(",
     "new mcp.StreamableHTTPTransport(", "new StreamableHTTPTransport<X>(", "new SSEServerTransport(", "new StdioServerTransport(", "new NodeStreamableHTTPServerTransport(",
     'import { StreamableHTTPTransport } from "@hono/mcp";', 'import { StreamableHTTPTransport } from "../node_modules/@hono/mcp/dist/index.js";', "const m = await import(`@hono/mcp`);", 'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";', 'const m = await import("@modelcontextprotocol/server");'];
