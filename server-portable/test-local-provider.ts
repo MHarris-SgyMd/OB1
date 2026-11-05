@@ -1609,7 +1609,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
       `outside a request a call is background, inside asLive live, and the seam's run returns the answer read, not a response (${JSON.stringify(calls.map((c) => c.call))})`);
     // The passes' own fetches: extraction's, the judge's, a worker's probe, and the decide tier's.
     calls.length = 0;
-    await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" });
+    await extractEntities("Ada works on Daemonic Brain.", cfg, undefined, { kind: "extraction" });
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000);
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
@@ -1662,7 +1662,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     // Each pass hands the seam its stop, which a hook waiting for a slot ends its wait on.
     const stop = new AbortController();
     calls.length = 0;
-    await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
+    await extractEntities("Ada works on Daemonic Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg, stop.signal);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000, stop.signal);
     await getEmbedding("an embedding with a stop", cfg, { kind: "re-embed" }, stop.signal);
