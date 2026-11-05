@@ -1180,7 +1180,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * set while processRow runs, with when it was taken up — moved on past a
    * provider pause, which is the provider's time and not the window's
    * (review pass 3) — which says whether the stop was long. A wait at the
-   * admit gate moves it on too, and `pausedAt` marks one in progress, so a
+   * admit gate moves it on too, as does one for a slot on the model-call
+   * seam's hook (stallWaits, PR 2a); `pausedAt` marks either in progress, so a
    * hard stop during it counts up to the wait (SMD-3379 PR 1b-1).
    */
   const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
@@ -1245,21 +1246,21 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * wait inside one the gate already paused leaves the gate's.
    */
   function stallWaits(workerId: string): CallWaits {
-    let mine: { at: number } | null = null;
+    let at: number | null = null;
     return {
       waiting() {
         const held = inHand.get(workerId);
         if (!held || held.pausedAt !== undefined) return;
-        mine = { at: Date.now() };
-        held.pausedAt = mine.at;
+        at = Date.now();
+        held.pausedAt = at;
       },
       running() {
         const held = inHand.get(workerId);
-        if (mine && held && held.pausedAt === mine.at) {
-          held.since += Date.now() - mine.at;
+        if (at !== null && held && held.pausedAt === at) {
+          held.since += Date.now() - at;
           held.pausedAt = undefined;
         }
-        mine = null;
+        at = null;
       },
     };
   }
@@ -1603,7 +1604,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                // A wait for a slot on the model-call seam is neither the call's time nor the thought's held (review pass 3).
+                // A wait for a slot on the model-call seam is neither the call's
+                // time nor the thought's held (review pass 3).
                 outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId), stallWaits(workerId)), () => processRow(row, workerId, asked, attempt > 0));
               } catch (e) {
                 // The calls a thrown thought made — its fourth window timing out

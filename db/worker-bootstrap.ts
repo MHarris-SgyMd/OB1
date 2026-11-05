@@ -471,7 +471,7 @@ export function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, 
     });
 }
 
-/** probeChat's call, once the seam lets it run: the one-token request and its answer read. */
+/** probeChat's exchange, once the seam lets it run: the one-token request and its answer read. */
 async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   let r: Response;
   try {

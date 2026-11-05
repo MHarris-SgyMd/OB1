@@ -1568,7 +1568,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
 
 console.log("\n[11] Every model call goes through the model-call seam, live inside a request and background outside one, the whole exchange inside it and its deadline started there (SMD-3379 PR 2a)");
 {
-  const { setModelCallHook, asLive } = await import("./model-call.ts");
+  const { setModelCallHook, asLive, modelCall, asPass, withCallWaits } = await import("./model-call.ts");
   type Call = import("./model-call.ts").ResolvedModelCall;
   const { resolveEmbedConfig, createEmbedder } = await import("./embed.ts");
   const { judgePair } = await import("./consolidate.ts");
@@ -1669,7 +1669,6 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     await jevInfo(jev, { signal: stop.signal });
     assert(calls.length === 5 && calls.every((c) => c.call.signal === stop.signal), `extraction, the judge, a probe, an embedding and the decide tier each hand the seam their stop (${calls.map((c) => `${c.call.purpose}:${c.call.signal === stop.signal}`).join(", ")})`);
     // A call that says its class outright keeps it, whatever the context (review pass 2).
-    const { modelCall } = await import("./model-call.ts");
     calls.length = 0;
     await modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "probe", cls: "live" }, async () => "said");
     await asLive(() => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "probe", cls: "background" }, async () => "said"));
@@ -1711,7 +1710,6 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
   // worker's observer of each call's wait on the hook — a fan-out's two calls held, the entry holding no call to abort
   // until the last runs, and a wait inside one idleWhile already holds leaving it held.
   {
-    const { modelCall, asPass, withCallWaits } = await import("./model-call.ts");
     const { inHandCalls, callWaitsFor } = await import("../db/lease.ts");
     const holds = new Map<string, number>([["a", 200], ["b", 400]]);
     const seenPasses: (string | undefined)[] = [];

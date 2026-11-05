@@ -25,17 +25,17 @@
  * scripts, and the servers' own timers (the vector mender, the provider
  * reprobe), which run outside any request. Work a request starts and nobody
  * waits on is background too: a detached job (jobs.ts runs it `asBackground`)
- * and a webhook's deferred work (core/plugins.ts), whose discard stays live,
- * run before the delivery's 500, unless it is deferred after the handler
- * failed, which the 500 does not wait on. A call may still say its class
- * outright.
+ * and a webhook's deferred work (core/plugins.ts). A webhook's discard stays
+ * live, since it runs before the delivery's 500 — unless it is deferred after
+ * the handler failed, which the 500 does not wait on. A call may still say its
+ * class outright.
  *
- * Two more things the context carries, for 2b's and 2c's hooks (review pass
- * 3): the pass a call belongs to (`asPass`, which each claim worker's run
- * sets: `extract`, `consolidate`, `reembed`), so a hook can order the passes'
- * calls; and an observer told when a call starts waiting on the hook and
- * when it runs (`withCallWaits`), so a worker's clocks — N12's call in hand,
- * extraction's stall — do not count a wait for a slot as the call's time.
+ * Two more things the context carries, for PR 2b's and 2c's hooks: the pass a
+ * call belongs to (`asPass`, which each claim worker's run sets: `extract`,
+ * `consolidate`, `reembed`), so a hook can order the passes' calls; and an
+ * observer told when a call starts waiting on the hook and when it runs
+ * (`withCallWaits`), so a worker's clocks — N12's call in hand, extraction's
+ * stall — do not count a wait for a slot as the call's time (review pass 3).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -109,8 +109,8 @@ export function modelCall<T>(call: ModelCall, run: () => Promise<T>): Promise<T>
   const { cls, ...rest } = call;
   const store = context.getStore();
   const resolved: ResolvedModelCall = { ...rest, cls: cls ?? store?.cls ?? "background", pass: store?.pass };
-  // The wait on the hook told to the worker's observer: waiting now, running when the hook runs the call — or, the
-  // call ended without running (refused, stopped), running again, so its clocks start from there (review pass 3).
+  // The wait on the hook told to the worker's observer: waiting now, running when the hook runs the call — or, if the
+  // call ended without running (refused, stopped), running then, so its clocks start from there (review pass 3).
   const waits = store?.waits;
   let ran = false;
   const running = waits ? () => { ran = true; waits.running(); return run(); } : run;
