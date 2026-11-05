@@ -69,7 +69,7 @@ const LEAD_STOPWORDS = new Set([
   "not", "no", "yes", "each", "every", "some", "any", "all", "both", "one", "two", "three", "first",
   "next", "last", "also", "however", "thus", "therefore", "because", "since", "after", "before", "during",
 ]);
-/** A word that may sit inside a proper-noun run in lower case (Bank of England, Carnegie & Co), and the dashes a project name uses (Daemonic Brain — Memory Quality & Claim Log). */
+/** A word that may sit inside a proper-noun run in lower case (Bank of England, Carnegie & Co), and the dashes a project name uses (Open Brain — Memory Quality & Claim Log). */
 const INNER_CONNECTORS = new Set(["of", "and", "the", "for", "de", "van", "von", "del", "la", "di", "da", "&", "—", "–", "-"]);
 /** A run token: a Capitalised word (Postgres, McKinsey), an ALL-CAPS acronym (ACL, NASDAQ), an initial (B.), or a hyphenated/aposed name (Stoltz-Taylor, O'Neil). */
 const CAP_TOKEN_RE = /^[A-Z][A-Za-z0-9'’.&/-]*$/;
@@ -81,7 +81,7 @@ const CAP_TOKEN_RE = /^[A-Z][A-Za-z0-9'’.&/-]*$/;
  * lone Capitalised token is dropped when it is a sentence-lead function word
  * (the recall it would add is none — those are never entities).
  */
-const MAX_RUN = 10; // a project name (Daemonic Brain — Memory Quality & Claim Log) runs long; still caps the walk
+const MAX_RUN = 10; // a project name (Open Brain — Memory Quality & Claim Log) runs long; still caps the walk
 const strip = (t: string) => t.replace(/^[("'`\[{]+/, "").replace(/[.,;:!?)"'`\]}]+$/, "");
 export function properNounCandidates(text: string): string[] {
   const out: string[] = [];

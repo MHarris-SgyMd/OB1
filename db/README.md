@@ -5879,12 +5879,12 @@ guards the target five ways.
     even though the restore left the source's `tier=stable` in `ob1_config`;
   - it is stamped `canary` or `working`;
   - its public schema holds nothing but what extensions own;
-  - it is an Open Brain schema with no thoughts.
+  - it is a Daemonic Brain schema with no thoughts.
 
   Anything else is refused, and the refusal names no override: the record
   (`tier=stable`), a brain with thoughts under no stamp, and another
   application's schema. For that check, `schema_migrations` alone does not
-  make an Open Brain schema, since Rails and others use the name. `--promote`
+  make a Daemonic Brain schema, since Rails and others use the name. `--promote`
   mirrors this and refuses a `--to` that is the `--from` database, marked, or
   stamped `canary`/`working`.
 

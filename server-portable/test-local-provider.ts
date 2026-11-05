@@ -554,8 +554,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       if (holdMs) await Bun.sleep(holdMs);
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
       if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
-      // The subject "Daemonic Brain" is in every window; each window also names one
-      // person of its own — Anita in the first, Dev in the second, and so on.
+      // The subject "Daemonic Brain" is in every window; each window also names
+      // one person of its own — Anita in the first, Dev in the second, and so on.
       const person = /(Anita|Dev|Priya|Sam)/.exec(text)?.[1];
       const entities: unknown[] = [{ name: "Daemonic Brain", type: "project", confidence: 0.8 + (person === "Dev" ? 0.1 : 0), aliases: person === "Dev" ? ["OB1"] : [] }];
       const relationships: unknown[] = [];
@@ -565,8 +565,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   });
   const D = `http://127.0.0.1:${providerD.port}/v1`;
   const para = (who: string, n: number) => `${who} wrote about Daemonic Brain. ${Array.from({ length: n }, (_, i) => `Sentence ${i} of this paragraph says nothing new about it.`).join(" ")}`;
-  // Four paragraphs of ~330 estimated tokens each: 1,320 in all, over a 600-token
-  // window and over the stub's 700-token ceiling as one call.
+  // Four paragraphs of ~575 estimated tokens each: about 2,300 in all, over a
+  // 600-token window and over the stub's 700-token ceiling as one call.
   const long = [para("Anita", 40), para("Dev", 40), para("Priya", 40), para("Sam", 40)].join("\n\n");
   const short = "Anita wrote about Daemonic Brain.";
   assert(estimateTokens(long) > CEILING && estimateTokens(short) < 100, `the long thought (${estimateTokens(long)} tokens) is over the stub's ceiling and the short one is not`);
@@ -659,7 +659,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(cfgD.extractMaxWindows === EXTRACT_MAX_WINDOWS && cfgD.extractMaxWindowsFrom === "default" && EXTRACT_MAX_WINDOWS === 24,
          "with OB1_EXTRACT_MAX_WINDOWS unset the bound is the constant, 24 — today's number (the drop-the-env control)");
   reqs.length = 0;
-  // Each paragraph of ~330 tokens is its own 600-token window's subject: Anita0 … Anita29.
+  // Each paragraph of ~575 tokens is its own 600-token window's subject: Anita0 … Anita29.
   const enormous = Array.from({ length: EXTRACT_MAX_WINDOWS + 6 }, (_, i) => para(`Anita${i}`, 40)).join("\n\n");
   const enormousWindows = chunkContent(enormous, { maxTokens: 600, overlapTokens: 75 }).length;
   // Caught, as the long thought's call above is: the refusal this replaced is a red line here, not a crash.

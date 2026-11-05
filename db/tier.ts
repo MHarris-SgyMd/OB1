@@ -330,9 +330,10 @@ export async function applyDatabaseSettings(dst: SQL, settings: Record<string, s
  *     mark existed);
  *   • with nothing in its public schema but what extensions own (a new
  *     `createdb`, whatever its template installed);
- *   • a Daemonic Brain schema — schema_migrations, ob1_config AND thoughts, since
- *     schema_migrations alone is Rails', Ecto's, golang-migrate's and dbmate's
- *     table too — holding no thoughts: a tier stack's database after `up`.
+ *   • a Daemonic Brain schema — schema_migrations, ob1_config AND thoughts,
+ *     since schema_migrations alone is Rails', Ecto's, golang-migrate's and
+ *     dbmate's table too — holding no thoughts: a tier stack's database after
+ *     `up`.
  * Anything else is refused: the record (tier=stable), a brain with thoughts
  * under no tier stamp (an untiered stable), and a schema that is not
  * Daemonic Brain's at all (another application's database, one name away). The
