@@ -83,7 +83,7 @@
  * where upstream's 2-argument call put the vector inside the payload, which
  * Daemonic Brain's function ignores, so every thought the server wrote had no
  * vector; and the item columns that hold a thought id are uuid, where
- * Daemonic Brain's UUID into upstream's bigint failed every item of a job with
+ * a UUID into upstream's bigint failed every item of a job with
  * a match and recorded no result. The smart-ingest block asserts the row's
  * vector at the stub's axis, its label, its enhanced columns and 008's row; the
  * item's result_thought_id; the same text again as a skip by fingerprint naming

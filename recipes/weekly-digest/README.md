@@ -43,6 +43,7 @@ in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`)
 It takes a share of each day and writer in the window, newest first within
 each. The recipe's importance ranking and its `--min-importance` are gone: any key could set `importance` on its own rows, so
 ten captures carrying a high value could rank every other thought out of the
-digest. Daemonic Brain retired the key (SMD-2653, `docs/priority.md` decision
-8). See the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and
-`db/README.md` for the flags and the egress model.
+digest. Daemonic Brain retired the key (SMD-2653, `docs/priority.md`
+decision 8). See the header of
+[`db/weekly-digest.ts`](../../db/weekly-digest.ts) and `db/README.md` for the
+flags and the egress model.

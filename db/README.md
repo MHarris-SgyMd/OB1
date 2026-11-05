@@ -5602,8 +5602,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 ## The stable tier — a brain rebuilt from the records (SMD-1806)
 
 Daemonic Brain runs a brain on its own memory, so a migration meets real vectors
-before an operator does. That brain — the **stable** tier — holds nothing that is
-not rebuildable from Daemonic Brain's records: FORK.md, the Linear board, the
+before an operator does. That brain — the **stable** tier — holds nothing that
+is not rebuildable from Daemonic Brain's records: FORK.md, the Linear board, the
 memory files and git. It is a *derived view* over the records, never the record
 itself, so a wipe costs one re-ingest, and that re-ingest is two commands:
 

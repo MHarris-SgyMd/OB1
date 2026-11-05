@@ -2378,8 +2378,8 @@ export async function alignVectorSearchPath(sql) {
  * The table privileges Daemonic Brain's SECURITY INVOKER functions need to run
  * as their caller. Every function 010/012/015 declares is SECURITY INVOKER, so
  * the writes they make — chunk rows, audit rows, work claims, entity rows — run
- * as the connecting role, not the definer, and reach beyond `thoughts` since
- * 007. Upstream never hit this: Supabase's `service_role` holds default
+ * as the connecting role, not the definer, and reach beyond `thoughts`
+ * since 007. Upstream never hit this: Supabase's `service_role` holds default
  * privileges on the public schema. A self-hosted role set up from the guide's
  * `GRANT … ON thoughts` alone can capture nothing — its first windowed capture
  * fails on `thought_chunks`, and the audit trigger fails on `thought_audit`.

@@ -22,7 +22,8 @@
  *   bun db/reembed.ts        --url postgres://…            # rows → vectors + chunks
  *
  * Sources, and what each needs:
- *   fork     — Daemonic Brain's changes, one changes/*.md file each (SMD-1917). In the tree; no flag.
+ *   fork     — Daemonic Brain's changes, one changes/*.md file each (SMD-1917).
+ *              In the tree; no flag.
  *   commit   — git commit messages since the upstream pin. In the tree; no flag.
  *   linear   — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear.
  *              Each record's `issue` goes through the Linear adapter
