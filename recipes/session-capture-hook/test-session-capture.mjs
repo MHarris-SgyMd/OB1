@@ -3946,6 +3946,30 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(renews().length === 1 && calls.some((c) => c.name === "list_claims") && stateOf(88)?.expiresAt === past
     && unattributedCovered?.blocked?.code === "CLAIMED_WHILE_LAPSED" && new RegExp(`^CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${pastRe}; since then codex claimed SMD-9001 at .* \\(now live, claim ${uuid(8994)}\\)`).test(unattributedCovered.blocked.message),
     "the hook's renewal refused CLAIM_UNATTRIBUTED with the claim's lapse records it and checks at once: a claim made on its work since gets a CLAIMED_WHILE_LAPSED marker, the registry still away");
+  assert(/claims: blocked: .*CLAIMED_WHILE_LAPSED: not renewed/.test(lastLine()) && !/met CLAIM_UNATTRIBUTED/.test(lastLine()), "…its line the check's, with no operator clause while the registry is only away");
+  clearClaims();
+  // Waiting on an operator: the blocked line says so too (review pass 2: the cause was lost).
+  putClaim(100, {}, "unattributed-final");
+  claims.get(C(100)).lapsedAt = past;
+  listed.set("SMD-9001", [listEntry(100), coveringSince(uuid(8992))]);
+  await claimsHook();
+  assert(revivedMarker(100)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && /; the renewal it tried met CLAIM_UNATTRIBUTED \(registry_misconfigured\): the agent registry cannot give the claim key's agent id until an operator acts, so tell the user that too$/.test(lastLine()),
+    `…and with the registry set up wrong, the blocked line says an operator must act, so tell the user that too (${lastLine()?.slice(-120)})`);
+  clearClaims();
+  // The check can't be made: said once, by its reason, though the piece holds a " — " (review pass 2: the reason was cut at the piece's dash).
+  putClaim(101, { piece: "PR 2 — docs" }, "unattributed");
+  claims.get(C(101)).lapsedAt = past;
+  listed.set("SMD-9001", []);
+  await claimsHook();
+  assert(!revivedMarker(101) && stateOf(101)?.expiresAt === past && new RegExp(`claims: kept: SMD-9001 PR 2 — docs \\(claim ${C(101)}\\) — CLAIM_UNATTRIBUTED \\(registry_away\\): .*can take it over; the claims made since were not checked: list_claims for SMD-9001 doesn't list it$`).test(lastLine()),
+    `…one the list doesn't show is kept, the line giving the reason whole (${lastLine()?.slice(-140)})`);
+  clearClaims();
+  // Listed live (the agent renewed it meanwhile): nothing to add.
+  putClaim(102, {}, "unattributed");
+  claims.get(C(102)).lapsedAt = past;
+  listed.set("SMD-9001", [listEntry(102, { state: "live", expiresAt: new Date(Date.now() + 3_600_000).toISOString() })]);
+  await claimsHook();
+  assert(!revivedMarker(102) && /can take it over$/.test(lastLine()), `…and one listed live gets no check's words (${lastLine()?.slice(-80)})`);
   clearClaims();
   putClaim(89, {}, "unattributed");
   claims.get(C(89)).lapsedAt = past;
@@ -3986,8 +4010,8 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     `an error result with no structuredContent is kept, and the claim after it renewed (${lineOf(98)?.slice(-80)})`);
   clearClaims();
   // The agent's own call, seen by the claims hook: from the reply's words alone, or its facts, checked in the same run.
-  putClaim(92);
-  putClaim(93, { piece: "PR 3" });
+  putClaim(92, {}, "unattributed");
+  putClaim(93, { piece: "PR 3" }, "unattributed");
   putClaim(94);
   putClaim(95);
   putClaim(96);
@@ -4007,7 +4031,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await claimsHook({ tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(97), token: tok(97) }, tool_response: JSON.stringify({ result: { content: [{ type: "text", text: unattributedText(C(97), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(97), forced: false, lapsedAt: past } } }) });
   assert(stateOf(97)?.expiresAt === past, "the agent's own call's lapse is read from facts inside a result, handed over as JSON");
   assert(!renews().length && stateOf(92)?.expiresAt === past && stateOf(93)?.expiresAt === past && [94, 95, 96].every((n) => stateOf(n)?.expiresAt === undefined)
-    && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at ${pastRe}; the claims made or renewed on its work since are checked now$`, "m").test(logText()),
+    && new RegExp(`claims: the agent's own renew_claim met CLAIM_UNATTRIBUTED: SMD-9001 \\(claim ${C(92)}\\) had lapsed at ${pastRe}; made due, so the hook's renewal checks the claims made or renewed on its work since$`, "m").test(logText()),
     "the agent's own call refused CLAIM_UNATTRIBUTED with its claim's lapse records it, read off the words or the facts; another claim's lapse records nothing");
   assert(revivedMarker(92)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && revivedMarker(93)?.blocked?.code === "CLAIMED_WHILE_LAPSED",
     "…and the same run, the registry still away, marks the claim made on its work since");

@@ -3048,7 +3048,7 @@ export async function renewClaim(cfg, claim) {
   const cause = result.structuredContent?.cause;
   if (code === "CLAIM_UNATTRIBUTED" && typeof cause === "string" && /^[a-z_]{1,40}$/.test(cause)) {
     const lapsedAt = unattributedLapse(result.structuredContent, text, claim.id);
-    return { keep: true, lapsedAt, line: `kept: ${what} — ${unattributedSaid(cause, lapsedAt)}` };
+    return { keep: true, lapsedAt, cause, line: `kept: ${what} — ${unattributedSaid(cause, lapsedAt)}` };
   }
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
@@ -3140,14 +3140,16 @@ function ownPieceNote(text, root, claimId) {
  */
 async function lapseCheck(cfg, claim, knownExpiry) {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
+  // `why` alone too, for a kept line of renewOne's own to carry (SMD-3807 review pass 2: a " — " in a piece split it).
+  const unchecked = (why) => ({ keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and ${why}`, why });
   let result;
   try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "list_claims", arguments: { ticket: claim.ticket, include_ended: true, limit: 1000 } }, 15_000); }
-  catch (e) { return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}` }; }
+  catch (e) { return unchecked(`the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}`); }
   let claims = result?.structuredContent?.claims;
   if (!Array.isArray(claims)) { try { claims = JSON.parse(textOfResult(result)).claims; } catch { claims = undefined; } }
-  if (result?.isError || !Array.isArray(claims)) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims gave no list to check: ${scrubTokens(oneLine(textOfResult(result))).slice(0, 200)}` };
+  if (result?.isError || !Array.isArray(claims)) return unchecked(`list_claims gave no list to check: ${scrubTokens(oneLine(textOfResult(result))).slice(0, 200)}`);
   const mine = claims.find((c) => String(c?.id).toLowerCase() === claim.id);
-  if (!mine) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims for ${claim.ticket} doesn't list it` };
+  if (!mine) return unchecked(`list_claims for ${claim.ticket} doesn't list it`);
   if (mine.state !== "lapsed") return {};
   const lapsedAt = Date.parse(mine.expiresAt);
   const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && (Date.parse(c?.claimedAt) > lapsedAt || Date.parse(c?.renewedAt) > lapsedAt) && overlaps(c, mine));
@@ -3179,8 +3181,9 @@ async function renewOne(b, path, claim) {
   // renewal up to an hour off let a push go first).
   if (o.lapsedAt && !check) {
     check = await lapseCheck(b.cfg, claim, o.lapsedAt);
-    if (check.blocked) o = { blocked: check.blocked, line: check.line, lapsedAt: o.lapsedAt };
-    else if (check.keep) o.line += `; ${check.keep.slice(check.keep.indexOf(" — ") + 3)}`;
+    // Waiting on an operator, the line says so too: the user must hear it whatever they decide (review pass 2).
+    if (check.blocked) o = { blocked: check.blocked, line: `${check.line}${o.cause === "registry_away" ? "" : `; the renewal it tried met CLAIM_UNATTRIBUTED (${o.cause}): the agent registry cannot give the claim key's agent id until an operator acts, so tell the user that too`}`, lapsedAt: o.lapsedAt };
+    else if (check.keep) o.line += `; the claims made since were not checked: ${check.why}`;
   }
   if (check && !check.blocked && !check.keep) {
     if (check.note) o.line += check.note;
@@ -3244,7 +3247,7 @@ function noteAgentClaimCall(hook, brains) {
   // renewal checks the claims made since at once, as the hook's own renewal does (review pass 1).
   const lapsedAt = unattributedLapse(resultFacts(hook.tool_response), text, f.claim.id);
   if (lapsedAt) {
-    const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "the claims made or renewed on its work since are checked now" : "its token file names no ticket, so the claims made since are not checked"}`;
+    const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "made due, so the hook's renewal checks the claims made or renewed on its work since" : "its token file names no ticket, so the claims made since are not checked"}`;
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: 0, expiresAt: lapsedAt, last: line });
     log(`claims: ${line}`);
     return;
