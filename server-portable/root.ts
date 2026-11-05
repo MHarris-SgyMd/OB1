@@ -62,8 +62,9 @@ export type Env = {
   /**
    * Background calls' share of each model server's slots (SMD-3379 PR 2b-1,
    * slots.ts): types with per-model overrides, `chat=1,embed=2,decide=1`,
-   * held across the brain's processes by advisory locks, each call waiting or
-   * holding a slot on a connection of its own; a live call takes none. Unset
+   * held across the brain's processes by advisory locks, each slot held, and
+   * one waiting call per share and process, on a connection of its own; a
+   * live call takes none. Unset
    * or off, none held; a value that does not parse is said, and none held.
    */
   OB1_BACKGROUND_SLOTS?: string;

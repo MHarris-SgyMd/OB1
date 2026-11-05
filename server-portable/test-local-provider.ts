@@ -1757,11 +1757,13 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   const { pausableTimeout } = await import("../db/lease.ts");
   // The setting: types and per-model overrides; off by default; a value that does not parse said, the hook left off.
   const parsed = backgroundSlotsFrom("chat=1, embed=2,decide=1,chat:qwen3.8:27b=3");
-  const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat"].map((r) => backgroundSlotsFrom(r).problem ?? "");
+  const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat", "chat:m=1,chat : m=2"].map((r) => backgroundSlotsFrom(r).problem ?? "");
+  const spaced = backgroundSlotsFrom("chat : qwen3.8:27b = 2").slots;
   assert(backgroundSlotsFrom(undefined).slots === null && backgroundSlotsFrom(" off ").slots === null && !backgroundSlotsFrom("").problem
     && JSON.stringify([...(parsed.slots ?? new Map())]) === JSON.stringify([["chat", 1], ["embed", 2], ["decide", 1], ["chat:qwen3.8:27b", 3]]) && refused.every(Boolean)
+    && spaced?.get("chat:qwen3.8:27b") === 2
     && /"chat" has no =N/.test(refused[6]) && /names no model type/.test(refused[2]),
-    `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat and a bare name, each in its own words (${JSON.stringify(refused.map((r) => r.slice(0, 40)))})`);
+    `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat (spaced or not) and a bare name, each in its own words; spaces about a model's name are not part of it (${JSON.stringify(refused.map((r) => r.slice(0, 40)))})`);
   // The share a call counts against: per normalised server and model, the decide tier per server; live and unlisted types none.
   const sl = parsed.slots!;
   const bg = (type: "embed" | "chat" | "decide", model: string | undefined, base: string) => shareOf(sl, { type, model, base, cls: "background" });
@@ -1789,19 +1791,41 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     await Promise.all([
       modelCall(call(), work(300)),
       modelCall(call(), work(300)),
+      modelCall(call(), work(300)),
       Bun.sleep(50).then(() => asLive(() => modelCall(call(META_MODEL, "live"), async () => { liveAt = Date.now() - t0; }))),
       Bun.sleep(50).then(() => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "test" }, async () => { embedAt = Date.now() - t0; })),
       Bun.sleep(150).then(async () => { heldConns = await semConns(); }),
     ]);
     const both = Date.now() - t0;
     const idleConns = await semConns();
-    assert(on.installed && most === 1 && both >= 600 && liveAt < 250 && embedAt < 250 && heldConns === 1 && idleConns === 0 && said.length === 0,
-      `chat=1: two background chat calls run one at a time (${both} ms for two of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms); one connection while a call holds its slot and the other queues, none once idle (${heldConns}, ${idleConns}); nothing said`);
+    assert(on.installed && most === 1 && both >= 900 && liveAt < 250 && embedAt < 250 && heldConns === 2 && idleConns === 0 && said.length === 0,
+      `chat=1: three background chat calls run one at a time (${both} ms for three of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms); two connections while a call holds its slot and two queue — the holder's and one poller's — none once idle (${heldConns}, ${idleConns}); nothing said`);
     // Each model's share its own: three models under chat=1 run at once, none queued behind another's.
     const t2 = Date.now();
     const starts: number[] = [];
     await Promise.all(["m-a", "m-b", "m-c"].map((m) => modelCall(call(m), async () => { starts.push(Date.now() - t2); await Bun.sleep(300); })));
     assert(starts.length === 3 && Math.max(...starts) < 250, `three models under chat=1 each take their own share's slot at once (${JSON.stringify(starts)} ms)`);
+    // Another process waiting: this one's calls, back to back, sit out a poll before each first try, and the other gets
+    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it).
+    {
+      const startsA: number[] = [];
+      const backlog = (async () => {
+        for (let i = 0; i < 14; i++) await modelCall(call(), async () => { startsA.push(Date.now()); await Bun.sleep(150); });
+      })();
+      for (let i = 0; i < 100 && startsA.length === 0; i++) await Bun.sleep(10);
+      const child = Bun.spawn(["bun", "-e", `
+        const { installBackgroundSlots } = await import("./slots.ts");
+        const { modelCall } = await import("./model-call.ts");
+        installBackgroundSlots({ url: process.env.DATABASE_URL, raw: "chat=1" });
+        await modelCall({ type: "chat", model: ${JSON.stringify(META_MODEL)}, base: ${JSON.stringify(PROVIDER)}, purpose: "test" }, async () => console.log(Date.now()));
+        process.exit(0);`], { cwd: import.meta.dir, env: { ...process.env, DATABASE_URL: URL_ }, stdout: "pipe", stderr: "pipe" });
+      const childAt = Number((await new Response(child.stdout).text()).trim());
+      await child.exited;
+      await backlog;
+      const beforeLast = startsA.filter((t) => t < childAt).length;
+      assert(childAt > 0 && beforeLast < startsA.length,
+        `a call in another process gets a slot this one's back-to-back calls let go, not after all of them: it ran after ${beforeLast} of ${startsA.length}`);
+    }
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
     try {
@@ -1864,6 +1888,95 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await inst.uninstall();
       await other.close();
     }
+  }
+  // A slot's connection was lost while its call ran — a Postgres restart, here its backend terminated: said as lost, not as
+  // a pooler, and the unlock not waiting on a reconnect.
+  {
+    const lostSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => lostSaid.push(l) });
+    const admin = new SQL({ url: URL_, max: 1 });
+    try {
+      let endedAt = 0;
+      const t0 = Date.now();
+      const got = await modelCall(call(), async () => {
+        await admin`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`;
+        await Bun.sleep(200);
+        endedAt = Date.now();
+        return "answer";
+      });
+      const releaseMs = Date.now() - endedAt;
+      const after = await modelCall(call(), async () => "next");
+      assert(got === "answer" && after === "next" && lostSaid.some((l) => /connection was lost while its call ran/.test(l)) && !lostSaid.some((l) => /pooler/.test(l)) && releaseMs < 1000,
+        `a slot whose connection was lost while its call ran is said as lost, not as a pooler; the call's answer kept, its release ${releaseMs} ms, the next call slotted (${JSON.stringify(lostSaid.map((l) => l.slice(0, 80)))}, ${Date.now() - t0} ms in all)`);
+    } finally {
+      await inst.uninstall();
+      await admin.close();
+    }
+  }
+  // A database that stops answering after the slot is taken — a proxy in front of Postgres dropping every byte, as a
+  // paused container or a frozen host does: the unlock gives up at the bound, the call's answer kept, said as lost; the
+  // next call fails open at the bound rather than waiting with no end (review pass 2: both waited past every stop).
+  {
+    const pg = new URL(URL_!);
+    let stalled = false;
+    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] };
+    const proxy = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
+      open(c) {
+        c.data = { buf: [] };
+        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) { if (!stalled) c.write(d); }, close() { c.end(); }, error() { c.end(); } } })
+          .then((up) => { c.data.up = up; for (const b of c.data.buf) up.write(b); c.data.buf = []; }, () => c.end());
+      },
+      data(c, d) { if (stalled) return; if (c.data.up) c.data.up.write(d); else c.data.buf.push(new Uint8Array(d)); },
+      close(c) { c.data.up?.end(); },
+    } });
+    const stallSaid: string[] = [];
+    const via = new URL(URL_!);
+    via.hostname = "127.0.0.1";
+    via.port = String(proxy.port);
+    const inst = installBackgroundSlots({ url: via.toString(), raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 1 });
+    // Cut at 6 s, so a wait with no bound fails the row rather than hanging the suite.
+    const cut = setTimeout(() => proxy.stop(true), 6000);
+    try {
+      let endedAt = 0;
+      const answer = await modelCall(call(), async () => { stalled = true; await Bun.sleep(100); endedAt = Date.now(); return "answer"; });
+      const heldMs = Date.now() - endedAt;
+      const t1 = Date.now();
+      const next = await modelCall(call(), async () => "next").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const nextMs = Date.now() - t1;
+      assert(answer === "answer" && heldMs < 1800 && stallSaid.some((l) => /connection was lost while its call ran \(no answer in 1 s\)/.test(l)) && next === "next" && nextMs < 2500 && stallSaid.some((l) => /did not answer/.test(l)),
+        `a database that stops answering while a slot is held: the unlock gives up at the bound (the answer back ${heldMs} ms after the call ended), said as lost; the next call fails open in ${nextMs} ms (${JSON.stringify(stallSaid.map((l) => l.slice(0, 90)))})`);
+    } finally {
+      clearTimeout(cut);
+      await inst.uninstall();
+      proxy.stop(true);
+    }
+  }
+  // A stop while the contender's connect hangs — a database that takes the connection and never answers — ends the
+  // wait at once, as a stop; and a URL Bun refuses as it builds the client fails open rather than rejecting the call.
+  {
+    const stall = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open() {}, data() {} } });
+    const stallSaid: string[] = [];
+    // One hook at a time: an install replaces the hook before it.
+    const inst = installBackgroundSlots({ url: `postgres://postgres:x@127.0.0.1:${stall.port}/none`, raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 5 });
+    let stopped = "", stopMs = 0, built = "";
+    try {
+      const stopper = new AbortController();
+      const t0 = Date.now();
+      setTimeout(() => stopper.abort(new Error("the pass stopped")), 100);
+      stopped = await modelCall({ ...call(), signal: stopper.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      stopMs = Date.now() - t0;
+    } finally {
+      await inst.uninstall();
+      stall.stop(true);
+    }
+    const badUrl = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:99999/none", raw: "chat=1", log: () => {} });
+    try {
+      built = await modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    } finally {
+      await badUrl.uninstall();
+    }
+    assert(stopped === "rejected: the pass stopped" && stopMs < 1000 && !stallSaid.some((l) => /did not answer/.test(l)) && built === "ran",
+      `a stop during a connect that hangs ends the wait in ${stopMs} ms, as a stop (${stopped}); a URL Bun refuses as it builds the client fails open (${built})`);
   }
   // Fail open: a semaphore whose database does not answer — here a port that takes each connection and closes it,
   // counting them — lets the call run without a slot, said once, within its connection's bound; then not asked

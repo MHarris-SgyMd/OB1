@@ -934,8 +934,8 @@ services:
       # Background calls held to a share of each model server's slots (SMD-3379
       # PR 2b-1): types with optional per-model overrides, e.g.
       # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, kept across the brain's
-      # processes by advisory locks, each call waiting or holding a slot on a
-      # connection of its own; a live call takes none. Unset or off, none is
+      # processes by advisory locks, each slot held, and one waiting call per
+      # share and process, on a connection of its own; a live call takes none. Unset or off, none is
       # held. The REST core reads it, and the coordinator hands it to its
       # passes.
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
