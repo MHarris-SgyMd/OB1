@@ -520,8 +520,8 @@ Every suite that drives an MCP server (all but `test-rest.ts`, `test-thoughts.ts
 auto-install off, so without them the import fails, naming the package, rather than
 Bun fetching it (SMD-2978).
 
-`hono` and `zod` are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, and `extensions/test-auth.ts` fails if they
+`hono` and `zod` are pinned to the exact versions `../integrations/package.json`
+installs for the vendored servers, and `integrations/test-auth.ts` fails if they
 drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
 `@hono/mcp` there, until SMD-2279 and SMD-2281). **If you bump a shared package
 in one file, bump it in both in the same commit.**
@@ -1516,8 +1516,7 @@ stored in the same write").
   until the client or a proxy gives up. A provider call is bounded by
   `OB1_LLM_TIMEOUT`, so a call that long is stuck in the database. The brain's
   servers serve with Bun's ceiling, 255 s, for their GETs (the idle timeout,
-  above), and keep the keepalive for the proxy in front and a call past 255 s;
-  the vendored MCP servers stay on the default (`sse.ts` says why, SMD-2931).
+  above), and keep the keepalive for the proxy in front and a call past 255 s.
   The two intervals are constants, not knobs: 5 s is inside any proxy read
   timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged
