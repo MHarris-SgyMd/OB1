@@ -10,6 +10,7 @@
 
 import type { Principal } from "../auth.ts";
 import { PriorityRefused, type PriorityAnswer, type PriorityAssertion, type PriorityItem, type PriorityRecord } from "../store.ts";
+import { asked, readOnly, unattributedAs, writerScope } from "./caller.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -29,30 +30,12 @@ export type PriorityHistoryResult = PriorityRecord;
 export type PriorityHistoryCode = "REFUSED_PRIORITY_INPUT" | "ITEM_NOT_FOUND";
 
 /**
- * The scope 116 reads off the envelope: `write` for a write key, `capture` for a capture-only key. A read key states
- * none, and 116 refuses it (READ_ONLY_KEY); the manifest gives a read key neither writer, so that is a caller of the
- * core's own (a plugin's ctx.call under a read key's principal) meeting the database's rule.
- */
-const writerScope = (principal: Principal): "write" | "capture" | undefined =>
-  principal.scope === "write" ? "write" : principal.scope === "capture" ? "capture" : undefined;
-
-/**
  * A date alone is the start of that day in UTC, so `2027-03-01` means one instant whatever the database's time
  * zone; a time with its offset is that instant.
  */
 const instant = (t: string | undefined) => (t === undefined ? undefined : /^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t}T00:00:00Z` : t);
 
-/** A store call, or the argument 116 refused by raising; any other throw stays a fault. */
-async function asked<T>(run: () => Promise<T>): Promise<T | PriorityRefused> {
-  try {
-    return await run();
-  } catch (e) {
-    if (e instanceof PriorityRefused) return e;
-    throw e;
-  }
-}
 const inputRefused = (e: PriorityRefused) => refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: e.problem, message: e.message });
-const readOnly = (principal: Principal) => refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
 /** The brain holds no such item, or no such due reference (`which`). */
 const notFound = (which: "item" | "due_ref", item: PriorityItem) => refuse({ code: "ITEM_NOT_FOUND", retryable: false, which, item });
 
@@ -65,12 +48,7 @@ const notFound = (which: "item" | "due_ref", item: PriorityItem) => refuse({ cod
  * failed (`agentUnresolved`): a principal that has no agent id by design — a plugin hook's, `hook:<plugin>` — is
  * 116's to answer, and its words are not "an operator must act" (review pass 2).
  */
-function unattributed(principal: Principal) {
-  if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
-  return principal.agentUnresolved === "unreachable"
-    ? refuse({ code: "PRIORITY_UNATTRIBUTED", retryable: true, cause: "registry_away" })
-    : refuse({ code: "PRIORITY_UNATTRIBUTED", retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused" });
-}
+const unattributed = (principal: Principal) => unattributedAs("PRIORITY_UNATTRIBUTED", principal);
 
 /**
  * The item a refusal names and its due reference, as 116 keys them and whether the brain holds each — read with
@@ -114,7 +92,7 @@ async function refusedBy(ctx: Ctx, a: PriorityAnswer, principal: Principal, inpu
  */
 async function argumentRefused(ctx: Ctx, e: PriorityRefused, input: Input<"set_priority">) {
   if (input.due_ref && (e.problem === "key" || e.problem === "kind")) {
-    const item = await asked(async () => (await ctx.store()).priorityItem(input.kind, input.key));
+    const item = await asked(PriorityRefused, async () => (await ctx.store()).priorityItem(input.kind, input.key));
     if (!(item instanceof PriorityRefused)) return refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: "due_ref", message: e.message });
   }
   return inputRefused(e);
@@ -123,7 +101,7 @@ async function argumentRefused(ctx: Ctx, e: PriorityRefused, input: Input<"set_p
 export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"set_priority">, opts: { plugin?: string } = {}): Promise<Outcome<SetPriorityResult, SetPriorityCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const a = await asked(async () => (await ctx.store()).assertPriority({
+  const a = await asked(PriorityRefused, async () => (await ctx.store()).assertPriority({
     kind: input.kind, key: input.key, level: input.level, dueAt: instant(input.due_at), notBefore: instant(input.not_before),
     dueRef: input.due_ref, reason: input.reason, inferred: input.inferred, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,
   }));
@@ -138,7 +116,7 @@ export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"
 export async function clearPriority(ctx: Ctx, principal: Principal, input: Input<"clear_priority">): Promise<Outcome<ClearPriorityResult, ClearPriorityCode>> {
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
-  const a = await asked(async () => (await ctx.store()).clearPriority({ kind: input.kind, key: input.key, actor: actorOf(ctx, principal), scope }));
+  const a = await asked(PriorityRefused, async () => (await ctx.store()).clearPriority({ kind: input.kind, key: input.key, actor: actorOf(ctx, principal), scope }));
   if (a instanceof PriorityRefused) return inputRefused(a);
   // Run first: 116 finds a key's statements by the registry's id for its name too (ob1_priority_actor), so a clear may
   // close one without the envelope's id. One that closed nothing then is unattributed: a key renamed since the
@@ -151,7 +129,7 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
 }
 
 export async function priorityHistory(ctx: Ctx, _principal: Principal, input: Input<"priority_history">): Promise<Outcome<PriorityHistoryResult, PriorityHistoryCode>> {
-  const r = await asked(async () => (await ctx.store()).priorityRecord(input.kind, input.key));
+  const r = await asked(PriorityRefused, async () => (await ctx.store()).priorityRecord(input.kind, input.key));
   if (r instanceof PriorityRefused) return inputRefused(r);
   // An item the brain does not hold, and nobody stated a priority on, is refused by name; one deleted since a
   // statement keeps its record (116's section 8), said with `exists: false`. A read key's: no capture key reads this.

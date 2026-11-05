@@ -157,7 +157,7 @@ The stack above builds the server image (as `api`) and `migrate` from the checko
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the workflow
 `.github/workflows/release.yml` (SMD-1860; its steps are in `release-steps.yml`)
 runs on the tag a cut is named by —
-`v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
+`v<X.Y.Z>`; [`MAINTAINING.md`](../MAINTAINING.md) "Versioning" and "Cutting a release" have the scheme and the cut —
 publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
@@ -2248,7 +2248,9 @@ there (its call in hand given 2 s, then cancelled). A period ends once its
 pools drain, however long that takes (SMD-3379 PR 1c-4b), and the next begins
 once there is work again: a capture's claim, read each poll, or what the
 idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
-(unset, 3600). Each pass's cost is the same as under `workers`, spent
+(unset, 3600), and within about a minute and a poll of a vector arriving —
+the vector mender's, say, which gives consolidation a thought to judge
+(SMD-3379 PR 1d). Each pass's cost is the same as under `workers`, spent
 only while nobody is writing to the brain.
 `db/README.md`, "Sleep", has the full rules.
 
@@ -3993,4 +3995,5 @@ so the profile builds from a checkout.
 
 - `../db/` — the schema and its migration runner
 - `../server-portable/` — the server, and `preflight.ts`
-- `../FORK.md` — what this fork changes and why
+- `../MAINTAINING.md` — the version scheme, cutting a release, CI and its checks
+- `../FORK.md` — the fork era: where Daemonic Brain came from

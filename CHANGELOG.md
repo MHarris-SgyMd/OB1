@@ -1,15 +1,16 @@
 # Changelog
 
-All notable changes to the OB1 fork are recorded here, newest first, following
+All notable changes to Daemonic Brain are recorded here, newest first, following
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
-This page is the short companion to the fork's design record — [`FORK.md`](FORK.md),
-the front door, and one file per change under [`changes/`](changes/README.md): why
-each change was made, what was measured, what was declined. Changes 1–103 predate
-the first release; this changelog begins at the first cut. FORK.md's "Versioning"
-section has the scheme and how a release is assembled from `changes/smd-NNNN.md`
-fragments.
+This page is the short companion to the record — one file per change under
+[`changes/`](changes/README.md), indexed there, and changes 1–17 in
+[`FORK.md`](FORK.md)'s table: why each change was made, what was measured, what
+was declined. Changes 1–103 predate the first release; this changelog begins at
+the first cut. [`MAINTAINING.md`](MAINTAINING.md)'s "Versioning" and "Cutting a
+release" have the scheme and how a release is assembled from
+`changes/smd-NNNN.md` fragments.
 
 ## [Unreleased]
 

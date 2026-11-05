@@ -43,7 +43,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
-import { LOOPBACK_HOSTS } from "./connect.ts";
+import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
@@ -71,7 +71,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { newestLive, passDumpFile, run as runSleep, usText } from "./sleep.ts";
+import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, vectorCome, vectorMark } from "./sleep.ts";
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -445,7 +445,7 @@ if (want("4")) {
   // (014/037: at most v_exact = 1,000 matching thoughts are scored by id, no
   // HNSW walk) — the same move [7] makes, and for the same reason. [7]'s
   // found-by reads flaked in CI because a walk over the tied unit-axis corpus
-  // returned live rows short (SMD-1632, FORK.md's known-issues entry); this
+  // returned live rows short (SMD-1632, MAINTAINING.md's known-issues entry); this
   // section's vectors are less degenerate, but it asserts an exact order over
   // three rows, so the walk is not what it means to test — [5b] holds that.
   const S = { s: "04" } as const;
@@ -2579,7 +2579,7 @@ if (want("7")) {
    * and chunk indexes — the same-model assertion below missed in five CI
    * attempts on three trees that touched nothing here and in a local loop,
    * where the dumps showed the thoughts index scan returning one or none of
-   * three live rows: SMD-1632, and FORK.md's known-issues entry for it, hold
+   * three live rows: SMD-1632, and MAINTAINING.md's known-issues entry for it, hold
    * that. This section no longer exercises the walk at all; [5b] holds its
    * recall on random vectors, [5c] its plan, and [4], [15], [11]'s hybrid
    * reads and [5b]'s two walk reads still read it unfiltered.
@@ -14276,7 +14276,7 @@ if (want("17")) {
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
 if (want("18")) {
-  console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
+  console.log("\n[18] Every schemas/*.sql, then every recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
   // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
@@ -14309,11 +14309,11 @@ if (want("18")) {
   };
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  // The extension and recipe schemas (SMD-1810), after the community files —
+  // The recipe schemas (SMD-1810; the extensions' went with SMD-2311), after the community files —
   // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
   // smart-ingest's and entity-extraction's tables. Same drop in the finally.
   const contribFiles = CONTRIB_SCHEMA_FILES;
-  const ALL_GROUPS = ["community", "extensions", "recipes"] as const;
+  const ALL_GROUPS = ["community", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 
@@ -14340,9 +14340,9 @@ if (want("18")) {
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      const contribObjects = [...grantedTables(["extensions", "recipes"]), ...grantedViews(["extensions", "recipes"])];
+      const contribObjects = [...grantedTables(["recipes"]), ...grantedViews(["recipes"])];
       assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)) && contribObjects.every((o) => skippedLine.includes(o)),
-             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every extension and recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function, and every recipe table and view, as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
@@ -14363,7 +14363,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 8 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 6 && contribFailed.length === 0, `…and so does every listed recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -14384,7 +14384,7 @@ if (want("18")) {
         try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(denied.length === 0, `the role's INSERT into every community, extension and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      assert(denied.length === 0, `the role's INSERT into every community and recipe table gets past privileges (${grantedTables([...ALL_GROUPS]).length} tables; denied: ${denied.join("; ") || "none"})`);
       let viewDenied = "";
       for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
@@ -21427,7 +21427,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a period re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a live write pauses it, a call past the bound aborted; its provider gone, its key refused or a throw sets it down for the period, a statement timed out holds it until a restart, extraction running on; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot run that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, ONE_SHOT, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, ONE_SHOT, sleepRun, bounded, intercept, nextPeriod, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -21970,6 +21970,203 @@ if (want("38r")) {
       `a one-shot run under that name, the record another model's, prints its --switch-model with the name quoted (exit ${shotCode}; ${shotErrs.join(" | ").slice(0, 300)})`);
     assert(unfitCode === 0 && unfitSaid === 1 && !unfitRan && unfitLeft && unfitBeat && unfitJob === undefined && /does not run in sleep/.test(unfitDry) && !/ reembed \(/.test(unfitDry),
       `a model name no row carries keeps re-embed out of sleep, said once, its row carrying no re-embed key; extraction runs on (exit ${unfitCode}; said ${unfitSaid}; ran ${unfitRan}; left and extracted ${unfitLeft}; row read ${unfitBeat}, its key ${JSON.stringify(unfitJob)}; dry run ${unfitDry.slice(0, 300)})`);
+
+    // ── A vector come (SMD-3379 PR 1d) ──────────────────────────────────────
+    // Consolidation judges only a thought with a vector (029), and a vector
+    // arriving queues no claim: the idle polls read the claims alone, so it
+    // waited for the rescan — 10 min here. Now a vector come since the last
+    // whole read brings the next forward, at most once a floor (4 s here)
+    // after the end of the last whole read or end read, and one read is not
+    // read again. Four thoughts planted extracted and vectorless, out of the
+    // claims and the pools: P1 and P3 with no entity, which consolidation
+    // never judges, and P2 and P4 with one. The mender's write gives each a
+    // vector: P1's brings a whole read forward that finds no work; P2's,
+    // written by a transaction begun before that read and committed during it
+    // once its consolidation pool is read (the mark taken before it, with the
+    // slack, so P2's is read again), waits out the floor from that read, and
+    // then begins a period for consolidation. P3, with no entity, is mended
+    // during that period: its end read takes the mark, so P3's vector brings
+    // no whole read after it. P4's is written by a transaction begun before
+    // an idle poll's read that finds none, and committed after it: the read's
+    // mark keeps the slack, and the floor, passed already, so the next poll
+    // reads it (review pass 2).
+    // Re-embed is kept out of sleep (the unfit name above): its backlog — a
+    // vectorless row is one — is read whole, so P2 would begin P1's period.
+    // When each mark is asked for (vectorMark's statement: a whole read's or an end read's, not vectorCome's), and
+    // each live read (newestLive), which follows a whole read in the idle poll: one after a mark, that read is done.
+    const markAt: number[] = [];
+    const liveAt: number[] = [];
+    // Run once, after the next consolidation pool read's statement (poolOf's fragment, then its read); and once after
+    // the next vectorCome.
+    let duringPool: (() => Promise<void>) | null = null;
+    let poolNext = false;
+    let afterCome: (() => Promise<void>) | null = null;
+    const counted = intercept((text, run) => {
+      if (/ AS seen$/.test(text.trim())) markAt.push(Date.now());
+      if (/ AS write_us/.test(text)) liveAt.push(Date.now());
+      if (afterCome !== null && / AS came\) c/.test(text)) {
+        const then = afterCome;
+        afterCome = null;
+        return (run() as Promise<unknown>).then(async (r) => { await then(); return r; });
+      }
+      if (duringPool !== null && /FROM consolidation_pool\(/.test(text)) poolNext = true;
+      else if (poolNext && /::int AS pending/.test(text)) {
+        poolNext = false;
+        const then = duringPool!;
+        duringPool = null;
+        return (run() as Promise<unknown>).then(async (r) => { await then(); return r; });
+      }
+      return run();
+    });
+    const readDone = (at: number) => pollUntil(async () => liveAt.some((t) => t > at), 5000);
+    const plant = async (content: string, entity: boolean) => {
+      // One transaction: the extraction claim the insert queues (016) is settled before a poll can read it.
+      return await sql.begin(async (tx) => {
+        const id = ((await tx`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+        if (entity) await tx`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) SELECT ${id}::uuid, id, 0.9, 'zz-vector' FROM ob1_entities ORDER BY id LIMIT 1`;
+        await tx`UPDATE thought_work_claims SET status = 'succeeded' WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+        return id;
+      });
+    };
+    /** The mender's write, giving `id` its vector: through the suite's client, or a held transaction. */
+    const mend = async (id: string, content: string, axis: number, c: SQL = sql) => {
+      const [{ ts }] = await c`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${id}::uuid`;
+      await c`SELECT update_thought(${id}::uuid, ${content}::text, NULL::jsonb, ${unit(axis)}::vector, NULL::jsonb, ${ts}::timestamptz,
+        ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb)`;
+    };
+    const p1Text = "A vectorless note no entity names, which consolidation never judges.";
+    const p2Text = "A vectorless note naming an entity, which its vector puts before consolidation.";
+    const p3Text = "A vectorless note no entity names, mended while a period runs.";
+    const p4Text = "A vectorless note naming an entity, its vector committed across an idle poll.";
+    const working = () => lines.filter((l) => /^ {2}working:/.test(l)).length;
+    /** Whether the last period begun has ended (or none began). */
+    const periodOver = () => {
+      let last = -1;
+      lines.forEach((l, i) => { if (/^ {2}working:/.test(l)) last = i; });
+      return last < 0 || lines.slice(last).some((l) => /— the period ends/.test(l));
+    };
+    await sql`UPDATE ob1_config SET value = 'stub embed' WHERE key = 'embedding_model'`;
+    const vectorRun = follow({ sql: counted, env: unfitEnv, rescanMs: 600_000, vectorFloorMs: 4000 });
+    let idle = false, plantedQuiet = false, p1Read = false, p2Begun = false, p2Ended = false, stopCode = -9;
+    let p1ReadAt = 0, p2MendedAt = 0, p2BegunAt = 0, readsAfter = -1, workingAfter = -1, judged = -1, p3During = false, p3BeforeEndMark = false;
+    let p4Held = false, p4Committed = 0, p4Begun = false, p4After = -1;
+    let p1 = "", p2 = "", p3 = "", p4 = "";
+    try {
+      // Idle: the baseline read done, a period it found work for begun by now (the capture's 1 s and a poll), and ended.
+      idle = await pollUntil(async () => markAt.length > 0, 10_000) && await readDone(markAt[0]);
+      await Bun.sleep(2500);
+      idle = idle && await pollUntil(async () => periodOver(), 30_000);
+      p1 = await plant(p1Text, false);
+      p2 = await plant(p2Text, true);
+      p3 = await plant(p3Text, false);
+      p4 = await plant(p4Text, true);
+      const before = working();
+      await Bun.sleep(2500);
+      plantedQuiet = working() === before;
+      // Past the floor from the last read, P1's vector reads the work whole at the next poll, and finds none.
+      await Bun.sleep(Math.max(0, 4000 - (Date.now() - markAt[markAt.length - 1])));
+      const marks = markAt.length;
+      // P2's vector, written in a transaction begun before P1's read, is committed inside it, past its consolidation
+      // pool: a mark taken after the read would hold it as read (review pass 1, run-it's mutant), and one taking no
+      // slack would start past it (review pass 3, run-it's mutant) — either way its period waiting for the rescan.
+      const holder2 = new SQL({ url: URL_, max: 1 });
+      let p2Held = false;
+      let release2 = () => {};
+      const released2 = new Promise<void>((r) => { release2 = r; });
+      try {
+        const held2 = holder2.begin(async (tx) => {
+          await mend(p2, p2Text, 22, tx);
+          p2Held = true;
+          await released2;
+        });
+        await pollUntil(async () => p2Held, 5000);
+        duringPool = async () => { release2(); await held2; p2MendedAt = Date.now(); };
+        await mend(p1, p1Text, 21);
+        p1Read = await pollUntil(async () => markAt.length > marks, 5000);
+        p1ReadAt = markAt[markAt.length - 1] ?? 0;
+        p1Read = p1Read && await readDone(p1ReadAt) && p2MendedAt > 0;
+        release2();
+        await held2;
+      } finally {
+        release2();
+        await holder2.close();
+      }
+      p2Begun = await pollUntil(async () => working() > before, 15_000);
+      p2BegunAt = Date.now();
+      // P3 mended in the period; its end read takes the mark, so past the floor no poll reads the work whole again.
+      await mend(p3, p3Text, 23);
+      const p3MendedAt = Date.now();
+      p3During = !periodOver();
+      p2Ended = await pollUntil(async () => periodOver(), 30_000);
+      const ended = markAt.length;
+      // The end read's mark asked for after P3's mend landed: one asked for just before it reads P3 once more (review pass 1).
+      p3BeforeEndMark = (markAt[ended - 1] ?? 0) > p3MendedAt;
+      await Bun.sleep(6000);
+      readsAfter = markAt.length - ended;
+      workingAfter = working() - before;
+      judged = ((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = ${p2}::uuid AND work_type = ${CO} AND status = 'succeeded'`)[0] as { c: number }).c;
+      // P4: its vector written in a transaction held open until an idle poll's vectorCome has found none, then committed.
+      const holder = new SQL({ url: URL_, max: 1 });
+      let release = () => {};
+      const released = new Promise<void>((r) => { release = r; });
+      try {
+        const held = holder.begin(async (tx) => {
+          await mend(p4, p4Text, 25, tx);
+          p4Held = true;
+          await released;
+        });
+        await pollUntil(async () => p4Held, 5000);
+        afterCome = async () => { release(); await held; p4Committed = Date.now(); };
+        await pollUntil(async () => p4Committed > 0, 8000);
+        release();
+        await held;
+        p4Begun = p4Committed > 0 && await pollUntil(async () => working() > before + 1, 6000);
+        p4After = p4Begun ? Date.now() - p4Committed : -1;
+        await pollUntil(async () => periodOver(), 30_000);
+      } finally {
+        release();
+        await holder.close();
+      }
+    } finally {
+      stopCode = await vectorRun.stop();
+      for (const id of [p1, p2, p3, p4].filter(Boolean)) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    }
+    assert(idle && plantedQuiet && p1Read && p2Begun && p2BegunAt - p1ReadAt >= 3700 && p2BegunAt - p2MendedAt <= 4000 + 4000 && judged > 0 && p2Ended && stopCode === 0,
+      `a vector come brings the whole read forward, not before the floor from the last: the plants begin nothing, P1's vector is read at once and P2's, landing inside that read, begins a period for consolidation once the floor has passed (idle ${idle}; planted quiet ${plantedQuiet}; P1 read ${p1Read}; P2 begun ${p2Begun}, ${p2BegunAt - p1ReadAt} ms after P1's read, ${p2BegunAt - p2MendedAt} ms after its mend; ${judged} consolidation claim(s) on P2 succeeded; its period ended ${p2Ended}; stopped ${stopCode})`);
+    assert(p3During && (p3BeforeEndMark ? readsAfter === 0 : readsAfter <= 1) && workingAfter === 1,
+      `…and a vector read once is not read again, a period's end read reading those come in it: no whole read in the 6 s after the period's end, past the floor (P3 mended in the period ${p3During}, before the end read's mark ${p3BeforeEndMark}; ${readsAfter} read(s); ${workingAfter} period(s) begun)`);
+    assert(p4Held && p4Committed > 0 && p4Begun && p4After <= 3500,
+      `…and a vector committed after an idle poll's read found none, by a transaction begun before it, is read at the next poll: the mark keeps the slack and the floor (held ${p4Held}; committed ${p4Committed > 0}; its period begun ${p4Begun}, ${p4After} ms after the commit)`);
+
+    // vectorCome's plan stays the custom one (review pass 1, run-it): a burst of vectors the statistics
+    // see, and a prepared vectorCome went generic from its sixth call — a scan of every audit row, each idle poll,
+    // for the connection's life. The scheduler's own connections plan each statement for its values
+    // (schedulerSession's plan_cache_mode); a plain connection, under the same burst, is the control.
+    const burst = (await sql`INSERT INTO thoughts (content, metadata) SELECT 'A burst note, number ' || g, '{"source":"live"}'::jsonb FROM generate_series(1, 1500) g RETURNING id::text AS id`).map((r: { id: string }) => r.id);
+    let plainGeneric = -1, ownGeneric = -1, ownMode = "";
+    const plain = new SQL({ url: URL_, max: 1 });
+    const own = openSql(URL_!, { max: 1, session: schedulerSession({ workMem: 4, maintenanceWorkMem: 64 }) });
+    try {
+      await sql`UPDATE thoughts SET embedding = ${unit(24)}::vector WHERE id = ANY(${sql.array(burst, "TEXT")}::uuid[])`;
+      await sql.unsafe("VACUUM ANALYZE thought_audit");
+      const generic = async (c: SQL) => {
+        const mark = await vectorMark(c, 30);
+        for (let i = 0; i < 8; i++) await vectorCome(c, mark, 30);
+        return Number((await c`SELECT COALESCE(sum(generic_plans), 0)::int AS g FROM pg_prepared_statements WHERE statement LIKE '%AS came) c%' AND statement NOT LIKE '%pg_prepared_statements%'`)[0].g);
+      };
+      plainGeneric = await generic(plain);
+      ownGeneric = await generic(own);
+      ownMode = String((await own`SHOW plan_cache_mode`)[0].plan_cache_mode);
+    } finally {
+      await plain.close();
+      await own.close();
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(burst, "TEXT")}::uuid[])`;
+    }
+    // The setting read back, and the control said rather than asserted: on a far larger audit table — a full,
+    // unsharded run's — the custom plan can win by cost alone and the plain connection not flip (review pass 2).
+    assert(ownGeneric === 0 && ownMode === "force_custom_plan",
+      `after a burst of 1,500 vectors, analysed, a plain connection's prepared vectorCome goes generic and the scheduler's own does not, its session planning each statement for its values (generic plans: plain ${plainGeneric}, the control; the scheduler's ${ownGeneric}; plan_cache_mode ${ownMode})`);
 
     // A re-embed follower running outside sleep does not yield to a live call: the scheduler refuses (2), as for the others.
     const outsideKey = `heartbeat:${EMBED_JOB}`;

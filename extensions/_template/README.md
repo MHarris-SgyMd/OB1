@@ -121,9 +121,8 @@ New query → paste and Run:
 
 <!--
 IMPORTANT: Every extension MUST say how a role other than the tables' owner is granted them.
-An extension in this tree lists its tables in ROLE_GRANTS.extensions (db/config.mjs) and lets
-`bun db/migrate.ts --grant <role>` issue them (the callout below); these hand lines are for a
-contribution that cannot. Replace table_name and table_name_2 with your actual table names.
+The --grant group the extensions used, ROLE_GRANTS.extensions, retired when they became plugins
+(SMD-2311; SMD-3747 rewrites this template); these hand lines are what is left. Replace table_name and table_name_2 with your actual table names.
 -->
 
 <details>
@@ -137,7 +136,7 @@ grant select, insert, update, delete on table public.table_name_2 to your_role;
 </details>
 
 > [!IMPORTANT]
-> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors. The extensions in this tree take the other route: their tables are rows of `ROLE_GRANTS.extensions` in `db/config.mjs`, and `bun db/migrate.ts --grant <role>` issues them with everything else (SMD-1810) — add yours there too when the extension lands.
+> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors. The extensions in this tree are plugins since SMD-2311, their tables made under each plugin's own role; the `ROLE_GRANTS.extensions` group they used is retired.
 
 ![1.3](https://img.shields.io/badge/1.3-Verify-555?style=for-the-badge&labelColor=HEX_COLOR)
 

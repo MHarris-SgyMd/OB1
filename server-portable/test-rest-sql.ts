@@ -1186,6 +1186,12 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   }
   const renewBack = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token: token.toUpperCase() }, KEYS.writer);
   assert(renewBack.status === 200, `…and with the registry back, the same token renews, upper-cased by a model as it may be (${renewBack.status} ${renewBack.body.code ?? ""})`);
+  // SMD-3780: a principal with no agent id and no word from the registry why (a caller of the core's own) is told
+  // registry_unknown, final — claims' own answer once the shared helper finds no registry failure to name.
+  const noWord = { name: "writer", scope: "write", keyHash: "" } as unknown as Parameters<typeof direct.renewClaim>[0];
+  const renewNoWord = await direct.renewClaim(noWord, { id: String(mine?.id), token } as never);
+  assert(renewNoWord.ok === false && renewNoWord.refusal.code === "CLAIM_UNATTRIBUTED" && renewNoWord.refusal.cause === "registry_unknown" && renewNoWord.refusal.retryable === false && renewNoWord.refusal.id === mine?.id,
+    `…and the holder's own renew with no agent id and no registry failure named is CLAIM_UNATTRIBUTED registry_unknown, final (${JSON.stringify(renewNoWord.ok ? "renewed" : renewNoWord.refusal)})`);
 
   // Two sessions of one key: the second, without the first's token, is told the holder is its own key, and how back.
   const first = await rest("POST", "/v1/claims", { ticket: "SMD-9307", label: "session one" }, KEYS.writer);
@@ -1771,13 +1777,24 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
   const hookAway = { name: "hook", scope: "capture", keyHash: "", agentUnresolved: "unreachable" } as unknown as Parameters<typeof direct.openItem>[0];
   const ownAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("update_item", { id: hookId, owner: "while away" }) as Out;
   const prioAway = await contextFor("home-maintenance", { core: direct, principal: hookAway }).call("set_priority", { kind: "item", key: rowId, level: 2 }) as Out;
+  // SMD-3780: the registry set up wrong, or refusing, is final on the same item, each with its cause (claims' [10] and
+  // priority's [11] read the set-up-wrong case too); and a read key's principal reaching a writer is READ_ONLY_KEY
+  // naming the key, whether the core or 117 refuses it.
+  const hookMisconfigured = { ...(hookAway as object), agentUnresolved: "misconfigured" } as unknown as Parameters<typeof direct.openItem>[0];
+  const ownMisconfigured = await contextFor("home-maintenance", { core: direct, principal: hookMisconfigured }).call("update_item", { id: hookId, owner: "while set up wrong" }) as Out;
+  const hookRefused = { ...(hookAway as object), agentUnresolved: "refused" } as unknown as Parameters<typeof direct.openItem>[0];
+  const ownRefused = await contextFor("home-maintenance", { core: direct, principal: hookRefused }).call("update_item", { id: hookId, owner: "while refused" }) as Out;
+  const readerDirect = await direct.openItem({ name: "reader", scope: "read", keyHash: "" } as unknown as Parameters<typeof direct.openItem>[0], { text: "omicron: a read key's item" } as never);
   const [stamp] = await sql`SELECT plugin, plugin_row FROM open_items WHERE item_id = ${rowId}::uuid`;
   assert(rowOpen.ok && rowItem?.plugin?.name === "home-maintenance" && rowItem.plugin.row === "task-7" && stamp?.plugin === "home-maintenance"
       && rowMove.ok && rowPrio.ok && otherHook.ok === false && otherHook.refusal?.code === "ITEM_NOT_YOURS"
       && noRowHook.ok === false && noRowHook.refusal?.code === "ITEM_UNOWNABLE"
       && awayDirect.ok === false && (awayDirect.refusal as { code: string; cause?: string }).code === "ITEM_UNATTRIBUTED" && (awayDirect.refusal as { cause?: string }).cause === "registry_away" && awayPlugin.ok === true
-      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true,
-    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final) (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal })})`);
+      && ownAway.ok === false && ownAway.refusal?.code === "ITEM_UNATTRIBUTED" && ownAway.refusal?.retryable === true && prioAway.ok === true
+      && ownMisconfigured.ok === false && ownMisconfigured.refusal?.code === "ITEM_UNATTRIBUTED" && ownMisconfigured.refusal?.retryable === false && ownMisconfigured.refusal?.cause === "registry_misconfigured"
+      && ownRefused.ok === false && ownRefused.refusal?.code === "ITEM_UNATTRIBUTED" && ownRefused.refusal?.retryable === false && ownRefused.refusal?.cause === "registry_refused"
+      && readerDirect.ok === false && readerDirect.refusal.code === "READ_ONLY_KEY" && (readerDirect.refusal as { key?: string }).key === "reader",
+    `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final); its own item with the registry set up wrong or refusing, ITEM_UNATTRIBUTED final, each its cause; a read key's open, READ_ONLY_KEY naming it (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal, misconfigured: ownMisconfigured.refusal, refused: ownRefused.refusal, reader: readerDirect.ok ? "opened" : readerDirect.refusal })})`);
 }
 
 apiServer.stop();
