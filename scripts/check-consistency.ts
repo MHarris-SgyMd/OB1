@@ -5434,6 +5434,22 @@ function aggregateRunPasses(needs: string, maySkip: string): boolean | string {
     return typeof err.status === "number" ? false : `bash did not run (${err.code ?? "no exit status"})`;
   }
 }
+const SHIFT_WORKFLOW = ".github/workflows/ci-shift.yml";
+/** What is wrong with ci-shift.yml's trigger for a checks workflow called `name`, or null: it names that one name. */
+function shiftTriggerProblem(name: unknown, shiftDoc: unknown): string | null {
+  const names = (shiftDoc as { on?: { workflow_run?: { workflows?: unknown } } } | null)?.on?.workflow_run?.workflows;
+  if (typeof name === "string" && name !== "" && Array.isArray(names) && names.length === 1 && names[0] === name) return null;
+  return `on.workflow_run.workflows is ${JSON.stringify(names ?? null)}, not [${JSON.stringify(name ?? null)}], ${WORKFLOW}'s name — CI shift would never run after it (check 20, SMD-3765)`;
+}
+/** [the checks workflow's name, ci-shift.yml as parsed, passes?] — what shiftTriggerProblem must refuse and pass. */
+const SHIFT_TRIGGER_PROBES: [unknown, unknown, boolean][] = [
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Brain Checks"] } } }, true],
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Fork Checks"] } } }, false],
+  ["Brain Checks", { on: { workflow_run: { workflows: ["Brain Checks", "Fork Checks"] } } }, false],
+  ["Brain Checks", { on: { workflow_dispatch: {} } }, false],
+  ["Brain Checks", null, false],
+  [undefined, { on: { workflow_run: { workflows: [undefined] } } }, false],
+];
 function checkRulesetRecord() {
   // Self-test: a record every rule accepts passes; each mutant reports exactly
   // one problem, and that problem names what the mutant broke; a non-probe
@@ -5527,11 +5543,13 @@ function checkRulesetRecord() {
   for (const [where, msg] of [...aggregateProblems(doc), ...rulesetProblems(ruleset)]) fail(where, msg);
   // ci-shift.yml runs after this workflow by its name (workflow_run), which a rename of either leaves silently
   // unmatched: CI shift would never run again (SMD-3765 renamed "Fork Checks" to "Brain Checks").
-  const SHIFT_WORKFLOW = ".github/workflows/ci-shift.yml";
-  const name = (doc as { name?: unknown }).name;
-  let shiftOn: unknown;
-  try { shiftOn = (Bun.YAML.parse(readFileSync(join(ROOT, SHIFT_WORKFLOW), "utf8")) as { on?: { workflow_run?: { workflows?: unknown } } })?.on?.workflow_run?.workflows; } catch { shiftOn = undefined; }
-  if (!(Array.isArray(shiftOn) && shiftOn.length === 1 && shiftOn[0] === name)) fail(SHIFT_WORKFLOW, `on.workflow_run.workflows is ${JSON.stringify(shiftOn ?? null)}, not [${JSON.stringify(name ?? null)}], ${WORKFLOW}'s name — CI shift would never run after it (check 20, SMD-3765)`);
+  for (const [name, shiftDoc, want] of SHIFT_TRIGGER_PROBES) {
+    if ((shiftTriggerProblem(name, shiftDoc) === null) !== want) fail(SELF, `check 20's ci-shift trigger rule ${want ? "refuses" : "passes"} ${JSON.stringify(shiftDoc)} for a workflow named ${JSON.stringify(name)} (its own probe)`);
+  }
+  let shiftDoc: unknown = null;
+  try { shiftDoc = Bun.YAML.parse(readFileSync(join(ROOT, SHIFT_WORKFLOW), "utf8")); } catch { shiftDoc = null; }
+  const shiftProblem = shiftTriggerProblem((doc as { name?: unknown }).name, shiftDoc);
+  if (shiftProblem) fail(SHIFT_WORKFLOW, shiftProblem);
   // Every other workflow, for a job that would report a check under the one
   // context (review pass 1); one that does not parse is check 23's to report.
   const workflowsDir = join(ROOT, ".github", "workflows");
@@ -7216,11 +7234,11 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
 }
 // ── 40: every healthcheck probes every second until its service is up (SMD-3194) ──
 /**
- * 40: every healthcheck in the stack's compose files — each service's, and each `x-` anchor's a service merges
- * in — has a start period longer than zero and probes every second within it, until it first passes. Docker's
- * start interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written
- * without them holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75
- * waits of 5.0–5.6 s a Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
+ * 40: every healthcheck in the stack's compose files — each service's, and each `x-` anchor's a service merges in —
+ * has a start period longer than zero and probes every second within it, until it first passes. Docker's start
+ * interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written without them
+ * holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75 waits of 5.0–5.6 s a
+ * Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
  * `NONE`) has nothing to probe and is passed over.
  */
 const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml"];
