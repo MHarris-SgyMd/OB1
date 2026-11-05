@@ -1660,7 +1660,7 @@ function checkCredentialCompares() {
 // held by test-writes.ts's text guard), and an `.rpc("update_thought", …)` or
 // `.rpc("upsert_thought", …)`, which is the remedy — the dataflow cases need
 // what this rule does not have, and a miss there is what the second half of
-// the audit, extensions/test-writes.ts, is for. Exceptions are per file and
+// the audit, integrations/test-writes.ts, is for. Exceptions are per file and
 // COUNTED, as checks 6–8's are: a file that deliberately writes around the
 // functions is listed with the reason and the line count, and its README must
 // say what its rows lack; one fixed drops out as stale, one added fails. Seven
@@ -1995,7 +1995,7 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
-  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole", lines: 1 }],
+  ["integrations/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole", lines: 1 }],
 ]);
 
 function checkThoughtWritesAround() {
@@ -7170,7 +7170,7 @@ const TRUST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/schema-aware-routing/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
-  ["extensions/test-writes.ts", { why: "the fixture check 10 counts: rows planted as an older write left them — test rows, not captures", lines: 1 }],
+  ["integrations/test-writes.ts", { why: "the fixture check 10 counts: rows planted as an older write left them — test rows, not captures", lines: 1 }],
 ]);
 
 function checkCaptureTrust() {
@@ -7688,7 +7688,7 @@ checkStarReads();
  * address, by its file and a fragment that names it and no other, with why; a fragment that names none, several, or
  * one already held is reported, as is an entry whose file the walk no longer reads (walkProblems, with the walk's
  * own floor). Its probe pins each of these. PR 1 held test-rest.ts, test-server.ts and db/test-support.ts; PR 2a
- * every suite and smoke script; PR 2b the vendored servers extensions/test-auth.ts starts, so its exception went.
+ * every suite and smoke script; PR 2b the vendored servers integrations/test-auth.ts starts, so its exception went.
  * Without git the walk cannot list them, and the check is skipped with a word, as check 41 is.
  */
 /**
@@ -10263,13 +10263,13 @@ function checkNoAutoInstall() {
   const dirs = [...new Set(runs.flatMap((r) => r.dirs))].filter((d) => existsSync(join(ROOT, d, "package.json"))).sort();
   // Three directories many steps run from: were any missed, the reading is broken. A cd's directory is check 34's
   // probe's to hold ("a cd in a subshell, behind a timeout"); no package directory is reached by a cd alone today.
-  for (const known of ["db", "server-portable", "extensions"]) {
+  for (const known of ["db", "server-portable", "integrations"]) {
     if (!dirs.includes(known)) fail(SELF, `check 44 does not read ${known}/ as a directory brain-checks.yml runs a script from — the reading is broken, not the tree clean`);
   }
   for (const d of dirs) {
     const p = join(ROOT, d, "bunfig.toml");
     const why = autoInstallLeftOn(existsSync(p) ? readFileSync(p, "utf8") : null);
-    if (why) fail(`${d}/bunfig.toml`, `${d}/ ${why}, but a ${SUITE_WORKFLOW} step runs a script from it, so an import its job's installs do not resolve is fetched from npm instead of failing — give it a bunfig.toml with \`[install]\` and \`auto = "disable"\`, as extensions/ has (check 44, SMD-2978)`);
+    if (why) fail(`${d}/bunfig.toml`, `${d}/ ${why}, but a ${SUITE_WORKFLOW} step runs a script from it, so an import its job's installs do not resolve is fetched from npm instead of failing — give it a bunfig.toml with \`[install]\` and \`auto = "disable"\`, as integrations/ has (check 44, SMD-2978)`);
   }
 }
 checkNoAutoInstall();
@@ -10444,7 +10444,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
-  "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
+  "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "integrations/package.json"], why: "named in messages and integrations/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
   "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
@@ -10475,7 +10475,7 @@ const namesDocs = (f: string): boolean => (/\.(ts|mts|mjs|cjs|js|sh|py|ya?ml|jso
 function checkChangesAllowlist() {
   const fileProbes: [string, boolean][] = [
     [".github/workflows/brain-checks.yml", true], ["deploy/compose.yaml", true], ["deploy/smoke.sh", true], ["server-portable/Dockerfile", true],
-    ["extensions/package.json", true], ["server-portable/bunfig.toml", true], ["db/config.d.mts", true], ["x/y.cjs", true],
+    ["integrations/package.json", true], ["server-portable/bunfig.toml", true], ["db/config.d.mts", true], ["x/y.cjs", true],
     ["deploy/orchestration/runner.Dockerfile", true], ["dashboard/src/routes/+page.svelte", true], ["evals/rerank-crossencoder.py", true],
     ["db/config.mjs", true], [SELF, false], [CHANGES_SCRIPT, false], ["docs/a.md", false], ["db/migrations/001_x.sql", false],
   ];

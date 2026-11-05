@@ -8,7 +8,7 @@
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
-// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// reaches the audit (008). FORK.md change 69; integrations/test-writes.ts drives it
 // against Postgres, and scripts/check-consistency.ts check 10 holds it.
 // SMD-1524 (change 71): the first run's row too — the raw insert computed its own
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
@@ -18,12 +18,12 @@
 // (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
 // refused — a 500 at the first query on the fork — and renders now; the shim
 // also hands created_at back as a string, as PostgREST does, which the prompt
-// slices. extensions/test-writes.ts drives the worker on both write paths.
+// slices. integrations/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 67; extensions/test-auth.ts exercises it.
+// change 67; integrations/test-auth.ts exercises it.
 /**
  * consolidation-bio — Generate a canonical biographical profile from existing thoughts.
  *

@@ -1,5 +1,7 @@
 # Extension Generator Spec
 
+> **Retired until its rewrite (SMD-3747):** every extension is a plugin since SMD-2311, and the server this spec generates imports `../_shared/sse.ts` and `../_shared/auth.ts` and resolves `extensions/package.json`, all three deleted by SMD-3747, so it no longer runs. New operations on the brain are a plugin: start from [`plugins/example/`](../../plugins/example/) and [`plugins/README.md`](../../plugins/README.md).
+
 This document is a machine-readable specification for generating new Open Brain extensions. An AI agent given this spec and a description of the desired extension should be able to produce all required files in a single pass.
 
 ## Required Output Files

@@ -8,7 +8,7 @@
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 67; extensions/test-auth.ts exercises it.
+// change 67; integrations/test-auth.ts exercises it.
 /**
  * entity-extraction-worker — Process the entity extraction queue via LLM.
  *

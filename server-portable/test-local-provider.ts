@@ -559,21 +559,21 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       if (holdMs) await Bun.sleep(holdMs);
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
       if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
-      // The subject "Open Brain" is in every window; each window also names one
-      // person of its own — Anita in the first, Dev in the second, and so on.
+      // The subject "Daemonic Brain" is in every window; each window also names
+      // one person of its own — Anita in the first, Dev in the second, and so on.
       const person = /(Anita|Dev|Priya|Sam)/.exec(text)?.[1];
-      const entities: unknown[] = [{ name: "Open Brain", type: "project", confidence: 0.8 + (person === "Dev" ? 0.1 : 0), aliases: person === "Dev" ? ["OB1"] : [] }];
+      const entities: unknown[] = [{ name: "Daemonic Brain", type: "project", confidence: 0.8 + (person === "Dev" ? 0.1 : 0), aliases: person === "Dev" ? ["OB1"] : [] }];
       const relationships: unknown[] = [];
-      if (person) { entities.push({ name: person, type: "person", confidence: 0.9 }); relationships.push({ from: person, to: "Open Brain", relation: "works_on", confidence: 0.7 }); }
+      if (person) { entities.push({ name: person, type: "person", confidence: 0.9 }); relationships.push({ from: person, to: "Daemonic Brain", relation: "works_on", confidence: 0.7 }); }
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities, relationships }) } }] });
     },
   });
   const D = `http://127.0.0.1:${providerD.port}/v1`;
-  const para = (who: string, n: number) => `${who} wrote about Open Brain. ${Array.from({ length: n }, (_, i) => `Sentence ${i} of this paragraph says nothing new about it.`).join(" ")}`;
-  // Four paragraphs of ~330 estimated tokens each: 1,320 in all, over a 600-token
-  // window and over the stub's 700-token ceiling as one call.
+  const para = (who: string, n: number) => `${who} wrote about Daemonic Brain. ${Array.from({ length: n }, (_, i) => `Sentence ${i} of this paragraph says nothing new about it.`).join(" ")}`;
+  // Four paragraphs of ~575 estimated tokens each: about 2,300 in all, over a
+  // 600-token window and over the stub's 700-token ceiling as one call.
   const long = [para("Anita", 40), para("Dev", 40), para("Priya", 40), para("Sam", 40)].join("\n\n");
-  const short = "Anita wrote about Open Brain.";
+  const short = "Anita wrote about Daemonic Brain.";
   assert(estimateTokens(long) > CEILING && estimateTokens(short) < 100, `the long thought (${estimateTokens(long)} tokens) is over the stub's ceiling and the short one is not`);
 
   // The configuration's window: an explicit 600 for the stub's model, which
@@ -604,11 +604,11 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(reqs.every((r, i) => r.part === `[Part ${i + 1} of ${reqs.length} of a longer note]`), `each window says which part it is (${reqs.map((r) => r.part).join(" | ")})`);
   assert(reqs.every((r) => r.maxTokens === extractOutputBudget(estimateTokens(r.text))), "each call's answer budget follows the text it carries, not the whole thought's");
   const subject = many.entities.filter((e) => e.type === "project");
-  assert(subject.length === 1 && subject[0].name === "Open Brain" && subject[0].confidence === 0.9 && subject[0].aliases.includes("OB1"),
+  assert(subject.length === 1 && subject[0].name === "Daemonic Brain" && subject[0].confidence === 0.9 && subject[0].aliases.includes("OB1"),
          `a subject every window names is ONE entity in the merged answer, at the best confidence with the aliases any window offered (${JSON.stringify(subject)})`);
   const people = many.entities.filter((e) => e.type === "person").map((e) => e.name).sort();
   assert(people.join(",") === "Anita,Dev,Priya,Sam", `…and each window's own person is there once (${people.join(",")})`);
-  assert(many.relations.length === 4 && many.relations.every((r) => r.to === "Open Brain" && r.relation === "works_on"), "the four works_on edges, one per window, all to the one subject");
+  assert(many.relations.length === 4 && many.relations.every((r) => r.to === "Daemonic Brain" && r.relation === "works_on"), "the four works_on edges, one per window, all to the one subject");
   assert(many.parts?.length === reqs.length && many.parts.every((p, i) => p.index === i && p.entities.length === 2 && p.tokens <= 600 && p.ms >= 0), "the per-window record keeps what each call returned, in order, with its size and time");
 
   // SMD-2269: the two measurement hooks — budgetTimes scales the answer budget,
@@ -664,7 +664,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(cfgD.extractMaxWindows === EXTRACT_MAX_WINDOWS && cfgD.extractMaxWindowsFrom === "default" && EXTRACT_MAX_WINDOWS === 24,
          "with OB1_EXTRACT_MAX_WINDOWS unset the bound is the constant, 24 — today's number (the drop-the-env control)");
   reqs.length = 0;
-  // Each paragraph of ~330 tokens is its own 600-token window's subject: Anita0 … Anita29.
+  // Each paragraph of ~575 tokens is its own 600-token window's subject: Anita0 … Anita29.
   const enormous = Array.from({ length: EXTRACT_MAX_WINDOWS + 6 }, (_, i) => para(`Anita${i}`, 40)).join("\n\n");
   const enormousWindows = chunkContent(enormous, { maxTokens: 600, overlapTokens: 75 }).length;
   // Caught, as the long thought's call above is: the refusal this replaced is a red line here, not a crash.
@@ -731,7 +731,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(boundedWindows("", unspaced, { windowTokens: 300, maxWindows: 3 }).coverage === undefined,
          "three unspaced paragraphs each just over the window, under a bound of three, are whole — not charged as runs");
   // Blank lines around a one-window thought are no text to bound: measured on chunk.ts's trimmed window.
-  const padded1 = `${"\n".repeat(12000)}${"Anita wrote about Open Brain. ".repeat(40)}`;
+  const padded1 = `${"\n".repeat(12000)}${"Anita wrote about Daemonic Brain. ".repeat(40)}`;
   const paddedB = boundedWindows(padded1, chunkContent(padded1, { maxTokens: 600, overlapTokens: 75 }), { windowTokens: 600, maxWindows: 1 });
   assert(paddedB.coverage === undefined && paddedB.windows[0].content === padded1, `a one-window thought behind 12,000 blank lines is sent whole, no caveat (${JSON.stringify(paddedB.coverage)})`);
   // A run that uses the whole bound leaves nothing of the next window: nothing
@@ -766,7 +766,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   proseIf = null;
   assert(reqs.length === 4 && !some.malformed && some.windows === 4,
          `two of four windows answered in prose: the thought's answer is not malformed, all four sent (${reqs.length} calls, malformed ${some.malformed})`);
-  assert(some.entities.map((e) => e.name).sort().join(",") === "Anita,Dev,Open Brain" && some.relations.length === 2,
+  assert(some.entities.map((e) => e.name).sort().join(",") === "Anita,Daemonic Brain,Dev" && some.relations.length === 2,
          `…it is the parsed windows' answer — their people and edges, not the prose windows' (${some.entities.map((e) => e.name).join(",")}; ${some.relations.length} edges)`);
   assert(JSON.stringify(some.coverage) === JSON.stringify({ windows: 4, of: 4, cut: false, malformed: [2, 3] }) && some.parts?.map((q) => q.malformed).join(",") === "false,false,true,true",
          `…and its coverage names the windows left out, as the per-window record does (${JSON.stringify(some.coverage)})`);
@@ -998,7 +998,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // …and a relation in the other array after it (seventh pass: an item there
   // is not the loop going on, whatever frame it lands in).
   const THRICE = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [{ from: "Anita", to: "Loop", relation: "uses", confidence: 0.8 }] });
-  const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
+  const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Daemonic Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Daemonic Brain", relation: "works_on", confidence: 0.7 }] });
   const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
   const providerG = Bun.serve({
     port: 0,
@@ -1609,7 +1609,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
       `outside a request a call is background, inside asLive live, and the seam's run returns the answer read, not a response (${JSON.stringify(calls.map((c) => c.call))})`);
     // The passes' own fetches: extraction's, the judge's, a worker's probe, and the decide tier's.
     calls.length = 0;
-    await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" });
+    await extractEntities("Ada works on Daemonic Brain.", cfg, undefined, { kind: "extraction" });
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000);
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
@@ -1662,7 +1662,7 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     // Each pass hands the seam its stop, which a hook waiting for a slot ends its wait on.
     const stop = new AbortController();
     calls.length = 0;
-    await extractEntities("Ada works on Open Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
+    await extractEntities("Ada works on Daemonic Brain.", cfg, undefined, { kind: "extraction" }, undefined, stop.signal);
     await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, cfg, stop.signal);
     await probeChat({ base: PROVIDER, headers: {} }, META_MODEL, 5000, stop.signal);
     await getEmbedding("an embedding with a stop", cfg, { kind: "re-embed" }, stop.signal);

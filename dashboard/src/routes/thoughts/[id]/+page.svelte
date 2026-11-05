@@ -17,7 +17,7 @@
 	const notice = $derived(ingestedNotice(data.thought.metadata));
 </script>
 
-<svelte:head><title>{data.thought.title} · Open Brain</title></svelte:head>
+<svelte:head><title>{data.thought.title} · Daemonic Brain</title></svelte:head>
 
 <article class="space-y-6">
 	<header>

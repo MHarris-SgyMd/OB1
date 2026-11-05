@@ -85,7 +85,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   const g = groupFindings([p, f({ id: "r9", older: "SMD-1", newer: "SMD-2", confidence: 0.5 })])[0];
   const body = commentBody(g);
   const lines = body.split("\n");
-  ok(lines[0] === "**Open Brain found something about SMD-2 and SMD-1**, two tickets this board does not link.", `the comment opens by naming the ticket it is on and the other (${lines[0]})`);
+  ok(lines[0] === "**Daemonic Brain found something about SMD-2 and SMD-1**, two tickets this board does not link.", `the comment opens by naming the ticket it is on and the other (${lines[0]})`);
   ok(/changed nothing on this board/.test(body) && lines[lines.length - 1] === "ob1-finding SMD-1 SMD-2 outdates related", "it says it changed nothing, and its marker is the last line");
   ok(lines.filter((l) => l.startsWith("- ")).length === 2 && lines.filter((l) => /^ob1-finding /.test(l)).length === 1, "one bullet per finding, and one marker line");
 
