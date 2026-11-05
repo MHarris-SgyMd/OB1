@@ -5700,6 +5700,10 @@ record) or else on its own thought, with the source's word as the reason: the
 same again is `unchanged`, and an unknown word (Linear's "No priority", a
 source's default, a word the scale does not hold) clears the actor's earlier
 statement. A due time with no level is not stated: a statement needs a level.
+A Markdown note's frontmatter `priority:` (none to critical, any case) and
+`due:` are its priority (SMD-3666 PR 2), on the note's own thought; every note
+carries one, none for a key it has not got, so deleting the `priority:` line
+clears the statement an earlier run made.
 The run's tier is the registry's (decision 4): a source once the operator has
 declared the actor one, its kind's until then. A brain before 116, or a role
 that may not run its writers, is said once and the run states none; the
