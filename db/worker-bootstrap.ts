@@ -386,6 +386,14 @@ export function missingModelIs(e: unknown, model: string): boolean {
  * call's deadline passing (timedOut) as embed.ts's `timeout` (SMD-3311).
  */
 export type FollowVerdict = "db-wait" | "db-end" | "db-moment" | "backpressure" | "maybe-poison" | "thought" | "probe-decides";
+
+/** The status of a provider's answer an error carries — an embed.ts `http` error's, or the extraction and judge calls' own Error's — else null: no answer (a deadline, no connection) or another kind (SMD-3311). */
+function answerStatus(e: unknown): number | null {
+  if (e instanceof ProviderError) return e.kind === "http" ? e.status ?? 0 : null;
+  const status = (e as { status?: unknown } | undefined)?.status;
+  return e instanceof Error && typeof status === "number" ? status : null;
+}
+
 export function followClassify(e: unknown): FollowVerdict {
   if (databaseUnavailable(e)) return "db-wait";
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
@@ -394,8 +402,7 @@ export function followClassify(e: unknown): FollowVerdict {
     if (/^(40|53)/.test(errno) || ["55P03", "25006", "25P02"].includes(errno)) return "db-moment";
     return "thought";
   }
-  const status = (e as { status?: unknown } | undefined)?.status;
-  const http = e instanceof ProviderError ? (e.kind === "http" ? e.status ?? 0 : null) : e instanceof Error && typeof status === "number" ? status : null;
+  const http = answerStatus(e);
   if (e instanceof ProviderError && e.kind === "egress") return "thought";
   if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
   if (http !== null) {
@@ -432,8 +439,7 @@ export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {
   // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
   // decides (review pass 1), and so is a 429 or a 503 saying so, backpressure, no suspect (review
   // pass 2). A deadline with no status keeps "thought", which the probe decides.
-  const answered = typeof (e as { status?: unknown } | undefined)?.status === "number";
-  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answered && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
+  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answerStatus(e) !== null && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
   return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
 }
 

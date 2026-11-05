@@ -4878,7 +4878,8 @@ if (want("10")) {
   let unavailableMs = 0;
   /**
    * Until this time every request — a follower's probe too — answers `down`
-   * (SMD-2599): a 503, a 404 for the model, or no answer at all ("hang").
+   * (SMD-2599): a 503, a 404 for the model, a 408 in `body408`'s words
+   * (SMD-3311), or no answer at all ("hang").
    * `probes` counts the follower's one-token probes, answered apart from the
    * calls so a follower's start costs no counted call.
    */

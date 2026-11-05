@@ -6723,7 +6723,8 @@ it through the store's capped path (`SqlStore.resolveAgent`, which bounds
 `lock_timeout` — the raw call the workers ran did not), refusing a revoked key
 and warning when none is set. **Errors and actors:** one `classifyError`
 classifies a provider error into thought / transient / fatal for both workers
-(extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
+(extract adds the `max_tokens`→fatal rule as an option; a `--follow` worker
+reads it through `followerFault`, SMD-3311), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
 worker of either kind, and `reembed.ts`'s follower (SMD-2679), waits a database outage out — `databaseUnavailable`
