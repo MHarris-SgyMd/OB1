@@ -2235,6 +2235,12 @@ else {
   assert(/the sleep scheduler runs this key \(stamped 2\d s ago; working, consolidate waiting for the provider mid-pass\), and its last pass failed/.test(row(consSleptMid.out, "consolidate pass"))
          && /The provider stopped answering mid-pass — check it/.test(fix(consSleptMid.out, "consolidate pass")) && !/log says why/.test(fix(consSleptMid.out, "consolidate pass")),
          `the scheduler's pass waiting mid-pass is said on the consolidate pass row, the fix naming the provider (${row(consSleptMid.out, "consolidate pass")} | ${fix(consSleptMid.out, "consolidate pass")})`);
+  // …but another pass's wait is not consolidation's: the subject sweep's, on the same chat endpoint, leaves the cause to
+  // the scheduler's log (SMD-3306 PR 6b-2; PR 6b-1's Not here).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "failed", waitingMidPass: ["subjects"] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSweepMid = fix((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
+  assert(/^→ The scheduler's log says why/.test(consSweepMid.trim()) && !/The provider stopped answering mid-pass/.test(consSweepMid),
+         `the subject sweep waiting mid-pass is not read as consolidation's wait on its row (${consSweepMid})`);
   // Its pass held out, or the scheduler paused by a live call (SMD-3379 PR 1c-2):
   // the row says its own pass's hold, not another's listed first, or the
   // pause, with or without a pass running — not "its passes running" or "idle".
@@ -4606,7 +4612,7 @@ else {
         `re-embed and extraction waiting name both providers' rows (${bothWaitFix})`);
       assert(/the pass goes on by itself once it answers; re-embed is set down for the period at the scheduler's next poll, .*, the thoughts in hand back in the pool meanwhile\./.test(bothWaitFix),
         `…each wait's own ending, extraction's going on and re-embed's set down (${bothWaitFix})`);
-      // The subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-1, read before PR 6b-2 writes it): its wait said
+      // The subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-1; written since PR 6b-2): its wait said
       // by its name, a chat provider's; its judge hold said, the fix the hand run that lifts it, a stopped row's too.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["subjects"], slept: { from: await at(130), to: null } }), 10);
       const subjectsWait = await run(LOG_ON);
@@ -4624,11 +4630,12 @@ else {
       // said so).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "model", until: null }, { pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsHeldBeside = await run(LOG_ON);
-      // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it.
+      // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it — its set-down's own
+      // (SMD-3306 PR 6b-2).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherHold = await run(LOG_ON);
-      // …and a failed row held for another reason of the sweep's keeps the generic cause of a failed pass (review pass
-      // 5, mutant: the cause left out beside any hold lived).
+      // …and a failed row so held says the set-down's cause, not the generic cause of a failed pass, another pass's
+      // failure its log's, as the judge hold's fix does (PR 6b-2; until it the generic cause, review pass 5's mutant).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherFailed = await run(LOG_ON);
       // …nor for a judge hold of another pass's, which the scheduler never writes (SMD-3306 PR 6b-1's review pass 2,
@@ -4643,6 +4650,8 @@ else {
              && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep"))
              && /held out: extract \(judge\)/.test(row(extractJudgeHold.out, "sleep")) && !/The subject sweep is held/.test(fix(extractJudgeHold.out, "sleep")),
         `the subject sweep's wait and judge hold are said by its name, the hold's fix the hand run that lifts it, a stopped row's too (${row(subjectsWait.out, "sleep")} | ${fix(subjectsHeld.out, "sleep")} | ${fix(subjectsHeldDown.out, "sleep")})`);
+      assert(/The subject sweep was set down for this period \(provider\) — the provider refused it: check the chat endpoint's key and base URL \(OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL\), and the account's credit where it answered 402; its log names the refusal; the next period with work tries it again\. The other passes run on meanwhile\.$/.test(fix(subjectsOtherHold.out, "sleep")),
+        `the sweep set down for a period says its cause's remedy, and that the next period tries it, the others running on (SMD-3306 PR 6b-2: ${fix(subjectsOtherHold.out, "sleep")})`);
       assert(/The subject sweep is held:/.test(fix(subjectsHeldFailed.out, "sleep")) && !/Its last pass failed/.test(fix(subjectsHeldFailed.out, "sleep"))
              && /The other passes run on meanwhile\. Another pass's failure, if any, its log says\./.test(fix(subjectsHeldFailed.out, "sleep"))
              && !/Another pass's failure/.test(fix(subjectsHeld.out, "sleep")),
@@ -4650,8 +4659,33 @@ else {
       assert(/→ Its last pass failed — a pass refused at its start/.test(fix(subjectsHeldBeside.out, "sleep")) && /The subject sweep is held:/.test(fix(subjectsHeldBeside.out, "sleep"))
              && !/the other passes run on meanwhile/i.test(fix(subjectsHeldBeside.out, "sleep")) && !/Another pass's failure/.test(fix(subjectsHeldBeside.out, "sleep")),
         `beside another pass's hold a failed row says the failed pass's cause, the hold's fix not that the other passes run on (${fix(subjectsHeldBeside.out, "sleep")})`);
-      assert(/Its last pass failed/.test(fix(subjectsOtherFailed.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherFailed.out, "sleep")),
-        `a failed row held for another reason of the sweep's keeps the generic cause (${fix(subjectsOtherFailed.out, "sleep")})`);
+      assert(!/Its last pass failed/.test(fix(subjectsOtherFailed.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherFailed.out, "sleep"))
+             && /The subject sweep was set down for this period \(provider\) — .* The other passes run on meanwhile\. Another pass's failure, if any, its log says\.$/.test(fix(subjectsOtherFailed.out, "sleep")),
+        `a failed row with the sweep set down says the set-down's cause, another pass's failure its log's, not a failed pass's generic cause (SMD-3306 PR 6b-2: ${fix(subjectsOtherFailed.out, "sleep")})`);
+      // The sweep held for another pool named (key, SMD-3306 PR 6b-2): the hold's fix the switch by hand, in the stack,
+      // and the reasoning's way back, the generic cause not said beside it; a stopped row's last word too, the passes
+      // not said to run on.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const keyHeld = await run(LOG_ON);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const keyHeldFailed = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "stopped", ended: true, holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
+      const keyHeldDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/held out: subjects \(key\)/.test(row(keyHeld.out, "sleep"))
+             && /The subject sweep is held: ob1_config names another subject pool than the scheduler's — a rule's, the question's or OB1_SUBJECT_REASONING's change since it was named, or --subjects rules run by hand — and the scheduler names a pool only when none is, never switching one; its log names both\. To sweep under the scheduler's, which pools again every thought with no current subject, switch it by hand in the stack as the coordinator runs, recreated first after a change to deploy\/\.env \(up -d coordinator\) — podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with \(docker compose alike\) — the scheduler's runs taking the rest; or, where OB1_SUBJECT_REASONING alone tells them apart, set it back in deploy\/\.env and recreate the coordinator\. The other passes run on meanwhile\.$/.test(fix(keyHeld.out, "sleep"))
+             && !/garbage-judge/.test(fix(keyHeld.out, "sleep")),
+        `the sweep held for another pool named says the switch by hand in the stack, and the reasoning's way back (${fix(keyHeld.out, "sleep")})`);
+      assert(!/Its last pass failed/.test(keyHeldFailed) && /The subject sweep is held: ob1_config names another subject pool .* Another pass's failure, if any, its log says\.$/.test(keyHeldFailed)
+             && /The subject sweep is held: ob1_config names another subject pool/.test(keyHeldDown) && !/the other passes run on meanwhile/i.test(keyHeldDown),
+        `…a failed row's fix the hold, another pass's failure its log's; a stopped row's the hold, the passes not said to run on (${keyHeldFailed} | ${keyHeldDown})`);
+      // Set down by a start refusal's kind, on a stopped row: its remedy, mended before the start (SMD-3306 PR 6b-2).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "failed", ended: true, holds: [{ pass: "subjects", why: "tables", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
+      const tablesDown = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "failed", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const failedDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/The subject sweep was set down for its last period \(tables\) — apply the migrations as the tables' owner .* the subject sweep's, grant the roles its log names what it names .*; mend that before the scheduler starts again, or its next period sets the sweep down again\./.test(tablesDown)
+             && /The subject sweep was set down for this period \(failed\) — it ended by itself — the database lost past its start, or its naming or pooling broken off, most likely — and its log gives the reason; the next period with work tries it again\./.test(failedDown),
+        `a set-down by its kind says its remedy, a stopped row's mended before the start (${tablesDown} | ${failedDown})`);
       // …and beside consolidation's hold alike, any pass's (SMD-3306 PR 6b-1's review pass 6, mutant: extraction's
       // alone lived); and where no line says a failed pass's cause — a stopped row ended failed, or a pass waiting on
       // its provider taking the line — the hold's fix names another pass's failure, never that the other passes run on

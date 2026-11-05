@@ -99,7 +99,7 @@
  * run under the key before a switch replaced the subject the new pool's run had recorded and finished).
  * `--subjects rules` stops at the rules, for a brain whose judge model has not been measured on the question.
  *
- * A scheduler drives the sweep much as it drives the claim passes (PRs 6a and 6b-1; sleep runs it from PR 6b-2):
+ * A scheduler drives the sweep much as it drives the claim passes (PRs 6a and 6b-1; sleep runs it since PR 6b-2):
  * following, an empty pool polled until its stop, a follower's end (0); the admit gate before the pool and each claim,
  * a thought a provider error put back claimed again through it; the call in hand's own abort beside the stop, its
  * thought set back unanswered, a following run's next claim after a one-token call, the call left unanswered that
@@ -429,7 +429,7 @@ const databaseDown = (e: unknown, left = "") => `\n  The database stopped answer
  * the process; `onPass` is handed the sweep's stop as its thoughts begin, whose second call aborts the model call in
  * hand too, and beside it the call's own abort (db/lease.ts's InHandAbort). A dry run hears neither: it reads on.
  *
- * The options a scheduler drives the sweep with, as it drives the claim passes (PRs 6a and 6b-1, for sleep's PR 6b-2):
+ * The options a scheduler drives the sweep with, as it drives the claim passes (PRs 6a and 6b-1, sleep's since PR 6b-2):
  * `follow`, `admit`, the abort beside the stop, `stamper`, `session`, `banner`, `onStart` and `check`, each below. None
  * is the CLI's.
  */
@@ -456,7 +456,8 @@ export interface SubjectSweepOptions {
    * run's past its gate after a one-token call, given the call's own limit, a provider not answering it waited out
    * (PR 6b-1's review pass 6, the maintainer's choice), unanswered past it, a hang of that thought, its claim marked
    * or, marked already, failed as its own (review pass 7, the maintainer's choice); one whose answer comes as it is
-   * aborted stands, answered. The sleep scheduler is to call it while its gate is closed (SMD-3379's N12).
+   * aborted stands, answered. The sleep scheduler calls it while its gate is closed (SMD-3379's N12), at most three
+   * times a period's hour since PR 6b-2, as consolidation's.
    */
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
@@ -490,7 +491,7 @@ export interface SubjectSweepOptions {
    * (PR 6b-1): `startWait` while the run waits at its start for a judge model its probe found not answering,
    * `providerWait` while it waits out the provider's outage past its pauses, or hung, not through the pauses themselves
    * (review pass 1, the consumer's prototype). Its outage stamps no `failed` as it begins, where extraction's follower
-   * does: how a scheduler reads that wait is the scheduler's (PR 6b-2). Unused without `follow`.
+   * does: sleep's row says that wait by the sweep's name, as it says re-embed's (PR 6b-2). Unused without `follow`.
    */
   stamper?: PassStamper | null;
   /**

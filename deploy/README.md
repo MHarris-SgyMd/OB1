@@ -2223,7 +2223,17 @@ vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call), then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. A migration run beside it — `migrate.ts`' lock held
+order above is built in. Beside consolidation runs the subject sweep
+(`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
+thought in the subject pool given its own subject; on a brain with no pool
+named, the first period names one and pools every thought with no current
+subject, each then asked of the judge model (a median of 71 s a call for the
+27B with its reasoning on), so `bun db/extract-entities.ts --subjects
+--dry-run` says how many first. The scheduler never switches a pool: another
+one named — a rule's, the question's or `OB1_SUBJECT_REASONING`'s change —
+holds the sweep until `--subjects --switch-key` is run by hand in the stack,
+and a garbage-judge alarm's trip holds it until a `--judge-checked` run by
+hand; preflight's `sleep` row gives each command. A migration run beside it — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
 (SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses

@@ -355,6 +355,16 @@ const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = fals
     ? `${startRefusalRemedy(kind, "reembed")} — a setting changed in deploy/.env is read once, so recreate sleep after it (and api, for the embedding's)${stopped ? "" : `: ${restartCommand("sleep", null)}`}`
   : startRefusalRemedy(kind, "reembed");
 /**
+ * What mends the cause that set the sleep scheduler's subject sweep down for a
+ * period (heartbeat:sleep's `holds`, SMD-3306 PR 6b-2): its start refusal's
+ * remedy, the chat endpoint's for the provider's refusal mid-pass, and the
+ * scheduler's own words for an end of its own.
+ */
+const subjectsDownRemedy = (kind: string): string =>
+  kind === "failed" ? "it ended by itself — the database lost past its start, or its naming or pooling broken off, most likely — and its log gives the reason"
+  : kind === "provider" ? "the provider refused it: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402; its log names the refusal"
+  : startRefusalRemedy(kind);
+/**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
  * with failed rows warns, names them, and says how they go back — or a
@@ -4760,9 +4770,10 @@ if (configFailed) {
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "idle, no period running")})`;
                 if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
-                  // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
+                  // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905) — consolidation's wait,
+                  // not another pass's, the subject sweep's on the same chat endpoint among them (SMD-3306 PR 6b-2).
                   add("consolidate pass", "warn", `${words}, and its last pass failed${died}`,
-                      fixOf(sleeping.running && sleeping.waitingMidPass?.length
+                      fixOf(sleeping.running && sleeping.waitingMidPass?.includes("consolidate")
                         ? `The provider stopped answering mid-pass — check it, and the model provider rows here (--deep probes chat); the scheduler's pass goes on by itself once it answers, with no second worker.${failedRows}`
                         : `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`, diedFix));
                 } else {
@@ -5277,7 +5288,12 @@ if (configFailed) {
             // or one kept out of it by its model name, which still refuses beside one (SMD-3486 review pass 1).
             const handFollowers = h.reembedJob !== undefined || unfitName ? handFollowersOf(w.heartbeats) : [];
             const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.job ?? b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
-            const subjectsJudgeHeld = h.holds?.some((x) => x.pass === "subjects" && x.why === "judge") ?? false;
+            // The subject sweep's hold but a statement's, which stmtHeld says: the alarm's trip (judge), another pool
+            // named (key), or set down for a period by its kind (SMD-3306 PR 6b-2) — each with a fix of its own below,
+            // which says why it failed a period.
+            const subjectsHold = h.holds?.find((x) => x.pass === "subjects" && x.why !== "statement");
+            const subjectsJudgeHeld = subjectsHold?.why === "judge";
+            const subjectsDown = subjectsHold !== undefined && subjectsHold.why !== "judge" && subjectsHold.why !== "key" ? subjectsHold.why : null;
             // Another pass held beside it, a start refusal the scheduler retries among them: not running on meanwhile.
             const othersHeld = h.holds?.some((x) => x.pass !== "subjects") ?? false;
             // Whether a line here said a failed pass's cause, so the judge hold's fix names another pass's failure
@@ -5323,13 +5339,13 @@ if (configFailed) {
               // (SMD-2679); and once the setting passes the bound it stopped
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
-            } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage") && (!subjectsJudgeHeld || othersHeld)) {
+            } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage") && (subjectsHold === undefined || othersHeld)) {
               // Not where the subject sweep's judge hold says why: its alarm ends its run failed, and neither cause
               // here is its (SMD-3306 PR 6b-1's review pass 4, the consumer's prototype: the hold's fix came after
               // them); but beside another pass's hold, a start refusal this line names, and the hold's fix names
               // another pass's failure else (review pass 5, cold read and the consumer's prototype: the hold outlasts
               // its sleep, so a later sleep's failure was another pass's, left unsaid, and beside extraction held the
-              // hold's fix said the other passes ran on).
+              // hold's fix said the other passes ran on). Its key hold and its set-down alike (PR 6b-2).
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               causeSaid = true;
             }
@@ -5338,7 +5354,7 @@ if (configFailed) {
             // run on, the hold's fix saying the sweep is held (SMD-3306 PR 6b-1's review pass 7, cold read and claims
             // audit).
             if (!down && stmtHeld.length) {
-              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}${subjectsJudgeHeld ? "." : "; the other passes run on meanwhile."}`);
+              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}${subjectsHold ? "." : "; the other passes run on meanwhile."}`);
               causeSaid = true;
             }
             if (setFix !== null && !(down && set && set.kind !== "model-switch")) fixes.push(setFix);
@@ -5355,8 +5371,21 @@ if (configFailed) {
             // coordinator is recreated after a change to deploy/.env, which `compose run` reads afresh where the
             // running coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the
             // lift took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
+            // A sweep hold's fix ends so: the other passes running on, where they do, and another pass's failure named
+            // where no line said a failed pass's cause (SMD-3306 PR 6b-1's review passes 5 to 7).
+            const subjectsTail = (): string => `${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid || (otherPass !== "" && fixes.some((x) => x.endsWith(otherPass))) ? "" : otherPass}`;
             if (subjectsJudgeHeld) {
-              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down || othersHeld || waitingFor || waitingMid ? "" : " The other passes run on meanwhile."}${causeSaid || (otherPass !== "" && fixes.some((x) => x.endsWith(otherPass))) ? "" : otherPass}`);
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${subjectsTail()}`);
+            }
+            // The subject sweep held for another pool named, by the scheduler's word (SMD-3306 PR 6b-2, the
+            // maintainer's choice): it names a pool when none is and never switches one, which is a hand run's, in the
+            // stack as the judge hold's lift is. The pools are its log's: the row carries neither.
+            if (subjectsHold?.why === "key") {
+              fixes.push(`The subject sweep is held: ob1_config names another subject pool than the scheduler's — a rule's, the question's or OB1_SUBJECT_REASONING's change since it was named, or --subjects rules run by hand — and the scheduler names a pool only when none is, never switching one; its log names both. To sweep under the scheduler's, which pools again every thought with no current subject, switch it by hand in the stack as the coordinator runs, recreated first after a change to deploy/.env (up -d coordinator) — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with (docker compose alike) — the scheduler's runs taking the rest; or, where OB1_SUBJECT_REASONING alone tells them apart, set it back in deploy/.env and recreate the coordinator.${subjectsTail()}`);
+            }
+            // Set down for a period, by its word (SMD-3306 PR 6b-2): re-armed at each, as re-embed's set-down is.
+            if (subjectsDown !== null) {
+              fixes.push(`The subject sweep was set down for ${h.running && !down ? "this" : "its last"} period (${subjectsDown}) — ${subjectsDownRemedy(subjectsDown)}; ${down ? "mend that before the scheduler starts again, or its next period sets the sweep down again" : "the next period with work tries it again"}.${subjectsTail()}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

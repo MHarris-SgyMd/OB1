@@ -1306,8 +1306,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const reWaits = [markOf("heartbeat:sleep", { waiting: ["reembed", "extract"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["reembed"] })?.waitingMidPass];
   assert(JSON.stringify(reWaits) === JSON.stringify([["reembed", "extract"], ["reembed"]]),
     `the scheduler's re-embed pass is carried waiting, at its start and mid-pass (${JSON.stringify(reWaits)})`);
-  // The subject sweep's, the scheduler's fourth pass (SMD-3306 PR 6b-1, read before PR 6b-2 writes it): at its start
-  // and mid-pass on the scheduler's row, never as a follower's own, which it never is.
+  // The subject sweep's, the scheduler's fourth pass (SMD-3306 PR 6b-1; written since PR 6b-2): at its start and
+  // mid-pass on the scheduler's row, never as a follower's own, which it never is.
   const subjectWaits = [markOf("heartbeat:sleep", { waiting: ["subjects"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["extract", "subjects"] })?.waitingMidPass,
     markOf("heartbeat:extract:stub-meta@1", { waitingMidPass: ["subjects"] })?.waitingMidPass ?? null];
   assert(JSON.stringify(subjectWaits) === JSON.stringify([["subjects"], ["extract", "subjects"], null]),
@@ -1499,6 +1499,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     .map((holds) => markOf("heartbeat:sleep", { holds })?.holds ?? null);
   assert(JSON.stringify(subjectHolds) === JSON.stringify([fourHolds, [{ pass: "subjects", why: "judge", until: null }], null, null, null]),
     `the subject sweep's judge hold is carried, all four passes held at once too, a fifth not — a pass again, as any fifth must be — nor a pass or a reason not of the lists (${JSON.stringify(subjectHolds)})`);
+  // …and its holds since the scheduler runs it (SMD-3306 PR 6b-2): another pool named (key), and set down by its start
+  // refusal's kind, the worker key's (identity) among them; a reason no pass is held for is still refused.
+  const sweepHolds = ["key", "identity", "tables", "failed", "linear-key"].map((why) => markOf("heartbeat:sleep", { holds: [{ pass: "subjects", why, until: null }] })?.holds?.[0]?.why ?? null);
+  assert(JSON.stringify(sweepHolds) === JSON.stringify(["key", "identity", "tables", "failed", null]),
+    `the subject sweep's key hold and set-downs are carried, a reason of no hold's refused (${JSON.stringify(sweepHolds)})`);
   // Their words, beside the state: the pause's length and each re-arm by the row's own clock; an ended row's as its last word.
   const sleepWords = (extra: Record<string, unknown>) => heartbeatState(parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true, ...extra }), at, age_s: 30 }]).heartbeats[0]!);
   const pausedSays = sleepWords({ paused: { since: pausedAt } });
