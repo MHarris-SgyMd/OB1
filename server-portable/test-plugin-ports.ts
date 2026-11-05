@@ -106,6 +106,16 @@ async function mcp(method: string, params: Record<string, unknown>, key: string)
   return JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6)) as McpReply;
 }
 const toolsFor = async (key: string) => ((await mcp("tools/list", {}, key)).result?.tools ?? []);
+/** sync_open_items' hints (SMD-3665 PR 3b): an add's, and idempotent. */
+const SYNC_HINT = JSON.stringify({ destructiveHint: false, openWorldHint: false, idempotentHint: true });
+type Item = { id: string; status: string; text: string; owner: string | null; dueAt: string | null; plugin: { name: string; row: string } | null; openedBy: { name: string } };
+/** A plugin's open items in the brain (SMD-3665 PR 3b), every status, by the row each stands for. */
+async function itemsOf(plugin: string): Promise<Map<string, Item>> {
+  const r = await rest("GET", `/v1/items?plugin=${plugin}&status=all&limit=1000`, undefined, KEYS.writer);
+  return new Map(((r.body.items ?? []) as Item[]).map((i) => [i.plugin?.row ?? "", i]));
+}
+/** Whether an item is due at the start of `day` in UTC. */
+const dueOn = (i: Item | undefined, day: string) => i?.dueAt !== null && i?.dueAt !== undefined && Date.parse(i.dueAt) === Date.parse(`${day}T00:00:00Z`);
 
 /** Every tool called below, by plugin — the drift guard's set. */
 const driven = new Map<string, Set<string>>();
@@ -212,12 +222,12 @@ console.log("\n[family-calendar] its members, activities and dates");
   // Each operation's scope, pinned here: [2] reads the scopes from the manifest it checks, so a wrong declaration there
   // (a write declared read, an add declared capture) would pass it.
   const scopes = Object.fromEntries(Object.entries(REGISTRY.find((p) => p.name === P)!.operations).map(([k, op]) => [k, op.scope]));
-  assert(JSON.stringify(scopes) === JSON.stringify({ add_family_member: "write", list_family_members: "read", add_activity: "write", get_week_schedule: "read", search_activities: "read", add_important_date: "write", get_upcoming_dates: "read" }),
-    `its seven operations' scopes: the four reads read, the three adds write (${JSON.stringify(scopes)})`);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_family_member: "write", list_family_members: "read", add_activity: "write", get_week_schedule: "read", search_activities: "read", add_important_date: "write", get_upcoming_dates: "read", sync_open_items: "write" }),
+    `its eight operations' scopes: the four reads read, the three adds and the items' sync write (${JSON.stringify(scopes)})`);
   const hints = Object.fromEntries((await toolsFor(KEYS.writer)).filter((t) => t.name.startsWith("family_calendar_")).map((t) => [t.name.slice("family_calendar_".length), JSON.stringify(t.annotations)]));
   const ADDS_HINT = JSON.stringify({ destructiveHint: false, openWorldHint: false }), READ_HINT = JSON.stringify({ readOnlyHint: true, openWorldHint: false });
-  assert(Object.keys(hints).length === 7 && Object.entries(hints).every(([k, h]) => h === (scopes[k] === "read" ? READ_HINT : ADDS_HINT)),
-    `its hints, all seven: an add destroys nothing, a read is read-only, and every operation is closed-world (${JSON.stringify(hints).slice(0, 240)})`);
+  assert(Object.keys(hints).length === 8 && Object.entries(hints).every(([k, h]) => h === (k === "sync_open_items" ? SYNC_HINT : scopes[k] === "read" ? READ_HINT : ADDS_HINT)),
+    `its hints, all eight: an add destroys nothing, the sync is idempotent too, a read is read-only, and every operation is closed-world (${JSON.stringify(hints).slice(0, 240)})`);
 
   const ada = await c("add_family_member", { name: "  Ada ", relationship: "child", birth_date: "2018-03-01" });
   assert(ada.status === 200 && UUID.test(ada.body.member?.id) && ada.body.member?.name === "Ada" && ada.body.member?.relationship === "child" && ada.body.member?.birth_date === "2018-03-01" && !("user_id" in ada.body.member),
@@ -464,6 +474,36 @@ console.log("\n[family-calendar] its members, activities and dates");
   const leap = year.find((d) => d.title === "Leap day");
   assert(leap?.next_date === expected, `a yearly 29 February comes round on ${expected} (${JSON.stringify(leap)})`);
   assert(!year.some((d) => d.title === "Old deadline"), "…and a one-time date already past is in no window, a year's included: it does not come round");
+
+  // Open items (SMD-3665 PR 3b): a one-time date still to come is a proposed item, due that day, its member its owner;
+  // a yearly date and one already past have none.
+  const form = await c("add_important_date", { family_member_id: adaId, title: "Ada's school form", date_value: await fromToday(5) });
+  let dateItems = await itemsOf(P);
+  const renewalItem = dateItems.get(String(renewal.body.important_date?.id)), formItem = dateItems.get(String(form.body.important_date?.id));
+  assert(renewal.body.item?.status === "proposed" && renewal.body.item?.id === renewalItem?.id && renewalItem?.text === "Insurance renewal" && dueOn(renewalItem, await fromToday(60))
+         && renewalItem?.owner === null && renewalItem?.openedBy.name === "writer" && todayOne.body.item?.status === "proposed"
+         && formItem?.owner === "Ada" && dueOn(formItem, await fromToday(5)) && form.body.item?.id === formItem?.id,
+    `a one-time date still to come opens a proposed item for its row, due that day, opened by the caller, its member its owner, the whole family's none (${JSON.stringify(renewalItem).slice(0, 200)} | ${JSON.stringify(formItem?.owner)})`);
+  assert(bday.body.item === null && past.body.item === null && !dateItems.has(String(bday.body.important_date?.id)) && !dateItems.has(String(past.body.important_date?.id)),
+    `…a yearly date and a one-time date already past answer item null and have none (${JSON.stringify([bday.body.item, past.body.item])})`);
+  // The sync: a date written past the operations gets its item, a past one none; a changed title moves its item's text;
+  // a dropped item stays dropped; run again, it keeps all as they are.
+  const [{ id: direct }] = (await sql`INSERT INTO plugin_family_calendar.important_dates (title, date_value) VALUES ('Direct deadline', ${await fromToday(9)}::date) RETURNING id::text`) as { id: string }[];
+  const [{ id: directPast }] = (await sql`INSERT INTO plugin_family_calendar.important_dates (title, date_value) VALUES ('Direct past deadline', ${await fromToday(-9)}::date) RETURNING id::text`) as { id: string }[];
+  await sql`UPDATE plugin_family_calendar.important_dates SET title = 'Insurance renewal (home)' WHERE id = ${String(renewal.body.important_date?.id)}::uuid`;
+  const dropped = await rest("POST", `/v1/items/${formItem?.id}/status`, { status: "dropped", reason: "the school sent it home" }, KEYS.writer);
+  await sql`UPDATE plugin_family_calendar.important_dates SET title = 'Ada''s school form, signed' WHERE id = ${String(form.body.important_date?.id)}::uuid`;
+  const sync = await c("sync_open_items", {});
+  dateItems = await itemsOf(P);
+  const live = [...dateItems.values()].filter((i) => i.status !== "dropped").length;
+  assert(sync.status === 200 && dropped.status === 200 && sync.body.opened === 1 && sync.body.updated === 1 && JSON.stringify(sync.body.failed) === "[]"
+         && dueOn(dateItems.get(direct), await fromToday(9)) && dateItems.get(direct)?.status === "proposed" && !dateItems.has(directPast)
+         && dateItems.get(String(renewal.body.important_date?.id))?.text === "Insurance renewal (home)"
+         && dateItems.get(String(form.body.important_date?.id))?.status === "dropped" && dateItems.get(String(form.body.important_date?.id))?.text === "Ada's school form",
+    `sync_open_items opens the item of a date written past the operations, none for a past one, moves a changed title onto its item, and leaves a dropped item as it was dropped (${JSON.stringify(sync.body)} | ${live} live)`);
+  const again = await c("sync_open_items", {}, { door: "mcp" });
+  assert(again.status === 200 && again.body.opened === 0 && again.body.updated === 0 && again.body.unchanged === sync.body.opened + sync.body.updated + sync.body.unchanged && JSON.stringify(again.body.failed) === "[]",
+    `…run again, it opens and moves nothing (${JSON.stringify(again.body)})`);
 }
 
 // ── Shared by the plugins' sections ──────────────────────────────────────────
@@ -514,10 +554,10 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
   const names = (r: Called, field = "tasks") => ((r.body[field] ?? []) as { name: string }[]).map((t) => t.name).join();
   const scopes = scopesOf(P);
-  assert(JSON.stringify(scopes) === JSON.stringify({ add_maintenance_task: "write", list_maintenance_tasks: "read", log_maintenance: "write", get_upcoming_maintenance: "read", search_maintenance_history: "read" }),
-    `its five operations' scopes: the three reads read, the add and the log write (${JSON.stringify(scopes)})`);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_maintenance_task: "write", list_maintenance_tasks: "read", log_maintenance: "write", get_upcoming_maintenance: "read", search_maintenance_history: "read", sync_open_items: "write" }),
+    `its six operations' scopes: the three reads read, the add, the log and the items' sync write (${JSON.stringify(scopes)})`);
   const hints = await hintsOf(P);
-  assert(Object.keys(hints).length === 5 && Object.entries(hints).every(([k, h]) => h === (scopes[k] === "read" ? READ_HINT : ADDS_HINT)), `its hints, all five (${JSON.stringify(hints).slice(0, 200)})`);
+  assert(Object.keys(hints).length === 6 && Object.entries(hints).every(([k, h]) => h === (k === "sync_open_items" ? SYNC_HINT : scopes[k] === "read" ? READ_HINT : ADDS_HINT)), `its hints, all six (${JSON.stringify(hints).slice(0, 200)})`);
 
   // Tasks: recurring with a date, one-time undated, one-time years out, recurring with no date (due frequency_days on),
   // one overdue, and an urgent one due the same day as the high one.
@@ -682,6 +722,39 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   await c("add_maintenance_task", { name: "Paint 50% of the fence", category: "exterior" });
   assert(names(await c("list_maintenance_tasks", { query: "50%" })) === "Paint 50% of the fence" && names(await c("list_maintenance_tasks", { query: "_" })) === "" && names(await c("list_maintenance_tasks", { category: "_" })) === "",
     "a %, or an _ in a query or a category, matches itself, not any text");
+  // Open items (SMD-3665 PR 3b): each task is a proposed item for its row, due at its next_due; a log moves a
+  // recurring task's due day on and settles a one-time task's item done.
+  let taskItems = await itemsOf(P);
+  const hvacItem = taskItems.get(ids.hvac), gutterItem = taskItems.get(ids.gutter);
+  const hvacLog = await rest("GET", `/v1/items/${hvacItem?.id}`, undefined, KEYS.writer);
+  const hvacEvents = ((hvacLog.body.events ?? []) as { event: string; dueAt: string | null }[]).map((e) => `${e.event}@${e.dueAt?.slice(0, 10)}`);
+  assert(hvac.body.item?.status === "proposed" && hvac.body.item?.id === hvacItem?.id && hvacItem?.text === "HVAC filter replacement" && hvacItem?.openedBy.name === "writer"
+         && dueOn(hvacItem, await dayFromToday(80)) && hvacItem?.status === "proposed" && gutter.body.item?.status === "proposed" && filter.body.item?.status === "proposed"
+         && JSON.stringify(hvacEvents) === JSON.stringify([`opened@${await dayFromToday(20)}`, `updated@${await dayFromToday(80)}`]) && logged.body.item?.id === hvacItem?.id,
+    `a task opens a proposed item for its row, due at its next_due, opened by the caller; its log moves the due day on once, an older log not at all (${JSON.stringify(hvacEvents)} | ${JSON.stringify(hvacItem).slice(0, 160)})`);
+  assert(once.body.item?.status === "done" && gutterItem?.status === "done" && gutterItem?.dueAt === null && roofDone.body.item?.status === "done" && dueOn(taskItems.get(String(roof.body.task?.id)), await dayFromToday(5 * 365)),
+    `…a one-time task logged settles its item done, keeping the due day it had (${JSON.stringify([once.body.item, gutterItem?.status, taskItems.get(String(roof.body.task?.id))?.dueAt])})`);
+  // The sync: a task written past the operations gets its item; a done one with none gets none; a renamed task moves
+  // its item's text; a one-time task done past the log settles its live item; a dropped item stays as it was dropped.
+  const [{ id: directTask }] = (await sql`INSERT INTO plugin_home_maintenance.maintenance_tasks (name, frequency_days, next_due) VALUES ('Direct task', 14, ${await dayFromToday(3)}::date) RETURNING id::text`) as { id: string }[];
+  const [{ id: directDone }] = (await sql`INSERT INTO plugin_home_maintenance.maintenance_tasks (name, last_completed) VALUES ('Direct done task', ${await dayFromToday(-3)}::date) RETURNING id::text`) as { id: string }[];
+  const sweep = String((await c("add_maintenance_task", { name: "Chimney sweep" })).body.task?.id);
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET last_completed = ${await dayFromToday(-1)}::date WHERE id = ${sweep}::uuid`;
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET name = 'Dryer vent and lint trap' WHERE id = ${String(fromYesterday.body.task?.id)}::uuid`;
+  const filterItem = taskItems.get(ids.filter);
+  const droppedTask = await rest("POST", `/v1/items/${filterItem?.id}/status`, { status: "dropped", reason: "a fridge filter now" }, KEYS.writer);
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET next_due = ${await dayFromToday(44)}::date WHERE id = ${ids.filter}::uuid`;
+  const synced = await c("sync_open_items", {});
+  taskItems = await itemsOf(P);
+  assert(synced.status === 200 && droppedTask.status === 200 && synced.body.opened === 1 && synced.body.updated === 1 && synced.body.settled === 1 && JSON.stringify(synced.body.failed) === "[]" && synced.body.items_truncated === false
+         && taskItems.get(directTask)?.status === "proposed" && dueOn(taskItems.get(directTask), await dayFromToday(3)) && !taskItems.has(directDone)
+         && taskItems.get(String(fromYesterday.body.task?.id))?.text === "Dryer vent and lint trap" && taskItems.get(sweep)?.status === "done"
+         && taskItems.get(ids.filter)?.status === "dropped" && dueOn(taskItems.get(ids.filter), await dayFromToday(30)),
+    `sync_open_items opens a task's item written past the operations, none for a done task with none, moves a renamed task's text, settles a done one-time task's live item, and leaves a dropped item as it was (${JSON.stringify(synced.body)})`);
+  const resynced = await c("sync_open_items", {}, { door: "mcp" });
+  assert(resynced.status === 200 && resynced.body.opened === 0 && resynced.body.updated === 0 && resynced.body.settled === 0 && JSON.stringify(resynced.body.failed) === "[]",
+    `…run again, it opens, moves and settles nothing (${JSON.stringify(resynced.body)})`);
+
   // Two logs at once, forced to race: a row lock held around both (FOR NO KEY UPDATE, which the logs' foreign-key
   // checks pass) stops each at its UPDATE after its statement has taken its snapshot, the newer queued first. Released,
   // one commits and the other's UPDATE, which waited on it, re-reads the row. Either way the task must keep the newer

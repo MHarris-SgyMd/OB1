@@ -11,11 +11,12 @@ Two tables of its own, in the schema `plugin_home_maintenance`, made by `migrati
 
 | Operation | MCP tool | REST route | Scope | Input | Output |
 |---|---|---|---|---|---|
-| Add a maintenance task | `home_maintenance_add_maintenance_task` | `POST /v1/plugins/home-maintenance/tasks` | `write` | `name`; `category`, `frequency_days` (1 to 3650), `next_due`, `priority` (default medium), `notes`, `today` optional | `{ task }` |
+| Add a maintenance task | `home_maintenance_add_maintenance_task` | `POST /v1/plugins/home-maintenance/tasks` | `write` | `name`; `category`, `frequency_days` (1 to 3650), `next_due`, `priority` (default medium), `notes`, `today` optional | `{ task, item }` |
 | The maintenance tasks | `home_maintenance_list_maintenance_tasks` | `GET /v1/plugins/home-maintenance/tasks` | `read` | `query`, `category`, `today` optional; `include_done` (default false); `limit`, 1 to 500, default 100 | `{ tasks, truncated }` |
-| Log maintenance done | `home_maintenance_log_maintenance` | `POST /v1/plugins/home-maintenance/logs` | `write` | `task_id`, `completed_on`; `performed_by`, `cost`, `notes`, `next_action`, `today` optional | `{ log, task }` |
+| Log maintenance done | `home_maintenance_log_maintenance` | `POST /v1/plugins/home-maintenance/logs` | `write` | `task_id`, `completed_on`; `performed_by`, `cost`, `notes`, `next_action`, `today` optional | `{ log, task, item }` |
 | Upcoming maintenance | `home_maintenance_get_upcoming_maintenance` | `GET /v1/plugins/home-maintenance/upcoming` | `read` | `days_ahead`, 0 to 366, default 30; `today` optional | `{ today, tasks }` |
 | Search maintenance history | `home_maintenance_search_maintenance_history` | `GET /v1/plugins/home-maintenance/history` | `read` | `task_id`, `task_name`, `category`, `date_from`, `date_to` optional; `limit`, 1 to 200, default 50 | `{ logs, count, total_cost, truncated }` |
+| Keep the tasks' open items | `home_maintenance_sync_open_items` | `POST /v1/plugins/home-maintenance/items/sync` | `write` | none | `{ opened, updated, settled, unchanged, failed, items_truncated }` |
 
 - **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. A cost is a number, kept to two decimal places. Text is trimmed and holds no NUL.
 - **Today.** The date in UTC is a day off from the user's for part of each day in most time zones. So:
@@ -42,9 +43,15 @@ Two tables of its own, in the schema `plugin_home_maintenance`, made by `migrati
   - A `date_to` before `date_from`: `422 BAD_DATES`.
   - A `completed_on` more than a day past today in UTC: `422 FUTURE_DATE`.
   - Input out of its form or range: `400`, before anything is stored.
-- **MCP hints.** Every tool is closed-world, a read is read-only, and a write is marked as destroying nothing.
+- **Open items** (SMD-3665 PR 3b). Each task is an open item in the brain, standing for the task's row, so a brain's reads (`list_items`, overdue among them) see it beside every other to-do:
+  - `add_maintenance_task` opens it `proposed`, due at the task's `next_due` (the start of that day in UTC), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped);
+  - `log_maintenance` moves a recurring task's item to its new `next_due`, and settles a one-time task's done, keeping the day it was due;
+  - an item a key settled or dropped is left as it is: a log does not reopen it.
 
-It reaches nothing of the core's: no thought is read or written. The old schema's two triggers, `updated_at` and a task's dates moved on when work is logged, are `log_maintenance`'s own statements now, so no function lives in the plugin's schema.
+  `item` in the answer is `{ id, status }`, or `null` when the brain did not keep it: the task is stored all the same, its item kept after the plugin's own transaction commits. `sync_open_items` keeps every task's at once, the same way: it opens a missing one (a task added before items, or one whose item came back `null`), moves a renamed task's text or a moved due day onto its item, and settles a done one-time task's item still live. A done task with no item gets none. Run it once after turning items on; it is safe to run again. The task's own `priority` does not reach the item yet (SMD-3804).
+- **MCP hints.** Every tool is closed-world, a read is read-only, and a write is marked as destroying nothing; `sync_open_items` is idempotent too.
+
+It reads and writes no thought. It reaches the core through `ctx.call` for its tasks' open items alone. The old schema's two triggers, `updated_at` and a task's dates moved on when work is logged, are `log_maintenance`'s own statements now, so no function lives in the plugin's schema.
 
 **`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02).
 
