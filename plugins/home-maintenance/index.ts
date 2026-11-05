@@ -12,7 +12,7 @@
 // Nothing else of the core's is reached.
 
 import { definePlugin, keepItemPriority, keepRowItem, ok, operation, refuse, RowItemAnswer, z } from "../../server-portable/plugin-sdk.ts";
-import type { PluginSql, RowItem } from "../../server-portable/plugin-sdk.ts";
+import type { PluginContext, PluginSql, RowItem } from "../../server-portable/plugin-sdk.ts";
 
 const PRIORITIES = ["low", "medium", "high", "urgent"] as const;
 /** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
@@ -57,7 +57,7 @@ const taskItem = (t: { id: string; name: string; frequency_days: number | null; 
  * table, the column's default medium unknown unless the caller chose it (002's priority_chosen). On a live item
  * alone: a settled one's priority would say nothing.
  */
-async function keepTaskPriority(ctx: Parameters<typeof keepItemPriority>[0], item: { id: string; status: string } | null, priority: string, chosen: boolean) {
+async function keepTaskPriority(ctx: Pick<PluginContext, "call">, item: { id: string; status: string } | null, priority: string, chosen: boolean) {
   if (!item || (item.status !== "proposed" && item.status !== "open")) return null;
   return keepItemPriority(ctx, item.id, { scale: "home-maintenance", value: priority, chosen });
 }
@@ -115,19 +115,20 @@ export default definePlugin({
       },
       output: { task: Task, item: RowItemAnswer.describe("The task's open item in the brain, proposed until a write key confirms it; null when the brain did not keep it, which sync_open_items repairs") },
       async handler(ctx, t) {
+        const chosen = t.priority !== undefined;
         const [row] = await ctx.db.tx(async (sql) => {
           const [{ id }] = await sql<{ id: string }>`
             INSERT INTO maintenance_tasks (name, category, frequency_days, next_due, priority, priority_chosen, notes)
             VALUES (${t.name}, ${t.category ?? null}, ${t.frequency_days ?? null}::int,
                     coalesce(${t.next_due ?? null}::date, coalesce(${t.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date) + ${t.frequency_days ?? null}::int),
-                    ${t.priority ?? "medium"}, ${t.priority !== undefined}, ${t.notes ?? null})
+                    ${t.priority ?? "medium"}, ${chosen}, ${t.notes ?? null})
             RETURNING id`;
           return sql<Answer<z.input<typeof Task>>>`
             SELECT answer || jsonb_build_object('days_until', next_due - coalesce(${t.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date)) AS answer
               FROM task_rows WHERE id = ${id}`;
         });
         const { item } = await keepRowItem(ctx, taskItem(row.answer));
-        await keepTaskPriority(ctx, item, row.answer.priority, t.priority !== undefined);
+        await keepTaskPriority(ctx, item, row.answer.priority, chosen);
         return ok({ task: row.answer, item });
       },
     }),
