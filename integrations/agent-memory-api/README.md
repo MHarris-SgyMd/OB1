@@ -27,7 +27,7 @@ This API exposes the v1 OB1 Agent Memory contract. OpenClaw is the first launch 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - [`schemas/agent-memory`](../../schemas/agent-memory/) applied
 - [Bun](https://bun.sh) installed, and a checkout of this repository (the API runs under Bun, Step 2)
-- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` in the server's environment — `name:scope:sha256` entries, minted as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope, but a recall under a `read` key stores no trace and returns `request_id: null`, so usage reporting needs a `write` key end to end.
+- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` in the server's environment — `name:scope:sha256` entries, minted as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope, but a recall under a `read` key stores no trace and returns `request_id: null`, so usage reporting needs a `write` key end to end.
 
 ## Credential Tracker
 
@@ -57,7 +57,7 @@ Apply [`schemas/agent-memory/schema.sql`](../../schemas/agent-memory/schema.sql)
 
 ![Step 2](https://img.shields.io/badge/Step_2-Run_the_API-1E88E5?style=for-the-badge)
 
-This API runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server — its two embeds were servable since change 77, and it waited on the deploy story). It imports the access-key module from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's). From a checkout of this repository:
+This API runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server — its two embeds were servable since change 77, and it waited on the deploy story). It imports the access-key module from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's). From a checkout of this repository:
 
 ```bash
 (cd integrations && bun install)   # once: the pinned hono and zod the server imports

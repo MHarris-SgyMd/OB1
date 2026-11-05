@@ -58,7 +58,7 @@ import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey, listenOn } from "./_shared/auth.ts";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, secondLoopback, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, RETIRED_V1_MCP, secondLoopback, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -139,7 +139,7 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
 // reads may call; a package.json of the server's own folder for a new npm package, with a
 // `bun install --frozen-lockfile` step for that folder in each brain-checks.yml job that runs
-// this suite (this directory's install is the MCP stack alone, held below); a TEXT_ONLY entry for a file
+// this suite (this directory's install is the stack alone, held below); a TEXT_ONLY entry for a file
 // that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
@@ -815,22 +815,21 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// One MCP stack per install (the recurring defect this fork guards against is a
-// value defined twice): what this directory installs is what the vendored servers
-// run under here and what `bun <file>` resolves for them (SMD-1800 —
-// until then each server carried a deno.json import map, held here to this file,
-// and server/deno.json anchored the set). It stays on STACK's v1 stack.
-// server-portable moved to the v2 scoped packages in SMD-2278 (stage 1 of the SDK
-// v2 migration), so during the window it is held to SERVER_STACK while this
-// install is held to STACK; stages 2 and 3 (SMD-2279, SMD-2281) fold the vendored
-// servers onto v2 and the split closes. (The Kubernetes image's install, held here
-// exactly to STACK, retired with it: SMD-2288.)
+// One stack per install (the recurring defect this fork guards against is a value
+// defined twice): what this directory installs is what the vendored servers run
+// under here and what `bun <file>` resolves for them (SMD-1800 — until then each
+// server carried a deno.json import map, held here to this file, and
+// server/deno.json anchored the set). It is STACK, hono and zod: the v1 MCP pair
+// left it with SMD-3747, no vendored server importing an MCP package. The two
+// installs that serve MCP, server-portable's and mcp-server's, are on the v2
+// scoped packages (SMD-2278), held to SERVER_V2_PINS. (The Kubernetes image's
+// install, held here exactly to STACK, retired with it: SMD-2288.)
 // Every pin equal, or this names the package and the two versions.
 {
   const manifest = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
   // The integrations sit under this install, so a `bun add` run in one with no package.json of its own writes here
   // (plain, -d, --optional or --peer, each into its own field), and bun.lock with it, so a frozen install passes. The
-  // install is the MCP stack in devDependencies and nothing else, so anything more fails here rather than land as every
+  // install is the stack in devDependencies and nothing else, so anything more fails here rather than land as every
   // integration's pin; a package the suites themselves come to need is named in this check first.
   const FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "bundleDependencies", "bundledDependencies"];
   const extraIn = (m: Record<string, unknown>) => FIELDS.flatMap((field) => {
@@ -839,17 +838,17 @@ for (const t of TEXT_ONLY) {
     return names.filter((name) => field !== "devDependencies" || !STACK.includes(name)).map((name) => `${field}: ${name}`);
   });
   const extra = extraIn(manifest);
-  assert(extra.length === 0, `integrations/package.json installs the MCP stack in devDependencies and nothing else: a \`bun add\` in an integration folder with no package.json of its own writes here (${extra.join(", ") || "none"})`);
+  assert(extra.length === 0, `integrations/package.json installs the stack in devDependencies and nothing else: a \`bun add\` in an integration folder with no package.json of its own writes here (${extra.join(", ") || "none"})`);
   const passed = [{ dependencies: { hono: "1" } }, { devDependencies: { ms: "1" } }, { optionalDependencies: { ms: "1" } }, { peerDependencies: { ms: "1" } },
     { bundleDependencies: ["ms"] }, { bundledDependencies: ["hono"] }].filter((m) => extraIn(m).length === 0);
   assert(passed.length === 0 && extraIn({ devDependencies: Object.fromEntries(STACK.map((name) => [name, "1"])) }).length === 0,
     `…and the rule reads a package in every dependency field, a stack name outside devDependencies among them, and passes the stack alone (its own probe; passed: ${passed.map((m) => JSON.stringify(m)).join(" | ") || "none"})`);
   const pkg = manifest.devDependencies as Record<string, string>;
   const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));
-  assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `integrations/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
+  assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `integrations/package.json installs the ${STACK.length} packages of the stack, ${STACK.join(" and ")} (${stack.map(([n]) => n).join(", ") || "none"})`);
   // server-portable is on the v2 stack (SMD-2278). It shares hono+zod with the
   // vendored servers — held to this install's versions — pins the v2 MCP packages to
-  // SERVER_V2_PINS (the independent truth while server-portable and mcp-server are the v2 installs), and the
+  // SERVER_V2_PINS (the independent truth for the two installs that serve MCP), and the
   // v1 MCP packages must be gone. It installs packages beside the stack, so its set
   // is a superset (no exact check). The
   // MCP server as a REST client (mcp-server/, SMD-2287) installs the same
@@ -860,13 +859,13 @@ for (const t of TEXT_ONLY) {
     const shared = stack.filter(([name]) => SERVER_STACK.includes(name)); // hono, zod
     const sharedDrift = shared.filter(([name, version]) => deps[name] !== version);
     const v2Drift = Object.entries(SERVER_V2_PINS).filter(([name, version]) => deps[name] !== version);
-    const stale = STACK.filter((name) => !SERVER_STACK.includes(name) && deps[name] !== undefined); // @hono/mcp, @modelcontextprotocol/sdk
+    const stale = RETIRED_V1_MCP.filter((name) => deps[name] !== undefined);
     const detail = [
       ...sharedDrift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`),
       ...v2Drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`),
       ...stale.map((n) => `${n}: still v1, must be gone`),
     ];
-    assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `${file} is on the v2 MCP stack (SMD-2278): hono+zod match integrations, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${STACK.filter((n) => !SERVER_STACK.includes(n)).join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
+    assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `${file} is on the v2 MCP stack (SMD-2278): hono+zod match integrations, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${RETIRED_V1_MCP.join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
   }
 }
 

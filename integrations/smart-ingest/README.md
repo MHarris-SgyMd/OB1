@@ -88,7 +88,7 @@ without human review.
 - **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). (The Pro dashboard's per-item "view thought" link carried that UUID to its thought page from SMD-2128 until that dashboard retired with SMD-3309.)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/))
 
 ### Required RPCs
 
@@ -128,7 +128,7 @@ EMBEDDING (at least one required)
 
 ### 1. Run the server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape), its own `_shared/` helpers and two names from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's): `routable`, the request rebuilt where its URL will not parse (SMD-2595) — its key is still its own compare — and `listenOn`, the one IP address `OB1_LISTEN_HOST` names to listen on, every address unset (SMD-3323). It is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps):
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape), its own `_shared/` helpers and two names from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's): `routable`, the request rebuilt where its URL will not parse (SMD-2595) — its key is still its own compare — and `listenOn`, the one IP address `OB1_LISTEN_HOST` names to listen on, every address unset (SMD-3323). It is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — one HTTP process, as every server here is. From a checkout of this repository ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps):
 
 ```bash
 PORT=8787 \
@@ -138,7 +138,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `integrations/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `integrations/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 

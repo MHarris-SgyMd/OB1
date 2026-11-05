@@ -1,41 +1,26 @@
-# Extension Name
-
-> **Retired until its rewrite (SMD-3747):** every extension is a plugin since SMD-2311, and SMD-3747 deleted what this template relies on: `extensions/package.json`, which its `(cd extensions && bun install)` installs, and the `../_shared/sse.ts` and `../_shared/auth.ts` its spec's server imports, so a server built from it no longer runs. New operations on the brain are a plugin: start from [`plugins/example/`](../../plugins/example/) and [`plugins/README.md`](../../plugins/README.md).
+# Extension N: Extension Name
 
 <!--
 =============================================================================
 TEMPLATE INSTRUCTIONS (for contributors and AI assistants)
 =============================================================================
 
-This template defines the required structure, visual patterns, and formatting
-for all Open Brain extension guides. Follow it exactly.
+An extension is a guide plus a plugin (SMD-2311; this template since
+SMD-3747). The guide, this file, goes to extensions/<name>/README.md with
+metadata.json beside it: it walks a person through turning the plugin on and
+using it, and teaches the concepts. The plugin, the plugin/ directory here,
+goes to plugins/<name>/: the code (index.ts), its tables (migrations/), its
+reference README and its metadata. AGENT_SPEC.md says how the pieces fit.
 
-VISUAL PATTERNS USED IN THIS TEMPLATE:
-  1. shields.io BADGES for every step and sub-step
-  2. Collapsible <details> blocks for SQL and long code
-  3. GitHub alert callouts: [!CAUTION], [!WARNING], [!TIP], [!IMPORTANT], [!NOTE]
-  4. "Done when" verification checkpoints after every step
-  5. Numbered commands within steps when there are 2+ commands in sequence
-
-BADGE FORMAT:
-  Main steps use:
-    ![Step N](https://img.shields.io/badge/Step_N-TITLE_HERE-HEX_COLOR?style=for-the-badge)
-  Sub-steps use INVERTED colors (color on left, grey on right):
-    ![N.X](https://img.shields.io/badge/N.X-TITLE_HERE-555?style=for-the-badge&labelColor=HEX_COLOR)
-
-  Replace HEX_COLOR with one consistent color for the whole extension.
-  Use underscores for spaces in badge titles: "Create_Tables" not "Create Tables"
-
-COLOR REFERENCE (pick one per extension, or reuse from this list):
-  E53935 (red)  |  F4511E (orange-red)  |  FB8C00 (orange)
-  43A047 (green)  |  00897B (teal)  |  1E88E5 (blue)
-  5C6BC0 (indigo)  |  8E24AA (purple)  |  D81B60 (pink)
+Extensions are curated: discuss a new one with the maintainers first
+(extensions/README.md, "Contributing").
 
 REPLACE all instances of:
-  - "Extension Name" with your extension's name
-  - "extension-name" with your extension's slug (lowercase, hyphenated)
-  - "HEX_COLOR" with your chosen badge color
-  - "table_name" / "table_name_2" with your actual table names
+  - "Extension Name" with the extension's name
+  - "extension-name" with its slug (lower-case words joined by hyphens), the
+    plugin's directory and OB1_PLUGINS name
+  - "extension_name" with the tool prefix: the slug, hyphens as underscores
+  - "N" with its place in the learning path
 
 DELETE this comment block before submitting your PR.
 =============================================================================
@@ -43,197 +28,123 @@ DELETE this comment block before submitting your PR.
 
 ## Why This Matters
 
-Lead with the human pain point. What real-life scenario makes this extension worth building? Use specific, relatable examples — not tech specs.
+Lead with the human pain point. What real-life moment makes this worth building? Use specific, relatable examples, not tech specs.
+
+## Learning Path: Extension N of 6
+
+| Extension | Name | Status |
+|-----------|------|--------|
+| 1 | [Household Knowledge Base](../household-knowledge/) | |
+| 2 | [Home Maintenance Tracker](../home-maintenance/) | |
+| 3 | [Family Calendar](../family-calendar/) | |
+| 4 | [Meal Planning & Recipes](../meal-planning/) | |
+| 5 | [Professional CRM](../professional-crm/) | |
+| 6 | [Job Hunt Pipeline](../job-hunt/) | |
+
+> Mark this extension's row in bold with **<-- You are here**.
 
 ## What It Does
 
-1-2 sentences on the practical capability this adds to your Open Brain.
+One or two sentences on what this adds to the brain.
 
-## Learning Path: Extension X of 6
+On this fork the extension is a **plugin**: [`plugins/extension-name`](../../plugins/extension-name/). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_extension_name`, which the brain's migrator makes when you turn the plugin on.
 
-| Extension | What You Build | Status |
-| --------- | -------------- | ------ |
-| 1. [Household Knowledge Base](../household-knowledge/) | Home facts your agent can recall | |
-| 2. [Home Maintenance Tracker](../home-maintenance/) | Scheduling and history for home upkeep | |
-| 3. [Family Calendar](../family-calendar/) | Multi-person schedule coordination | |
-| 4. [Meal Planning](../meal-planning/) | Recipes, meal plans, grocery lists | |
-| 5. [Professional CRM](../professional-crm/) | Contact tracking with interaction history | |
-| 6. [Job Hunt Pipeline](../job-hunt/) | Application tracking and interview pipeline | |
+**Tables:**
+- `entries`: what each row holds
 
-> Mark your current extension with **<-- You are here**
+**Tools** (each also a REST route under `/v1/plugins/extension-name/`):
+- `extension_name_add_entry`: when an agent uses it
+- `extension_name_search_entries`: when an agent uses it
+- `extension_name_get_entry`: when an agent uses it
+
+The plugin's [README](../../plugins/extension-name/README.md) gives each one's input, output and refusals.
 
 ## What You'll Learn
 
 - Concept or technique 1
 - Concept or technique 2
-- Concept or technique 3
+- How a brain's plugin serves tools behind the brain's own keys
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
-- List any earlier extensions that must be completed first
-- List any required primitives with links
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Any earlier extensions this one builds on
 
-## Credential Tracker
+## Steps
 
-Copy this block into a text editor and fill it in as you go.
+### 1. Turn on the Plugin
 
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-```text
-EXTENSION NAME -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-GENERATED DURING SETUP
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
+```
+OB1_PLUGINS=extension-name
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
 ```
 
----
+Names are comma-separated: keep the plugins already turned on in the list.
 
-![Step 1](https://img.shields.io/badge/Step_1-Create_the_Database_Tables-HEX_COLOR?style=for-the-badge)
-
-<!-- If this step has multiple parts (e.g., create tables, then create functions,
-     then set permissions), break them into sub-steps with inverted badges. -->
-
-![1.1](https://img.shields.io/badge/1.1-Create_the_Tables-555?style=for-the-badge&labelColor=HEX_COLOR)
-
-Run `schema.sql` against your Open Brain database — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, or paste it into the SQL client you use. It needs nothing first — no `auth.*` stub, no Supabase role (SMD-1810; check 12 refuses both in any `.sql`):
-
-<details>
-<summary>📋 <strong>SQL: Extension tables</strong> (click to expand)</summary>
-
-```sql
--- Paste your schema.sql content here
--- Keep each logical group (tables, indexes, functions, triggers) in its own sub-step
-```
-
-</details>
-
-![1.2](https://img.shields.io/badge/1.2-Grant_Table_Permissions-555?style=for-the-badge&labelColor=HEX_COLOR)
-
-New query → paste and Run:
-
-<!--
-IMPORTANT: Every extension MUST say how a role other than the tables' owner is granted them.
-The --grant group the extensions used, ROLE_GRANTS.extensions, retired when they became plugins
-(SMD-2311; SMD-3747 rewrites this template); these hand lines are what is left. Replace table_name and table_name_2 with your actual table names.
--->
-
-<details>
-<summary>📋 <strong>SQL: Grant the server's role access</strong> (click to expand)</summary>
-
-```sql
-grant select, insert, update, delete on table public.table_name to your_role;
-grant select, insert, update, delete on table public.table_name_2 to your_role;
-```
-
-</details>
-
-> [!IMPORTANT]
-> This step is required unless the server connects as the table owner. Nothing grants the connecting role anything by default (`db/README.md`, "Grants for a capturing role"). Without this, your MCP server will return "permission denied" errors. The extensions in this tree are plugins since SMD-2311, their tables made under each plugin's own role; the `ROLE_GRANTS.extensions` group they used is retired.
-
-![1.3](https://img.shields.io/badge/1.3-Verify-555?style=for-the-badge&labelColor=HEX_COLOR)
-
-✅ **Done when:** `\d table_name` in psql shows your new tables with the expected columns.
-
----
-
-![Step 2](https://img.shields.io/badge/Step_2-Run_the_MCP_Server-HEX_COLOR?style=for-the-badge)
-
-Run the server under [Bun](https://bun.sh) from a checkout of this repository — one HTTP process, as every server here is (SMD-1799; [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it, `compat/supabase-sql/README.md` §3 has the shim):
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun extensions/extension-name/index.ts
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-`SUPABASE_URL` is a `postgres://` connection string (the SQL shim keeps the variable names; `SUPABASE_SERVICE_ROLE_KEY` may be left unset). Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS`. Your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=<your-key>` (behind TLS on any host that is not your own).
+The migrator makes the plugin's tables, and the servers start with its tools.
 
-✅ **Done when:** Bun prints its start line (`Started development server: http://localhost:8787`, or `Started server:` under `NODE_ENV=production`) and the process stays up.
+### 2. Check Your AI Sees It
 
----
+Your MCP client lists the `extension_name_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the tools that read. A write key sees them all.
 
-![Step 3](https://img.shields.io/badge/Step_3-Connect_to_Your_AI-HEX_COLOR?style=for-the-badge)
+### 3. Test It
 
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
+Try these prompts, each one exercising a tool:
 
-| Setting | Value |
-|---------|-------|
-| Connector name | `Extension Name` |
-| URL | Your **MCP Connection URL** from the credential tracker |
+```
+A prompt that adds something
+```
 
-✅ **Done when:** Your AI client shows the extension's tools in its available tools list.
+```
+A prompt that finds it again
+```
 
----
-
-![Step 4](https://img.shields.io/badge/Step_4-Test_It-HEX_COLOR?style=for-the-badge)
-
-<!-- Provide 2-3 specific prompts the user can paste into their AI to verify
-     each tool works. Use a numbered list so they test in order. -->
-
-Try these prompts in your AI client:
-
-1. **Test prompt 1** — describe what this tests and what the user should see
-2. **Test prompt 2** — describe what this tests and what the user should see
-3. **Test prompt 3** — describe what this tests and what the user should see
-
-> [!CAUTION]
-> If any prompt returns an error, read the server's terminal output (a failed tool call logs its cause there) before troubleshooting further.
-
-✅ **Done when:** All test prompts return expected results and `select * from table_name` shows the rows.
-
----
+```
+A prompt that asks for one in full
+```
 
 ## Cross-Extension Integration
 
-<!-- Describe how this extension connects to others. What tools bridge between
-     this extension and the rest of the Open Brain ecosystem? Be specific about
-     which tools call which, and give example prompts that trigger cross-extension
-     behavior. This is the proof that extensions compound. -->
-
-Describe how this extension connects to others. What tools bridge between this extension and the rest of the Open Brain ecosystem? This is the proof that extensions compound.
+How this extension connects to the others: which patterns it reuses or introduces, and which of its tools another extension's prompts reach. This is the proof that extensions compound.
 
 ## Expected Outcome
 
-<!-- Be specific. What tables exist? What tools are available? What can the user
-     ask their AI to do that they couldn't before? -->
+After completing this extension, you should be able to:
 
-What should be working when you're done? Be specific.
+1. What a person can now do
+2. What a person can now ask
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/extension-name/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-<!-- Include at least 2-3 issues specific to this extension. Format each as a
-     bold error message followed by a bullet-point fix. -->
+**No `extension_name_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `extension-name`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
 
-**"permission denied for table table_name"**
-- You skipped Step 1.2. Go back and run the `GRANT` SQL.
-
-**"relation 'table_name' does not exist"**
-- The schema SQL wasn't run successfully — re-run it against the database `SUPABASE_URL` names.
+**A second issue a person is likely to meet**
+- Its fix
 
 ## Next Steps
 
-Link to the next extension in the learning path and briefly describe what it adds.
+**Extension N+1: Its Name**: what it adds, in a sentence or two.
 
-> **Tool hygiene:** This extension adds MCP tools to your AI's context window. As you build more extensions, the total tool count grows — and with it, the context cost and risk of your AI picking the wrong tool. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on auditing, merging, and scoping your tools.
+[Continue to Extension N+1 →](../next-extension/README.md)
+
+> **As you add extensions**, each one adds tool definitions to your AI's context window. It's worth thinking about which plugins you keep turned on. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies.
 
 <!--
-REQUIRED: Every extension that exposes MCP tools must include a link to
-docs/05-tool-audit.md somewhere in its README. The automated review checks
-for this. The blockquote above is the recommended format — adjust the wording
-to fit your extension's context, but keep the link.
+REQUIRED: every extension links docs/05-tool-audit.md in its README; the
+automated review checks for it. Keep the link when you reword the blockquote.
 -->

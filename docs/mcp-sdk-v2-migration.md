@@ -110,7 +110,8 @@ is green.
    three:** SMD-1931 retired `enhanced-mcp`, `delete-thought-mcp` and
    `update-thought-mcp`. **Done for all five (2026-10-22):** SMD-2920 retired
    `ob-graph` and `work-operating-model-activation`, so no server in this
-   stage remains to migrate.
+   stage remains to migrate, and SMD-3747 dropped the v1 pair from that
+   install (in `integrations/` since).
 3. **The self-pinned outliers.** `integrations/kubernetes-deployment`, which
    vendored its own pinned SDK + `@hono/mcp`, retired with compose-only
    (SMD-2288) rather than migrate. `recipes/vercel-neon-telegram` is already on the v1
@@ -138,8 +139,8 @@ servers, 20 SDK importers. The swap per site:
 | `ListToolsRequestSchema` from `.../sdk/.../types.js` | the same name is exported from `@modelcontextprotocol/server` |
 | client `Client` + `StreamableHTTPClientTransport` from `.../sdk/client/*` | `@modelcontextprotocol/client` |
 
-Pin sites to touch: `server-portable/package.json`, `integrations/package.json`
-(lockstep), `evals/package.json` (client only),
+Pin sites to touch: `server-portable/package.json` (and `mcp-server/package.json`,
+in lockstep), `evals/package.json` (client only),
 `recipes/vercel-neon-telegram/package.json`, and their `bun.lock` files
 (`integrations/kubernetes-deployment`'s retired: SMD-2288). The transitive tree shrinks: v1 pulled `express`, `raw-body`,
 `cors`, `@hono/node-server`, `ajv`, `@cfworker/json-schema` (unused on the

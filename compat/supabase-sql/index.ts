@@ -302,7 +302,7 @@ function shapeSql(rel: string): string {
   return `(SELECT c.oid::text || ':' || c.relnatts || ':' || md5(coalesce((SELECT string_agg(a.atttypid::text || '.' || a.atttypmod, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), '')) FROM pg_class c WHERE c.oid = ${rel})`;
 }
 
-/** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
+/** One store per connection URL: a server may create a client per request (the extension servers did), and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
 
 /**
