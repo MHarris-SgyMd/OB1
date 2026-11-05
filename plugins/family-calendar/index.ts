@@ -3,10 +3,15 @@
 // the plugin's own (migrations/001_family_calendar.sql). Ported from the
 // standalone server extensions/family-calendar/index.ts, its six tools kept
 // as six operations under the same names, and a seventh, list_family_members,
-// so an agent can find a member's id. It reaches nothing of the core's.
+// so an agent can find a member's id. A one-time date to remember still to
+// come — a deadline — is an open item in the brain (SMD-3665 PR 3b), kept
+// through the core as the caller (keepRowItem): proposed when it is added, due
+// that day, its member its owner, and sync_open_items keeps every such date's
+// at once. Birthdays, anniversaries and activities stay the calendar's alone
+// (the maintainer, 2026-11-04). Nothing else of the core's is reached.
 
-import { definePlugin, ok, operation, refuse, z } from "../../server-portable/plugin-sdk.ts";
-import type { PluginSql } from "../../server-portable/plugin-sdk.ts";
+import { definePlugin, keepRowItem, ok, operation, refuse, RowItemAnswer, z } from "../../server-portable/plugin-sdk.ts";
+import type { PluginSql, RowItem } from "../../server-portable/plugin-sdk.ts";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const;
 /** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
@@ -42,6 +47,14 @@ const ADDS = { destructiveHint: false, openWorldHint: false } as const;
 
 /** A row's answer as the migration's views build it (activity_rows, important_date_rows): one jsonb object, the shape the output declares. */
 type Answer<T> = { answer: T };
+
+/**
+ * A one-time date as the open item it stands for: its title, due that day, its member (by name) the owner. A whole
+ * family's date names no owner, so one a key gave its item is kept (review pass 1: a sync cleared it).
+ */
+const dateItem = (d: { id: string; title: string; date_value: string; family_member: { name: string } | null }): RowItem => ({
+  row: d.id, text: d.title, due: d.date_value, ...(d.family_member ? { owner: d.family_member.name } : {}),
+});
 
 /** Whether a member is there: an activity or a date may name only one that is, and a read filters by one that is. */
 async function memberExists(sql: PluginSql, id: string): Promise<boolean> {
@@ -231,7 +244,7 @@ export default definePlugin({
     }),
     add_important_date: operation({
       title: "Add a date to remember",
-      description: "Adds a date to remember. A birthday or an anniversary needs recurring_yearly true: it then comes round each year on its month and day, whatever year date_value is given in (29 February on the 28th in other years). A one-time date (a deadline) before today is kept but never listed by get_upcoming_dates: the answer's next_date is null then. reminder_days_before is how far ahead it is flagged, 7 unless given. A member that is not there is refused (NO_SUCH_MEMBER).",
+      description: "Adds a date to remember. A birthday or an anniversary needs recurring_yearly true: it then comes round each year on its month and day, whatever year date_value is given in (29 February on the 28th in other years). A one-time date (a deadline) before today is kept but never listed by get_upcoming_dates: the answer's next_date is null then. reminder_days_before is how far ahead it is flagged, 7 unless given. A one-time date still to come is an open item in the brain too, answered as item: proposed, due that day, its member its owner, until a write key confirms it (set_item_status). A member that is not there is refused (NO_SUCH_MEMBER).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -245,7 +258,7 @@ export default definePlugin({
         notes: text(5000).nullish().describe("Anything else worth keeping"),
         today: TodayInput,
       },
-      output: { important_date: AddedDate },
+      output: { important_date: AddedDate, item: RowItemAnswer.describe("A one-time date's open item in the brain, proposed until a write key confirms it; null for a yearly date or a one-time date already past, which have none, or when the brain did not keep it (sync_open_items repairs that)") },
       async handler(ctx, d) {
         const memberId = d.family_member_id ?? null;
         const row = await ctx.db.tx(async (sql) => {
@@ -271,7 +284,9 @@ export default definePlugin({
           return full;
         });
         if (!row) return noSuchMember(memberId);
-        return ok({ important_date: row.answer });
+        const date = row.answer;
+        const item = !date.recurring_yearly && date.next_date !== null ? (await keepRowItem(ctx, dateItem(date))).item : null;
+        return ok({ important_date: date, item });
       },
     }),
     get_upcoming_dates: operation({
@@ -310,6 +325,34 @@ export default definePlugin({
           return { today, rows };
         });
         return ok({ today, dates: rows.map((r) => r.answer) });
+      },
+    }),
+    sync_open_items: operation({
+      title: "Keep the dates' open items",
+      description: "Keeps the open item of every one-time date from today on, as add_important_date does: opens the item of a date that has none (proposed), and moves an item's text, due day or owner to its date's. A yearly date has no item, and a one-time date already past is left as it is: its item, if it has one, stays for a key to settle. An item a key dropped or settled is left so. Safe to run again; run it once after turning on items (SMD-3665), and after an add whose item came back null. Answers how many items it opened, updated and left unchanged, and each date whose item the brain refused with its code.",
+      scope: "write",
+      annotations: { ...ADDS, idempotentHint: true },
+      method: "POST",
+      path: "/items/sync",
+      input: { today: TodayInput },
+      output: {
+        opened: z.number().int(), updated: z.number().int(), unchanged: z.number().int(),
+        failed: z.array(z.object({ important_date_id: z.string(), code: z.string() })),
+      },
+      async handler(ctx, { today }) {
+        const dates = await ctx.db.tx((sql) => sql<Answer<z.input<typeof ImportantDate>>>`
+          SELECT answer FROM important_date_rows
+           WHERE NOT recurring_yearly AND (answer->>'date_value')::date >= coalesce(${today ?? null}::date, (now() AT TIME ZONE 'UTC')::date)
+           ORDER BY (answer->>'date_value')::date, id`);
+        const tally = { opened: 0, updated: 0, unchanged: 0 };
+        const failed: { important_date_id: string; code: string }[] = [];
+        for (const { answer: d } of dates) {
+          const kept = await keepRowItem(ctx, dateItem(d));
+          if (kept.did === "failed") failed.push({ important_date_id: d.id, code: kept.code });
+          // A date is never done and never comes round, so its item is neither settled nor reopened here.
+          else if (kept.did !== "settled" && kept.did !== "reopened") tally[kept.did]++;
+        }
+        return ok({ ...tally, failed });
       },
     }),
   },

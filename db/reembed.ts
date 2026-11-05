@@ -489,7 +489,8 @@ import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-st
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits } from "../server-portable/model-call.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, callWaitsFor, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
@@ -810,6 +811,12 @@ export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed"
  * as the CLI's stack dump always showed; run()'s own client is closed first.
  */
 export async function run(opts: ReembedOptions): Promise<number> {
+  // Its model calls labelled with the pass, for the model-call seam's hook (SMD-3379 PR 2a).
+  return asPass("reembed", () => runPass(opts));
+}
+
+/** run's body, inside its pass's label. */
+async function runPass(opts: ReembedOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
   /** A refusal of the options themselves: said, reported as the start's `usage`, 2 (extract-entities.ts's). */
   const usage = (line: string): number => {
@@ -2272,7 +2279,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           } else {
             inCall.begin(workerId);
             try {
-              outcome = await processRow(row, workerId);
+              // A wait for a slot on the model-call seam is not the call's time (review pass 3).
+              outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => processRow(row, workerId));
               // An aborted call is no answer from the provider (review pass 2).
               if (outcome.outcome !== "setBack") probed = true;
             } catch (e) {

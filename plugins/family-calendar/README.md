@@ -17,8 +17,9 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
 | Schedule an activity | `family_calendar_add_activity` | `POST /v1/plugins/family-calendar/activities` | `write` | `title`; `family_member_id`, `activity_type`, `day_of_week`, `start_time`, `end_time`, `start_date`, `end_date`, `location`, `notes` optional | `{ activity }` |
 | The week's schedule | `family_calendar_get_week_schedule` | `GET /v1/plugins/family-calendar/week` | `read` | `week_start`; `family_member_id` optional | `{ week_start, week_end, activities }`, each with `on_date` |
 | Search activities | `family_calendar_search_activities` | `GET /v1/plugins/family-calendar/activities` | `read` | `query`, `activity_type`, `family_member_id` optional; `limit`, 1 to 200, default 50 | `{ activities, truncated }` |
-| Add a date to remember | `family_calendar_add_important_date` | `POST /v1/plugins/family-calendar/dates` | `write` | `title`, `date_value`; `family_member_id`, `recurring_yearly` (default false), `reminder_days_before` (0 to 365, default 7), `notes`, `today` optional | `{ important_date }`, with `next_date` |
+| Add a date to remember | `family_calendar_add_important_date` | `POST /v1/plugins/family-calendar/dates` | `write` | `title`, `date_value`; `family_member_id`, `recurring_yearly` (default false), `reminder_days_before` (0 to 365, default 7), `notes`, `today` optional | `{ important_date, item }`, with `next_date` |
 | Upcoming dates | `family_calendar_get_upcoming_dates` | `GET /v1/plugins/family-calendar/dates` | `read` | `days_ahead`, 0 to 366, default 30; `today` optional | `{ today, dates }` |
+| Keep the dates' open items | `family_calendar_sync_open_items` | `POST /v1/plugins/family-calendar/items/sync` | `write` | `today` optional | `{ opened, updated, unchanged, failed }` |
 
 - **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and times `HH:MM` on the 24-hour clock, both in and out. `day_of_week` is a lower-case day name (`monday`). Text is trimmed and holds no NUL.
 - **Activities.**
@@ -42,9 +43,12 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
   - A `family_member_id` that names no member, on an add or a filter: `404 NO_SUCH_MEMBER`, saying where the ids are.
   - An `end_date` before the `start_date`: `422 BAD_DATES`.
   - A date, time, day, id or number out of its form or range: `400`, before anything is stored.
-- **MCP hints.** Every tool is closed-world, a read is read-only, and an add is marked as destroying nothing.
+- **Open items** (SMD-3665 PR 3b). A one-time date still to come, a deadline, is an open item in the brain, standing for the date's row, so a brain's reads (`list_items`, overdue among them) see it beside every other to-do. Birthdays, anniversaries and activities have none (the maintainer, 2026-11-04).
+  - `add_important_date` opens it `proposed`, due that day (the start of it in UTC), its member's name its `owner` (a whole family's names none, so one a key gives its item is kept), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped). `item` in the answer is `{ id, status }`, or `null` for a yearly date, a one-time date already past, or when the brain did not keep it: the date is stored all the same.
+  - `sync_open_items` keeps the item of every one-time date from today on (the user's, given as `today`): it opens a missing one (a date added before items, or one whose item came back `null`) and moves a changed title, day or member onto its item. A date already past is left as it is, its item, if any, kept for a key to settle. An item a key settled or dropped is left as it is. Run it once after turning items on; it is safe to run again.
+- **MCP hints.** Every tool is closed-world, a read is read-only, and an add is marked as destroying nothing; `sync_open_items` is idempotent too.
 
-It reaches nothing of the core's: no thought is read or written.
+It reads and writes no thought. It reaches the core through `ctx.call` for its deadlines' open items alone.
 
 **`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row. The column waits for a multi-user change that may never come (decided 2026-11-02).
 

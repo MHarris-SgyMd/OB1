@@ -31,6 +31,7 @@
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
+import { modelCall } from "./model-call.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
 /**
@@ -767,6 +768,14 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     const gate = mayLeaveBox({ kind: "judge", actor, metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
     if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
   }
+  // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it: the request, a retry without
+  // logprobs, and the answer's read, as one call.
+  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, purpose: "judge", ...(signal ? { signal } : {}) },
+    () => judgeExchange(older, newer, cfg, signal, opts));
+}
+
+/** judgePair's exchange, once the seam lets it run: the request (again without logprobs where refused), the answer read and parsed. */
+async function judgeExchange(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal: AbortSignal | undefined, opts: JudgeOptions): Promise<Judgement> {
   const endpoint = `${cfg.chat.base} ${cfg.judgeModel}`;
   const logprobs = opts.logprobs && !refusesLogprobs.has(endpoint) ? opts.logprobs : undefined;
   let r = await judgeRequest(older, newer, cfg, signal, logprobs);

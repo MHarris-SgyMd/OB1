@@ -74,6 +74,7 @@
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
+import { modelCall } from "./model-call.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens, type Chunk } from "./chunk.ts";
 import { extractOutputBudget } from "../db/config.mjs";
 
@@ -890,7 +891,14 @@ export function extractionKey(model: string): string {
  * malformed answer — visible, retryable — not at the context's end. `stop`
  * aborts the call as the deadline does, a streamed answer's read included.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}, stop?: AbortSignal): Promise<Extraction & { runaway: boolean }> {
+function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}, stop?: AbortSignal): Promise<Extraction & { runaway: boolean }> {
+  // Through the model-call seam (SMD-3379 PR 2a): the request and its streamed read, the deadline started inside.
+  return modelCall({ type: "chat", model: second.model ?? cfg.metadataModel, base: cfg.chat.base, purpose: "extraction", ...(stop ? { signal: stop } : {}) },
+    () => extractExchange(text, cfg, timeoutMs, part, w, second, stop));
+}
+
+/** extractOnce's exchange, once the seam lets it run: the request, the answer read (streamed or whole) and parsed. */
+async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string }, stop?: AbortSignal): Promise<Extraction & { runaway: boolean }> {
   // Named by the windowing, not positional booleans (second review pass).
   const { outputBudget: budget, streamAbort: stream } = w;
   // The retry dials the escalation model when given (SMD-2000), the metadata
