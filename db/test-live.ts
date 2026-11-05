@@ -4884,6 +4884,8 @@ if (want("10")) {
    */
   let downUntil = 0;
   let down: "503" | "404" | "408" | "hang" = "503";
+  /** A 408's words: a gateway's, which classifyError reads as a deadline and the follower as an answer (SMD-3311 review pass 2). */
+  let body408 = "litellm.Timeout: Request timed out.";
   let probes = 0;
   /** While set, a call that arrives while another is in flight answers 429, as a provider's concurrency limit does; the one in flight takes 600 ms (SMD-3311). Probes are exempt. */
   let limitConcurrent = false;
@@ -4910,7 +4912,7 @@ if (want("10")) {
       if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
-        if (down === "408") return new Response(JSON.stringify({ error: { message: "request timeout" } }), { status: 408 });
+        if (down === "408") return new Response(JSON.stringify({ error: { message: body408 } }), { status: 408 });
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
           : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -5674,7 +5676,7 @@ if (want("10")) {
       assert(waited && done408 && !settled && !lines.some((l) => /refuses the request itself/.test(l)),
              `a 408 mid-pass is the provider's outage: paused for, waited out, the thought extracted after — not the request's, every worker stopped and exit 2 (waited ${waited}, done ${done408}, settled ${settled})`);
 
-      // The same with no race (review pass 1, run-it: which worker drew the concurrency 429 after a probe answered was
+      // The same with no race (review pass 1, mutant: which worker drew the concurrency 429 after a probe answered was
       // a race, and a call site that kept the suspect passed the rows above half the time): one thought, eight 429s —
       // the call and its three pauses, twice — so its second outage comes right after the probe answered. No suspect:
       // extracted after the second outage, not failed as its own.
@@ -5859,7 +5861,7 @@ if (want("10")) {
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
   // The answer budget refused (a 400 naming max_tokens) is the request's under --follow too, read through followerFault
   // with extract's maxTokensFatal: the follower ends refused, exit 2, nothing failed — not each thought's length, the pool
-  // failed a row at a time while it runs on (SMD-3311 review pass 1, run-it: no row held the option). Stopped at 20 s if not.
+  // failed a row at a time while it runs on (SMD-3311 review pass 1, mutant: no row held the option). Stopped at 20 s if not.
   const budgetNote = await seed("A note whose answer budget the provider refuses while followed.");
   refuseBudget = 1;
   const budgetAc = new AbortController();
@@ -5872,6 +5874,31 @@ if (want("10")) {
   assert(budgetCode === 2 && budgetRow !== "failed" && budgetLines.some((l) => /refuses the request itself \(Extraction request to [^)]*400 [^)]*max_tokens/.test(l)),
          `a follower whose provider refuses the answer budget ends refused, exit 2, the thought not failed (exit ${budgetCode}, ${budgetRow})`);
   await sql`SELECT delete_thought(${budgetNote}::uuid, NULL::jsonb)`;
+  // A run without --follow keeps classifyError's rules: a 408 is the request's, exit 2, nothing failed — followerFault is
+  // the followers' alone (SMD-3311 review pass 2, mutant: no row held the one-shot side). The pauses cut, so a run that
+  // reads it as the provider's ends within seconds, exit 1.
+  {
+    const restorePauses = shortenPauses();
+    const oneShot408 = await seed("A note a one-shot run meets a 408 on.");
+    const oneShot408Lines: string[] = [];
+    let oneShot408Code = -1;
+    try {
+      // A plain 408, whose words classifyError does not read as a deadline: the gateway's would be the thought's, both before and after.
+      body408 = "request timeout";
+      down = "408";
+      downUntil = Date.now() + 60_000;
+      oneShot408Code = await runExtract({ url: URL_!, env, workers: 1, writer: { out: (l) => oneShot408Lines.push(l), err: (l) => oneShot408Lines.push(l) } });
+    } finally {
+      downUntil = 0;
+      down = "503";
+      body408 = "litellm.Timeout: Request timed out.";
+      restorePauses();
+    }
+    const oneShot408Row = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${oneShot408}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+    assert(oneShot408Code === 2 && oneShot408Row !== "failed" && oneShot408Lines.some((l) => /refused the request itself/.test(l)),
+           `a run without --follow still reads a 408 as the request's: exit 2, the thought not failed (exit ${oneShot408Code}, ${oneShot408Row})`);
+    await sql`SELECT delete_thought(${oneShot408}::uuid, NULL::jsonb)`;
+  }
   // A following pass that throws (here its Writer, on the pass's own counts
   // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
   const thrownNote = await seed("A note whose pass throws while followed.");
@@ -14910,7 +14937,7 @@ if (want("16")) {
       // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599).
       if (judgeOutage.down(isProbe)) {
         if (judgeDown === "hang") return neverAnswers();
-        return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "request timeout" } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+        return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "litellm.Timeout: Request timed out." } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       // A follower's one-token probe, answered apart: no judge call counted.
       if (isProbe) {

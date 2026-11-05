@@ -1740,8 +1740,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The pass's caller aborted it (abortInHand): the worker sets the thought back.
         if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
-        // else is the provider's and is classified by the caller.
-        if (timedOut(e)) {
+        // else is the provider's and is classified by the caller. Under --follow
+        // a deadline is one with no answer: an answer whose words say "timed out"
+        // (a gateway's 408 "Request timed out") is the caller's to read through
+        // followerFault, as extract's is (SMD-3311 review pass 2).
+        if (timedOut(e) && !(FOLLOW && typeof (e as { status?: unknown }).status === "number")) {
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.

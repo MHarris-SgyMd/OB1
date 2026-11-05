@@ -427,9 +427,10 @@ export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {
   const kind = classifyError(e, opts);
   // An answer's status outranks classifyError's "timed out" in its words: a 408 whose body says
   // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
-  // decides (review pass 1). A deadline with no status keeps "thought", which the probe decides.
+  // decides (review pass 1), and so is a 429 or a 503 saying so, backpressure, no suspect (review
+  // pass 2). A deadline with no status keeps "thought", which the probe decides.
   const answered = typeof (e as { status?: unknown } | undefined)?.status === "number";
-  const outage = verdict === "maybe-poison" && (kind === "fatal" || (kind === "thought" && answered));
+  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answered && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
   return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
 }
 
