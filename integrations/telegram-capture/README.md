@@ -25,7 +25,7 @@ Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sen
 - A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)'s stack, or any Postgres carrying the schema)
 - A Telegram account (the bot is free)
 - An [OpenRouter](https://openrouter.ai) API key
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - Shell access with `curl` and `openssl`
 
 **Cost**: Telegram is free. OpenRouter embedding + classification is the same as slack-capture, roughly **$0.10–0.30/month** for 20 captures per day.
@@ -377,7 +377,7 @@ OPENROUTER_API_KEY='sk-or-v1-your-openrouter-key' \
 bun integrations/telegram-capture/index.ts
 ```
 
-Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
+Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
 
 Your capture URL will look like:
 

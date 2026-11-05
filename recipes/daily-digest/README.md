@@ -108,7 +108,7 @@ Solution: Verify your Gmail MCP connector is working. Try `gmail_create_draft` m
 
 ## Approach B: Scheduled Server (Planned)
 
-A fully self-contained approach: one HTTP server under Bun, on the shape every server here has ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)), fired by cron — or by `pg_cron` + `pg_net` where your Postgres has them — with an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
+A fully self-contained approach: one HTTP server under Bun, on the shape every server here has ([Run a Vendored Server](../../primitives/deploy-remote-mcp/)), fired by cron — or by `pg_cron` + `pg_net` where your Postgres has them — with an email service (Resend or SendGrid) for true automated delivery without Claude running. This approach is not yet implemented — contributions welcome.
 
 ### Prerequisites (planned)
 
