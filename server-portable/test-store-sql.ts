@@ -16,7 +16,7 @@
 import { SqlStore } from "./store-sql.ts";
 import { createHash } from "node:crypto";
 import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
-import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
+import { HUNG_MARK, MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore, ListCursorRefused, normaliseTicketStatusInputs } from "./store.ts";
 import { SQL } from "bun";
 
@@ -579,10 +579,11 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     const A = "extract:action-model@p2";
     const B = "extract:action-model@p1";
 
-    // ── retryFailed: pool A has 2 failed + 1 succeeded + 1 pending; pool B has 1 failed.
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES
-      (${ids[0]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3),
-      (${ids[1]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3)`;
+    // ── retryFailed: pool A has 2 failed + 1 succeeded + 1 pending; pool B has 1 failed. A's first failed row dated 30
+    // days ahead, as db/sleep.ts dates a stopped extraction thought (SMD-3008), its second in the past.
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count, enqueued_at) VALUES
+      (${ids[0]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days'),
+      (${ids[1]}::uuid, ${A}, 'failed', 'w1', now(), 'boom', 3, '2000-01-01 00:00:00+00')`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at) VALUES (${ids[2]}::uuid, ${A}, 'succeeded', 'w1', now())`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[3]}::uuid, ${A}, 'pending')`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count) VALUES (${ids[4]}::uuid, ${B}, 'failed', 'w1', now(), 'boom', 3)`;
@@ -593,6 +594,23 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     const aRows = await raw`SELECT thought_id::text AS id, status, last_error, finished_at, attempt_count FROM thought_work_claims WHERE work_type = ${A}`;
     const aReset = (aRows as Record<string, unknown>[]).filter((r) => r.id === ids[0] || r.id === ids[1]);
     assert(aReset.length === 2 && aReset.every((r) => r.status === "pending" && r.last_error === null && r.finished_at === null && Number(r.attempt_count) === 0), `A's failed rows are pending with error/finish/attempt reset (${JSON.stringify(aReset)})`);
+    const aDated = (await raw`SELECT thought_id::text AS id, enqueued_at <= now() AS due, enqueued_at = '2000-01-01 00:00:00+00'::timestamptz AS kept FROM thought_work_claims WHERE work_type = ${A}`) as { id: string; due: boolean; kept: boolean }[];
+    assert(aDated.find((r) => r.id === ids[0])?.due === false && aDated.find((r) => r.id === ids[1])?.kept === true,
+      `extraction's forward date kept, as its own retry keeps it, and an earlier date kept (SMD-3306 PR 6b-1's review pass 8: ${JSON.stringify(aDated)})`);
+    // …and a subject pool's failure dated ahead made the pool's head, a second before its claim pending, no later than
+    // now, its standing hang marks cleared (SMD-3306 PR 6b-1's review passes 7 and 8, run-it and cold read: dated now,
+    // it came after a capture pooled before the retry, asked in its place; and the retry cleared no mark).
+    const S = "subjects:r1.1:p2r";
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count, enqueued_at) VALUES
+      (${ids[5]}::uuid, ${S}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[6]}::uuid, ${S}, 'pending')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, last_error, enqueued_at) VALUES (${ids[7]}::uuid, ${S}, 'pending', ${`${HUNG_MARK}a hang the case marks`}, now() + interval '30 days')`;
+    const rfS = await store.retryFailed(S);
+    const [sAfter] = (await raw`SELECT (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${S} AND thought_id = ${ids[5]}::uuid)
+                                        < (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${S} AND thought_id = ${ids[6]}::uuid) AS first,
+                                      (SELECT last_error FROM thought_work_claims WHERE work_type = ${S} AND thought_id = ${ids[7]}::uuid) AS mark`) as { first: boolean; mark: string | null }[];
+    assert(rfS.retried === 1 && sAfter.first === true && sAfter.mark === null,
+      `a subject pool's failure dated ahead is made its head, ahead of its claim pending, and its standing hang mark cleared (${JSON.stringify({ rfS, sAfter })})`);
     const bStill = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${B} AND thought_id = ${ids[4]}::uuid`;
     assert(bStill.length === 1 && bStill[0].status === "failed", "a sibling pool's failed row is untouched — retryFailed is scoped to its work_type");
     const aSucc = await raw`SELECT status FROM thought_work_claims WHERE work_type = ${A} AND thought_id = ${ids[2]}::uuid`;
@@ -600,6 +618,32 @@ console.log("\n[5f] retryFailed and releaseStaleLeases — the write half of wor
     // Idempotent: nothing failed now, so a second call moves nothing.
     const rf2 = await store.retryFailed(A);
     assert(rf2.retried === 0 && rf2.ids.length === 0, "retryFailed on a pool with no failures reports 0");
+    // A subject pool's forward date retried goes no later than now, every claim pending in the pool dated ahead or none
+    // pending, and a second before its own pool's first claim pending, another pool's older one not read, a failure
+    // dated in the past keeping its place ahead of it (SMD-3306 PR 6b-1's review pass 8, mutant: without the LEAST it
+    // stayed ahead, or went null with no claim pending; without its pool the read dated it before the older failure).
+    const SC = "subjects:r1.1:c", SD = "subjects:r1.1:d", SE = "subjects:r1.1:e", SG = "subjects:r1.1:g";
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count, enqueued_at) VALUES
+      (${ids[5]}::uuid, ${SC}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days'),
+      (${ids[7]}::uuid, ${SD}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, enqueued_at) VALUES (${ids[6]}::uuid, ${SC}, 'pending', now() + interval '60 days')`;
+    const leastThrew: string[] = [];
+    for (const pool of [SC, SD]) await store.retryFailed(pool).catch((e) => { leastThrew.push(String((e as Error)?.message ?? e).slice(0, 100)); });
+    const leastDue = (await raw`SELECT work_type AS pool, status, enqueued_at <= now() AS due FROM thought_work_claims WHERE (work_type = ${SC} AND thought_id = ${ids[5]}::uuid) OR (work_type = ${SD} AND thought_id = ${ids[7]}::uuid) ORDER BY work_type`) as { pool: string; status: string; due: boolean }[];
+    assert(leastThrew.length === 0 && leastDue.length === 2 && leastDue.every((r) => r.status === "pending" && r.due === true),
+      `a subject pool's forward date retried goes no later than now, every claim pending ahead or none pending (threw ${leastThrew.join("; ")}; ${JSON.stringify(leastDue)})`);
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error, attempt_count, enqueued_at) VALUES
+      (${ids[0]}::uuid, ${SE}, 'failed', 'w1', now(), 'boom', 3, now() + interval '30 days'),
+      (${ids[1]}::uuid, ${SE}, 'failed', 'w1', now(), 'boom', 3, now() - interval '1 hour')`;
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, enqueued_at) VALUES (${ids[2]}::uuid, ${SE}, 'pending', now() - interval '30 minutes'), (${ids[3]}::uuid, ${SG}, 'pending', now() - interval '2 hours')`;
+    await store.retryFailed(SE);
+    const [{ gap: ownGap, past_first: ownOrder }] = (await raw`
+      SELECT EXTRACT(EPOCH FROM (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${SE} AND thought_id = ${ids[2]}::uuid)
+                             - (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${SE} AND thought_id = ${ids[0]}::uuid))::float8 AS gap,
+             (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${SE} AND thought_id = ${ids[1]}::uuid)
+           < (SELECT enqueued_at FROM thought_work_claims WHERE work_type = ${SE} AND thought_id = ${ids[0]}::uuid) AS past_first`) as { gap: number; past_first: boolean }[];
+    assert(Math.abs(ownGap - 1) < 0.001 && ownOrder === true,
+      `a subject pool's forward date goes a second before its own pool's first claim pending, another pool's not read (gap ${ownGap} s; the past-dated failure first ${ownOrder})`);
 
     // ── releaseStaleLeases: A has 1 stale (w-dead, attempt 2) + 1 live (w-live); B has 1 stale (w-dead-b).
     await raw`DELETE FROM thought_work_claims`;
