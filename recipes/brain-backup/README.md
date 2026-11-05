@@ -48,7 +48,7 @@ Export the Open Brain tables to local JSON files. The script pages each table th
 After running the script you will have a `backup/` directory containing dated JSON exports of every table the script knows that is present in your brain.
 
 - `thoughts` is always backed up (required).
-- Optional companion tables — `entities`, `edges`, `thought_entities`, `ingestion_jobs`, `ingestion_items` — are backed up only if they exist. They ship with the companion schemas: `schemas/entity-extraction` for the first three (on a fork brain `thought_entities` is migration 016's, and is exported as it is) and `schemas/smart-ingest` for the last two. A brain without them will see `skipped (table not present)` for those, which is expected.
+- Optional companion tables — `entities`, `edges`, `thought_entities`, `ingestion_jobs`, `ingestion_items` — are backed up only if they exist. They ship with the companion schemas: `schemas/entity-extraction` for the first three (on a migrated brain `thought_entities` is migration 016's, and is exported as it is) and `schemas/smart-ingest` for the last two. A brain without them will see `skipped (table not present)` for those, which is expected.
 
 The console output shows row counts and file sizes for each table, making it easy to verify the backup is complete.
 

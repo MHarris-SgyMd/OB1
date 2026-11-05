@@ -413,10 +413,11 @@ export type RoleGrant = { table?: string; view?: string; sequence?: string; func
 /** The groups ROLE_GRANTS is keyed by. */
 export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "jobs" | "pages" | "claims" | "closedclaims" | "priority" | "items" | "community" | "recipes";
 /**
- * Privileges Daemonic Brain's SECURITY INVOKER functions need to run as their caller,
- * grouped by the role that needs each group — tables for the migrations' own
- * groups; tables, sequences and functions for the community schemas'. The
- * single spelling read by preflight's `write privileges` check, `migrate.ts
+ * Privileges Daemonic Brain's SECURITY INVOKER functions need to run as their
+ * caller, grouped by the role that needs each group — tables for the
+ * migrations' own groups; tables, sequences and functions for the community
+ * schemas'. The single spelling read by preflight's `write privileges` check,
+ * `migrate.ts
  * --grant`, and db/README.md.
  */
 export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;

@@ -8,8 +8,8 @@
  * (half the bytes) and binary-quantised vectors (a thirty-second), and the
  * published results are build times and footprints cut by large factors with
  * a rerank of the candidates on the full vectors restoring recall. Nothing in
- * Daemonic Brain had measured either, and the random 64-dimensional bench cannot
- * answer a recall question. This harness does, on the real vectors this
+ * Daemonic Brain had measured either, and the random 64-dimensional bench
+ * cannot answer a recall question. This harness does, on the real vectors this
  * machine has at the shipped width: a LongMemEval corpus loaded by
  * eval-longmemeval.ts, whose whole vectors and windows are exactly what
  * `match_thoughts`' two candidate CTEs scan.

@@ -32,8 +32,8 @@
  * One LLM call per thought — per window of a thought over the extraction
  * window, so a 13,000-character thought is four or five smaller calls rather
  * than one that never ends (SMD-1879) — recurring: every new capture is extracted too. On
- * Daemonic Brain's default — Ollama, `qwen2.5:7b` — that is compute and latency on
- * your own machine and nothing leaves it. Pointed at a hosted provider it is
+ * Daemonic Brain's default — Ollama, `qwen2.5:7b` — that is compute and latency
+ * on your own machine and nothing leaves it. Pointed at a hosted provider it is
  * money, per thought, for ever, and the content of every thought goes to that
  * provider rather than only the ones someone searches for. FORK.md change 30
  * has the measured wall clock for a full pass.

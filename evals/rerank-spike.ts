@@ -7,7 +7,8 @@
  * 99.2% / 95.3%). What, if anything, reorders the close-behind gold into the
  * top five?
  *
- * The answer this harness records: nothing available in Daemonic Brain's local stack.
+ * The answer this harness records: nothing available in Daemonic Brain's local
+ * stack.
  *   - fan-in width (1301): a wider vector scan does NOT change the returned five.
  *     Calling the shipped hybrid at match_count = 5..100 and taking the first 5
  *     is invariant with N — at recency_weight 0 the vector arm is ranked by

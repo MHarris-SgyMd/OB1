@@ -17,7 +17,8 @@ RLS is the foundation that makes multi-user and shared-access extensions possibl
 
 ## Prerequisites
 
-- A Postgres with at least one table created — Daemonic Brain's stack, or a Supabase project
+- A Postgres with at least one table created — Daemonic Brain's stack, or a
+  Supabase project
 - Basic understanding of SQL and PostgreSQL
 - Familiarity with Supabase authentication (users have UUIDs via `auth.uid()`)
 

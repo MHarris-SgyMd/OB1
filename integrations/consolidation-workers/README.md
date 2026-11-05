@@ -203,7 +203,7 @@ Solution: Ensure the knowledge graph schema is applied. The `consolidation_log` 
 ```
 consolidation-workers/
   _shared/           # Shared config and helpers (as in upstream's enhanced-mcp)
-    auth.ts          # Access keys — a copy of server-portable/auth.ts (Daemonic Brain)
+    auth.ts          # Access keys — a copy of server-portable/auth.ts
     config.ts        # Constants, models, prompt, patterns
     helpers.ts       # Type coercion, embedding, metadata extraction
   bio/

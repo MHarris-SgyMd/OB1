@@ -35,11 +35,12 @@
 name: open-brain
 
 # The one place the Ollama image is named: the model server and the pull job
-# below run the same image, so a bump is one edit (Daemonic Brain's recurring defect
-# is a value defined twice). Pinned to a release, not `:latest`, for the reason
-# postgres is: a floating tag moves under a working deployment. The release job
-# resolves this tag to a digest and writes `ollama/ollama@sha256:…` into the
-# release's compose overlay (SMD-1860; deploy/README.md, "Pinning a release").
+# below run the same image, so a bump is one edit (Daemonic Brain's recurring
+# defect is a value defined twice). Pinned to a release, not `:latest`, for the
+# reason postgres is: a floating tag moves under a working deployment. The
+# release job resolves this tag to a digest and writes `ollama/ollama@sha256:…`
+# into the release's compose overlay (SMD-1860; deploy/README.md, "Pinning a
+# release").
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
 
 # Every service's log, bounded (SMD-1849): the json-file driver, rotated at

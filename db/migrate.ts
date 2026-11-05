@@ -619,8 +619,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // — so every file carries one and two files may not share it: `021.sql`
     // would sort before `021_…` and run at its number, and a second 021_*.sql
     // sorting first would run before the one it collides with. The rule is
-    // config.mjs's, shared with the consistency checker, which refuses where the
-    // collision is made.
+    // config.mjs's, shared with the consistency checker, which refuses where
+    // the collision is made.
     const problem = migrationNameProblem(names);
     if (problem) {
       err(problem);

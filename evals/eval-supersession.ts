@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 /**
  * eval-supersession.ts — does EXCLUDING a superseded thought from retrieval help,
- * on the kind of relevance task Daemonic Brain measures against? (Linear SMD-1253.)
+ * on the kind of relevance task Daemonic Brain measures against? (Linear
+ * SMD-1253.)
  *
  * Migration 025 records that one thought supersedes another. The ticket asks the
  * question 020's recency blend had to answer before it could ship: a supersedes

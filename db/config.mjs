@@ -246,8 +246,8 @@ export const KNOWN_MODEL_DIMS = {
  * OB1_CHUNK_TOKENS for it, or add the entry once it is measured. Hosted models
  * are deliberately absent (first review pass): a provider's document states
  * the MODEL's maximum input, not what the serving provider behind an
- * OpenRouter route admits, and Daemonic Brain has no key to measure with. A WRONG
- * entry here truncates windows silently, which is the failure the windows
+ * OpenRouter route admits, and Daemonic Brain has no key to measure with. A
+ * WRONG entry here truncates windows silently, which is the failure the windows
  * exist to prevent, so a model that is not measured is not listed — it keeps
  * the fallback, which is exactly what it had.
  */
@@ -346,8 +346,8 @@ export const KNOWN_CHAT_MODEL_WINDOW = {
  *
  * EXTRACT_PROMPT_TOKENS is the rules and the delimiter with an empty thought,
  * as the qwen2.5 tokeniser counts them (`usage.prompt_tokens` 398). The answer
- * grows with the text, but not only with the text: on Daemonic Brain's own brain,
- * 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
+ * grows with the text, but not only with the text: on the maintainer's own
+ * brain, 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
  * estimated input token (25 tokens per entity or edge row, compact JSON) with
  * a 95th percentile of 1.6 — and `qwen3.8:27b`, asked the same of four short,
  * dense notes it then extracted correctly, answered at 3.5 to 9.4 times the
@@ -453,11 +453,11 @@ export const EXTRACT_MIN_WINDOW_TOKENS = 64;
  * The most windows one thought is extracted in, by default — the per-thought
  * cost bound the 8,000-character cut used to be (fifth review pass of
  * SMD-1879). At the default window that is ~29,000 estimated tokens, ~115,000
- * characters. It was sized as four times the longest thought on Daemonic Brain's
- * brain, and a thought over it was recorded failed with the count; ingested
- * documents broke the sizing (8 of 53 thoughts on one pass, 26 to 74 windows),
- * so a thought over it is now extracted over its first windows and recorded
- * succeeded with a caveat naming the coverage (SMD-2240,
+ * characters. It was sized as four times the longest thought on the
+ * maintainer's brain, and a thought over it was recorded failed with the count;
+ * ingested documents broke the sizing (8 of 53 thoughts on one pass, 26 to 74
+ * windows), so a thought over it is now extracted over its first windows and
+ * recorded succeeded with a caveat naming the coverage (SMD-2240,
  * server-portable/entities.ts). OB1_EXTRACT_MAX_WINDOWS overrides it
  * (resolveExtractMaxWindows).
  */
@@ -810,8 +810,8 @@ export function usableChunkContext(context, chunk) {
  * One line, and it still belongs here. The server composes it at capture, the
  * benchmark composes it to measure, and a backfill would compose it again; if
  * any of the three used a different separator the vectors would not be
- * comparable and nothing would say so. Daemonic Brain's recurring defect is a value
- * defined twice.
+ * comparable and nothing would say so. Daemonic Brain's recurring defect is a
+ * value defined twice.
  *
  * An empty or missing context returns the window unchanged, which is what makes
  * a failed blurb degrade to today's behaviour rather than embedding a stray
@@ -825,8 +825,8 @@ export function composeChunkForEmbedding(context, chunk) {
 /**
  * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
  * parameter. Off by default: a silently shortened vector from a model that was not
- * trained for it is precisely the kind of quiet quality loss Daemonic Brain tries to
- * make loud.
+ * trained for it is precisely the kind of quiet quality loss Daemonic Brain tries
+ * to make loud.
  *
  * Turn it on to use a model whose native width exceeds pgvector's 2000-dimension
  * HNSW ceiling. `qwen3-embedding:4b` is 2560 natively and unindexable, but scored
@@ -882,11 +882,12 @@ export function embeddingContract(record) {
  * query, so the one argument for off no longer holds and the default flips with
  * it.
  *
- * The costs did not change, and they are still real. Measured on Daemonic Brain's own
- * corpus (db/bench-trgm.ts): the index does nothing below ~10,000 rows — the
- * planner correctly declines it — nothing at any scale for a common word, and
- * nothing for a pattern under three characters. It costs roughly +70 to +95
- * microseconds on every capture, and about as much storage as the table itself.
+ * The costs did not change, and they are still real. Measured on Daemonic
+ * Brain's own corpus (db/bench-trgm.ts): the index does nothing below ~10,000
+ * rows — the planner correctly declines it — nothing at any scale for a common
+ * word, and nothing for a pattern under three characters. It costs roughly +70
+ * to +95 microseconds on every capture, and about as much storage as the table
+ * itself.
  *
  * So a stock deployment below ~10,000 thoughts now pays that write cost for no
  * read benefit. That is the unflattering half, and it is the reason this stayed
@@ -1008,9 +1009,9 @@ export const CHUNK_CONTEXT = resolveChunkContext(ENV.OB1_CHUNK_CONTEXT);
  * db/test-support.ts and db/test-schema.ts — and until this existed each kept its
  * own pair of hardcoded `.replace()` calls. Two of them would have silently
  * ignored a new variable: a `{{TRGM_INDEX}}` nobody substitutes is not an error
- * in a `.replace()` chain, it is a literal left in the SQL. Daemonic Brain's recurring
- * defect is a value defined twice, and adding a third variable to three copies is
- * how that happens again.
+ * in a `.replace()` chain, it is a literal left in the SQL. Daemonic Brain's
+ * recurring defect is a value defined twice, and adding a third variable to three
+ * copies is how that happens again.
  *
  * @param {{ dim?: number, model?: string, trgm?: boolean, chunkContext?: boolean, backfillLimit?: number | null, routeEstimateMinPages?: number }} overrides
  */
@@ -1367,9 +1368,9 @@ export const ACCEPTED_BY_MODEL_SQL =
 export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
 
 /**
- * Whether Daemonic Brain's schema is in public: migration 001's `thoughts`, a table
- * or a partitioned one, by pg_class so a role's search_path does not hide it.
- * An SQL expression, read as a column (`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS
+ * Whether Daemonic Brain's schema is in public: migration 001's `thoughts`, a
+ * table or a partitioned one, by pg_class so a role's search_path does not hide
+ * it. An SQL expression, read as a column (`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS
  * present`) by migrate.ts's refusal of a plain run over a schema with no
  * ledger and preflight's ledger row, so the two judge one database alike
  * (SMD-3425).
@@ -2374,14 +2375,14 @@ export async function alignVectorSearchPath(sql) {
 }
 
 /**
- * The table privileges Daemonic Brain's SECURITY INVOKER functions need to run as
- * their caller. Every function 010/012/015 declares is SECURITY INVOKER, so the
- * writes they make — chunk rows, audit rows, work claims, entity rows — run as
- * the connecting role, not the definer, and reach beyond `thoughts` since 007.
- * Upstream never hit this: Supabase's `service_role` holds default privileges on
- * the public schema. A self-hosted role set up from the guide's `GRANT … ON
- * thoughts` alone can capture nothing — its first windowed capture fails on
- * `thought_chunks`, and the audit trigger fails on `thought_audit`.
+ * The table privileges Daemonic Brain's SECURITY INVOKER functions need to run
+ * as their caller. Every function 010/012/015 declares is SECURITY INVOKER, so
+ * the writes they make — chunk rows, audit rows, work claims, entity rows — run
+ * as the connecting role, not the definer, and reach beyond `thoughts` since
+ * 007. Upstream never hit this: Supabase's `service_role` holds default
+ * privileges on the public schema. A self-hosted role set up from the guide's
+ * `GRANT … ON thoughts` alone can capture nothing — its first windowed capture
+ * fails on `thought_chunks`, and the audit trigger fails on `thought_audit`.
  *
  * One list, grouped by the role that needs each group, each row naming the
  * migration that introduced the requirement. This is the single spelling:
@@ -3119,12 +3120,12 @@ export function stripSqlComments(text) {
 }
 
 /**
- * What a `.sql` file may not run in Daemonic Brain, each with the reason (SMD-1796).
- * Matched over the whole comment-stripped text, one hit per rule and line, so a
- * statement broken across lines is one hit — string literals included,
- * since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely as the
- * bare statement does — so a header that quotes one of these to explain its
- * absence is not a hit, and a statement is.
+ * What a `.sql` file may not run in Daemonic Brain, each with the reason
+ * (SMD-1796). Matched over the whole comment-stripped text, one hit per rule
+ * and line, so a statement broken across lines is one hit — string literals
+ * included, since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely
+ * as the bare statement does — so a header that quotes one of these to explain
+ * its absence is not a hit, and a statement is.
  */
 export const SUPABASE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "service_role", re: /\bservice_role\b/i,

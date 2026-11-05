@@ -9,18 +9,18 @@
 // boot under any other scheme and skipped when unset — it built the URL from
 // SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
 // database credentials and failed inside its timeout; and it never fired,
-// because upsert_thought answers Daemonic Brain's UUID id, which extractThoughtId
-// read as no id, so every add was reported failed.
-// ob1-fork (SMD-2128): the write path is Daemonic Brain's. Upstream's 2-argument
-// upsert_thought carried the vector inside the payload, where Daemonic Brain's
-// function does not look, so every thought this server wrote landed without a
-// vector, unlabelled, its type and source_type NULL and the other enhanced
-// columns at their defaults — invisible to semantic search. writeThought()
-// below is the 3-argument form every other vendored writer uses (SMD-1228):
-// the vector as p_embedding, its model's label and the actor (SMD-1541) in the
-// envelope, the enhanced columns by an update on a fresh row. The item columns
-// that hold a thought id are uuid (schemas/smart-ingest), so a match is
-// persisted and the written id recorded.
+// because upsert_thought answers Daemonic Brain's UUID id, which
+// extractThoughtId read as no id, so every add was reported failed.
+// ob1-fork (SMD-2128): the write path is Daemonic Brain's. Upstream's
+// 2-argument upsert_thought carried the vector inside the payload, where
+// Daemonic Brain's function does not look, so every thought this server wrote
+// landed without a vector, unlabelled, its type and source_type NULL and the
+// other enhanced columns at their defaults — invisible to semantic search.
+// writeThought() below is the 3-argument form every other vendored writer uses
+// (SMD-1228): the vector as p_embedding, its model's label and the actor
+// (SMD-1541) in the envelope, the enhanced columns by an update on a fresh row.
+// The item columns that hold a thought id are uuid (schemas/smart-ingest), so a
+// match is persisted and the written id recorded.
 /**
  * smart-ingest — the Smart Ingest server.
  *

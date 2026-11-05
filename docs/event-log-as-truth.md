@@ -625,6 +625,6 @@ every write and consolidation deciding the row.
 - `docs/safe-agent-memory-provenance.md` — the provenance vocabulary the
   event's `stance` and `trust` carry
 - SMD-1729 — the claim-log program this record is the explicit form of;
-  SMD-2115, SMD-2116, SMD-2117 — the path; SMD-2118 — Daemonic Brain; SMD-2011,
-  SMD-1725 — valid time; SMD-1723 — forgetting; SMD-1731, SMD-1732 — lineage
-  and the rebuild primitive; SMD-2074 — the first fold
+  SMD-2115, SMD-2116, SMD-2117 — the path; SMD-2118 — the point-in-time fork;
+  SMD-2011, SMD-1725 — valid time; SMD-1723 — forgetting; SMD-1731, SMD-1732 —
+  lineage and the rebuild primitive; SMD-2074 — the first fold

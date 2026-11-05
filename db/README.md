@@ -184,8 +184,8 @@ run, or a paste of the body left, is 030's to take back at its own place — the
 re-run reaches it. Judged before anything runs, in both modes, whenever 021
 will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
 otherwise; 023's call needs one too). A file not named `NNN_name.sql`, or two
-sharing a number, is refused at load, and by the consistency checker on every push; a
-set without 021 is refused at load, since the file is named whole. Every
+sharing a number, is refused at load, and by the consistency checker on every
+push; a set without 021 is refused at load, since the file is named whole. Every
 refusal is collected and reported together, the re-run's included.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
@@ -1037,11 +1037,11 @@ the census and `--status` read the tables — and, with no such row standing,
 warns when the listing is from before 070 (every listing fails there: the
 callers pass the third argument) or 029's two-argument form stands beside it
 (029 re-applied by hand lands it beside, and a call short of three arguments
-is then ambiguous and fails; Daemonic Brain's callers pass three, which resolve). No
-verdict is written at apply time — a rejection is a reviewer's, with a name on
-it — and a `--reject-lineage` sweep is not taken until the flag has been used.
-DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC, as on 029's).
-test-schema [64], test-upgrade [20v], test-live [16];
+is then ambiguous and fails; Daemonic Brain's callers pass three, which
+resolve). No verdict is written at apply time — a rejection is a reviewer's,
+with a name on it — and a `--reject-lineage` sweep is not taken until the flag
+has been used. DDL alone; no row moves; no grant is carried (EXECUTE is PUBLIC,
+as on 029's). test-schema [64], test-upgrade [20v], test-live [16];
 `server-portable/test-preflight.ts` drives the census, the leftover-form and
 the older-body arms; the store and e2e suites read the column.
 
@@ -2062,11 +2062,11 @@ whose key equals it exactly, selected before the order and the cap; NULL every
 pass. 070's three-argument form is dropped first (another argument list is
 another function), and 029's two-argument one with it if a hand re-apply left
 it; a call of two or three arguments — a server or CLI from before the file —
-resolves to the new form through the default. Daemonic Brain's callers pass four,
-always: 029 or 070 re-applied by hand lands its form beside 109's, and a call
-both forms take (under three arguments beside 029's, under four beside 070's)
-is then ambiguous and fails. An older server's preflight and an older CLI's
-`--status` read a brain at 109 as before 070 (they probe 070's signature):
+resolves to the new form through the default. Daemonic Brain's callers pass
+four, always: 029 or 070 re-applied by hand lands its form beside 109's, and a
+call both forms take (under three arguments beside 029's, under four beside
+070's) is then ambiguous and fails. An older server's preflight and an older
+CLI's `--status` read a brain at 109 as before 070 (they probe 070's signature):
 upgrade the server, never re-apply 070. The readers follow: the MCP tool and
 `GET /v1/proposals` take `judge_key` (1–200 of a pass key's own characters,
 `server-portable/pass-key.ts`: letters, digits and `. _ : / @ + -`, so a key
@@ -2109,12 +2109,12 @@ exactly, judged_at to the microsecond, the id) for the next call, and
 plpgsql, for the refusal. 109's four-argument form is dropped first (a RETURNS
 TABLE cannot gain a column), and 070's and 029's with it if a hand re-apply
 left them; a call of two, three or four arguments resolves through the
-defaults. Daemonic Brain's callers pass seven. The readers follow: the MCP tool and
-`GET /v1/proposals` take `after` and answer `cursor` (null once no more follow)
-and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the cursor
-base64url of `["proposals", status, lineage, judge_key, confidence, judged_at,
-id]` so one listing's is refused by the other and one passed with other filters
-is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
+defaults. Daemonic Brain's callers pass seven. The readers follow: the MCP tool
+and `GET /v1/proposals` take `after` and answer `cursor` (null once no more
+follow) and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the
+cursor base64url of `["proposals", status, lineage, judge_key, confidence,
+judged_at, id]` so one listing's is refused by the other and one passed with
+other filters is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
 `consolidate.ts --list <status> --after <cursor>` lists the next page, a capped
 page printing the line to run, its `--list` and `--key` with the cursor
 (`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
@@ -2567,16 +2567,16 @@ the learning path's schemas, retired in 2.0.0 when the six became plugins
 
 ## Grants for a capturing role
 
-Every function Daemonic Brain adds is `SECURITY INVOKER` — the policy migrations 010,
-012 and 015 state, and the default the capture writers in 005/007/008/022/025
-rely on — so the writes they make run as the connecting role, and since migration
-007 they reach past `thoughts`. A role granted `SELECT, INSERT, UPDATE, DELETE ON
-thoughts` and nothing else, as the getting-started guide's grant step gives, can
-capture nothing on a self-hosted brain: its first windowed capture fails on
-`thought_chunks`, and 008's audit trigger fails on `thought_audit` on its very
-first capture of any kind. (Supabase is unaffected — its `service_role` holds
-default privileges on the public schema, which is why the hosted path never hits
-this.)
+Every function Daemonic Brain adds is `SECURITY INVOKER` — the policy migrations
+010, 012 and 015 state, and the default the capture writers in
+005/007/008/022/025 rely on — so the writes they make run as the connecting role,
+and since migration 007 they reach past `thoughts`. A role granted `SELECT,
+INSERT, UPDATE, DELETE ON thoughts` and nothing else, as the getting-started
+guide's grant step gives, can capture nothing on a self-hosted brain: its first
+windowed capture fails on `thought_chunks`, and 008's audit trigger fails on
+`thought_audit` on its very first capture of any kind. (Supabase is unaffected —
+its `service_role` holds default privileges on the public schema, which is why
+the hosted path never hits this.)
 
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
@@ -3271,7 +3271,7 @@ answer budget sized to the text it sends (three times the estimated tokens plus
 and `qwen3.8:27b`), so an answer that will not end is cut in about a minute rather than
 running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
-taxes the repetition the runaways were measured to be: on Daemonic Brain's brain that
+taxes the repetition the runaways were measured to be: on the maintainer's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
 one call could not finish, where windows alone reached 10 to 13. Set
 `OB1_EXTRACT_ESCALATE_MODEL` and a runaway is instead remade once on that larger
@@ -3337,7 +3337,7 @@ thought is extracted in at most `OB1_EXTRACT_MAX_WINDOWS` windows (24 unset,
 call) — ~29,000 estimated tokens of text at the default window, and under
 twice that at most for a thought of more than one window, since `chunk.ts`
 fills a window with whole words and the last may run past the size. The bound
-was sized at four times the longest thought on Daemonic Brain's brain; ingested
+was sized at four times the longest thought on the maintainer's brain; ingested
 documents broke that, and on one pass 8 of 53 thoughts (PDFs and pages of 26
 to 74 windows) were failed before any call with nothing in the graph. A
 thought over it is now extracted over its
@@ -3894,12 +3894,12 @@ the content of every thought goes to the provider rather than only the ones
 someone searches for. **Not suitable for regulated or patient-adjacent
 content** for that reason. `--dry-run` says how many thoughts a run would send
 before it sends any; `--limit` lets you look at twenty before committing to
-thousands. Measured on Daemonic Brain's 441-issue corpus with `qwen2.5:7b` on local
-Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are worth
-about 5% like for like, since a local Ollama mostly serialises — and eleven to
-twenty-one of the longest issues exceeded the per-call timeout on a 7B model,
-varying by pass, until SMD-1879 measured those timeouts as answers that did
-not end and bounded them (above). Two hours for a corpus that size, then per
+thousands. Measured on Daemonic Brain's 441-issue corpus with `qwen2.5:7b` on
+local Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are
+worth about 5% like for like, since a local Ollama mostly serialises — and
+eleven to twenty-one of the longest issues exceeded the per-call timeout on a 7B
+model, varying by pass, until SMD-1879 measured those timeouts as answers that
+did not end and bounded them (above). Two hours for a corpus that size, then per
 capture. Note that `--timeout` above 300 s only took effect from SMD-1879 on:
 Bun's `fetch` cut an unstreamed call at its own 300 s idle timeout whatever the
 flag said; the three worker diallers (`providerCall`, `judgePair`,
@@ -5601,11 +5601,11 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 
 ## The stable tier — a brain rebuilt from the records (SMD-1806)
 
-Daemonic Brain runs a brain on its own memory, so a migration meets real vectors before
-an operator does. That brain — the **stable** tier — holds nothing that is not
-rebuildable from Daemonic Brain's records: FORK.md, the Linear board, the memory files
-and git. It is a *derived view* over the records, never the record itself, so a
-wipe costs one re-ingest, and that re-ingest is two commands:
+Daemonic Brain runs a brain on its own memory, so a migration meets real vectors
+before an operator does. That brain — the **stable** tier — holds nothing that is
+not rebuildable from Daemonic Brain's records: FORK.md, the Linear board, the
+memory files and git. It is a *derived view* over the records, never the record
+itself, so a wipe costs one re-ingest, and that re-ingest is two commands:
 
 ```bash
 # 1. the records → rows (bare: no vectors, no chunks yet)
@@ -5811,8 +5811,8 @@ for a **scope** the operator cleared: `--allow <scope,scope>` or
 `linear:corpus`; a vault: its resolved root path; an item: the `scope` its
 emitter wrote, an export or a workspace), never a prefix and never "the
 whole workspace". The default is nothing; a record refused is counted per source
-and the refusal names the knob that clears it. Daemonic Brain's own records (`fork`,
-`commit`, `memory`) are not external and are not gated.
+and the refusal names the knob that clears it. Daemonic Brain's own records
+(`fork`, `commit`, `memory`) are not external and are not gated.
 
 **The brain reports its tier.** `OB1_TIER` (`stable` | `canary` | `working`,
 default `stable`); the ingester stamps `ob1_config.tier` and `.last_ingest` on
@@ -6114,10 +6114,10 @@ goes on: a heartbeat is reporting, never a reason to stop.
 ## The board in the brain (SMD-1954)
 
 `ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
-rebuild. Daemonic Brain's running brain needs the board **continuously**: a ticket filed
-while a session works should be findable in the next, and one that moves to Done
-should read Done. `sync-linear.ts` is that sweep, and the coordinator's
-`board-sync` pass (`OB1_PASSES`, SMD-3476) runs it on a schedule:
+rebuild. Daemonic Brain's running brain needs the board **continuously**: a
+ticket filed while a session works should be findable in the next, and one that
+moves to Done should read Done. `sync-linear.ts` is that sweep, and the
+coordinator's `board-sync` pass (`OB1_PASSES`, SMD-3476) runs it on a schedule:
 
 ```bash
 bun sync-linear.ts --url postgres://…                # one pass

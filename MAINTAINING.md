@@ -3,7 +3,7 @@
 Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1):
 it began as a fork of that tree at `9543c29` (2026-08-30), and is a project in
 its own right (decided 2026-11-04, SMD-3765). It takes nothing further from
-upstream and keeps no parity. [`FORK.md`](FORK.md) is the record of Daemonic Brain
+upstream and keeps no parity. [`FORK.md`](FORK.md) is the record of the fork
 era: the pin, changes 1–17, the detach and how rebases ran.
 
 This file is for whoever changes the code: the version scheme and what it

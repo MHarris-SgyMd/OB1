@@ -10,8 +10,8 @@
 # the new major dropped is ignored at run time with a warning, not refused.
 # Read the PR's action.yml against every `with:` the workflows pass.
 #
-# Only GitHub Actions. Daemonic Brain's packages are pinned by lockfile and moved
-# deliberately (check 18 holds the type-checked directories to one set of
+# Only GitHub Actions. Daemonic Brain's packages are pinned by lockfile and
+# moved deliberately (check 18 holds the type-checked directories to one set of
 # versions); a bot bumping one directory alone is what that check refuses.
 version: 2
 updates:

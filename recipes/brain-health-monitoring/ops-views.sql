@@ -194,4 +194,5 @@ END$$;
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the eight
 -- ops_* views (SELECT), each issued only once its view exists; a role that
--- owns the tables needs nothing. Row-level security in Daemonic Brain: SMD-1716.
+-- owns the tables needs nothing. Row-level security in Daemonic Brain:
+-- SMD-1716.

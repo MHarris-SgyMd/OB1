@@ -13,7 +13,7 @@ import { hashKey } from "./auth.ts";
  * Tests the REAL server. Not a mirror of it.
  *
  * ── Why that sentence is the whole point ──────────────────────────────────────
- * Upstream's Edge Function build, `server/index.ts` (in Daemonic Brain until
+ * Upstream's Edge Function build, `server/index.ts` (in this tree until
  * SMD-1800), could not be imported by a test runner: it read `Deno.env` at
  * module scope and imported `jsr:@supabase/functions-js/edge-runtime.d.ts`.
  * So the suites next to it reimplemented the server inline and asserted
@@ -21,8 +21,9 @@ import { hashKey } from "./auth.ts";
  *
  * That was not a stylistic choice — it is how upstream's auth assertions came
  * to claim HTTP 401 for three months after PR #243 changed the server to HTTP
- * 200. The copy kept passing. Daemonic Brain's first answer was a drift guard that
- * grepped index.ts as text, which detected the problem but did not remove it.
+ * 200. The copy kept passing. Daemonic Brain's first answer was a drift guard
+ * that grepped index.ts as text, which detected the problem but did not remove
+ * it.
  *
  * This file removes it. Because env is read lazily here, `index.ts` imports
  * cleanly under Bun/Node and every assertion below runs against the same code

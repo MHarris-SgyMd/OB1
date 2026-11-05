@@ -2,7 +2,7 @@
 /**
  * tier.ts — the promotion engine for SMD-1806's three-brain pipeline.
  *
- * SMD-1806 runs Daemonic Brain's own code on Daemonic Brain's own memory as three brains over
+ * SMD-1806 runs Daemonic Brain's own code on its own memory as three brains over
  * one corpus, so a migration meets real vectors before an operator's brain does
  * and every PR's "what moved" is measured rather than written by hand:
  *

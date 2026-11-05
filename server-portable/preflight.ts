@@ -2684,10 +2684,11 @@ if (configFailed) {
               // fails — under three arguments beside 029's, four beside 070's
               // (SMD-3248 review pass 1, measured), five beside 109's (test-schema
               // [98], SMD-3249, measured) — while
-              // Daemonic Brain's callers resolve (SMD-2313's run-it, first review pass: the
-              // arm said the older body answered). 110 drops the older forms. Gated on 063 like the arms above:
-              // a brain before 063 is the older-bodies arm's, and one at
-              // 029..062 the ledger check's (LATEST_MIGRATION), read first.
+              // Daemonic Brain's callers resolve (SMD-2313's run-it, first review
+              // pass: the arm said the older body answered). 110 drops the older
+              // forms. Gated on 063 like the arms above: a brain before 063 is
+              // the older-bodies arm's, and one at 029..062 the ledger check's
+              // (LATEST_MIGRATION), read first.
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${bodies.lists_current !== true && bodies.has_current_form === true && Number(bodies.listing_forms) === 1
                     ? "list_supersession_proposals' seven-argument body is not 110's (written by hand, or re-made without its sentinels): the listings run, but nothing vouches that it flags a lineage pair, selects a pass or pages as 110 does"
@@ -2887,8 +2888,8 @@ if (configFailed) {
          * SILENTLY — a capture that names a source or a supersession is accepted
          * and the provenance dropped — and lacks the read/label functions. A
          * fail, not a warn: the write path accepts input it cannot honour, the
-         * exact silent-and-wrong shape Daemonic Brain removes. (SQL-only, like the
-         * checks around it; the store's label lookup is best-effort so search
+         * exact silent-and-wrong shape Daemonic Brain removes. (SQL-only, like
+         * the checks around it; the store's label lookup is best-effort so search
          * itself survives a pre-025 schema — this check is how the operator
          * learns why the labels never appear.)
          */
@@ -4373,13 +4374,13 @@ if (configFailed) {
 
         /**
          * 001's updated_at trigger, still enabled. 021's backfill holds it off
-         * inside one DO block, so nothing Daemonic Brain ships can leave it off; a
-         * hand DISABLE, or an interrupted statement of the operator's own, can
-         * — and from then on no raw or community UPDATE moves updated_at, so
-         * 009's if_unchanged_since guard and 021's evidence rule degrade
-         * silently. Its own try, before the corpus scan, so a scan that fails
-         * cannot hide it (fourth review pass). Read once per start; the remedy
-         * is one line.
+         * inside one DO block, so nothing Daemonic Brain ships can leave it
+         * off; a hand DISABLE, or an interrupted statement of the operator's
+         * own, can — and from then on no raw or community UPDATE moves
+         * updated_at, so 009's if_unchanged_since guard and 021's evidence rule
+         * degrade silently. Its own try, before the corpus scan, so a scan that
+         * fails cannot hide it (fourth review pass). Read once per start; the
+         * remedy is one line.
          */
         try {
           const trg = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
@@ -4856,7 +4857,7 @@ if (configFailed) {
         const tree = pad3(LATEST_MIGRATION);
         const hi = facts.highestMigration;
         const status = ledgerStatus(hi, LATEST_MIGRATION); // brain_info's rule, one definition
-        // Whether a fork schema is there: public.thoughts (migration 001's
+        // Whether the brain's schema is there: public.thoughts (migration 001's
         // table), by pg_class so a role's search_path does not hide it — the
         // predicate the schema row's off-path probe uses. With one and a ledger
         // that records nothing, or none, it was applied without the migrator,

@@ -11,8 +11,8 @@
  *
  * The prompt is adapted from integrations/entity-extraction-worker, keeping its
  * two good ideas — the untrusted-content delimiter with escaped close tags, and
- * the injection instruction — and changing what Daemonic Brain's schema needs: an
- * `aliases` field the model may fill (recorded, never used to resolve; see
+ * the injection instruction — and changing what Daemonic Brain's schema needs:
+ * an `aliases` field the model may fill (recorded, never used to resolve; see
  * migration 016), a request for the most complete common name, and
  * `depends_on` in the relation vocabulary.
  *
@@ -26,16 +26,16 @@
  *
  * ── Long thoughts are extracted in windows (SMD-1879) ───────────────────────
  * Until SMD-1879 a thought went to the model in ONE call, cut at 8,000
- * characters, with no bound on the answer's length. On Daemonic Brain's own brain 32
- * thoughts — 1,656 to 13,113 characters — timed out at 900 s on `qwen2.5:7b`,
- * every one of them a call the model would not finish: its served context is
- * 32,768 tokens, so nothing was truncated on the way in; the answer was what
- * did not end. Two rules bound both directions now. A thought over the window
- * (`EmbedConfig.extractChunkTokens`, derived from the metadata model's served
- * context by db/config.mjs's `resolveExtractWindow`) is split with chunk.ts
- * into overlapping windows and each window is one call, so the model reads a
- * bounded text; and every call carries `max_tokens` — an output budget sized
- * to the text sent (`extractOutputBudget`) — so an answer that does not
+ * characters, with no bound on the answer's length. On the maintainer's own
+ * brain 32 thoughts — 1,656 to 13,113 characters — timed out at 900 s on
+ * `qwen2.5:7b`, every one of them a call the model would not finish: its served
+ * context is 32,768 tokens, so nothing was truncated on the way in; the answer
+ * was what did not end. Two rules bound both directions now. A thought over the
+ * window (`EmbedConfig.extractChunkTokens`, derived from the metadata model's
+ * served context by db/config.mjs's `resolveExtractWindow`) is split with
+ * chunk.ts into overlapping windows and each window is one call, so the model
+ * reads a bounded text; and every call carries `max_tokens` — an output budget
+ * sized to the text sent (`extractOutputBudget`) — so an answer that does not
  * converge is cut and read as malformed in seconds instead of running to the
  * context's end and the worker's timeout. A window's answers are merged across
  * the thought by (type, lower-cased name) and (relation, from, to), the

@@ -21,7 +21,8 @@ This schema adds sidecar tables that let Open Brain store agent-created operatio
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A Postgres with the core `thoughts` table — Daemonic Brain's stack, or a Supabase project
+- A Postgres with the core `thoughts` table — Daemonic Brain's stack, or a Supabase
+  project
 - The core dedupe setup (`db/migrations/003`–`005`, applied by the core setup) is recommended
 
 ## Credential Tracker

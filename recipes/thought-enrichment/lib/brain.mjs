@@ -57,7 +57,7 @@ export function connect(env) {
   const url = (env.SUPABASE_URL || "").trim();
   if (!url) {
     throw new Error(
-      "SUPABASE_URL must be set — the brain's postgres:// connection string in Daemonic Brain, " +
+      "SUPABASE_URL must be set — the brain's postgres:// connection string, " +
         "in the environment or in .env.local beside the scripts."
     );
   }

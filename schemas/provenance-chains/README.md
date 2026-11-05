@@ -100,8 +100,8 @@ SELECT * FROM public.trace_provenance(
 -- Should return 0 rows on a fresh install (nothing has been marked derived yet).
 -- Note: upstream's helpers are service_role-only, so run these in the Supabase
 -- SQL Editor (which uses the service role) or via an edge function; PostgREST
--- calls as `authenticated` return 42501 permission denied there. In Daemonic Brain
--- the two are 025's and run as the connecting role.
+-- calls as `authenticated` return 42501 permission denied there. In Daemonic
+-- Brain the two are 025's and run as the connecting role.
 SELECT * FROM public.find_derivatives(
   (SELECT id FROM public.thoughts LIMIT 1),
   50
@@ -136,7 +136,7 @@ In Daemonic Brain the two query functions are migrations 025 and 026's and `thou
 If you need to remove everything this migration added, run the block below. The rollback is lossy — any recorded provenance will be permanently dropped.
 
 ```sql
--- Daemonic Brain: trace_provenance and find_derivatives are migrations 025/026's
+-- Daemonic Brain: trace_provenance and find_derivatives are 025/026's
 -- here and are not dropped — nor are the derived_from and supersedes columns,
 -- which 025 owns and upsert_thought writes, nor 025's two indexes on them,
 -- idx_thoughts_derived_from and idx_thoughts_supersedes (SMD-1250).

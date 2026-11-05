@@ -5414,8 +5414,8 @@ console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain
   //
   // The sweep is asked of itself first: five objects of the kinds the drop
   // lists do not cover — a standalone composite type, a partitioned table, an
-  // enum, a domain, a function — are planted beside Daemonic Brain's, and after the
-  // reset each must be seen. A third pass found the first sweep blind to
+  // enum, a domain, a function — are planted beside Daemonic Brain's, and after
+  // the reset each must be seen. A third pass found the first sweep blind to
   // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
   // and its type query excluded every composite, a table's row type and a
   // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
@@ -5453,12 +5453,12 @@ console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain
   assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
     `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside Daemonic Brain's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
-  // A survivor is Daemonic Brain's when some migration names it — then a line is
-  // missing from test-support's lists and this section fails. One no migration
-  // names is another suite's: a run against a kept database meets whatever
-  // the last suite left there (CI's data-layer job gives this suite a fresh
-  // database of its own, SMD-2219). Those are reported in the label and do
-  // not fail the section, which is about the drop lists, not about the
+  // A survivor is Daemonic Brain's when some migration names it — then a line
+  // is missing from test-support's lists and this section fails. One no
+  // migration names is another suite's: a run against a kept database meets
+  // whatever the last suite left there (CI's data-layer job gives this suite a
+  // fresh database of its own, SMD-2219). Those are reported in the label and
+  // do not fail the section, which is about the drop lists, not about the
   // neighbours (fifth review pass).
   const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
   const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));

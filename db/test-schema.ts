@@ -1076,10 +1076,10 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    * These are text searches over the migration files, so they cannot tell a
    * statement from prose ABOUT a statement. Migration 012's header quotes the
    * `GRANT EXECUTE ... TO authenticated, service_role` that upstream's version
-   * ends with, in order to explain why Daemonic Brain does not have it — and that
-   * quotation failed this assertion. A guard that forbids DISCUSSING the thing
-   * it forbids pushes the explanation out of the file, which is the opposite of
-   * what these headers are for.
+   * ends with, in order to explain why Daemonic Brain does not have it — and
+   * that quotation failed this assertion. A guard that forbids DISCUSSING the
+   * thing it forbids pushes the explanation out of the file, which is the
+   * opposite of what these headers are for.
    *
    * Stripping first makes the check strictly sharper, not laxer: it still sees
    * every executable statement, and it stops seeing text that only describes
@@ -1531,8 +1531,8 @@ console.log("\n[15] thought_work_claims: the pool, the lease, the release");
   const pendingIdx = (await db.query<{ def: string }>(`SELECT indexdef AS def FROM pg_indexes WHERE indexname = 'thought_work_claims_pending_idx'`)).rows[0]?.def ?? "";
   assert(/\(work_type, enqueued_at\)/.test(pendingIdx) && /WHERE \(status = 'pending'::text\)/.test(pendingIdx),
          `the claim's index is partial on pending rows and ordered by enqueued_at (${pendingIdx.replace(/^.*USING /, "")})`);
-  // 015 must be Daemonic Brain's shape: no DELETE anywhere, since expiry and clean
-  // shutdown are UPDATEs and the record of a pass is meant to survive.
+  // 015 must be Daemonic Brain's shape: no DELETE anywhere, since expiry and
+  // clean shutdown are UPDATEs and the record of a pass is meant to survive.
   const f015 = files.find((f) => f.startsWith("015"))!;
   const src015 = readFileSync(join(MIGRATIONS, f015), "utf8").replace(/--[^\n]*/g, "");
   // `ON DELETE CASCADE` on the foreign key is a clause, not a statement.
@@ -15613,7 +15613,8 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
 
   // 070 re-applied by hand lands its three-argument form beside 109's: a call
   // passing three is ambiguous (not unique) and fails, four resolve — why
-  // Daemonic Brain's callers pass four, and what preflight names. 109 again drops it.
+  // Daemonic Brain's callers pass four, and what preflight names. 109 again
+  // drops it.
   await reapply("070");
   let short = "resolved";
   try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`); } catch (e) { short = (e as Error).message; }

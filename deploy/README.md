@@ -247,8 +247,8 @@ OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 
 Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
-ignores (it does not ignore `.env.<name>`); Daemonic Brain's checks refuse a tracked
-env file.
+ignores (it does not ignore `.env.<name>`); Daemonic Brain's checks refuse a
+tracked env file.
 `--env-file` replaces `deploy/.env` for that command, so give it on every
 compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
 env file names the canary's project, port, address, tier and profiles
@@ -373,12 +373,13 @@ there.
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
-first stack Daemonic Brain ran on (podman on macOS) offered the database superuser and
-the MCP server to the whole LAN on a password and a key over plain HTTP. Since
-SMD-1844 every published port names its address, the default is loopback, and
-the database and Ollama are not published at all. `compose …` in this section
-stands for `podman compose -f deploy/compose.yaml …` (or `docker compose`) from
-the repo root, with whatever `-f` files the stack was started with.
+first stack Daemonic Brain ran on (podman on macOS) offered the database
+superuser and the MCP server to the whole LAN on a password and a key over plain
+HTTP. Since SMD-1844 every published port names its address, the default is
+loopback, and the database and Ollama are not published at all. `compose …` in
+this section stands for `podman compose -f deploy/compose.yaml …` (or `docker
+compose`) from the repo root, with whatever `-f` files the stack was started
+with.
 
 Inside the stack, each service is on the networks it needs and no other
 (SMD-2583; the ADR's "Two networks", `docs/operator-surface-tiers.md`), and
@@ -1904,11 +1905,11 @@ from (measured): remove them first, or after, with the folder command under
 
 ## Keeping the board in the brain
 
-Daemonic Brain's own brain holds its Linear board — every issue in the Open Brain
-initiative's projects as one thought, in the shape the hand captures used. Until
-SMD-1954 that was a paste per ticket, and a ticket that moved to Done kept
-reading Backlog until someone pasted it again, which made a second row. The
-coordinator's `board-sync` pass is that sweep, unattended:
+The maintainer's own brain holds the project's Linear board — every issue in the
+Open Brain initiative's projects as one thought, in the shape the hand captures
+used. Until SMD-1954 that was a paste per ticket, and a ticket that moved to
+Done kept reading Backlog until someone pasted it again, which made a second
+row. The coordinator's `board-sync` pass is that sweep, unattended:
 
 ```bash
 # deploy/.env: LINEAR_API_KEY=lin_api_…  (and OB1_LINEAR_INITIATIVE when the
@@ -3580,8 +3581,8 @@ and the run data the kit counts are not n8n's published contract. The kit
 runs this profile as it ships (`../evals/README.md`, "The orchestration
 profile (SMD-2210)").
 
-**Licences** (Daemonic Brain's reading, not legal advice; the ADR's Gate 1). n8n is
-under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
+**Licences** (Daemonic Brain's reading, not legal advice; the ADR's Gate 1). n8n
+is under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
 running the profile is running two non-OSI licences side by side.
 Installing an OB1 brain with the profile on a client's own infrastructure is
 inside both: n8n's FAQ permits consulting and installing on a client's

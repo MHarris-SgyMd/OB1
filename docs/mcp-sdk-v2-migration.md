@@ -2,12 +2,12 @@
 
 > **Amended 2026-09-27 by `docs/operator-surface-tiers.md` (SMD-2282).** The staging below still holds, and stage 1 (SMD-2278) has landed. But server-portable is no longer the long-term canonical surface. The REST core (SMD-2284) is the contract, and the MCP surface becomes a new SDK-v2 server that is a client of it (SMD-2287). Where this record calls server-portable "the canonical one-HTTP-process server" or "the canonical surface", read it as true until SMD-2287's cutover. Stage 2 (SMD-2279) is mostly retirement under SMD-1931.
 
-An architecture decision record. **Decided 2026-09-27: GO — migrate Daemonic Brain
-onto the MCP TypeScript SDK v2 scoped packages (`@modelcontextprotocol/core` +
-`@modelcontextprotocol/server`), retiring the v1 single package
-`@modelcontextprotocol/sdk` and the third-party `@hono/mcp`. Staged,
-server-portable first. The spike proves the transport swap is small — three
-localized changes in `server-portable/index.ts` carry it, and every
+An architecture decision record. **Decided 2026-09-27: GO — migrate Daemonic
+Brain onto the MCP TypeScript SDK v2 scoped packages
+(`@modelcontextprotocol/core` + `@modelcontextprotocol/server`), retiring the v1
+single package `@modelcontextprotocol/sdk` and the third-party `@hono/mcp`.
+Staged, server-portable first. The spike proves the transport swap is small —
+three localized changes in `server-portable/index.ts` carry it, and every
 server-portable suite is green but three understood assertions.** The evidence
 is a throwaway spike on branch `michaelharris/smd-2275-sdk-v2-spike` (commit
 `def84115`), measured against this tree. This page is the pick, what the spike
@@ -28,8 +28,8 @@ The verified package facts are the memory note `mcp-typescript-sdk-v2-repackagin
    `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server`
    (a Web-standard `Request → Response` transport), so it needs no framework
    middleware package at all — `@modelcontextprotocol/hono` is available but
-   Daemonic Brain does not need it, because it owns its own Hono app and only wants a
-   transport.
+   Daemonic Brain does not need it, because it owns its own Hono app and only wants
+   a transport.
 3. **Staged, server-portable first.** The canonical one-HTTP-process server
    (`server-portable/`) migrates first as its own PR; the vendored servers and the
    SDK client follow, or the vendored servers retire per SMD-1931. The stages are
@@ -52,9 +52,10 @@ tree. It is not for merge — it is the sizing behind this ADR.
   is **reconstructed into a fresh `Request`** for the transport. This was the
   single biggest source of breakage and is the one real gotcha: v2's transport
   reads the **raw request body stream**, where `@hono/mcp` read Hono's *cached*
-  body, so Daemonic Brain's read-the-body-for-the-label-first step (SMD-1864's request
-  labelling) left the v2 transport with an empty stream and every call returned
-  `-32700 Parse error: Invalid JSON` until the body was handed over reconstructed.
+  body, so Daemonic Brain's read-the-body-for-the-label-first step (SMD-1864's
+  request labelling) left the v2 transport with an empty stream and every call
+  returned `-32700 Parse error: Invalid JSON` until the body was handed over
+  reconstructed.
 
 **`McpServer`, `registerTool`, `connect` are v2-compatible.** `McpServer`'s
 constructor (`{ name, version }`), `registerTool(name, config, cb)` (still
@@ -167,7 +168,8 @@ because v2 answers with `text/event-stream`. `MCP_METHODS = ["POST"]` and the
   official clients do; a bespoke client that sends one now gets a clear 406).
 - The `?key=` / `x-brain-key` auth rides **on top** of the transport, unchanged —
   the auth gate runs before `handleRequest` and is untouched by the swap (v2's
-  own `requireBearerAuth`/OAuth helpers are not used; Daemonic Brain keeps its key auth).
+  own `requireBearerAuth`/OAuth helpers are not used; Daemonic Brain keeps its
+  key auth).
 - v2 ships built-in legacy handling (`legacyStatelessFallback`,
   `classifyInboundRequest`, `isLegacyRequest`) — a backstop for older-protocol
   clients that the stage-1 PR should exercise against a real connector before it

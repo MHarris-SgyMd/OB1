@@ -10,8 +10,8 @@
 #
 #     ob1-gate-v2.yml               enforces upstream's contribution rules
 #                                   (metadata.json, category folders) which
-#                                   Daemonic Brain deliberately does not follow — every
-#                                   internal PR would go red
+#                                   Daemonic Brain deliberately does not follow —
+#                                   every internal PR would go red
 #     update-readme-contributions   runs on a schedule and rewrites README
 #     auto-label / welcome-…        fire on every PR and issue
 #     claude-issue-triage           needs ANTHROPIC_API_KEY we do not set

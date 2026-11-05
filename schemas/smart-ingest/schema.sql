@@ -2,12 +2,12 @@
 -- Adds ingestion_jobs and ingestion_items tables for tracking
 -- the extract-deduplicate-execute lifecycle of bulk text ingestion.
 -- Safe to run multiple times (fully idempotent), and one transaction, BEGIN to
--- COMMIT (Daemonic Brain, SMD-2128): a refusal anywhere leaves nothing applied, under
--- a client that sends the file as one query and under plain `psql -f`, which
--- runs on past an error, alike. One exception in kind, not in effect: section 2b
--- retypes two columns on a table created before it, once — an ALTER TABLE that
--- rewrites the table under ACCESS EXCLUSIVE, so on a brain with a large
--- ingestion_items stop the ingest server for it — and refuses, relaying
+-- COMMIT (Daemonic Brain, SMD-2128): a refusal anywhere leaves nothing applied,
+-- under a client that sends the file as one query and under plain `psql -f`,
+-- which runs on past an error, alike. One exception in kind, not in effect:
+-- section 2b retypes two columns on a table created before it, once — an ALTER
+-- TABLE that rewrites the table under ACCESS EXCLUSIVE, so on a brain with a
+-- large ingestion_items stop the ingest server for it — and refuses, relaying
 -- Postgres's own words and the object's name, while anything of yours reads
 -- either column or fixes its type (a view, trigger, policy, constraint, index
 -- predicate, default, foreign key).
@@ -97,9 +97,9 @@ ALTER TABLE public.ingestion_items
 -- ============================================================
 -- 2b. THE TWO THOUGHT-ID COLUMNS ARE uuid (Daemonic Brain, SMD-2128)
 --     Upstream's thoughts.id is an integer and the two columns above were
---     bigint. In Daemonic Brain thoughts.id is a uuid, so every value the server
---     records here is one: a fingerprint or semantic match, the thought an
---     item wrote. Against bigint, an INSERT carrying a matched id failed
+--     bigint. In Daemonic Brain thoughts.id is a uuid, so every value the
+--     server records here is one: a fingerprint or semantic match, the thought
+--     an item wrote. Against bigint, an INSERT carrying a matched id failed
 --     whole — no item of a job with any match was ever persisted — the
 --     result column could take nothing, and SMD-2110 parked the written
 --     thought's id in metadata.result_thought_uuid meanwhile. A table that
@@ -237,16 +237,16 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(uuid, jsonb) FROM public;
 
--- Daemonic Brain (SMD-1796): upstream's section 4 also GRANTed ALL on both tables,
--- USAGE, SELECT on their two sequences and EXECUTE on the append TO
+-- Daemonic Brain (SMD-1796): upstream's section 4 also GRANTed ALL on both
+-- tables, USAGE, SELECT on their two sequences and EXECUTE on the append TO
 -- service_role, and a section 5 ENABLEd ROW LEVEL SECURITY on both tables with
 -- a policy FOR service_role and, where Supabase's auth.uid() exists, a SELECT
 -- policy FOR authenticated scoped to it. Those are Supabase's: on plain
 -- Postgres the first GRANT stops the file (`role "service_role" does not
 -- exist`), and the section's own comment says what RLS then does — "deny-by-
--- default for anyone except service_role", which in Daemonic Brain is the role you
--- connect as. Removed; the REVOKE above stays, so the SECURITY DEFINER append
--- is callable only by a role granted it.
+-- default for anyone except service_role", which in Daemonic Brain is the role
+-- you connect as. Removed; the REVOKE above stays, so the SECURITY DEFINER
+-- append is callable only by a role granted it.
 -- Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's

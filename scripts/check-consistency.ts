@@ -208,9 +208,9 @@
  *      four review flags, required-status- checks with its parameters — are
  *      present once each, the one optional rule — merge-queue, which GitHub
  *      refuses on a user-owned repository and the record adds the day this one
- *      is organisation-owned — at most once and, when present, with Daemonic Brain's
- *      merge method, every entry judged on its own merge commit and no PR
- *      waiting for another (SMD-1857), no other type is, the target is the
+ *      is organisation-owned — at most once and, when present, with Daemonic
+ *      Brain's merge method, every entry judged on its own merge commit and no
+ *      PR waiting for another (SMD-1857), no other type is, the target is the
  *      default branch and nothing else, the bypass list is empty and
  *      enforcement is active; no other job reports a check under the
  *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
@@ -849,7 +849,7 @@ function checkSqlGuards() {
   }, {
     // SMD-1924. Adding a column to thoughts is fine (guarded above); dropping
     // or retyping one mutates a structure db/migrations owns, and a vendored
-    // file applied to a fork brain must not do it. The hazard was
+    // file applied to a migrated brain must not do it. The hazard was
     // recipes/email-history-import/rollback-chunking-columns.sql (DROP COLUMN
     // parent_id/chunk_index/full_text, the abandoned upstream chunking),
     // removed in SMD-1924. Scoped to vendored .sql: a core migration may own
@@ -866,10 +866,10 @@ function checkSqlGuards() {
 //
 // The number is a migration's identity — its order, and how prose names it —
 // and two branches each adding "the next number" is how two files come to
-// share one (Daemonic Brain has renumbered twice; SMD-1421). migrate.ts refuses such
-// a set at run time, which is every operator's run and every compose start;
-// this is the same rule — config.mjs's duplicateMigrationNumber, one spelling
-// — where the collision is created, on every push.
+// share one (Daemonic Brain has renumbered twice; SMD-1421). migrate.ts refuses
+// such a set at run time, which is every operator's run and every compose
+// start; this is the same rule — config.mjs's duplicateMigrationNumber, one
+// spelling — where the collision is created, on every push.
 
 async function checkMigrationNumbers() {
   const { migrationNameProblem } = await import("../db/config.mjs");
@@ -1665,8 +1665,8 @@ function checkCredentialCompares() {
 // functions is listed with the reason and the line count, and its README must
 // say what its rows lack; one fixed drops out as stale, one added fails. Seven
 // today, none a bypass a fix could remove: three deployments whose database is
-// their own (Daemonic Brain's functions are not in it — two of them the files check 7
-// excepts for creating a brain), the two guides and the one container init that
+// their own (Daemonic Brain's functions are not in it — two of them the files check
+// 7 excepts for creating a brain), the two guides and the one container init that
 // show an upsert_thought body (the INSERT is the function's own), and the test
 // that plants a row as an older write left it, to be moved by the writer under test.
 /** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
@@ -2462,10 +2462,10 @@ function checkSupabaseIsms() {
 // SMD-1844. deploy/compose.yaml carried `"${POSTGRES_PORT:-5432}:5432"`,
 // `"${SERVER_PORT:-8000}:8000"` and `"${OLLAMA_PORT:-11434}:11434"`: an
 // address-less mapping, which compose binds to 0.0.0.0. On the first stack
-// Daemonic Brain ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432` and
-// `*:8010` — the postgres superuser on the whole brain behind its password, and
-// the MCP server with its key in clear on every request, offered to every host
-// on the LAN. The file's own comment said to drop the database port in
+// Daemonic Brain ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432`
+// and `*:8010` — the postgres superuser on the whole brain behind its password,
+// and the MCP server with its key in clear on every request, offered to every
+// host on the LAN. The file's own comment said to drop the database port in
 // production; the default was the exposed one and no README said to. Since the
 // fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
@@ -2856,7 +2856,7 @@ checkPublishedPorts();
  * silently win over the third. Compose substitutes `${VAR:-fallback}` before the
  * process starts, so a stale fallback in compose.yaml overrides db/config.mjs
  * rather than deferring to it — the configuration would look right in the source
- * and be wrong in the container, which is the failure mode this whole fork keeps
+ * and be wrong in the container, which is the failure mode Daemonic Brain keeps
  * trying to make loud.
  */
 async function checkEmbeddingDefaults() {
@@ -4222,8 +4222,8 @@ checkFragments();
  * 17a: CHANGELOG.md is Keep a Changelog 1.1.0 — Unreleased first, released
  * versions dated and newest-first, only the six headings under a version, and a
  * resolving compare link for every section. No back-fill: sections 1–100 of
- * Daemonic Brain predate the first cut and live in FORK.md, so a fresh CHANGELOG has only
- * Unreleased until the first release is assembled.
+ * Daemonic Brain predate the first cut and live in FORK.md, so a fresh
+ * CHANGELOG has only Unreleased until the first release is assembled.
  */
 function changelogProblems(text: string) {
   const problems: string[] = [];
@@ -4909,15 +4909,15 @@ const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_st
 const OPTIONAL_RULE_TYPES = ["merge_queue"];
 /**
  * The merge queue's parameters when the rule is present, each held equal
- * (SMD-1857). MERGE keeps the merge commit Daemonic Brain lands with (the record of
- * how a branch diverged); ALLGREEN judges each queued PR on its own merge
- * commit, so a red run names the PR that broke the tree rather than the group;
- * min 1 means a lone PR is merged as soon as its run is green — the wait
+ * (SMD-1857). MERGE keeps the merge commit Daemonic Brain lands with (the
+ * record of how a branch diverged); ALLGREEN judges each queued PR on its own
+ * merge commit, so a red run names the PR that broke the tree rather than the
+ * group; min 1 means a lone PR is merged as soon as its run is green — the wait
  * applies only to reaching a minimum above one; 5 and 5 are GitHub's defaults
- * for how many entries build and merge together, more than Daemonic Brain queues
- * at once; 60 minutes is four times the longest run seen (a push run of main,
- * 16 minutes) before a check that never reports is read as failed and the PR
- * is dropped from the queue.
+ * for how many entries build and merge together, more than Daemonic Brain
+ * queues at once; 60 minutes is four times the longest run seen (a push run of
+ * main, 16 minutes) before a check that never reports is read as failed and the
+ * PR is dropped from the queue.
  */
 const MERGE_QUEUE = { check_response_timeout_minutes: 60, grouping_strategy: "ALLGREEN", max_entries_to_build: 5, max_entries_to_merge: 5, merge_method: "MERGE", min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 5 } as const;
 /** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
@@ -5587,8 +5587,8 @@ checkRulesetRecord();
 // files" and nothing in Daemonic Brain checked it. Upstream's PR gate
 // (ob1-gate-v2.yml, rule 5) greps a PR's changed .sql files for the words on
 // any line, comments included, and calls a DELETE unqualified when its own
-// line has no WHERE; Daemonic Brain does not run that gate (FORK.md's detach note:
-// it enforces contribution rules Daemonic Brain does not follow), and
+// line has no WHERE; Daemonic Brain does not run that gate (FORK.md's detach
+// note: it enforces contribution rules Daemonic Brain does not follow), and
 // read that literally the rail fails the one file that applies it — 046's
 // `BEFORE TRUNCATE ON thought_audit` trigger, which REFUSES truncation, was
 // flagged twice in SMD-1730's review against the sentence — and 034's
@@ -6463,20 +6463,20 @@ checkWorkflowPins();
 // Thirty scripts in twenty-one recipes reached the brain as PostgREST clients:
 // `${SUPABASE_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>` with a service-role
 // key from a `.mjs`/`.js`/`.ts` fetch, or supabase-py's `create_client` from a
-// `.py`. Daemonic Brain's stack runs no PostgREST (SETUP.md), so each one's live mode
-// failed at its first request, and neither check 10 (a URL string is not
-// `.insert(`) nor check 22 (no supabase-js import) saw them. The class decision
-// is docs/vendored-disposition.md's "PostgREST-speaking scripts" section: an
-// import emits ingestion-contract items for db/ingest-records.ts (SMD-1867,
-// SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql
-// under bun, three whose capability the core already owns retire — one ticket
-// each, filed under SMD-2126. This holds the class where it stands and stops it
-// growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
-// .sh) under the seven category directories and docs/, comments blanked (the
-// JS scanner for JS; a `#` outside a string for Python, and for shell one at
-// a word's start (after one of bash's metacharacters, whitespace, `;`, `(`,
-// `)`, `|`, `&`, `<`, `>`, or the text's start) — `$#`, `${#a[@]}` and `a#b`
-// are not comments, so a hit after
+// `.py`. Daemonic Brain's stack runs no PostgREST (SETUP.md), so each one's
+// live mode failed at its first request, and neither check 10 (a URL string is
+// not `.insert(`) nor check 22 (no supabase-js import) saw them. The class
+// decision is docs/vendored-disposition.md's "PostgREST-speaking scripts"
+// section: an import emits ingestion-contract items for db/ingest-records.ts
+// (SMD-1867, SMD-2136), a maintenance script reaches Postgres through
+// compat/supabase-sql under bun, three whose capability the core already owns
+// retire — one ticket each, filed under SMD-2126. This holds the class where it
+// stands and stops it growing back: in every code file
+// (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py, .sh) under the seven category
+// directories and docs/, comments blanked (the JS scanner for JS; a `#` outside
+// a string for Python, and for shell one at a word's start (after one of bash's
+// metacharacters, whitespace, `;`, `(`, `)`, `|`, `&`, `<`, `>`, or the text's
+// start) — `$#`, `${#a[@]}` and `a#b` are not comments, so a hit after
 // one on the same line is read; a docstring is a string and is read: a file
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`

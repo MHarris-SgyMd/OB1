@@ -2884,7 +2884,7 @@ else {
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
   // A brain at 109 under this server: 109's four-argument listing alone (109
-  // applied over the ladder's 029 leftover, which it drops). Every fork caller
+  // applied over the ladder's 029 leftover, which it drops). Every caller here
   // passes 110's seven arguments, so every listing fails, naming the
   // seven-argument form; the check warns naming 110.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });

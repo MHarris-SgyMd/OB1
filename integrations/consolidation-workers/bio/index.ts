@@ -482,11 +482,11 @@ async function upsertProfile(
   // itself and stored no vector at all, so the first profile was unsearchable
   // until a re-embed pass reached it. The function reads p_payload->'metadata'
   // and ->>'embedding_model' only — sibling keys such as type/importance/
-  // source_type are dropped, by upstream's function and Daemonic Brain's alike — so
-  // the enhanced-thoughts columns follow by a raw update that carries neither
-  // content nor vector, as the rewrite path's do. findExistingProfile() has
-  // already run; `existed` is a concurrent run's row, reported as not created
-  // and left with its columns. The key's name rides as the actor (008).
+  // source_type are dropped, by upstream's function and Daemonic Brain's alike
+  // — so the enhanced-thoughts columns follow by a raw update that carries
+  // neither content nor vector, as the rewrite path's do. findExistingProfile()
+  // has already run; `existed` is a concurrent run's row, reported as not
+  // created and left with its columns. The key's name rides as the actor (008).
   const embedding = await embedText(profileContent);
   const { data, error: insertError } = await supabase.rpc("upsert_thought", {
     p_content: profileContent,

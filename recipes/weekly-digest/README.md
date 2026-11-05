@@ -1,16 +1,16 @@
 # Weekly Digest
 
-> **In Daemonic Brain (SMD-2126, SMD-2239) — retired.** The live mode now lives in
-> [`db/weekly-digest.ts`](../../db/weekly-digest.ts), a `db/` verb on SMD-2134's
-> harness, behind the server's egress gate (SMD-1903). The original
+> **In Daemonic Brain (SMD-2126, SMD-2239) — retired.** The live mode now lives
+> in [`db/weekly-digest.ts`](../../db/weekly-digest.ts), a `db/` verb on
+> SMD-2134's harness, behind the server's egress gate (SMD-1903). The original
 > `weekly-digest.mjs` reached the brain as a PostgREST client
 > (`${SUPABASE_URL}/rest/v1/…` with a service-role key) and posted the digest to
 > Telegram with no egress handling at all — a **sink** that would read the
-> database and send its content from below the gate. Daemonic Brain's stack runs no
-> PostgREST (SETUP.md), so that script never ran here; rather than port a sink
-> onto `compat/supabase-sql`, SMD-2239 rebuilt it as the `db/` verb, where the
-> synthesis and the Telegram send each pass the egress gate. This page is kept as
-> a pointer; the script is gone.
+> database and send its content from below the gate. Daemonic Brain's stack runs
+> no PostgREST (SETUP.md), so that script never ran here; rather than port a
+> sink onto `compat/supabase-sql`, SMD-2239 rebuilt it as the `db/` verb, where
+> the synthesis and the Telegram send each pass the egress gate. This page is
+> kept as a pointer; the script is gone.
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -43,6 +43,6 @@ in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`)
 It takes a share of each day and writer in the window, newest first within
 each. The recipe's importance ranking and its `--min-importance` are gone: any key could set `importance` on its own rows, so
 ten captures carrying a high value could rank every other thought out of the
-digest. Daemonic Brain retired the key (SMD-2653, `docs/priority.md` decision 8). See
-the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and
+digest. Daemonic Brain retired the key (SMD-2653, `docs/priority.md` decision
+8). See the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and
 `db/README.md` for the flags and the egress model.

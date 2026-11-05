@@ -2,8 +2,8 @@
 /**
  * assemble-release.ts — cut a release from the changes/ fragments (SMD-1804).
  *
- * Daemonic Brain's change counter used to be assigned by hand at PR time, so a merge of
- * `main` while a PR was in review renumbered a FORK.md section and its
+ * Daemonic Brain's change counter used to be assigned by hand at PR time, so a
+ * merge of `main` while a PR was in review renumbered a FORK.md section and its
  * cross-references. This is the other half of the fix: a PR ships a fragment
  * (changes/smd-NNNN.md) citing ticket and migration numbers, and the release step
  * assembles the accumulated fragments in merge order — assigning the change

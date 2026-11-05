@@ -12,8 +12,9 @@
  * the old vector and 022's chunk rows of the old vector under the new one.
  * scripts/check-consistency.ts check 10 holds the text; this proves the
  * behaviour: each writer that can run is driven as deployed against a real
- * Postgres carrying Daemonic Brain's schema, and the row it leaves is compared with
- * the row update_thought leaves for the same edit — the ticket's own verify.
+ * Postgres carrying Daemonic Brain's schema, and the row it leaves is compared
+ * with the row update_thought leaves for the same edit — the ticket's own
+ * verify.
  *
  * SMD-1524 (FORK.md change 71) added the other door: eight vendored files
  * INSERTED a fresh row with content, or content and a vector, around the
@@ -82,11 +83,11 @@
  * where upstream's 2-argument call put the vector inside the payload, which
  * Daemonic Brain's function ignores, so every thought the server wrote had no
  * vector; and the item columns that hold a thought id are uuid, where
- * Daemonic Brain's UUID into upstream's bigint failed every item of a job with a match
- * and recorded no result. The smart-ingest block asserts the row's vector at
- * the stub's axis, its label, its enhanced columns and 008's row; the item's
- * result_thought_id; the same text again as a skip by fingerprint naming the
- * first thought; and, through a stub vector 0.88 from the first thought's,
+ * Daemonic Brain's UUID into upstream's bigint failed every item of a job with
+ * a match and recorded no result. The smart-ingest block asserts the row's
+ * vector at the stub's axis, its label, its enhanced columns and 008's row; the
+ * item's result_thought_id; the same text again as a skip by fingerprint naming
+ * the first thought; and, through a stub vector 0.88 from the first thought's,
  * the two branches between the thresholds — append_thought_evidence(uuid,
  * jsonb) on the richer existing thought, and a revision whose `supersedes`
  * is the thought it revises. The sidecar's retype of a table created under
@@ -147,10 +148,10 @@ const { assert, report } = createAssert();
 
 // Pinned, as test-e2e-sql.ts pins them: this suite asserts the data layer, not
 // the model choice, and every writer here spells the OpenRouter default — so
-// the brain is built at ITS width. Daemonic Brain's default is qwen3-embedding:4b at
-// 1024, where every one of these writers' vectors is refused by the function
-// and the capture or edit fails whole; that case is the operator's to avoid
-// (each README says so) and is not driven here.
+// the brain is built at ITS width. Daemonic Brain's default is
+// qwen3-embedding:4b at 1024, where every one of these writers' vectors is
+// refused by the function and the capture or edit fails whole; that case is the
+// operator's to avoid (each README says so) and is not driven here.
 const DIM = 1536;
 const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });

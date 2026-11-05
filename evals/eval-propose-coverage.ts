@@ -1,12 +1,13 @@
 /**
- * eval-propose-coverage.ts (SMD-2017) — the proposer recall ceiling on the FORK'S
- * OWN content, not the research-paper gold. There are no hand labels for fork
- * content, so the denominator is the 7B extractor's own entity NAMES per thought
- * (recall is about the name being proposed; the decider does the typing): what
- * fraction of what the current extractor finds would propose→decide even see?
- * The SMD-1961 gold is arXiv papers (citation-dense, a proposer's worst case);
- * fork content is Linear issues, session summaries and notes — identifier- and
- * code-artifact-dominated, where the deterministic channels should do far better.
+ * eval-propose-coverage.ts (SMD-2017) — the proposer recall ceiling on the
+ * BRAIN'S OWN content, not the research-paper gold. There are no hand labels for
+ * that content, so the denominator is the 7B extractor's own entity NAMES per
+ * thought (recall is about the name being proposed; the decider does the
+ * typing): what fraction of what the current extractor finds would
+ * propose→decide even see? The SMD-1961 gold is arXiv papers (citation-dense, a
+ * proposer's worst case); its own content is Linear issues, session summaries
+ * and notes — identifier- and code-artifact-dominated, where the deterministic
+ * channels should do far better.
  *
  * Run read-only against the dogfood stable brain.
  */
@@ -16,7 +17,7 @@ import { normalizeEntityName } from "../server-portable/entity-gate.ts";
 
 const sql = new SQL(process.env.DATABASE_URL as string);
 const N = Number(process.env.SAMPLE ?? 200);
-// fork content: has entities, moderate length (excludes the giant research papers and trivial notes)
+// own content: has entities, moderate length (excludes the giant research papers and trivial notes)
 const rows = await sql`
   SELECT t.id, t.content
   FROM thoughts t
@@ -69,7 +70,7 @@ for (const r of rows) {
 }
 
 const pct = (a: number, b: number) => (b ? (100 * a / b).toFixed(1) : "0.0") + "%";
-console.log(`\n=== SMD-2017 proposer coverage on fork content (${docs} thoughts, 7B entities as denominator, +leave-one-out gazetteer) ===`);
+console.log(`\n=== SMD-2017 proposer coverage on the brain's own content (${docs} thoughts, 7B entities as denominator, +leave-one-out gazetteer) ===`);
 console.log(`exact coverage:       ${found}/${total} = ${pct(found, total)}`);
 console.log(`containment coverage: ${contain}/${total} = ${pct(contain, total)}   (a candidate is a token-run of the entity or vice versa)`);
 console.log(`candidates/doc ${(candTotal / (docs || 1)).toFixed(1)} avg`);

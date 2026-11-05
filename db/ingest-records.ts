@@ -153,9 +153,9 @@ export function recordId(source: string, key: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * One changes/*.md file as a fork Doc. SMD-1917 moved Daemonic Brain's changes out of
- * FORK.md into one file each, in two shapes this reader handles through the
- * fragment parser they share with the release step (scripts/fragments.ts):
+ * One changes/*.md file as a fork Doc. SMD-1917 moved Daemonic Brain's changes
+ * out of FORK.md into one file each, in two shapes this reader handles through
+ * the fragment parser they share with the release step (scripts/fragments.ts):
  *
  *   - A rendered, numbered change (`NNN-slug.md`, e.g. 018-…): no front matter,
  *     the file opens `# N. Title` and the whole file is the change. The number
@@ -175,9 +175,9 @@ export function forkDocFromFile(slug: string, text: string): Doc {
     const tickets = Array.isArray(parsed.fm.tickets) ? (parsed.fm.tickets as string[]) : [];
     return { id: recordId("fork", slug), content: fork, source: "fork", meta: { change: null, ticket: tickets[0] ?? null, file: slug } };
   }
-  // A numbered rendered change: Daemonic Brain's own parsers read the number and the
-  // owning ticket from the `# N. Title (SMD-…)` heading — the canonical pair the
-  // changes index shows — rather than the first SMD id anywhere in the body,
+  // A numbered rendered change: Daemonic Brain's own parsers read the number and
+  // the owning ticket from the `# N. Title (SMD-…)` heading — the canonical pair
+  // the changes index shows — rather than the first SMD id anywhere in the body,
   // which could be an incidental cross-reference ("superseded by", "unlike").
   const heading = headingOf(text);
   const change = heading?.n ?? (Number(slug.match(/^(\d+)-/)?.[1]) || null);
@@ -399,10 +399,10 @@ export function allowlistOf(value: string | undefined): Allowlist {
 }
 
 /**
- * Daemonic Brain's commit messages since the pin — its whole delta from upstream, the
- * same span FORK.md documents. Each commit is one Doc: the full message
- * (subject + body), the sha and author date. Records separated by 0x1e, fields
- * by 0x00, so a message's own newlines and blank lines survive.
+ * Daemonic Brain's commit messages since the pin — its whole delta from
+ * upstream, the same span FORK.md documents. Each commit is one Doc: the full
+ * message (subject + body), the sha and author date. Records separated by 0x1e,
+ * fields by 0x00, so a message's own newlines and blank lines survive.
  */
 export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
   const out = execFileSync("git", ["log", `${since}..HEAD`, "--no-color", "--format=%H%x00%aI%x00%B%x1e"], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });

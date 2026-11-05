@@ -1195,16 +1195,16 @@ for (const t of TEXT_ONLY) {
   for (const re of t.mustNot) assert(!re.test(text), `${t.file} no longer says ${re}`);
 }
 
-// One MCP stack per install (the recurring defect Daemonic Brain guards against is a
-// value defined twice): what this directory installs is what the vendored servers
-// run under here and what `bun <file>` resolves for the extensions (SMD-1800 —
-// until then each server carried a deno.json import map, held here to this file,
-// and server/deno.json anchored the set). It stays on STACK's v1 stack.
-// server-portable moved to the v2 scoped packages in SMD-2278 (stage 1 of the SDK
-// v2 migration), so during the window it is held to SERVER_STACK while this
-// install is held to STACK; stages 2 and 3 (SMD-2279, SMD-2281) fold the vendored
-// servers onto v2 and the split closes. (The Kubernetes image's install, held here
-// exactly to STACK, retired with it: SMD-2288.)
+// One MCP stack per install (the recurring defect Daemonic Brain guards against
+// is a value defined twice): what this directory installs is what the vendored
+// servers run under here and what `bun <file>` resolves for the extensions
+// (SMD-1800 — until then each server carried a deno.json import map, held here to
+// this file, and server/deno.json anchored the set). It stays on STACK's v1
+// stack. server-portable moved to the v2 scoped packages in SMD-2278 (stage 1 of
+// the SDK v2 migration), so during the window it is held to SERVER_STACK while
+// this install is held to STACK; stages 2 and 3 (SMD-2279, SMD-2281) fold the
+// vendored servers onto v2 and the split closes. (The Kubernetes image's install,
+// held here exactly to STACK, retired with it: SMD-2288.)
 // Every pin equal, or this names the package and the two versions.
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;

@@ -272,12 +272,12 @@ BEGIN
 END;
 $$;
 
--- Daemonic Brain (SMD-1796): upstream's file ends here with ENABLE ROW LEVEL SECURITY
--- on the eight tables, a policy FOR service_role on each, and GRANTs TO
--- service_role. Those are Supabase's: on plain Postgres the first GRANT stops
--- the file (`role "service_role" does not exist`), and with the role created to
--- get past it, RLS with no policy for the role you actually connect as denies
--- that role every row. Removed.
+-- Daemonic Brain (SMD-1796): upstream's file ends here with ENABLE ROW LEVEL
+-- SECURITY on the eight tables, a policy FOR service_role on each, and GRANTs
+-- TO service_role. Those are Supabase's: on plain Postgres the first GRANT
+-- stops the file (`role "service_role" does not exist`), and with the role
+-- created to get past it, RLS with no policy for the role you actually connect
+-- as denies that role every row. Removed.
 -- Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's

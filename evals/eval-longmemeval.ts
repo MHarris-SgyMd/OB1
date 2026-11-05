@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * eval-longmemeval.ts — Daemonic Brain's retrieval on LongMemEval-S, scored the way
- * the field publishes it.
+ * eval-longmemeval.ts — Daemonic Brain's retrieval on LongMemEval-S, scored the
+ * way the field publishes it.
  *
  * Every retrieval number in this directory is measured on one corpus, and
  * SMD-1039 records the consequence: the baseline saturates it, so each add-on

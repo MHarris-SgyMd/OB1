@@ -104,8 +104,8 @@ import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Post
 // The core server's access keys: named, scoped, SHA-256-hashed entries in
 // MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
 // auth.ts is server-portable/auth.ts, copied beside the extensions and held
-// identical by extensions/test-auth.ts. Never
-// compare a key with `!==` yourself (Daemonic Brain's consistency check refuses it).
+// identical by extensions/test-auth.ts. Never compare a key with `!==`
+// yourself (Daemonic Brain's consistency check refuses it).
 import { authenticateRequest, canWrite, listenOn, type Principal } from "../_shared/auth.ts";
 // The reply kept alive while a tool runs, and a client that leaves logged: Bun
 // closes a stream silent for 8–12 s (SMD-1864, SMD-2001). _shared/sse.ts is

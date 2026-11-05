@@ -2,10 +2,10 @@
  * bench-load.ts — bench-hnsw.ts section F: `match_thoughts` under concurrency
  * (SMD-1500). Every other latency bench-hnsw.ts prints is a median of one call
  * at a time on one connection. The server's own pool is ten connections
- * (`OB1_PG_POOL`), and the figures Daemonic Brain compares itself to are throughput
- * and p99 under load. Ten concurrent calls are not one call's cost times ten:
- * 014's header prices the walk's memory per backend, and concurrent calls
- * share the CPUs and the page cache.
+ * (`OB1_PG_POOL`), and the figures Daemonic Brain compares itself to are
+ * throughput and p99 under load. Ten concurrent calls are not one call's cost
+ * times ten: 014's header prices the walk's memory per backend, and concurrent
+ * calls share the CPUs and the page cache.
  *
  * What the section does, closed-loop:
  * - Each of N connections is its own backend. It issues its next call the

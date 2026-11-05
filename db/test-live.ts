@@ -20119,7 +20119,7 @@ if (want("29")) {
       skip("…no URL: each of the three ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
     } else {
       const noUrl = await Promise.all([script("backfill-type.mjs", {}, "--dry-run"), script("backfill-sensitivity.mjs", {}, "--dry-run"), script("enrich-thoughts.mjs", {}, "--status")]);
-      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string in Daemonic Brain, in the environment or in \.env\.local beside the scripts\.$/m;
+      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string, in the environment or in \.env\.local beside the scripts\.$/m;
       assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
         `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
     }

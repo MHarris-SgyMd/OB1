@@ -140,9 +140,9 @@ yet built):
    works.
 8. **One owner per source per brain.** A source is ingested by one writer on a
    given brain, or the brain holds the same item twice in two renderings.
-   Daemonic Brain's Linear board is board-sync's (SMD-1954), which updates a ticket's row
-   in place; an n8n Linear template ships only when it can do the same —
-   identity-keyed upsert through SMD-1931's capture route with SMD-1867's
+   Daemonic Brain's Linear board is board-sync's (SMD-1954), which updates a
+   ticket's row in place; an n8n Linear template ships only when it can do the
+   same — identity-keyed upsert through SMD-1931's capture route with SMD-1867's
    identity — and then, on a brain that runs it, replaces board-sync there.
    The rule holds during a cut-over too: a template proving itself "unattended"
    before a native path retires does so on another brain (the canary tier is its
@@ -195,8 +195,8 @@ disabled. n8n's licence is the price; Gate 1 is where that price is checked.
 
 ## Gate 1: the licence
 
-What follows is Daemonic Brain's reading of the licence texts, not legal advice; where
-it rests on an inference, it says so.
+What follows is Daemonic Brain's reading of the licence texts, not legal advice;
+where it rests on an inference, it says so.
 
 n8n's Sustainable Use License 1.0 grants use, copying, distribution, making
 available and derivative works, limited so: "You may use or modify the software
@@ -215,8 +215,8 @@ licence does not address in words:
 - **The profile references the image; OB1 does not distribute n8n.** The
   operator's own compose pulls `n8nio/n8n` from Docker Hub; no n8n code is in
   the tree. Because OB1 distributes nothing of n8n's, the SUL's Notices clause
-  (pass these terms on with a copy) does not bite; if Daemonic Brain ever built or
-  published an image containing n8n, it would.
+  (pass these terms on with a copy) does not bite; if Daemonic Brain ever built
+  or published an image containing n8n, it would.
 - **The templates are OB1's.** Workflow JSON naming nodes and connections is
   configuration an operator writes; OB1 writing it for them adds nothing of
   n8n's to the tree.

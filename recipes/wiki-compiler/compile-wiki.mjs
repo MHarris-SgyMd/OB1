@@ -196,7 +196,8 @@ function spawnNode(scriptPath, scriptArgs, envOverrides = {}) {
 
 async function triggerEntityExtraction(args, env) {
   // The worker's own address, never derived from another URL: the `${OPEN_BRAIN_URL}/functions/v1/…` fallback was
-  // upstream's Edge Function path, and in Daemonic Brain the worker is a server of its own (SMD-2110).
+  // upstream's Edge Function path, and in Daemonic Brain the worker is a server of its own
+  // (SMD-2110).
   const workerUrl = String(env.ENTITY_EXTRACTION_WORKER_URL || "").trim() || null;
   if (workerUrl && !/^https?:\/\//i.test(workerUrl)) {
     throw new Error("ENTITY_EXTRACTION_WORKER_URL must be an http(s) URL — the entity-extraction-worker server's address.");

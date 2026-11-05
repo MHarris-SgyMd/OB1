@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 // ob1-fork (SMD-2139): this script paged PostgREST's `/thoughts` route and wrote
-// each row's `type` back through it with a service-role key, and Daemonic Brain's
-// stack runs no PostgREST. It reads and writes through compat/supabase-sql now —
-// SUPABASE_URL is a postgres:// connection string, SUPABASE_SERVICE_ROLE_KEY is
-// accepted and ignored (the credentials live in the URL). Run it from a
-// checkout: the import is relative. One read changed with the transport: a
-// page selects `metadata` whole and reads its `type` key here, since the shim
-// takes no JSON path in a select list. `--limit N` caps the rows written. A
-// flag the script does not know is refused, not ignored.
+// each row's `type` back through it with a service-role key, and Daemonic
+// Brain's stack runs no PostgREST. It reads and writes through
+// compat/supabase-sql now — SUPABASE_URL is a postgres:// connection string,
+// SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live in the
+// URL). Run it from a checkout: the import is relative. One read changed with
+// the transport: a page selects `metadata` whole and reads its `type` key here,
+// since the shim takes no JSON path in a select list. `--limit N` caps the rows
+// written. A flag the script does not know is refused, not ignored.
 /**
  * backfill-type.mjs
  *

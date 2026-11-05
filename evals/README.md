@@ -1096,7 +1096,7 @@ neighbours. That discrimination is precisely a reranker's single-hop strength
 *destroys* a pre-decomposition multi-hop set yet belongs **after** decomposition,
 on the single-hop sub-pools. **Decision:** decomposition alone is declined for the
 default path (marginal strict gain at the cost of an LLM call plus N retrievals per
-query, on a local-by-default fork); the measured, motivated follow-up is
+query, on a local-by-default brain); the measured, motivated follow-up is
 **decompose-then-rerank** — lift each sub-pool's gold to rank 0, then interleave —
 whose headroom is the 39% of golds not yet at rank 0. Like the reranker itself
 (SMD-1304), that belongs on a *hard* held-out corpus, not only LongMemEval.
@@ -1307,7 +1307,7 @@ time. Making that configurable is the obvious follow-up.
 
 `eval-extract-windows.ts` (SMD-1879). Until this change `db/extract-entities.ts`
 sent a thought to the metadata model in one call, cut at 8,000 characters,
-with no bound on the answer. On Daemonic Brain's own brain 32 of 295 thoughts —
+with no bound on the answer. On the maintainer's own brain 32 of 295 thoughts —
 1,656 to 13,113 characters — failed with "The operation timed out." on
 `qwen2.5:7b`, re-run serially with `--timeout 900`. The ticket read that as one
 oversized read-and-generate. Measured, it was half that.
@@ -4655,9 +4655,9 @@ gate over its own corpus would redact its thoughts to id+embedding.
 ## Does the store matter? pgvector against a dedicated vector database (SMD-1037)
 
 Every retrieval number above was measured on Postgres with pgvector, because
-that is the store Daemonic Brain kept when it left Supabase. The choice was argued —
-one transactional store lets a hybrid query run as one statement over one
-snapshot — never measured against the alternative it rules out. SMD-1038
+that is the store Daemonic Brain kept when it left Supabase. The choice was
+argued — one transactional store lets a hybrid query run as one statement over
+one snapshot — never measured against the alternative it rules out. SMD-1038
 (changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") wrote the two-store shape and
 the bar its numbers would have to clear *before* this measurement; this is the
 measurement, read against that bar. Nothing in the product changes as a result —
@@ -4856,10 +4856,10 @@ SMD-1037's bracket had a separate server (Qdrant) and an in-engine index
 store, run in-process against local files with no second server and no network
 round trip — though still a second store to keep consistent with Postgres.
 LanceDB is that store, and it is the external candidate most likely to help a
-local-by-default fork, because it removes the "second process + network hop" part
-of the two-store cost while the id→row resolve and the consistency tax remain. So
-measuring it isolates which part of that cost is the network and which is
-architectural. It is wired as a fourth store into the same harness
+local-by-default brain, because it removes the "second process + network hop"
+part of the two-store cost while the id→row resolve and the consistency tax
+remain. So measuring it isolates which part of that cost is the network and which
+is architectural. It is wired as a fourth store into the same harness
 (`store-backends.ts`, a `LanceEngine` behind the same `ExternalEngine` interface
 as Qdrant), embedded — no container, only a temp dataset directory — and scored
 against the same exact-cosine oracle over the same points.
@@ -5138,8 +5138,8 @@ near or above the logical figure — 4 MB on disk vs 2 MB logical on the real co
 **Verdict — SMD-1037's holds, and the resolve it leaned on is shown not to be the
 bottleneck.** The read-model topology *works*: its read path is provably
 zero-Postgres — it serves reads with Postgres stopped — and appends are cheap when
-batched, on the eventual-consistency model Daemonic Brain already uses. But removing the
-resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
+batched, on the eventual-consistency model Daemonic Brain already uses. But removing
+the resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
 three paths are within noise on the real corpus and single-store pgvector has the
 fastest *p50* from 1M up, and the read-model-vs-resolve delta is within noise
 throughout. (One tail-latency caveat already points at the scale case: at 10M the
@@ -5756,8 +5756,8 @@ What it says:
   two kinds run opposite ways.** Read per kind or not at all.
 
 Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
-not to Daemonic Brain), the hedged strata clustered on six thoughts for mentions and
-three for edges, and a strict rule on type. The grades stand as they were
+not to the project), the hedged strata clustered on six thoughts for mentions
+and three for edges, and a strict rule on type. The grades stand as they were
 given blind; re-grading the calls the grader marked borderline — the two
 quoted example tokens `migration 021` and `Edge0` read as held, the control's
 `Jev per-type gates` and `PR #119` read as failed — leaves the mention finding
@@ -5790,10 +5790,10 @@ before and after — copied small enough to run in CI in seconds.
 **The reduced first form, said so.** The ticket's "deliverable that carries
 citations" needs SMD-1715's `capture_deliverable`, which is not built, and
 migration 042's `record_citation` has no MCP caller (SMD-1733 owns the
-argument). In Daemonic Brain today a deliverable is what SMD-1719 already scores as
-a citation: a `capture_thought` whose `derived_from` names the returned ids it
-used. That is the form that ran; when 1715 lands the arm swaps the tool and the
-scorer does not change.
+argument). In Daemonic Brain today a deliverable is what SMD-1719 already scores
+as a citation: a `capture_thought` whose `derived_from` names the returned ids
+it used. That is the form that ran; when 1715 lands the arm swaps the tool and
+the scorer does not change.
 
 **The corpus is code, not a fixture.** Twenty fictional sessions over twelve
 fictional subjects, thirty-six captures by two keys — the operator's and an

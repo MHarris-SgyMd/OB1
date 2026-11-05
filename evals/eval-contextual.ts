@@ -6,8 +6,8 @@
  * blurb to each chunk before embedding it, so a window reading "revenue grew 3%
  * over the previous quarter" carries which company and which quarter into its
  * vector. They report roughly a 35% reduction in top-20 retrieval failure. Those
- * are their numbers on their corpora; Daemonic Brain's standing rule is that a claim
- * gets measured here before it ships, and this is that measurement.
+ * are their numbers on their corpora; Daemonic Brain's standing rule is that a
+ * claim gets measured here before it ships, and this is that measurement.
  *
  * ── What this harness exists to avoid ────────────────────────────────────────
  *

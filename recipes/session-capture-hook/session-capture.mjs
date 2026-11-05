@@ -1245,11 +1245,12 @@ export const SECRET_PATTERNS = [
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
   ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
-  // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are their
-  // digests — told apart only by where they sit: a digest follows `name:scope:`
-  // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
-  // otherwise (second review pass: the mixed-case rule let every hex string by).
-  // …and not the everyday spellings of a digest: `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
+  // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
+  // their digests — told apart only by where they sit: a digest follows
+  // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
+  // until proven otherwise (second review pass: the mixed-case rule let every
+  // hex string by). …and not the everyday spellings of a digest:
+  // `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
   // and `sha256sum`'s own output shape, `<hex>  file` — two spaces then the name (fifth review pass:
   // an actionlint pin line refused a session; sixth: a lookbehind on the WORD sha256sum excused any
   // hex later on that line, a key included).
