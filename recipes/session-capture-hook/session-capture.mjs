@@ -2990,6 +2990,7 @@ function unattributedLapse(sc, text, id) {
     const m = new RegExp(`^Refused: claim (${UUID}) was made under this key's agent id\\b.*? It had lapsed at (\\S+?), and stays lapsed until a renewal lands\\b`, "i").exec(text);
     at = m && m[1].toLowerCase() === id ? m[2] : undefined;
   }
+  // Past, give or take five minutes of the two clocks' skew: one further off is no lapse (review pass 3).
   return typeof at === "string" && isTime(at) && Date.parse(at) <= Date.now() + 300_000 ? at : undefined;
 }
 /** CLAIM_UNATTRIBUTED in the log, from the reply's facts: the brain's words run past markerSaid's cut once a lapse is in them (SMD-3807). */
@@ -3138,12 +3139,15 @@ function ownPieceNote(text, root, claimId) {
  * claim made before the lapse and revived during it counts (review pass 2 of
  * SMD-3654: it was missed). Lapsed with one: `blocked`, the marker written as
  * for WORK_CLAIMED, naming each claim's id and its state so the agent can
- * match it against the claim named after the user's decision. Can't tell: `keep`.
+ * match it against the claim named after the user's decision. Can't tell:
+ * `keep`, its line, and `reason`, why alone, for a line of renewOne's own
+ * (SMD-3807 review pass 2: a " — " in a piece split the line). `markerNote`
+ * goes into the marker after "not renewed", ahead of its cut: an operator's
+ * part, when the renewal just tried met the registry waiting on one.
  */
-async function lapseCheck(cfg, claim, knownExpiry, why = "") {
+async function lapseCheck(cfg, claim, knownExpiry, markerNote = "") {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
-  // `why` alone too, for a kept line of renewOne's own to carry (SMD-3807 review pass 2: a " — " in a piece split it).
-  const unchecked = (why) => ({ keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and ${why}`, why });
+  const unchecked = (reason) => ({ keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and ${reason}`, reason });
   let result;
   try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "list_claims", arguments: { ticket: claim.ticket, include_ended: true, limit: 1000 } }, 15_000); }
   catch (e) { return unchecked(`the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}`); }
@@ -3158,7 +3162,7 @@ async function lapseCheck(cfg, claim, knownExpiry, why = "") {
   // Lapsed with nothing since: renewed, and the log says it had lapsed, as a brain since SMD-3654 says it (review pass 3: on an older brain it was a plain renewal).
   if (!since.length) return { quiet: quietLapse(mine.expiresAt) };
   // "not renewed" in the marker itself: the agent reads the file, not the log, to know it must renew after a carry-on (review pass 3).
-  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed${why}; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
+  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed${markerNote}; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
 }
 
@@ -3185,10 +3189,11 @@ async function renewOne(b, path, claim) {
     // Waiting on an operator, the marker says so too, ahead of its cut: the user must hear it whatever they decide (review passes 2 and 3).
     check = await lapseCheck(b.cfg, claim, o.lapsedAt, o.cause === "registry_away" ? "" : ` (and the agent registry cannot give the claim key's agent id until an operator acts, ${o.cause}: tell the user that too)`);
     if (check.blocked) o = { blocked: check.blocked, line: check.line, lapsedAt: o.lapsedAt };
-    else if (check.keep) o.line += `; the claims made since were not checked (${check.why}), and the hook renews it only once they are`;
+    else if (check.keep) o.line += `; the claims made since were not checked (${check.reason}), and the hook renews it only once they are`;
   }
   if (check && !check.blocked && !check.keep) {
-    if (check.note) o.line += check.note;
+    // The lapse time once: the refusal's line already gives it (review pass 4).
+    if (check.note) o.line += o.lapsedAt ? " (its token file names no ticket, so the claims made since were not checked)" : check.note;
     if (check.quiet && o.ok && !o.blocked && !o.line.includes(QUIET_LAPSE_HEAD)) o.line += check.quiet;
     if (check.quiet && o.lapsedAt) o.line += "; no other claim was made or renewed on its work since, and each renewal checks again";
   }
