@@ -1,0 +1,27 @@
+{
+  "name": "Job Hunt Plugin",
+  "description": "A job search's companies, postings, applications, interviews and contacts, in tables of the plugin's own: each listed, searched word by word and changed, one open application a posting, interviews scheduled, rescheduled and written up, the pipeline at a glance with the interviews still waiting for notes, and a job contact linked to the professional CRM contact the agent found or added first. The learning path's Extension 6, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": [
+    "plugin",
+    "job-hunt",
+    "career",
+    "pipeline",
+    "interviews",
+    "applications"
+  ],
+  "difficulty": "advanced",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-03",
+  "updated": "2026-11-03"
+}

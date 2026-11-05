@@ -1,5 +1,5 @@
-# Bun reads this file for any command run from extensions/: the three suites
-# (test-auth, test-writes, test-tools) and package.json's scripts. With
+# Bun reads this file for any command run from extensions/: the two suites
+# (test-auth, test-writes) and package.json's scripts. With
 # auto-install off, a package that does not resolve fails the import instead of
 # Bun fetching whatever npm serves. That holds for the recipe and integration
 # servers the suites import in-process, which reach this directory's install

@@ -434,7 +434,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // privilege without grant option "grants" it with a WARNING and no effect,
   // which the driver does not surface (SMD-1796, third review pass).
   // A plain --grant issues every group of ROLE_GRANTS; a retired group's name
-  // (RETIRED_GRANT_GROUPS: `sleep`, SMD-3315) is refused as such. --groups a,b
+  // (RETIRED_GRANT_GROUPS: `sleep`, SMD-3315; `extensions`, SMD-2311) is refused as such. --groups a,b
   // grants those groups of ROLE_GRANTS alone (SMD-2289:
   // the orchestration runner's role gets what its ingester and reembed run, not
   // the whole list). Alone it revokes nothing, so a role granted more

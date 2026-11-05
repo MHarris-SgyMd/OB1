@@ -5,10 +5,10 @@
  * walks the whole corpus and re-embeds every thought, and it has to produce
  * exactly what a capture would: the same windows, the same blurb rule, the same
  * prompt template, the same whole-content-then-head-window fallback, the same
- * width check. A second copy of that logic in a script is the defect FORK.md
- * keeps finding — a value defined twice — and here the value is every stored
- * vector: two implementations that drift by one separator produce vectors that
- * are not comparable, and nothing reports it.
+ * width check. A second copy of that logic in a script is the defect
+ * MAINTAINING.md names — a value defined twice — and here the value is every
+ * stored vector: two implementations that drift by one separator produce
+ * vectors that are not comparable, and nothing reports it.
  *
  * So the server and the re-embed worker call the same function, and the only
  * thing either supplies is configuration. The configuration is resolved from an

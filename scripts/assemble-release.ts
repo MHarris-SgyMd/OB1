@@ -10,20 +10,21 @@
  * numbers and the release version once, at assembly, with nothing able to land
  * between assembly and tag. Since SMD-1917 a numbered change is a file,
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
- * the next numbered file, removes the fragment, and re-renders FORK.md's index
- * with scripts/fork-index.ts. Everything a cut can refuse by reading — a
- * directory that is not contiguous or holds a stray or two fragments for one
- * ticket, a fragment check 16 would refuse (one function, fragments.ts) or one
- * naming a migration outside the range, a FORK.md with no marker pair or a
- * CHANGELOG.md with no Unreleased section or a hand-written note under it, a
- * half-applied earlier cut (its numbered files, changelog section or release
- * entry already present), a shallow clone — is refused in the plan, before
+ * the next numbered file, removes the fragment, and re-renders the index in
+ * changes/README.md (FORK.md's until SMD-3765) with scripts/fork-index.ts.
+ * Everything a cut can refuse by reading — a directory that is not contiguous
+ * or holds a stray or two fragments for one ticket, a fragment check 16 would
+ * refuse (one function, fragments.ts) or one naming a migration outside the
+ * range, an index file with no marker pair or a CHANGELOG.md with no
+ * Unreleased section or a hand-written note under it, a half-applied earlier
+ * cut (its numbered files, changelog section or release entry already
+ * present), a shallow clone — is refused in the plan, before
  * --write touches a file, and --write itself refuses a working tree that is
  * not clean. An I/O failure during --write is not planned for: revert the
  * working tree and run again.
  *
  *   bun scripts/assemble-release.ts              # DRY RUN: print the plan, touch nothing
- *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json, server-portable/version.ts
+ *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, changes/README.md's index, CHANGELOG.md, releases.json, server-portable/version.ts
  *   bun scripts/assemble-release.ts --self-check  # exercise the pure functions
  *
  * The pieces this computes — the next version, the change numbering, the section
@@ -54,7 +55,7 @@ import { fileURLToPath } from "node:url";
 import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems, type FragmentFrontMatter } from "./fragments.ts";
 import { renderVersionTs } from "./gen-version.ts";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, INDEX_FILE, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_ABS = join(ROOT, "changes");
@@ -227,7 +228,7 @@ function buildPlan() {
     const planned = renderChangeFile(0, f.fork).title;
     for (const e of existing) {
       if ((e.heading?.title ?? "") === planned) {
-        throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record (same title) — a previous --write stopped half-way; delete the numbered files it wrote, restore FORK.md, CHANGELOG.md and releases.json from version control, and run again`);
+        throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record (same title) — a previous --write stopped half-way; delete the numbered files it wrote, restore changes/README.md, CHANGELOG.md and releases.json from version control, and run again`);
       }
     }
   }
@@ -239,12 +240,11 @@ function buildPlan() {
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
   const changeRange: [number, number] = [numbered[0].number, numbered[numbered.length - 1].number]; // pending is non-empty (refused above)
   // The index as it will read after the cut, from the plan — rendered (and the
-  // marker pair checked) before a single file is written, so a FORK.md this step
+  // marker pair checked) before a single file is written, so an index file this step
   // cannot write into is refused with nothing half-applied. The numbered files
   // alone reach it (SMD-2084): those there are, then those the plan writes.
   const after = [...existing, ...classifyChanges(numbered.map((f) => ({ name: f.file.name, text: f.file.text }))).numbered];
-  const forkPath = join(ROOT, "FORK.md");
-  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
+  const indexAfter = spliceIndex(readFileSync(join(ROOT, INDEX_FILE), "utf8"), renderIndex(after));
   const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
@@ -291,7 +291,7 @@ function buildPlan() {
   // with the last release is NOT one: a ticket may ship a second fragment.
   const last = releases[releases.length - 1];
   if (changelogBefore.includes(`## [${core}]`) || (last && last.server === gitHead())) {
-    throw new Error(`CHANGELOG.md or releases.json already carries this cut while its fragments are still in ${CHANGES_REL}/ — a previous --write stopped half-way; restore FORK.md, CHANGELOG.md and releases.json from version control and run again`);
+    throw new Error(`CHANGELOG.md or releases.json already carries this cut while its fragments are still in ${CHANGES_REL}/ — a previous --write stopped half-way; restore changes/README.md, CHANGELOG.md and releases.json from version control and run again`);
   }
   // Whatever sits under ## [Unreleased] is replaced by the version section; a
   // hand-written note there would vanish. Only the placeholder paragraph may sit there.
@@ -308,7 +308,7 @@ function buildPlan() {
   );
   const entry: Release = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets, changes: changeRange };
   if (range) entry.frozenShas = frozenShasForRange(range[0], range[1], readMig);
-  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry, before };
+  return { releases, fragments: numbered, version, range, tickets, date, indexAfter, changelogAfter, entry, before };
 }
 
 /** What buildPlan renders: everything --write applies, and everything the dry run prints. */
@@ -337,13 +337,13 @@ function printPlan(plan: Plan) {
 function write(plan: Plan) {
   // Everything was rendered in buildPlan; this only writes (the release author
   // reviews the diff; this is not run in CI). The new numbered files first —
-  // pure additions — then the three overwrites (FORK.md's index, CHANGELOG.md's
+  // pure additions — then the three overwrites (changes/README.md's index, CHANGELOG.md's
   // section under Unreleased with its compare link, releases.json's entry), and
   // the fragments are removed last. A failure part-way is recovered by reverting
   // the working tree to the commit before the cut and running again; buildPlan
   // refuses to run on top of a half-applied cut rather than double it.
   for (const f of plan.fragments) writeFileSync(join(CHANGES_ABS, f.file.name), f.file.text);
-  writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
+  writeFileSync(join(ROOT, INDEX_FILE), plan.indexAfter);
   writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
   // The server's generated version module names the range the entry just
@@ -351,7 +351,7 @@ function write(plan: Plan) {
   writeFileSync(join(ROOT, "server-portable", "version.ts"), renderVersionTs());
   for (const f of plan.fragments) unlinkSync(join(CHANGES_ABS, f.name));
 
-  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md, releases.json and server-portable/version.ts for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
+  console.log(`Wrote ${plan.fragments.length} change file(s), changes/README.md's index, CHANGELOG.md, releases.json and server-portable/version.ts for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
   console.log(`Next: commit this as the cut's second commit, run check-fork-consistency, and open the PR. Once it has merged, tag the merge commit — git tag -a v${plan.version.split("+")[0]} <merge sha> -m '${plan.version}' && git push origin v${plan.version.split("+")[0]} — and .github/workflows/release.yml publishes the images and the release from it (scripts/release-artifacts.ts refuses a tag that does not name this cut).`);
 }
 
@@ -432,8 +432,8 @@ if (import.meta.main) {
       write(plan);
     } else printPlan(plan);
   } catch (e) {
-    // Nothing to release, a fragment this step cannot number, a FORK.md it cannot
-    // write into: a sentence, not a stack trace, and a non-zero exit so a release
+    // Nothing to release, a fragment this step cannot number, an index file it
+    // cannot write into: a sentence, not a stack trace, and a non-zero exit so a release
     // job stops here (SMD-1805).
     console.error(`assemble-release: ${(e as Error).message}`); // buildPlan and write throw Errors
     process.exit(1);

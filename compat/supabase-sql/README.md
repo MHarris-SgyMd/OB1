@@ -79,14 +79,11 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun --no-install extensions/job-hunt/index.ts                 # an extension
-
-SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
 PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
 ```
 
-An extension sits beside `extensions/node_modules` and resolves its packages from
-there. A recipe or integration resolves the same pinned install through
+The install lives in `extensions/node_modules` (the extensions' servers used it
+until SMD-2311). A recipe or integration resolves that pinned install through
 `recipes/node_modules` and `integrations/node_modules`, committed links to
 `../extensions/node_modules`, so the one `bun install` above serves every server
 from any working directory (SMD-1991). `NODE_PATH`, which these commands used
@@ -97,7 +94,7 @@ Without it, Bun downloads whatever version npm serves when it finds no
 counts as none. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
-every server. An extension's `schema.sql` applies to
+every server. A recipe's `schema.sql` applies to
 a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
 are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-fork-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
@@ -118,10 +115,7 @@ cd compat/supabase-sql && bun run test
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page has
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-tools.ts` then drives every tool of the one MCP server with
-a schema of its own — job-hunt, the last extension, ten tools since five
-became plugins (SMD-2311) — against those
-schemas, and `extensions/test-writes.ts` the servers
+`extensions/test-writes.ts` then drives the servers
 that need the model provider stubbed (agent-memory-api's nine routes,
 the two consolidation workers, smart-ingest): the migrated
 files this shim is judged by.
@@ -336,27 +330,25 @@ development — the test caught it.
   need live credentials — Gmail, Slack, Readwise. The shim is tested; each
   migrated file is verified to parse; `extensions/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
-  filters on a JSON path, found the two gaps change 73 closed); and
-  `extensions/test-tools.ts` drives every tool of the one MCP server with a
-  schema of its own — ten tools, since SMD-2920 retired ob-graph's ten and
-  SMD-2311 made five extensions plugins — against those
-  schemas (change 74's review had found seven of the first twenty-nine
-  failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
-  four embedded selects the codemod's blocker regex let through — and driving
-  every argument branch found two more; change 77 closed them all). Exercise
+  filters on a JSON path, found the two gaps change 73 closed). Until the
+  last extension became a plugin (SMD-2311), `extensions/test-tools.ts` drove
+  every extension tool on the shim too (change 74's review had found seven of
+  the first twenty-nine failing on it — no `.not()`, a JavaScript array bound
+  as its `String()`, four embedded selects the codemod's blocker regex let
+  through — and driving every argument branch found two more; change 77
+  closed them all). Exercise
   the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.
 - **Timestamps are strings.** A `Date` Bun hands back is rendered as its ISO
   string, as PostgREST's JSON has it (FORK.md change 73); a consumer that wants a
-  `Date` does `new Date(row.x)`, as the shim-migrated extensions already do.
+  `Date` does `new Date(row.x)`, as the shim-migrated extensions did.
 - **JSON-path keys are identifier-shaped.** `meta->>café` and `meta->>a$b` are
   refused here; PostgREST accepts both. Nothing in the tree uses such a key.
 
 ## Related
 
 - `../../scripts/migrate-to-sql-shim.ts` — the codemod
-- `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against
