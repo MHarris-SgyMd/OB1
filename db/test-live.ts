@@ -20281,9 +20281,11 @@ if (want("38")) {
     const acWholeDrain = new AbortController();
     const wholeDrained = await bounded(sleepRun({ ...ONE_SHOT, signal: acWholeDrain.signal }), acWholeDrain);
     lines.length = 0;
+    /** newestLive's query (db/sleep.ts), the scheduler's read of the newest live write: what this case and the next count. */
+    const isLiveRead = (text: string) => text.includes("FROM thought_audit WHERE created_at >");
     let noneReads = 0;
     const counting = intercept((text, run) => {
-      if (text.includes("FROM thought_audit WHERE created_at >")) noneReads++;
+      if (isLiveRead(text)) noneReads++;
       return run();
     });
     const acNone = new AbortController();
@@ -20300,7 +20302,7 @@ if (want("38")) {
     let liveReads = 0;
     // Synchronous for every other statement: a fragment nested in a query must come back as itself, not a promise.
     const finishing = intercept((text, run) => {
-      if (!(text.includes("FROM thought_audit WHERE created_at >") && ++liveReads === 2)) return run();
+      if (!(isLiveRead(text) && ++liveReads === 2)) return run();
       return sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${goneNote}::uuid`.then(() => run());
     });
     lines.length = 0;
