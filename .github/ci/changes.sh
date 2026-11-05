@@ -192,11 +192,12 @@ cut_blocks() {
 # unchanged; it is empty when an edit outside the jobs or of a RUN_ALL_JOBS
 # job, or an unreadable file, runs every job.
 by_job() {
-  local wf=$1 charged=$2 d f id changed='' skip='' rc=0
+  local wf=$1 charged=$2 d f id changed='' skip='' rc=0 at=HEAD
+  if [ "$wf" = 1 ]; then at='HEAD^1 and HEAD'; fi
   d=$(mktemp -d) || { printf 'true\t\tno scratch directory to read %s by job\n' "$WORKFLOW"; return; }
   mkdir "$d/base" "$d/head"
   if ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || { [ "$wf" = 1 ] && ! git show "HEAD^1:$WORKFLOW" > "$d/base.yml" 2> /dev/null; }; then
-    printf 'true\t\t%s could not be read at HEAD^1 and HEAD\n' "$WORKFLOW"; rc=1
+    printf 'true\t\t%s could not be read at %s\n' "$WORKFLOW" "$at"; rc=1
   elif ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null || { [ "$wf" = 1 ] && ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; }; then
     printf 'true\t\t%s is not in the shape its jobs are read apart in\n' "$WORKFLOW"; rc=1
   fi

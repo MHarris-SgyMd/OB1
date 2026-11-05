@@ -38,8 +38,8 @@ defaults:
 # (.github/dependabot.yml) moves the pins by PR, and check-consistency
 # check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
 # persist-credentials: false: no step needs the token after it (a job that
-# reads history takes it at checkout, fetch-depth: 0; the changes job's one
-# lazy blob fetch, on a PR that edits its classifier, is anonymous, the
+# reads history takes it at checkout, fetch-depth: 0; the changes job's lazy
+# blob fetches, the base's classifier and this workflow, are anonymous, the
 # repository public), so the token has no reason to stay in the workspace.
 
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
@@ -79,8 +79,10 @@ jobs:
   # with none, or a fetch that fails, runs every job. The checkout is .github/ci
   # and the root's files (sparse cone mode), blobless otherwise: the diff reads
   # trees, and the base's classifier is the checked-out blob unless the PR
-  # edits it, when it is fetched alone. Its answer is on the run's summary page
-  # too (review pass 2). Check 20 holds this job as written.
+  # edits it, when it is fetched alone. This workflow, outside the cone, is
+  # fetched whenever the answer reads it by job: a PR touching a mapped path,
+  # most of them, or editing it. Its answer is on the run's summary page too
+  # (review pass 2). Check 20 holds this job as written.
   changes:
     name: What the change can affect
     runs-on: ubuntu-24.04
