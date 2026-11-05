@@ -102,6 +102,10 @@ export function autolinkTargets(text: string): string[] {
  * issue is live), so a facet that goes away is patched away too: an issue
  * archived then restored would otherwise keep `archived_at` forever, since the
  * patch compares the keys the new facets name (SMD-1954, second review pass).
+ * `due_date` alone is written only when the issue carries `dueDate` (SMD-3666):
+ * every fetch does, null included, but a dump built before it was fetched has
+ * none, and its null merged over a row would wipe the day board-sync wrote
+ * (review pass 1).
  */
 export function issueFacets(issue: LinearIssue): Record<string, unknown> {
   return {
@@ -112,7 +116,7 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
     status_type: issue.state.type,
     priority: issue.priorityLabel,
     // The day Linear says it is due (SMD-3666): board-sync states it with the priority, from this facet.
-    due_date: issue.dueDate ?? null,
+    ...("dueDate" in issue ? { due_date: issue.dueDate ?? null } : {}),
     labels: labelNames(issue),
     parent: issue.parent?.identifier ?? null,
     url: issue.url,

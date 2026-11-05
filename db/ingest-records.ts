@@ -534,6 +534,10 @@ export type RecordResult = {
  * a write followed reads "stale" for a reason that is not a later view; the
  * sync's next pass lands the rename from its census, so the cost is a delay
  * and an overstated count, never a lost write (second review pass).
+ *
+ * With `priorities` (the caller has asked that the brain has 116's writers and
+ * the role may run them), a record's priority is stated in the same
+ * transaction once its row stands (SMD-3666); without it, none is.
  */
 export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), actor: IngestActor = INGEST_ACTOR, priorities = false): Promise<RecordResult> {
   const meta = { ...doc.meta, source: doc.source };
@@ -804,9 +808,10 @@ function selfCheck(): number {
   ok(reasonOf("linear", "High") === "Linear priority: High" && reasonOf("frontmatter", " very\thigh ") === "frontmatter priority: very high", "a statement's reason names the source and its word, a control character a space");
   const ticketDoc = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "High", dueDate: "2026-12-01" }));
   const noPriority = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "No priority" }));
+  const noDay = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, dueDate: null }));
   ok(JSON.stringify(ticketDoc.priority) === JSON.stringify({ kind: "ticket", key: SAMPLE_ISSUE.identifier, level: 3, due: "2026-12-01T00:00:00Z", reason: "Linear priority: High" })
-     && ticketDoc.meta.due_date === "2026-12-01" && ticketDoc.meta.priority === "High" && noPriority.priority?.level === null && noPriority.meta.due_date === null,
-    `a ticket's priority is stated on the ticket, Linear's word and due day kept as facets; No priority is unknown (${JSON.stringify(ticketDoc.priority)})`);
+     && ticketDoc.meta.due_date === "2026-12-01" && ticketDoc.meta.priority === "High" && noPriority.priority?.level === null && !("due_date" in noPriority.meta) && noDay.meta.due_date === null,
+    `a ticket's priority is stated on the ticket, Linear's word and due day kept as facets; No priority is unknown; an issue with no dueDate key (a dump built before it was fetched) writes no due_date, one whose dueDate is null writes null (review pass 1) (${JSON.stringify(ticketDoc.priority)})`);
   const sampleItem = JSON.parse(JSON.stringify(SAMPLE_ITEM)) as Ingested;
   const noteDoc = docOf({ ...sampleItem, priority: { scale: "frontmatter", value: "urgent", due: "2026-12-01" } });
   const partDocs = docsOf({ ...linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "High" }), derived: [{ identity: { system: "linear", key: "SMD-1936#update-1" }, canonical: sampleItem.canonical, text: "a dated part", links: [], mentions: [], facets: {} }] });
