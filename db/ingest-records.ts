@@ -995,7 +995,7 @@ async function main(): Promise<void> {
   // its first write, ending the run).
   const priorityProblem = docsWithPriority ? await priorityWritersProblem(sql) : null;
   const priorities = docsWithPriority > 0 && priorityProblem === null;
-  if (priorityProblem) console.error(`  priority: ${docsWithPriority} record(s) carry a priority, and none is stated: ${priorityProblem}`);
+  if (priorityProblem) console.error(`  priority: ${docsWithPriority} record(s) state or clear a priority, and none is: ${priorityProblem}`);
   const priorityTally = new Map<string, number>();
   /** Why an item wrote nothing, in the emitter's terms (held names the holder inline). */
   const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
