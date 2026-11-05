@@ -197,8 +197,9 @@
  *      every other job, runs if: always(), lets only the jobs with an if: of
  *      their own skip (AGGREGATE_MAY_SKIP: commit-lint and
  *      publish-test-counts), and the jobs the changes job gates only when it
- *      said code=false (AGGREGATE_GATED, each needing it and running under
- *      GATED_IF, which fails open; SMD-2435), on which no job it needs sets
+ *      said code=false or named them in skip (AGGREGATE_GATED, each needing
+ *      it alone and running under gatedIf, which fails open; SMD-2435), on
+ *      which no job it needs sets
  *      continue-on-error or calls a reusable workflow, which runs on
  *      ubuntu-24.04 with no key beyond the few allowed on it or its step, and
  *      whose one step is held verbatim and run on its own cases (SMD-3168);
@@ -605,6 +606,13 @@
  *      when it does not, a need with no counts is named on every page as
  *      having none, and a name uploaded twice fails on main alone
  *      (SMD-3709). Its probe pins what it refuses and passes
+ *  51. .github/ci/changes.sh cuts brain-checks.yml at its jobs as Bun reads
+ *      it: its jobs are the file's, in order, each job's block parses alone
+ *      to the job the whole file holds, and what lies outside the jobs to the
+ *      rest, so a gated job whose block an edit leaves byte for byte the same
+ *      may skip — no alias, merge key or flow style reaches across a block,
+ *      and a file the cut refuses fails here as well as running every job
+ *      (SMD-2435 PR 2). Its probe pins what it refuses and passes
  *  52. scripts/commitlint.config.ts takes `[core]` for the project's own code
  *      and `[fork]`, its name before SMD-3765: both read by the header, listed
  *      in type-enum and held to ticket-ref, which is on (level 1 or more,
@@ -613,7 +621,7 @@
  *      only a PR's own commits, so nothing else reads the config's categories
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
  * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
  */
@@ -4971,6 +4979,10 @@ const AGGREGATE_CASES: [why: string, needs: string, maySkip: string, passes: boo
     ["commit-lint failed", n({ a: r("success"), "commit-lint": r("failure") }), "commit-lint", false],
     ["a job whose name MAY_SKIP's contains was skipped", n({ a: r("success"), commit: r("skipped") }), "commit-lint", false],
     ["a job whose name contains MAY_SKIP's was skipped", n({ a: r("success"), "commit-lint-x": r("skipped") }), "commit-lint", false],
+    // As gatedMaySkip renders it (SMD-2435 PR 2): format()'s space, then the changes job's skip, or nothing.
+    ["a job the changes job's skip names was skipped", n({ a: r("success"), "db-live": r("skipped") }), "commit-lint publish db-live data-layer", true],
+    ["nothing skipped, MAY_SKIP ending in format()'s space", n({ a: r("success"), b: r("success") }), "commit-lint publish ", true],
+    ["a job skipped with skip empty", n({ a: r("success"), "db-live": r("skipped") }), "commit-lint publish ", false],
     ["a result that is empty", n({ a: r("") }), "", false],
     ["a NEEDS that does not parse", "not json", "", false],
   ];
@@ -5004,28 +5016,32 @@ const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
 /**
  * The job that says whether a run's change can affect the code jobs
  * (SMD-2435, .github/ci/changes.sh), and the jobs it gates. A gated job needs
- * it and runs under GATED_IF exactly: unless the changes job succeeded and
- * said code=false — so a changes job that failed, or was cancelled, runs them
- * all (it fails open). The aggregate lets a gated job skip only in that same
- * case: MAY_SKIP is gatedMaySkip()'s expression, AGGREGATE_MAY_SKIP and the
- * gated jobs when the changes job said code=false, AGGREGATE_MAY_SKIP alone
- * otherwise, so a cancelled run's unstarted jobs fail it. The changes job has
+ * it alone and runs under gatedIf(its name) exactly: unless the changes job
+ * succeeded and said code=false or named it in skip (PR 2: an edit of the
+ * workflow that leaves its block as it was) — so a changes job that failed,
+ * or was cancelled, runs them all (it fails open). It needs no other job, so
+ * its block and the changes job's answer are all it reads (check 51). The
+ * aggregate lets a gated job skip only in those same cases: MAY_SKIP is
+ * gatedMaySkip()'s expression, AGGREGATE_MAY_SKIP and the gated jobs when the
+ * changes job said code=false, or the ones its skip names when it succeeded,
+ * so a cancelled run's unstarted jobs fail it. The changes job has
  * no if: of its own: everything gated needs it. A job that needs a gated job
  * runs under `!cancelled()` (GATED_DEPENDENT_IF), so its skipped need does not
  * skip it: publish-test-counts, on a push to main, where nothing is gated.
  */
 const CHANGES_JOB = "changes";
 const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "preflight-rest", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
-const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code != 'false') }}`;
+const gatedIf = (job: string): string =>
+  `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || (needs.${CHANGES_JOB}.outputs.code != 'false' && !contains(format(' {0} ', needs.${CHANGES_JOB}.outputs.skip), ' ${job} '))) }}`;
 /**
  * The changes job as written (review pass 1): a checkout on pull requests
  * alone, shallow and blobless; a decide step whose env reads the event and
  * the branches and whose run runs the BASE's classifier, or answers
- * code=true; its one output from that step. No other key, so no
- * continue-on-error, no pinned EVENT, no output a literal can set.
+ * code=true; its two outputs, code and skip, from that step. No other key, so
+ * no continue-on-error, no pinned EVENT, no output a literal can set.
  */
 const CHANGES_JOB_KEYS = ["name", "runs-on", "timeout-minutes", "outputs", "steps"];
-const CHANGES_OUTPUTS = { code: "${{ steps.decide.outputs.code }}" };
+const CHANGES_OUTPUTS = { code: "${{ steps.decide.outputs.code }}", skip: "${{ steps.decide.outputs.skip }}" };
 const CHANGES_CHECKOUT_IF = "github.event_name == 'pull_request'";
 const CHANGES_CHECKOUT_WITH = { "persist-credentials": false, "fetch-depth": 2, filter: "blob:none", "sparse-checkout": ".github/ci" };
 const CHANGES_ENV = { EVENT: "${{ github.event_name }}", BASE_REF: "${{ github.base_ref }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" };
@@ -5060,9 +5076,13 @@ function changesJobProblems(job: Record<string, unknown>): string[] {
   return out;
 }
 const GATED_DEPENDENT_IF = /^\$\{\{\s*!cancelled\(\)\s*&&/;
-/** The aggregate's MAY_SKIP: the gated jobs beside maySkip only when the changes job succeeded and said code=false. With nothing gated, maySkip as it is. */
+/**
+ * The aggregate's MAY_SKIP: maySkip, and beside it, when the changes job
+ * succeeded, every gated job if it said code=false or else the ones its skip
+ * names. With nothing gated, maySkip as it is.
+ */
 const gatedMaySkip = (maySkip: readonly string[], gated: readonly string[]): string =>
-  gated.length ? `\${{ needs.${CHANGES_JOB}.result == 'success' && needs.${CHANGES_JOB}.outputs.code == 'false' && '${[...maySkip, ...gated].join(" ")}' || '${maySkip.join(" ")}' }}` : maySkip.join(" ");
+  gated.length ? `\${{ format('${maySkip.join(" ")} {0}', needs.${CHANGES_JOB}.result == 'success' && (needs.${CHANGES_JOB}.outputs.code == 'false' && '${gated.join(" ")}' || needs.${CHANGES_JOB}.outputs.skip) || '') }}` : maySkip.join(" ");
 /** A name as a message shows it: quoted, with anything outside printable ASCII escaped, so a look-alike does not read as the name it imitates (review pass 3). */
 const shownName = (s: string): string => JSON.stringify(s).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 /** One `${{ … }}` in a name: a quoted string read whole, so a `}}` inside it does not end the expression (review pass 4); unclosed, it runs to the end. */
@@ -5187,7 +5207,7 @@ function aggregateProblems(doc: JobsDoc, maySkipList: readonly string[] = AGGREG
   const maySkip = gatedMaySkip(maySkipList, gatedList);
   // With nothing skippable the key may go too: the step reads an unset MAY_SKIP as empty.
   const given = env.MAY_SKIP === undefined && maySkip === "" ? "" : env.MAY_SKIP;
-  if (given !== maySkip) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step sets MAY_SKIP to ${JSON.stringify(env.MAY_SKIP ?? null)}, not ${JSON.stringify(maySkip)} — AGGREGATE_MAY_SKIP${gatedList.length ? ", and AGGREGATE_GATED only when the changes job said code=false," : ""} in ${SELF}, one space between names as the step's jq splits them; a job made skippable is a change there, with its reason (SMD-3168, SMD-2435)`]);
+  if (given !== maySkip) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step sets MAY_SKIP to ${JSON.stringify(env.MAY_SKIP ?? null)}, not ${JSON.stringify(maySkip)} — AGGREGATE_MAY_SKIP${gatedList.length ? ", and AGGREGATE_GATED only when the changes job said code=false or the ones its skip names," : ""} in ${SELF}, one space between names as the step's jq splits them; a job made skippable is a change there, with its reason (SMD-3168, SMD-2435)`]);
   if (gatedList.length) {
     const changes = jobs[CHANGES_JOB];
     if (!changes || typeof changes !== "object") problems.push([WORKFLOW, `has no job ${CHANGES_JOB}, which AGGREGATE_GATED's jobs need — without it every gated job's needs fail (SMD-2435)`]);
@@ -5199,8 +5219,10 @@ function aggregateProblems(doc: JobsDoc, maySkipList: readonly string[] = AGGREG
       const job = jobs[key];
       if (!others.includes(key) || !job) { problems.push([SELF, `AGGREGATE_GATED names ${key}, which is no job in ${WORKFLOW} — take it off (SMD-2435)`]); continue; }
       if (maySkipList.includes(key)) problems.push([SELF, `AGGREGATE_GATED names ${key}, which AGGREGATE_MAY_SKIP names too — a job skips by its own if: or by the changes job, not both (SMD-2435)`]);
-      if (String(job.if ?? "").trim() !== GATED_IF) problems.push([WORKFLOW, `job ${key} runs if: ${JSON.stringify(job.if ?? null)}, not ${GATED_IF} — a gated job runs unless the changes job succeeded and said code=false, so a changes job that fails runs it (SMD-2435)`]);
-      if (!needsOf(job.needs)?.includes(CHANGES_JOB)) problems.push([WORKFLOW, `job ${key} does not need ${CHANGES_JOB} — its if: reads that job's answer, and without the need it reads nothing and runs, or skips on a guess (SMD-2435)`]);
+      if (String(job.if ?? "").trim() !== gatedIf(key)) problems.push([WORKFLOW, `job ${key} runs if: ${JSON.stringify(job.if ?? null)}, not ${gatedIf(key)} — a gated job runs unless the changes job succeeded and said code=false or named it in skip, so a changes job that fails runs it (SMD-2435)`]);
+      const needs = needsOf(job.needs);
+      if (!needs?.includes(CHANGES_JOB)) problems.push([WORKFLOW, `job ${key} does not need ${CHANGES_JOB} — its if: reads that job's answer, and without the need it reads nothing and runs, or skips on a guess (SMD-2435)`]);
+      else if (needs.length !== 1) problems.push([WORKFLOW, `job ${key} needs ${needs.filter((n) => n !== CHANGES_JOB).join(", ")} beside ${CHANGES_JOB} — a gated job skips when its own block is unchanged, so it may read nothing another job's block decides (SMD-2435 PR 2)`]);
       for (const dep of others.filter((k) => needsOf(jobs[k]?.needs)?.includes(key))) {
         if (!GATED_DEPENDENT_IF.test(String(jobs[dep]?.if ?? ""))) problems.push([WORKFLOW, `job ${dep} needs ${key}, which the changes job may skip, and does not run under \${{ !cancelled() && … }} — a skipped need would skip it too (SMD-2435)`]);
       }
@@ -5393,7 +5415,7 @@ const GATED_PROBE = (): ProbeJobs => ({
     { name: "Whether it can affect the code jobs", id: "decide", env: { ...CHANGES_ENV }, run: `${CHANGES_RUN}\n` },
   ] },
   [CHANGES_SELF_CHECK_JOB]: { name: "Repo consistency", steps: [{ run: CHANGES_SELF_CHECK_RUN }] },
-  g: { name: "Server tests", needs: CHANGES_JOB, if: GATED_IF },
+  g: { name: "Server tests", needs: CHANGES_JOB, if: gatedIf("g") },
   publish: { name: "Publish", needs: ["g"], if: "${{ !cancelled() && github.event_name == 'push' }}" },
   "commit-lint": { name: "Commit messages", if: "github.event_name == 'pull_request'" },
   [AGGREGATE_JOB]: { name: AGGREGATE_NAME, "runs-on": "ubuntu-24.04", if: "always()", needs: [CHANGES_JOB, CHANGES_SELF_CHECK_JOB, "g", "publish", "commit-lint"], steps: [{ name: "Every job succeeded", env: { NEEDS: AGGREGATE_NEEDS_ENV, MAY_SKIP: gatedMaySkip(PROBE_GATED_MAY_SKIP, PROBE_GATED) }, run: `${AGGREGATE_RUN}\n` }] },
@@ -5413,6 +5435,14 @@ const GATED_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says: st
   ["a gated job without !cancelled()", (j) => { (j.g as Record<string, unknown>).if = "${{ needs.changes.result != 'success' || needs.changes.outputs.code == 'true' }}"; return j; }, "job g runs if:"],
   ["a gated job with no if:", (j) => { delete (j.g as Record<string, unknown>).if; return j; }, "job g runs if: null"],
   ["a gated job that does not need the changes job", (j) => { delete (j.g as Record<string, unknown>).needs; return j; }, "job g does not need changes"],
+  // PR 2's per-job gate.
+  ["a gated job reading another job's name in skip", (j) => { (j.g as Record<string, unknown>).if = gatedIf("h"); return j; }, "job g runs if:"],
+  ["a gated job's if: as PR 1 wrote it, skip unread", (j) => { (j.g as Record<string, unknown>).if = "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}"; return j; }, "job g runs if:"],
+  ["a gated job's skip read without format()'s spaces", (j) => { (j.g as Record<string, unknown>).if = "${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(needs.changes.outputs.skip, 'g'))) }}"; return j; }, "job g runs if:"],
+  ["a gated job that needs another job beside the changes job", (j) => { (j.g as Record<string, unknown>).needs = [CHANGES_JOB, CHANGES_SELF_CHECK_JOB]; return j; }, `beside ${CHANGES_JOB}`],
+  ["MAY_SKIP taking skip whether or not the changes job succeeded", (j) => { aggOf(j).steps[0].env.MAY_SKIP = "${{ format('commit-lint publish {0}', needs.changes.outputs.code == 'false' && 'g' || needs.changes.outputs.skip) }}"; return j; }, "sets MAY_SKIP to"],
+  ["the changes job without its skip output", (j) => { changesOf(j).outputs = { code: "${{ steps.decide.outputs.code }}" }; return j; }, `job ${CHANGES_JOB}'s outputs are`],
+  ["the changes job's skip a literal", (j) => { changesOf(j).outputs = { ...CHANGES_OUTPUTS, skip: "g" }; return j; }, `job ${CHANGES_JOB}'s outputs are`],
   ["MAY_SKIP naming the gated job always, not only on code=false", (j) => { aggOf(j).steps[0].env.MAY_SKIP = [...PROBE_GATED_MAY_SKIP, ...PROBE_GATED].join(" "); return j; }, "sets MAY_SKIP to"],
   ["MAY_SKIP's condition dropped to the code output alone", (j) => { aggOf(j).steps[0].env.MAY_SKIP = `\${{ needs.changes.outputs.code == 'false' && 'commit-lint publish g' || 'commit-lint publish' }}`; return j; }, "sets MAY_SKIP to"],
   ["a job that needs a gated job without !cancelled()", (j) => { (j.publish as Record<string, unknown>).if = "github.event_name == 'push'"; return j; }, "job publish needs g, which the changes job may skip"],
@@ -11082,6 +11112,128 @@ function checkTestCountsPublished() {
   for (const msg of testCountsProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
 }
 checkTestCountsPublished();
+
+// ── 51: the changes job cuts brain-checks.yml at its jobs as Bun reads them (SMD-2435 PR 2) ──
+//
+// The changes job reads an edit of the workflow by job: it cuts the base's and
+// the head's text at their job keys (changes.sh's cut_blocks, bash, so no Bun
+// on the run's critical path), and a gated job whose block is the same byte
+// for byte skips. That is sound only while a job's block alone says what the
+// job is: an alias to an anchor in another block, a merge key, or a flow style
+// the cut misreads would let an edit elsewhere change a job that then skips.
+// So the cut is held to Bun's reading: its jobs are the file's, in order, each
+// block parses alone to its job as the whole file does, and what lies outside
+// the jobs parses alone to the rest of the file. A file the cut refuses runs
+// every job on each edit, and fails here too, so the refusal is seen.
+/** How CHANGES_SCRIPT cuts a workflow's text: each region's lines (".top" for what lies outside the jobs), or why it would not. */
+function changesCut(text: string): { regions: Map<string, string[]> } | { refused: string } {
+  const dir = mkdtempSync(join(tmpdir(), "ob1-check51-"));
+  try {
+    const file = join(dir, "workflow.yml");
+    writeFileSync(file, text);
+    const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--blocks", file]);
+    if (r.exitCode !== 0) return { refused: r.stderr.toString().trim() || `exit ${r.exitCode}` };
+    const lines = text.split("\n");
+    const regions = new Map<string, string[]>();
+    for (const row of r.stdout.toString().split("\n").filter(Boolean)) {
+      const [name, first, last] = row.split("\t");
+      regions.set(name, [...(regions.get(name) ?? []), ...lines.slice(Number(first) - 1, Number(last))]);
+    }
+    return { regions };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+/** What check 51 reports for a workflow's text: the cut refused, or a region whose text alone reads otherwise than the whole file. */
+function jobBlockProblems(text: string): string[] {
+  let whole: unknown;
+  try { whole = Bun.YAML.parse(text); } catch (e) { return [`does not parse as YAML (${(e as Error).message.split("\n")[0]}) (check 51, SMD-2435)`]; }
+  const doc = whole as Record<string, unknown> | null;
+  const jobs = doc && typeof doc === "object" ? doc.jobs : undefined;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return ["has no `jobs:` map (check 51, SMD-2435)"];
+  const cut = changesCut(text);
+  if ("refused" in cut) return [`is a file ${CHANGES_SCRIPT} will not cut at its jobs (${cut.refused}), so every edit of it runs every job — write "jobs:" alone on its line and each job as "  <id>:" alone on its, two spaces in, its body deeper, with no line opening with a tab (check 51, SMD-2435)`];
+  const problems: string[] = [];
+  const ids = [...cut.regions.keys()].filter((r) => r !== ".top");
+  if (JSON.stringify(ids) !== JSON.stringify(Object.keys(jobs))) problems.push(`is cut by ${CHANGES_SCRIPT} into jobs ${ids.join(", ") || "none"}, where Bun reads ${Object.keys(jobs).join(", ")} — the cut would compare the wrong text for a job (check 51, SMD-2435)`);
+  const readsAlone = (lines: string[] | undefined, want: unknown): boolean => {
+    try { return Bun.deepEquals(Bun.YAML.parse((lines ?? []).join("\n")), want); } catch { return false; }
+  };
+  for (const id of ids) {
+    if (!(id in jobs)) continue;
+    if (!readsAlone(cut.regions.get(id), { [id]: (jobs as Record<string, unknown>)[id] })) problems.push(`job ${id}'s block does not read alone as the whole file reads it — an alias or merge key reaching an anchor outside it, say — so an edit outside the block could change the job while the changes job skips it as unchanged; keep each job's YAML within its block (check 51, SMD-2435)`);
+  }
+  if (!readsAlone(cut.regions.get(".top"), { ...doc, jobs: null })) problems.push(`what lies outside its jobs does not read alone as the whole file reads it — an alias reaching an anchor in a job, say — so the changes job could miss an edit there that changes every job (check 51, SMD-2435)`);
+  return problems;
+}
+function checkJobBlocksCut() {
+  const wf = (top: string, jobs: string, after = "") => `name: probe\n${top}on: push\njobs:\n${jobs}${after}`;
+  const A = "  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo a\n";
+  const B = "  b:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo b\n";
+  const REFUSED = `will not cut at its jobs`;
+  // [why, text, what each problem it reports says]: none for a pass, one phrase per problem, in order.
+  const cases: [string, string, string[]][] = [
+    ["two jobs", wf("", A + B), []],
+    ["a job's heading comments, and a blank line, above it", wf("", `${A}\n  # ── b's heading\n  # more of it\n${B}`), []],
+    ["a key after the jobs", wf("", A + B, "concurrency:\n  group: x\n"), []],
+    ["a run whose lines look like keys, deeper in", wf("", `  a:\n    steps:\n      - run: |\n          b:\n          c: 1\n${B}`), []],
+    ["a job with no body", wf("", `  a:\n${B}`), []],
+    ["an anchor and alias within one job", wf("", `  a:\n    env: &e\n      X: "1"\n    steps:\n      - env: *e\n        run: x\n${B}`), []],
+    ["an alias to another job's anchor", wf("", `  a:\n    env: &e\n      X: "1"\n  b:\n    env: *e\n`), ["job b's block does not read alone"]],
+    ["a merge key from another job", wf("", `  a:\n    env: &e\n      X: "1"\n  b:\n    env:\n      <<: *e\n      Y: "2"\n`), ["job b's block does not read alone"]],
+    ["a job's alias to an anchor above the jobs", wf("env: &e\n  X: \"1\"\n", `  a:\n    env: *e\n${B}`), ["job a's block does not read alone"]],
+    ["an alias above the jobs to an anchor in one", wf("", `  a:\n    env: &e\n      X: "1"\n${B}`, "env: *e\n"), ["outside its jobs does not read alone"]],
+    ["a job in flow style", wf("", `  a: { runs-on: ubuntu-24.04 }\n${B}`), [REFUSED]],
+    ["a quoted job key", wf("", `  "a":\n    runs-on: ubuntu-24.04\n${B}`), [REFUSED]],
+    ["a tab inside a run's text, past its indent", wf("", `  a:\n    steps:\n      - run: |\n          cat <<-EOF\n          \tx\n          EOF\n${B}`), []],
+    ["jobs in flow style", "name: probe\non: push\njobs: { a: { runs-on: x } }\n", [REFUSED]],
+    ["jobs indented four spaces", "name: probe\non: push\njobs:\n    a:\n      runs-on: x\n", [REFUSED]],
+    ["a file that does not parse", "jobs: [", ["does not parse"]],
+    ["a file with no jobs", "name: probe\non: push\n", ["has no `jobs:` map"]],
+  ];
+  const wrong = cases.map(([why, text, says]) => ({ why, says, got: jobBlockProblems(text) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 51 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
+  for (const msg of jobBlockProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
+}
+checkJobBlocksCut();
+/**
+ * The jobs whose edit runs every job, as CHANGES_SCRIPT lists them in RUN_ALL_JOBS (review pass 2): the changes job,
+ * whose answer the gates read, and each job that runs this checker, since its check 51 is what makes an unchanged block
+ * a safe skip. A job renamed, or the checker moved, would otherwise drop out of the list with nothing failing.
+ */
+const RUN_ALL_LINE = /^RUN_ALL_JOBS="([^"]*)"$/m;
+const CHECKER_RUN = "bun scripts/check-consistency.ts";
+function runAllProblems(script: string, doc: JobsDoc): string[] {
+  const m = RUN_ALL_LINE.exec(script);
+  if (!m) return [`has no RUN_ALL_JOBS="…" line, the jobs whose edit runs every job (check 51, SMD-2435)`];
+  const listed = m[1].split(" ").filter(Boolean);
+  const jobs = doc?.jobs ?? {};
+  const runners = Object.keys(jobs).filter((k) => Array.isArray(jobs[k]?.steps) && (jobs[k]!.steps as { run?: unknown }[]).some((st) => typeof st?.run === "string" && st.run.trim() === CHECKER_RUN));
+  const want = [CHANGES_JOB, ...runners];
+  if (!runners.length) return [`names no job that runs ${CHECKER_RUN}, so nothing runs check 51 on a pull request whose gated jobs skip (check 51, SMD-2435)`];
+  if (JSON.stringify([...listed].sort()) !== JSON.stringify([...want].sort())) return [`RUN_ALL_JOBS is ${listed.join(" ") || "empty"}, not ${want.join(" ")} — the changes job and the job that runs ${CHECKER_RUN}, whose edit must run every job (check 51, SMD-2435)`];
+  return [];
+}
+function checkRunAllJobs() {
+  const LINE = `RUN_ALL_JOBS="${CHANGES_JOB} repo-consistency"\n`;
+  const doc = (checkerJob: string): JobsDoc => ({ jobs: { [CHANGES_JOB]: { steps: [] }, [checkerJob]: { steps: [{ run: CHECKER_RUN }] }, g: { steps: [{ run: "x" }] } } });
+  // [why, script, workflow, what its one problem says, or "" for none]
+  const cases: [string, string, JobsDoc, string][] = [
+    ["the list as the workflow has it", LINE, doc("repo-consistency"), ""],
+    ["the list in another order", `RUN_ALL_JOBS="repo-consistency ${CHANGES_JOB}"\n`, doc("repo-consistency"), ""],
+    ["the checker's job left out", `RUN_ALL_JOBS="${CHANGES_JOB}"\n`, doc("repo-consistency"), "RUN_ALL_JOBS is"],
+    ["the checker moved to another job", LINE, doc("lint"), "RUN_ALL_JOBS is"],
+    ["no list", "x=1\n", doc("repo-consistency"), "has no RUN_ALL_JOBS"],
+    ["no job running the checker", LINE, { jobs: { [CHANGES_JOB]: { steps: [] } } }, "names no job that runs"],
+  ];
+  const wrong = cases.map(([why, script, wf, says]) => ({ why, says, got: runAllProblems(script, wf) }))
+    .filter((c) => (c.says === "" ? c.got.length !== 0 : c.got.length !== 1 || !c.got[0].includes(c.says)));
+  if (wrong.length) fail(SELF, `check 51's RUN_ALL_JOBS rule no longer reads its probe as written: ${JSON.stringify(wrong)} (SMD-2435)`);
+  const wf = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc;
+  for (const msg of runAllProblems(readFileSync(join(ROOT, CHANGES_SCRIPT), "utf8"), wf)) fail(CHANGES_SCRIPT, msg);
+}
+checkRunAllJobs();
 
 // ── 52: commitlint's categories — [core], and [fork] from before it (SMD-3765) ──
 //
