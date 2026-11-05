@@ -2661,7 +2661,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
 | **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
 | | `work_claims` (115) | `SELECT, UPDATE` |
-| **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
+| **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE); board-sync's role, which states Linear's priorities on the tickets, and an ingester's, which states its records' (SMD-3666). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
@@ -5690,6 +5690,21 @@ IS the input; the Markdown adapter enumerates what its text cannot reproduce
 file that is not UTF-8, one holding NUL (`MARKDOWN_LIMITS`). `bun
 ingest-linear.ts --self-check` and `bun ingest-markdown.ts --self-check` run the
 pure rules; `test-schema.ts` [48] drives 053 with the Linear adapter's output.
+An item may say how much it matters (`Ingested.priority`, SMD-3666): the
+source's own value on one of `server-portable/priority-scale.ts`'s scales
+(`docs/priority.md`'s mapping table: Linear, frontmatter, GitHub-style labels,
+home-maintenance) and when it is due, a date or a time with its offset. The
+record's transaction then states it through migration 116 as the run's actor
+(`--actor`, default `ingest-records`), on the ticket the record is of (a Linear
+record) or else on its own thought, with the source's word as the reason: the
+same again is `unchanged`, and an unknown word (Linear's "No priority", a
+source's default, a word the scale does not hold) clears the actor's earlier
+statement. A due time with no level is not stated: a statement needs a level.
+The run's tier is the registry's (decision 4): a source once the operator has
+declared the actor one, its kind's until then. A brain before 116, or a role
+that may not run its writers, is said once and the run states none; the
+priorities stay as facets. The run's last lines count them
+(`priorities (SMD-3666, as ingest-records): asserted N, …`) and name a refusal.
 An item may yield **derived items** (`Ingested.derived`, SMD-2059): parts that
 are thoughts of their own — a Linear ticket's dated sections — each with its
 own identity, canonical, text, links and facets, written after the parent
@@ -5700,8 +5715,10 @@ parent's identity, whichever writer's it is.
 `ingest-items.ts` reads a file of items already mapped — one JSON object per
 line, the keys `Ingested` names (`identity {system, key}`, `scope`,
 `canonical {form, mediaType}`, `text`, `links`, `mentions`, `facets`, and
-optionally `createdAt` and `watermark {key, value, asOf?}`; `null` for either
-is absent, what a Python emitter writes for `None`) — so a parser in
+optionally `createdAt`, `watermark {key, value, asOf?}` and
+`priority {scale, value, due?}` (SMD-3666, stated on the item's own thought;
+a line names no ticket for it); `null` for any of them is absent, what a Python
+emitter writes for `None`) — so a parser in
 any language emits the contract and the pipeline writes it: no database client
 in the recipe, no rewrite under `db/` (SMD-2126 routes four import recipes
 here, three of them Python). The row is labelled with the item's own system
@@ -6324,6 +6341,26 @@ run's `would release` reads the brain as it stands, so a ticket the pass would
 close is not in it. A failed call fails the pass, as a failed findings post does. Asked once at start: a
 brain before 118, or a role without the **closedclaims** group, is said once, and
 the claims stay until their holders release them.
+
+**The tickets' priorities (SMD-3666).** Each head row carries Linear's
+`priorityLabel` and, since this ticket, its `dueDate` as facets (`priority`,
+`due_date`). After each pass, `--dry-run` and `--only` included and `--audit`
+not, the tool states them through migration 116 on each ticket
+(`{kind: ticket, key}`) as `board-sync`, with Linear's word as the reason
+(`Linear priority: High`), mapped by `docs/priority.md`'s table: Low 1, Medium
+2, High 3, Urgent 4, and No priority unknown, which clears the tool's statement.
+It reads the rows, not the fetch, so every ticket is kept — one synced before
+this step among them — and a board that has not moved writes nothing. A ticket
+synced before `dueDate` was fetched has no `due_date` until it next changes, or
+until one `--full` pass. **The operator declares board-sync a priority source,
+once per brain:** `SELECT declare_priority_source('board-sync');` (migration 116,
+the operator's alone). Its statements then win at the source tier, above any
+agent's (decision 4); the step states again any statement written before the
+declaration, or after a withdrawal, so its tier follows. The pass prints
+`ticket priorities: stated N, cleared M` when it moved any, and a refusal or a
+failure fails the pass. Asked once at start: a brain before 116, or a role
+without the **priority** group, is said once, and the priorities stay as
+facets. `metadata.priority` is still written, so today's filter works (decision 8).
 
 **What it tells the board (SMD-2681).** The board comes in; consolidation's
 findings about it went nowhere until someone read the queue. With
