@@ -138,7 +138,7 @@ servers, 20 SDK importers. The swap per site:
 | `ListToolsRequestSchema` from `.../sdk/.../types.js` | the same name is exported from `@modelcontextprotocol/server` |
 | client `Client` + `StreamableHTTPClientTransport` from `.../sdk/client/*` | `@modelcontextprotocol/client` |
 
-Pin sites to touch: `server-portable/package.json`, `extensions/package.json`
+Pin sites to touch: `server-portable/package.json`, `integrations/package.json`
 (lockstep), `evals/package.json` (client only),
 `recipes/vercel-neon-telegram/package.json`, and their `bun.lock` files
 (`integrations/kubernetes-deployment`'s retired: SMD-2288). The transitive tree shrinks: v1 pulled `express`, `raw-body`,

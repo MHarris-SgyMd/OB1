@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ob1-extensions-tests",
+      "name": "ob1-vendored-tests",
       "devDependencies": {
         "@hono/mcp": "0.3.2",
         "@modelcontextprotocol/sdk": "1.30.0",
