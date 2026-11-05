@@ -42,7 +42,7 @@
 	const unplaced = $derived(form?.error && !data.proposals.some((p) => p.id === form?.id) ? form : null);
 </script>
 
-<svelte:head><title>Proposals · Open Brain</title></svelte:head>
+<svelte:head><title>Proposals · Daemonic Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Supersession proposals</h1>

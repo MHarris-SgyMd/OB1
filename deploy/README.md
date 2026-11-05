@@ -2600,7 +2600,7 @@ loopback check, `tier.ts` guards `--to` two ways:
     cannot reach it, so a refresh that failed partway can simply be re-run;
   - one stamped `canary` or `working`;
   - one whose public schema holds nothing but what extensions own;
-  - an Open Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
+  - a Daemonic Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
     holding no thoughts. `schema_migrations` alone is not enough, since Rails,
     Ecto, golang-migrate and dbmate use that name too.
 

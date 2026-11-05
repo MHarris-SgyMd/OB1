@@ -11,7 +11,7 @@
 	]);
 </script>
 
-<svelte:head><title>Overview · Open Brain</title></svelte:head>
+<svelte:head><title>Overview · Daemonic Brain</title></svelte:head>
 
 <h1 class="sr-only">Overview</h1>
 <section class="space-y-8">

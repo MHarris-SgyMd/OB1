@@ -596,7 +596,7 @@ async function assertThrowawayConnection(sql: SQL, url: string): Promise<void> {
 function refuseDrop(refusal: string, overridable: boolean): never {
   console.error(
     `  Refusing to drop the schema: ${refusal}.\n\n` +
-      `  This command DROPS every table Open Brain owns in that database. That is\n` +
+      `  This command DROPS every table the brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
       (overridable
         ? `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +

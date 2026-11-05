@@ -18303,7 +18303,7 @@ if (want("20")) {
     assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
     await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
     for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
-    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    assert((await refusalAt(canaryUrl)) === null, "a Daemonic Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
     // Another application's database, one name away from a tier.
     const foreignDb = "ob1_tier_foreign";
     const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
@@ -18319,10 +18319,10 @@ if (want("20")) {
       assert((await refusalAt(foreignUrl)) === null, "the same with pg_stat_statements and tablefunc installed in public (what a template may carry): allowed");
       const foreign = new SQL({ url: foreignUrl, max: 1 });
       try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
-      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      assert(/not a Daemonic Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
       const railsLike = new SQL({ url: foreignUrl, max: 1 });
       try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
-      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
+      assert(/not a Daemonic Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
     } finally {
       await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
     }
