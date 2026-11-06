@@ -300,14 +300,13 @@ export const firstGoing = (r: Listed): boolean => r.status !== "completed" && r.
 /**
  * The window over runs listed oldest first, whatever their state: up to `through`, or without it up to the newest
  * completed run (one running after that is a push not yet done, not the window's), then its newest `last`. A run in it
- * that is not completed is being re-run, and `running` names it: its jobs are not to be read, and its gap counts as
- * an unread run's does. A first attempt not completed is a push not yet done wherever it sits: main's runs no longer
- * cancel one another (SMD-3173), so an older one can still be going when a newer one ends. It is left out before
- * `last` is counted, and `going` names it; its own end reads it. A shift whose last runs straddle the two is then in
- * neither report's last 3, and a later run's window names it in its list, not as a warning: rare, since main's runs
- * take minutes and land far more apart. "running" when `through` itself is not completed;
- * undefined when it is not listed. Without `gaps` (the per-job report) the window is over completed runs alone, so
- * `--last n` is n of them.
+ * that is not completed is being re-run, and `running` names it: its jobs are not to be read, and its gap counts as an
+ * unread run's does. A first attempt not completed is a push not yet done wherever it sits: main's runs no longer
+ * cancel one another (SMD-3173), so an older one can still be going when a newer one ends. It is left out before `last`
+ * is counted, and `going` names it; its own end reads it. A shift whose last runs straddle the two is then in neither
+ * report's last 3, and a later run's window names it in its list, not as a warning: rare, since main's runs take
+ * minutes and land further apart than that. "running" when `through` itself is not completed; undefined when it is not
+ * listed. Without `gaps` (the per-job report) the window is over completed runs alone, so `--last n` is n of them.
  */
 export function shiftWindow(listed: Listed[], through?: string, last?: number, gaps = true): { ids: string[]; running: string[]; going: string[] } | "running" | undefined {
   if (!gaps) listed = listed.filter((r) => r.status === "completed");
@@ -936,7 +935,7 @@ if (import.meta.main) {
     // --through names the newest run or near it, as the workflow does; one further back, with fewer than `last` runs
     // up to it in the short list, takes the whole list (~30 s). Runs still going take places in it, so 10 spare.
     listed = await list(Math.min(last + 10, LIST_LIMIT));
-    if (last + 10 < LIST_LIMIT && needsWiderList(listed.filter((r) => !firstGoing(r)).map((r) => r.id), through, last)) listed = await list(LIST_LIMIT);
+    if (last + 10 < LIST_LIMIT && needsWiderList(listed.filter((r) => r.id === through || !firstGoing(r)).map((r) => r.id), through, last)) listed = await list(LIST_LIMIT);
     if (lastFellShort(full > 0, listed.length, last, namedWorkflow, shift)) console.log(`  gh returned all ${full} runs it was asked for, ${listed.length} of them ${where}: fewer than --last ${last}, other workflows' runs filling the rest; give --workflow with one name (${DEFAULT_WORKFLOWS.map((w) => JSON.stringify(w)).join(", or for runs before SMD-3765 ")}), whose list holds that workflow's runs alone`);
   } else {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.

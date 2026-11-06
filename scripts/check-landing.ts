@@ -15,12 +15,12 @@
  * numbered, and records itself in releases.json — the manifest written beside a
  * fragment deleted is its signature. Tests and docs are exempt by PATH — a
  * `test-*.ts` / `*.test.ts` file or a Markdown file inside those directories
- * asks no fragment — rather than by a label, so the rule reads the change
- * alone and holds whoever opened the PR. The rule is
- * landingProblem, one pure function over a landing's change list, and the git
- * reading is the thin part around it: `--name-status -z --no-renames`, so a
- * non-ASCII path is not C-quoted past the prefix test and a file moved out of
- * a directory shows as its deletion there.
+ * asks no fragment — rather than by a label, so the rule reads the change alone
+ * and holds whoever opened the PR. The rule is landingProblem, one pure
+ * function over a landing's change list, and the git reading is the thin part
+ * around it: `--name-status -z --no-renames`, so a non-ASCII path is not
+ * C-quoted past the prefix test and a file moved out of a directory shows as
+ * its deletion there.
  *
  * Run: bun scripts/check-landing.ts --from <base sha> --to <head sha>
  * Exit: 0 the landing carries what it must; 1 it does not (named with the

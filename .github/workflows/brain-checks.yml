@@ -5284,12 +5284,12 @@ jobs:
   # `if: always()` because a job whose needs failed is otherwise skipped, and
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
-  # own `if:` runs it on pull requests alone, and publish-test-counts, whose own
-  # runs it on a push to main alone; and, only
-  # when the changes job succeeded and said code=false, the jobs it gates, or
-  # when it succeeded, those its skip names (SMD-2435), so a cancelled run's
-  # unstarted jobs never pass. The step is
-  # held verbatim by check 20, which runs it against its own cases.
+  # own `if:` runs it on pull requests alone, and publish-test-counts, whose
+  # own runs it on a push to main alone; and, only when the changes job
+  # succeeded and said code=false, the jobs it gates, or when it succeeded,
+  # those its skip names (SMD-2435), so a cancelled run's unstarted jobs never
+  # pass. The step is held verbatim by check 20, which runs it against its own
+  # cases.
   brain-checks-passed:
     name: Brain Checks passed
     runs-on: ubuntu-24.04
