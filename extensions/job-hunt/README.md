@@ -150,7 +150,7 @@ Your agent has even more context when you're job hunting:
 - **Extension 3 (Family Calendar):** Can schedule interviews around existing commitments, factor in family obligations
 - **Extension 4 (Meal Planning):** Knows your dietary needs for interview lunches, can plan around busy interview days
 
-This is the power of a fully interconnected Daemonic Brain — context flows across domains.
+This is the power of a fully interconnected brain — context flows across domains.
 
 ## Expected Outcome
 

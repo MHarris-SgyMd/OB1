@@ -24,7 +24,7 @@ This schema extension adds six new columns to the `thoughts` table (`type`, `sen
 ## Prerequisites
 
 - Working Daemonic Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
-- Supabase project with the `thoughts` table, `match_thoughts` function, and `upsert_thought` function already created
+- A Postgres with the `thoughts` table, `match_thoughts` and `upsert_thought` — Daemonic Brain's stack, or a Supabase project
 
 ## Credential Tracker
 

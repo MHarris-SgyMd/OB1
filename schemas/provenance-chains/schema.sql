@@ -1,14 +1,14 @@
 -- Provenance Chains — Derivation tracking for Daemonic Brain thoughts
 --
--- Adds four columns plus helper SQL functions so Daemonic Brain can answer
+-- Adds four columns plus helper SQL functions so Open Brain can answer
 -- "show me the atomic thoughts that produced this derived artifact" and
 -- "what downstream artifacts cite this atomic thought?" at the database layer.
 --
 -- Columns added to public.thoughts:
 --   derived_from         JSONB   — array of parent thought IDs (as JSON strings,
 --                                  since public.thoughts.id is UUID in the
---                                  canonical Daemonic Brain setup). NULL for primary
---                                  thoughts.
+--                                  canonical Daemonic Brain setup). NULL for
+--                                  primary thoughts.
 --   derivation_method    TEXT    — how the thought was derived. Currently
 --                                  constrained to 'synthesis' or NULL.
 --   derivation_layer     TEXT    — 'primary' (atomic capture) or 'derived'

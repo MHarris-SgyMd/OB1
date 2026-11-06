@@ -1,6 +1,6 @@
 # Provenance Chains
 
-> Adds derivation-tracking columns and helper SQL functions so Daemonic Brain can cite the atomic thoughts that produced each derived artifact.
+> Adds derivation-tracking columns and helper SQL functions so Open Brain can cite the atomic thoughts that produced each derived artifact.
 
 ## What It Does
 

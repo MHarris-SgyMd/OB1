@@ -352,7 +352,7 @@ After following this guide, you will have:
 4. Verified security boundaries preventing unauthorized access
 5. A working shared-access pattern you can replicate for other use cases
 
-The other person can now use Claude to interact with shared data, while your personal Daemonic Brain remains completely private.
+The other person can now use Claude to interact with shared data, while your personal brain remains completely private.
 
 ## Troubleshooting
 

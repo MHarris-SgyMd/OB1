@@ -112,7 +112,7 @@ Prep me for my meeting with Sarah
 
 ### `professional_crm_link_thought` — The Bridge Tool
 
-Your core Daemonic Brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
+Your brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
 
 **Example workflow:**
 
