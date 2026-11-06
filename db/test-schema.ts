@@ -17361,7 +17361,7 @@ console.log("\n[106] Migration 118: a closed ticket's claims released — every 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
 }
 
-console.log("\n[108] Migration 120: a work thread's edges — the thoughts holding one subject key, in capture order (created_at, then id), each linked to the one before it by a standing `evolves` relation of origin thread (the key named, judge key thread:v1, no confidence, its lineage at both fingerprints), kept by constraint triggers at the writer's commit as subjects land, close and go with their thought, a replace that keeps the key moving no edge; thread_relink closing what the thread no longer has and writing what it lacks, a dry run counting; the validator taking a thread's edge, refusing a malformed one, and saying the origin; the judge's edges under their own index, record_thought_relation reading them alone; a delete by a role that cannot make a re-link's writes leaving the gap a re-link heals; a re-apply a no-op, an index of 084's shape made again (SMD-3306)");
+console.log("\n[108] Migration 120: a work thread's edges — the thoughts holding one subject key, in capture order (created_at, then id), each linked to the one before it by a standing `evolves` relation of origin thread (the key named, judge key thread:v1, no confidence, its lineage at both fingerprints), kept by constraint triggers at the writer's commit as subjects land, close and go with their thought, a replace that keeps the key moving no edge; thread_relink closing what the thread no longer has and writing what it lacks, a dry run counting; the validator taking a thread's edge, refusing a malformed one, and saying the origin; the judge's edges under their own index, record_thought_relation reading them alone; a delete by a role that cannot make a re-link's writes leaving the gap a re-link heals; READ COMMITTED alone — a subject written above it refused at its commit, a delete above it committing, its gap left; a re-apply a no-op, an index of 084's shape made again (SMD-3306)");
 {
   type Relink = { ok: boolean; key: string; thoughts: number; closed: number; added: number; dry: boolean };
   type Edge = { id: string; newer: string; older: string; origin: string; relation: string; judge: string; key: string; conf: unknown };
@@ -17592,6 +17592,31 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   assert(asStructure.code === null && (await pairs(K7)) === "i3→i1",
     `granted the structure group, the same role's delete links the neighbours itself (${asStructure.code ?? "deleted"}: ${asStructure.message.slice(0, 80)}; ${await pairs(K7)})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // READ COMMITTED alone (115's rule): above it the re-link's reads would see a snapshot taken before the key's lock.
+  // A subject written under REPEATABLE READ is refused at its commit, written nowhere; a delete under it commits, its
+  // re-link skipped (a delete is never refused for a thread), the gap the next re-link's; a direct call is refused.
+  const K8 = "ticket:SMD-9114";
+  const [, k2] = await trio("k", K8, 13);
+  const k4 = await thought("k4", "2026-11-13T04:00:00Z");
+  const underRepeatable = async (sql: string, params: unknown[]) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return { code: null as string | null, message: "" };
+    } catch (err) { return { code: String((err as { code?: string }).code ?? "?"), message: (err as Error).message.split("\n")[0] }; }
+  };
+  const rrWrite = await underRepeatable(`SELECT record_thought_subject($1::uuid, $2::text, 'model', $3::text, NULL::uuid, $4::text, NULL::jsonb)`, [k4, K8, JUDGE, await fp(k4)]);
+  const k4Subject = await q(`SELECT 1 FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject'`, [k4]);
+  assert(rrWrite.code === "0A000" && /thread_relink must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(rrWrite.message) && k4Subject.length === 0
+         && (await pairs(K8)) === "k2→k1 k3→k2",
+    `a subject written under REPEATABLE READ is refused at its commit, by name, and written nowhere (${rrWrite.code}: ${rrWrite.message.slice(0, 90)})`);
+  const rrDelete = await underRepeatable(`SELECT delete_thought($1::uuid)`, [k2]);
+  const rrGap = await pairs(K8);
+  const rrHealed = await relink(K8);
+  assert(rrDelete.code === null && rrGap === "" && rrHealed.added === 1 && (await pairs(K8)) === "k3→k1",
+    `a delete under REPEATABLE READ commits, its re-link skipped, its neighbours unlinked until the next re-link writes k3→k1 (${rrDelete.code ?? "deleted"}; ${rrGap || "no edge"}; ${JSON.stringify(rrHealed)})`);
+  const rrDirect = await underRepeatable(`SELECT thread_relink($1, true)`, [K8]);
+  assert(rrDirect.code === "0A000" && /thread_relink must run under READ COMMITTED/.test(rrDirect.message), `thread_relink called under REPEATABLE READ is refused, a dry run too (${rrDirect.code})`);
 
   // Re-applied, 120 changes nothing; on a brain whose index is 084's still, 120 makes it again with the judge's clause.
   // (084 re-applied keeps 120's index: [74], before any subject's lineage row, which 084's CHECK would refuse.)

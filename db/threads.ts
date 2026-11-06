@@ -14,10 +14,14 @@
  * For each subject key two thoughts or more hold (111), and each key a thread's edge stands under, in key order, it
  * calls thread_relink(key), which writes each edge the thread has that does not stand, with its lineage, and closes
  * each it no longer has; --batch keys a transaction (200 unless said), so a brain of many keys commits as it goes and a
- * stop loses one batch at most. Each page reads its keys in their indexes' order, so a run over millions of keys pages
+ * stop loses one batch at most. A key whose re-link writes ends its batch: the row locks a write takes (its edges'
+ * thoughts, KEY SHARE) are held to the commit, so a delete of one of them waits one thread's re-link, never a batch's,
+ * and delete_thought, which holds the brain's review lock while it waits, keeps every other delete waiting no longer. Each page reads its keys in their indexes' order, so a run over millions of keys pages
  * in linear time; a key one thought holds and no edge names has nothing to link, and is passed over. --key re-links
  * that one key's thread. --dry-run calls thread_relink(key, true), which counts what a re-link now would write and close
- * and writes nothing. A key a thread's edge still stands under with no subject left is re-linked too, its edges
+ * and writes nothing, a key a transaction, so it holds one key's lock at a time (a batch's held through it would leave
+ * a delete beside it its gap). Every transaction runs under READ COMMITTED, which thread_relink needs, whatever the
+ * role's default. A key a thread's edge still stands under with no subject left is re-linked too, its edges
  * closed. A writing run needs a re-link's writes, refused up front, by name, without them (a dry run and --status
  * read). A batch
  * holds its keys' locks until it commits, so a writer moving a thought between two of them can deadlock it: Postgres
@@ -104,6 +108,7 @@ async function census(sql: SQL): Promise<{ threads: number; thoughts: number; st
 async function relinkLacks(sql: SQL): Promise<string | null> {
   const [g] = (await sql`
     SELECT current_user AS role, has_any_column_privilege('thought_facets', 'INSERT') AS fi, has_any_column_privilege('thought_facets', 'UPDATE') AS fu,
+           has_table_privilege('thought_facets', 'SELECT') AS fs, has_table_privilege('thoughts', 'SELECT') AS ts,
            has_any_column_privilege('thoughts', 'UPDATE') AS tu, has_any_column_privilege('derivations', 'INSERT') AS di,
            has_any_column_privilege('derivations', 'UPDATE') AS du, has_table_privilege('derivations', 'SELECT') AS ds`) as ({ role: string } & Record<string, boolean>)[];
   const lackOn = (table: string, privs: [string, boolean][]) => {
@@ -111,11 +116,20 @@ async function relinkLacks(sql: SQL): Promise<string | null> {
     return lacked.length ? `${lacked.length > 1 ? `${lacked.slice(0, -1).join(", ")} and ${lacked.at(-1)}` : lacked[0]} on ${table}` : "";
   };
   const structure = !g.fi;
-  const captureLacks = [lackOn("thought_facets", [["UPDATE", g.fu]]), lackOn("thoughts", [["UPDATE", g.tu]]), lackOn("derivations", [["INSERT", g.di], ["UPDATE", g.du], ["SELECT", g.ds]])].filter(Boolean);
+  const captureLacks = [lackOn("thought_facets", [["SELECT", g.fs], ["UPDATE", g.fu]]), lackOn("thoughts", [["SELECT", g.ts], ["UPDATE", g.tu]]),
+    lackOn("derivations", [["INSERT", g.di], ["UPDATE", g.du], ["SELECT", g.ds]])].filter(Boolean);
   if (!structure && captureLacks.length === 0) return null;
   const what = [structure && "INSERT on thought_facets (the structure group)", captureLacks.length > 0 && `${captureLacks.join(", ")} (the capture group)`].filter(Boolean).join(" and ");
   const groups = [captureLacks.length > 0 && "capture", structure && "structure"].filter(Boolean).join(",");
   return `this role lacks ${what}, which a re-link writes with (each edge, its lineage, its thoughts' row locks) — cd db && bun migrate.ts --url <owner's url> --grant ${g.role} --groups ${groups}, or run as the owner`;
+}
+
+/** One transaction under READ COMMITTED, which thread_relink needs whatever the role's default (115's rule). */
+async function readCommitted<T>(sql: SQL, body: (tx: SQL) => Promise<T>): Promise<T> {
+  return sql.begin(async (tx) => {
+    await tx`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`;
+    return body(tx as unknown as SQL);
+  }) as Promise<T>;
 }
 
 /** A database error's SQLSTATE. */
@@ -188,7 +202,7 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       }
     }
     if (KEY !== undefined) {
-      const [{ r }] = (await sql`SELECT thread_relink(${KEY}, ${DRY}) AS r`) as { r: Relink }[];
+      const r = await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${KEY}, ${DRY}) AS r`) as { r: Relink }[])[0].r);
       out(`  ${KEY}: ${r.thoughts} thought(s), ${r.closed} edge(s) ${DRY ? "to close" : "closed"}, ${r.added} ${DRY ? "to write" : "written"}${DRY ? " (dry run: nothing written)" : ""}`);
       return 0;
     }
@@ -215,25 +229,39 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       if (page.length === 0) break;
       // One transaction a batch: its keys' re-links stand or fall together, and the run commits as it goes. A deadlock
       // with a writer (40P01, the server's to break) ends the batch, rolled back, and it is run again, three tries in all.
-      let done: Relink[] = [];
-      for (let attempt = 1; ; attempt++) {
-        try {
-          done = await sql.begin(async (tx) => {
-            const rs: Relink[] = [];
-            for (const { key } of page) rs.push(((await tx`SELECT thread_relink(${key}, ${DRY}) AS r`) as { r: Relink }[])[0].r);
-            return rs;
-          });
-          break;
-        } catch (e) {
-          if (sqlState(e) !== "40P01" || attempt >= 3) throw e;
-          err(`  batch ${batches + 1}: a deadlock with a writer ended it (40P01, the server's to break) — its re-links run again`);
+      // A key that writes ends its batch, its row locks going at the commit, and the next batch takes the page's rest:
+      // a page is read once, so a run that writes every key still pages in linear time. A dry run's keys go a
+      // transaction each, holding one key's lock at a time and no row's.
+      for (let from = 0; from < page.length; ) {
+        let done: Relink[] = [];
+        if (DRY) {
+          for (const { key } of page) done.push(await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${key}, true) AS r`) as { r: Relink }[])[0].r));
+        } else {
+          for (let attempt = 1; ; attempt++) {
+            try {
+              done = await readCommitted(sql, async (tx) => {
+                const rs: Relink[] = [];
+                for (const { key } of page.slice(from)) {
+                  const r = ((await tx`SELECT thread_relink(${key}, false) AS r`) as { r: Relink }[])[0].r;
+                  rs.push(r);
+                  if (r.added > 0 || r.closed > 0) break;
+                }
+                return rs;
+              });
+              break;
+            } catch (e) {
+              if (sqlState(e) !== "40P01" || attempt >= 3) throw e;
+              err(`  batch ${batches + 1}: a deadlock with a writer ended it (40P01, the server's to break) — its re-links run again`);
+            }
+          }
         }
-      }
-      batches += 1;
-      keys += done.length;
-      for (const r of done) {
-        closed += r.closed;
-        added += r.added;
+        batches += 1;
+        keys += done.length;
+        for (const r of done) {
+          closed += r.closed;
+          added += r.added;
+        }
+        from += done.length;
       }
       after = page[page.length - 1].key;
     }

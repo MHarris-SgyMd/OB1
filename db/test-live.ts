@@ -28887,7 +28887,7 @@ if (want("46")) {
 }
 
 if (want("47")) {
-  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing; --key re-links one thread; --status names the keys that differ; a writing run as a role short of a re-link's writes refused by name, its dry run read; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
+  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a writing run as a role short of a re-link's writes refused by name, its dry run read under READ COMMITTED whatever the role's default; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
   // Its own client: [24] closed the suite's.
   const sql = new SQL({ url: URL_!, max: 1 });
   const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
@@ -28951,6 +28951,26 @@ if (want("47")) {
       `the run, a key a transaction, links both threads, each edge origin thread, and closes the orphan's edge (${ran.out.trim()}; origin ${origins})`);
     const done = await threads({ status: true });
     assert(/^ {2}linked: {4}every thread — nothing to do$/m.test(done.out), `--status after it: nothing to do (${done.out.trim().split("\n").at(-1)})`);
+    // A key whose re-link writes ends its batch, its row locks going at its commit, and the next batch takes the page's
+    // rest: two threads to link in a run of one --batch are two batches or more from one page read, and the empty one
+    // that ends the run. A page read again at each batch a write ended would cost a run linking every key a page a key.
+    await unlink([KA, KB]);
+    const pageSql = new SQL({ url: URL_!, max: 1 });
+    let pageReads = 0;
+    const counting = new Proxy(pageSql, {
+      apply: (target, self, args: unknown[]) => {
+        if (((args[0] as readonly string[] | undefined)?.[0] ?? "").includes("SELECT key FROM (")) pageReads++;
+        return Reflect.apply(target, self, args);
+      },
+      get: (target, p) => {
+        const v = Reflect.get(target, p, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const split = await threads({ batch: 10_000, sql: counting }).finally(() => pageSql.close());
+    const [, splitBatches] = /^ {2}\d+ key\(s\) in (\d+) batch\(es\): 0 edge\(s\) closed, 3 written$/m.exec(split.out) ?? [];
+    assert(split.code === 0 && Number(splitBatches) >= 2 && pageReads === 2 && (await pairs(KA)) === "a2→a1 a3→a2" && (await pairs(KB)) === "b2→b1",
+      `a key whose re-link writes ends its batch, the next batch taking the page's rest: two threads linked in a run of one --batch take two batches or more from one page read and the empty one (${pageReads} page read(s); ${split.out.trim()})`);
 
     // --key: one thread's gap, healed alone, the dry run counting first.
     await unlink([KB]);
@@ -28980,12 +29000,15 @@ if (want("47")) {
       await sql.unsafe(`GRANT USAGE ON SCHEMA public TO ${READER}`);
       for (const st of grantStatements(READER, { groups: ["capture", "server"] })) await sql.unsafe(st);
       const asReader = URL_!.replace(/\/\/[^@]*@/, `//${READER}:threads-reader@`);
+      // Its sessions default to REPEATABLE READ, which thread_relink refuses: threads.ts runs its own transactions under
+      // READ COMMITTED.
+      await sql.unsafe(`ALTER ROLE ${READER} SET default_transaction_isolation = 'repeatable read'`);
       await unlink([KB]);
       const refusedRun = await threads({ url: asReader });
       const readerDry = await threads({ url: asReader, dryRun: true });
       assert(refusedRun.code === 2 && refusedRun.err.includes(`this role lacks INSERT on thought_facets (the structure group), which a re-link writes with (each edge, its lineage, its thoughts' row locks) — cd db && bun migrate.ts --url <owner's url> --grant ${READER} --groups structure, or run as the owner.`)
           && (await pairs(KB)) === "" && readerDry.code === 0 && /1 to write \(dry run: nothing written\)$/m.test(readerDry.out),
-        `a writing run as a role without INSERT on thought_facets is refused by name, the grant named, nothing written; its dry run counts (${refusedRun.err.trim().slice(0, 120)} | ${readerDry.out.trim()})`);
+        `a writing run as a role without INSERT on thought_facets is refused by name, the grant named, nothing written; its dry run counts, under READ COMMITTED though the role's default is REPEATABLE READ (${refusedRun.err.trim().slice(0, 120)} | ${readerDry.out.trim()}${readerDry.err.trim()})`);
       await threads({ key: KB });
     } finally {
       await sql.unsafe(`DROP OWNED BY ${READER}`);
@@ -29018,7 +29041,7 @@ if (want("47")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing, not deadlocking (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -29147,23 +29170,27 @@ if (want("48")) {
       for (const id of [p1, p2, p3]) await subjectOn(owner, id, K3);
       await holder`BEGIN`;
       await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${K3}::text, 0))`;
+      // The delete on a client of its own: one that waited on the key would leave the reads below, on `owner`, free to
+      // say so, and the holder's commit reached (the case fails, not hangs).
+      const deleter = new SQL({ url: URL_!, max: 1 });
       let deletedNow = false;
-      const deleting = (async () => { await owner`SELECT delete_thought(${p2}::uuid)`; deletedNow = true; })();
+      const deleting = (async () => { await deleter`SELECT delete_thought(${p2}::uuid)`; deletedNow = true; })();
       const promptly = await pollUntil(async () => deletedNow, 2000);
       const gap = await pairs(K3);
       await holder`COMMIT`;
       await deleting;
+      await deleter.close();
       const healed = await threads({ key: K3 });
       assert(promptly && gap === "" && healed.out === `  ${K3}: 2 thought(s), 0 edge(s) closed, 1 written` && (await pairs(K3)) === "p3→p1",
         `the owner's delete beside a held key commits at once, its neighbours unlinked until the next re-link, which links them (${promptly ? "at once" : "waited"}; ${gap || "no edge"}; ${healed.out})`);
 
       // A threads.ts batch a deadlock ends is said and run again. The holder takes the later key and waits long before
-      // its own deadlock check; the batch takes the earlier key, waits on the later; the holder then asks for the
+      // its own deadlock check; the batch takes the earlier key, linked already (nothing to write, so the batch goes on
+      // holding it: a key that writes ends its batch), and waits on the later, unlinked; the holder then asks for the
       // earlier: the batch's check finds the cycle first and ends its own batch, rolled back, and runs it again.
       const KA = "phrase:thread deadlock probe a", KB = "phrase:thread deadlock probe b";
       const g1 = await thought("g1", 1), g2 = await thought("g2", 2), h1 = await thought("h1", 1), h2 = await thought("h2", 2);
       for (const [id, key] of [[g1, KA], [g2, KA], [h1, KB], [h2, KB]] as const) await subjectOn(owner, id, key);
-      await unlink(KA);
       await unlink(KB);
       await holder`BEGIN`;
       await holder`SET LOCAL deadlock_timeout = '60s'`;
@@ -29173,7 +29200,7 @@ if (want("48")) {
       await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${KA}::text, 0))`;
       await holder`COMMIT`;
       const ran = await batchRun;
-      assert(batchWaits && ran.code === 0 && /^ {2}batch 1: a deadlock with a writer ended it \(40P01, the server's to break\) — its re-links run again$/m.test(ran.err)
+      assert(batchWaits && ran.code === 0 && /^ {2}batch \d+: a deadlock with a writer ended it \(40P01, the server's to break\) — its re-links run again$/m.test(ran.err)
           && (await pairs(KA)) === "g2→g1" && (await pairs(KB)) === "h2→h1",
         `a batch a deadlock ends is said and run again, its threads linked (exit ${ran.code}: ${ran.err.trim().slice(0, 160)} | ${ran.out.trim()})`);
 
@@ -29194,6 +29221,74 @@ if (want("48")) {
       const cancelEnd = canceled ?? (await cancelRun);
       assert(batchPid !== 0 && canceled !== null && cancelEnd.code === 1 && /failed: canceling statement due to user request/.test(cancelEnd.err) && !/run again/.test(cancelEnd.err),
         `a batch an operator cancels ends the run, exit 1, not run again (exit ${cancelEnd.code}: ${cancelEnd.err.trim().slice(0, 160)})`);
+
+      // The re-link writes before it closes. The owner deletes X, which stalls in its cascade (another session holds X's
+      // source row), holding X's own; a subject is written for Y, between X and N, and its commit's re-link waits on X's
+      // row before writing Y→X. Released, the delete goes on (084's trigger closing N→X) and commits, and the re-link
+      // reads the thread again and links N→Y→P. Closing first, the re-link would hold N→X's row while it waited on X,
+      // and the delete's close of N→X wait on it: a deadlock, the subject lost.
+      const K9 = "ticket:SMD-9485";
+      const xp = await thought("xp", 1), xx = await thought("xx", 3), xy = await thought("xy", 4), xn = await thought("xn", 5);
+      for (const id of [xp, xx, xn]) await subjectOn(owner, id, K9);
+      await owner`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+        VALUES (${xx}::uuid, 'live', ${`x-${xx}`}, 'c', 'text/plain', encode(sha256('c'::bytea), 'hex'))`;
+      const staller = new SQL({ url: URL_!, max: 1 }), dropper = new SQL({ url: URL_!, max: 1 }), writer = new SQL({ url: URL_!, max: 1 });
+      const settled = (run: () => Promise<unknown>) => run().then(() => "ok", (e: Error) => e.message.split("\n")[0]);
+      const waitsOn = async (pid: number) => ((await owner`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${pid}`)[0] as { t: string | null } | undefined)?.t === "Lock";
+      try {
+        const dPid = await pidOf(dropper), wPid = await pidOf(writer);
+        await staller`BEGIN`;
+        await staller`SELECT 1 FROM thought_sources WHERE thought_id = ${xx}::uuid FOR UPDATE`;
+        await dropper`BEGIN`;
+        const dropping = settled(async () => { await dropper`SELECT delete_thought(${xx}::uuid)`; });
+        const dropStalled = await pollUntil(() => waitsOn(dPid), 5000);
+        await writer`BEGIN`;
+        await writer`SELECT record_thought_subject(${xy}::uuid, ${K9}::text, 'first_line', 'subject:qwen3.8:27b@p1', NULL::uuid,
+          (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${xy}::uuid), NULL::jsonb)`;
+        const committing = settled(async () => { await writer`COMMIT`; });
+        const writeWaits = await pollUntil(() => waitsOn(wPid), 5000);
+        await staller`COMMIT`;
+        const dropped = await dropping;
+        const dropCommitted = await settled(async () => { await dropper`COMMIT`; });
+        const committed = await committing;
+        assert(dropStalled && writeWaits && dropped === "ok" && dropCommitted === "ok" && committed === "ok" && (await pairs(K9)) === "xn→xy xy→xp",
+          `a subject written beside a delete stalled in its cascade waits the delete out and links past it, its edges written before any close (stalled ${dropStalled}, waited ${writeWaits}; delete ${dropped}, its commit ${dropCommitted}; the write's commit ${committed}; ${await pairs(K9)})`);
+      } finally {
+        await staller.close();
+        await dropper.close();
+        await writer.close();
+      }
+
+      // Two writers moving thoughts across one pair of keys in opposite directions queue rather than deadlock: a
+      // replace's close locks both keys in key order at its commit, the lesser first. The holder keeps the lesser key
+      // while both commits start, each then waiting on it; let go, they run one after the other, and each thread is
+      // exact. Each re-linking its closed key first would hold that key while it waited on the other's: a deadlock.
+      const KL = "ticket:SMD-9486", KH = "ticket:SMD-9487";
+      const kl1 = await thought("kl1", 1), kl2 = await thought("kl2", 2), kh1 = await thought("kh1", 3), kh2 = await thought("kh2", 4);
+      for (const [id, key] of [[kl1, KL], [kl2, KL], [kh1, KH], [kh2, KH]] as const) await subjectOn(owner, id, key);
+      const moverA = new SQL({ url: URL_!, max: 1 }), moverB = new SQL({ url: URL_!, max: 1 });
+      const rekey = (c: SQL, id: string, key: string) => c`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'first_line', 'subject:qwen3.8:27b@p1', NULL::uuid,
+        (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb)`;
+      try {
+        const aPid = await pidOf(moverA), bPid = await pidOf(moverB);
+        await holder`BEGIN`;
+        await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${KL}::text, 0))`;
+        await moverA`BEGIN`;
+        await rekey(moverA, kl2, KH);
+        const aCommit = settled(async () => { await moverA`COMMIT`; });
+        const aWaits = await pollUntil(() => waitsOn(aPid), 5000);
+        await moverB`BEGIN`;
+        await rekey(moverB, kh2, KL);
+        const bCommit = settled(async () => { await moverB`COMMIT`; });
+        const bWaits = await pollUntil(() => waitsOn(bPid), 5000);
+        await holder`COMMIT`;
+        const aEnd = await aCommit, bEnd = await bCommit;
+        assert(aWaits && bWaits && aEnd === "ok" && bEnd === "ok" && (await pairs(KL)) === "kh2→kl1" && (await pairs(KH)) === "kh1→kl2",
+          `two writers moving thoughts across one pair of keys in opposite directions queue on the lesser key and both commit, each thread exact (waited ${aWaits}/${bWaits}; ${aEnd} / ${bEnd}; ${await pairs(KL)} | ${await pairs(KH)})`);
+      } finally {
+        await moverA.close();
+        await moverB.close();
+      }
     } finally {
       await holder.close();
       await relinker.close();

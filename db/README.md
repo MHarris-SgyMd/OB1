@@ -2548,24 +2548,31 @@ has (a closed edge is history, never re-opened); dry, it counts and writes
 nothing. Three constraint triggers on `thought_facets`, deferred to the
 writer's commit, call it as a subject is written, closed (`close_thought_subject`
 included, which since 120 needs the door's writes), or deleted with its
-thought, so a subject recorded again under the same key moves no edge. The last
-re-links only when the deleting role can make a re-link's writes (INSERT and
-UPDATE on `thought_facets` and on `derivations`) and no other transaction holds
-the key's lock, since a delete never waits on a re-link: a server role cannot,
-so a thought it deletes leaves its neighbours unlinked until their key's next
-re-link. The validator says a relation's origin: one naming a subject key is a thread's edge,
-`evolves` under a `thread:` judge key with no confidence; any other is the
-judge's, `judged`, under 084's index, which now keeps to the judge's edges, so
-a judged `related` and a thread's `evolves` stand side by side on one pair.
-`record_thought_relation` reads, keeps, replaces and closes the judge's edge
-alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
-count the judge's alone. The upgrade writes no edge: run `threads.ts` once
-after it, which links every thread, a batch of keys a transaction:
+thought, so a subject recorded again under the same key moves no edge, and one
+moved to another key locks both keys first, in key order, as `threads.ts` locks
+its batches' keys, so two writers moving thoughts across one pair of keys
+queue. The last re-links only when the deleting role can make a re-link's
+writes (INSERT and UPDATE on `thought_facets`, UPDATE on `thoughts` for the row
+locks, and INSERT, UPDATE and SELECT on `derivations`), under READ COMMITTED,
+and while no other transaction holds the key's lock, since a delete never waits
+on that lock: a server role cannot, so a thought it deletes leaves its
+neighbours unlinked until their key's next re-link. `thread_relink` runs under
+READ COMMITTED alone and refuses a transaction above it, so a subject written
+in one is refused at its commit. The validator says a relation's origin: one
+naming a subject key is a thread's edge, `evolves` under a `thread:` judge key
+with no confidence; any other is the judge's, `judged`, under 084's index,
+which now keeps to the judge's edges, so a judged `related` and a thread's
+`evolves` stand side by side on one pair. `record_thought_relation` reads,
+keeps, replaces and closes the judge's edge alone, and `brain_info`,
+board-sync's findings and `consolidate.ts --status` count the judge's alone.
+The upgrade writes no edge: run `threads.ts` once after it, which links every
+thread, a batch of keys a transaction, a key that writes ending its batch and
+the next batch taking the page's rest:
 
 ```bash
 bun threads.ts --url … --status                # the threads, and the keys whose edges differ
 bun threads.ts --url … --dry-run               # counts what it would close and write; writes nothing
-bun threads.ts --url …                         # links them (--batch N keys a transaction, 200 unless said)
+bun threads.ts --url …                         # links them (--batch N keys a transaction at most, 200 unless said)
 bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete
 ```
 
@@ -2573,9 +2580,11 @@ A thought stands in one thread until its subjects are a set (PR 7a-3); the
 thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084,
 111 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the
 re-link, the validator, the judge's door beside a thread, the deletes with and
-without the writes, a replace that keeps its key, the re-apply), test-upgrade
-[20bl] (onto a populated brain at the file before it), test-live [47]
-(`threads.ts`) and [48] (beside a delete in flight, a held key and a deadlock).
+without the writes, a replace that keeps its key, a write and a delete under
+REPEATABLE READ, the re-apply), test-upgrade [20bl] (onto a populated brain at
+the file before it), test-live [47] (`threads.ts`, its page reads counted) and
+[48] (beside a delete in flight or stalled, a held key, a deadlock and a writer
+re-keying the other way).
 
 ## What changed relative to the guide
 
