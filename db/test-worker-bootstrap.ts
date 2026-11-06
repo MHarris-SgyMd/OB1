@@ -494,9 +494,22 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const writer = { out: (l: string) => lines.push(`out ${l}`), err: (l: string) => lines.push(`err ${l}`) };
   const instant = async () => {};
   const wake = new AbortController().signal;
+  /** A clock the injected sleep advances, in place of Date.now while a cell runs, so the seconds a line says are the schedule's own. */
+  let clock = 0;
+  const ticking = async (ms: number) => { clock += ms; };
+  const onTheClock = async <T>(run: () => Promise<T>): Promise<T> => {
+    const realNow = Date.now;
+    clock = 1_000_000;
+    Date.now = () => clock;
+    try {
+      return await run();
+    } finally {
+      Date.now = realNow;
+    }
+  };
   /** Probes answered in order; asked past the script it answers refused and says so, so a helper that probes too often ends and is reported by name, not looped (review passes 4 and 5). */
   const overran: string[] = [];
-  const scripted = (states: Probe[], cell = "a cell") => async (): Promise<Probe> => {
+  const scripted = (states: Probe[], cell: string) => async (): Promise<Probe> => {
     const next = states.shift();
     if (next) return next;
     // Once refused, so a wait that settles on it ends and the last cell names it; again thrown, naming the cell, so
@@ -525,14 +538,15 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const startStates: Probe[] = [{ state: "out", why: "503" }, { state: "up" }];
   const waitSignals: AbortSignal[] = [];
   const nextStart = scripted(startStates, "waitAtStart's out then up");
-  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: (w) => { waitSignals.push(w); return nextStart(); }, refusal: (p, w) => { waitSignals.push(w); return refuseMissing(p); }, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
+  const up = await onTheClock(() => waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: (w) => { waitSignals.push(w); return nextStart(); }, refusal: (p, w) => { waitSignals.push(w); return refuseMissing(p); }, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: ticking }));
   // Both probes asked: an out probe is waited past, not taken for the answer (review pass 3).
-  ok(up === "up" && startStates.length === 0 && waitSignals.length === 3 && waitSignals.every((w) => w === wake) && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the provider answers after [01] s$/.test(lines[1] ?? ""),
+  ok(up === "up" && startStates.length === 0 && waitSignals.length === 3 && waitSignals.every((w) => w === wake) && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the provider answers after 15 s$/.test(lines[1] ?? ""),
     `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
   stamps.length = 0;
   let thrownThrough = "";
-  await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: async () => { throw new Error("the probe threw"); }, refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant }).catch((e: Error) => { thrownThrough = e.message; });
-  ok(thrownThrough === "the probe threw" && stamps.join() === "true,false", `waitAtStart: a probe that throws still turns the stamp off (review pass 5; ${stamps})`);
+  let probeThrows = 0;
+  await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: async () => { if (probeThrows++ === 0) throw new Error("the probe threw"); return { state: "up" }; }, refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant }).catch((e: Error) => { thrownThrough = e.message; });
+  ok(thrownThrough === "the probe threw" && probeThrows === 1 && stamps.join() === "true,false", `waitAtStart: a probe that throws still turns the stamp off, its error thrown, not waited past (review passes 5 and 6; ${stamps}, ${probeThrows} probe(s))`);
   lines.length = 0;
   await waitAtStart({ who: "the provider", why: `${"w".repeat(250)}TAIL`, meanwhile: "m", probe: scripted([{ state: "up" }], "the long why"), refusal: refuseMissing, wake, writer, sleep: instant });
   ok(lines[0]?.includes(`(${"w".repeat(200)}) — `) === true && !lines[0]?.includes("TAIL"), "waitAtStart: the first probe's why cut at 200 characters in the line (review pass 5)");
@@ -550,8 +564,8 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const pgDown = () => Object.assign(new Error("Connection closed\nsecond line"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" });
   lines.length = 0;
   let checks = 0;
-  ok((await waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: instant, firstLine: true })) && checks === 2
-    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the database answers again after [01] s; polling resumes$/.test(lines[1] ?? ""),
+  ok((await onTheClock(() => waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: ticking, firstLine: true }))) && checks === 2
+    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the database answers again after 15 s; polling resumes$/.test(lines[1] ?? ""),
     `waitForDatabase: said with the error's first line, checked until it answers, said again (${checks} checks; ${lines.join(" | ").slice(0, 200)})`);
   lines.length = 0;
   await waitForDatabase(pgDown(), { check: async () => {}, wake, writer, sleep: instant });
