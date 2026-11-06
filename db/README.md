@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and eighteen (118) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and nineteen (119) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 120 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2533,6 +2533,44 @@ says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
 `duplicate`), 068 and 115; a re-apply is a no-op. test-schema [106] (the tickets released and
 left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
 (onto a populated brain at 117).
+
+Migration 120 links each work thread (SMD-3306 PR 7a-1). A thread is the
+thoughts holding one standing subject key (111), in capture order (`created_at`,
+then id), and each thought after the first carries a standing `relation` facet
+on it: relation `evolves`, its target the thought before it, judge key
+`thread:v1`, the thread's `key`, no confidence, origin `thread`, with its
+lineage row (the older and the newer thought at their fingerprints, produced by
+`thread:v1`). `thread_relink(key, dry)` makes one thread stand as its subjects
+say, under a lock on the key: it closes each edge the thread no longer has (a
+closed edge is history, never re-opened) and writes each it lacks; dry, it
+counts and writes nothing. Three triggers on `thought_facets` call it as a
+subject is written, closed (`close_thought_subject` included, which since 120
+needs the door's writes), or deleted with its thought, the last only when the
+deleting role can make a re-link's writes (INSERT and UPDATE on
+`thought_facets` and on `derivations`): a server role cannot, so a thought it
+deletes leaves its neighbours unlinked until their key's next re-link. The
+validator says a relation's origin: one naming a subject key is a thread's edge,
+`evolves` under a `thread:` judge key with no confidence; any other is the
+judge's, `judged`, under 084's index, which now keeps to the judge's edges, so
+a judged `related` and a thread's `evolves` stand side by side on one pair.
+`record_thought_relation` reads, keeps, replaces and closes the judge's edge
+alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
+count the judge's alone. The upgrade writes no edge: run `threads.ts` once
+after it, which links every thread, a batch of keys a transaction:
+
+```bash
+bun threads.ts --url … --status                # the threads, and the keys whose edges differ
+bun threads.ts --url … --dry-run               # counts what it would close and write; writes nothing
+bun threads.ts --url …                         # links them (--batch N keys a transaction, 200 unless said)
+bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete
+```
+
+A thought stands in one thread until its subjects are a set (PR 7a-3); the
+thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084,
+111 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the
+re-link, the validator, the judge's door beside a thread, the deletes with and
+without the writes, the re-apply), test-upgrade [20bl] (onto a populated brain
+at the file before it), test-live [47] (`threads.ts`).
 
 ## What changed relative to the guide
 

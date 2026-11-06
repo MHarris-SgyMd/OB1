@@ -1131,8 +1131,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         JOIN thoughts n ON n.id = f.thought_id
         JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
         LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117).
-       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
+       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117). A work
+       -- thread's edge (origin thread, 120) is no judgement to review (SMD-3306).
+       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+         AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
          -- --key (SMD-3248): one pass's relations alone, by the key its facet names.
          AND (${KEY ?? null}::text IS NULL OR f.payload->>'judge_key' = ${KEY ?? null}::text)
        ORDER BY f.created_at DESC, f.id
@@ -1224,7 +1226,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           JOIN thoughts n ON n.id = f.thought_id
           JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
           LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
+         -- The judge's alone: a work thread's edges (origin thread, 120) are the subjects' (SMD-3306).
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
       out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them` +
         (r.distinct_pairs ? `; ${r.distinct_pairs} pair(s) judged distinct — near neighbours the judge called unrelated, kept apart (102)` : ""));

@@ -2374,7 +2374,7 @@ async function sweep(
         } catch (e) {
           if (e === ROLLED_BACK) return false;
           if (sqlState(e) === "42501") {
-            endedBy = { code: 2, line: `\n  This role cannot close a thought's subject (${(e as Error).message.slice(0, 300)}): close_thought_subject needs UPDATE on thought_facets and on thoughts.` };
+            endedBy = { code: 2, line: `\n  This role cannot close a thought's subject (${(e as Error).message.slice(0, 300)}): close_thought_subject needs UPDATE on thought_facets and on thoughts, and since a close re-links its thread (120) what the door does: ${DOOR_GRANTS}.` };
             return false;
           }
           if (databaseUnavailable(e)) {

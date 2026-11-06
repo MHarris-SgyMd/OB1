@@ -58,6 +58,7 @@ import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, HUNG_MARK, J
 import { metadataTicket, subjectCurrent, subjectPoolKey, subjectPrompt, subjectReasoningOn, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
+import { run as runThreads, type ThreadsOptions } from "./threads.ts";
 import { drainer, sweepOrphans } from "./rebuild.ts";
 import type { Admit, InHandAbort, PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
@@ -10121,10 +10122,13 @@ if (want("10h")) {
       const followChecked = await sweep({ follow: 1, judgeChecked: true, stamper: throughRow, signal: backstop() });
       const followHalf = await sweep({ follow: 0.5, stamper: throughRow, signal: backstop() });
       const refusedWords = stamped.join(",");
-      // …nor --retry-failed, whose count a start begun again would read as 0 (PR 6b-1's review pass 3, cold read).
-      const followRetry = await sweep({ follow: 1, retryFailed: true, signal: backstop() });
-      assert(followRetry.code === 2 && /^follow is a scheduler's run of the sweep, and --retry-failed is an operator's word that the failures' cause is mended, which no scheduler can give: drop one of them\.$/m.test(followRetry.stderr),
-        `a following run refuses --retry-failed, usage (exit ${followRetry.code}): ${followRetry.stderr.trim().slice(-160)}`);
+      // …nor --retry-failed, whose count a start begun again would read as 0 (PR 6b-1's review pass 3, cold read), heard
+      // as usage, as a scheduler reads its start (SMD-3306 PR 7a-1: the case did not listen).
+      const followRetryHeard: StartResult[] = [];
+      const followRetry = await sweep({ follow: 1, retryFailed: true, onStart: (r) => { followRetryHeard.push(r); }, signal: backstop() });
+      assert(followRetry.code === 2 && /^follow is a scheduler's run of the sweep, and --retry-failed is an operator's word that the failures' cause is mended, which no scheduler can give: drop one of them\.$/m.test(followRetry.stderr)
+          && JSON.stringify(followRetryHeard) === JSON.stringify([{ ok: false, refused: "usage" }]),
+        `a following run refuses --retry-failed, usage, heard as usage (exit ${followRetry.code}; heard ${JSON.stringify(followRetryHeard)}): ${followRetry.stderr.trim().slice(-160)}`);
       const lent = new SQL({ url: URL_!, max: 1 });
       const sessionLent = await caught((writer) => sweepSubjects({ sql: lent, env, session: { application_name: "ob1-sweep-lent" }, writer })).finally(() => lent.close({ timeout: 5 }));
       const gateDeaf = await orHung(sweep({ admit: heldGate(0).admit }), 10_000);
@@ -16533,11 +16537,20 @@ if (want("16")) {
     const again = await rejudge("related");
     assert(/relations: 0 added, 1 kept, 0 replaced, 0 closed/.test(again.out) && (await relOf()).filter((r) => r.active).length === 1,
       `judged related again by the same pass at the same confidence, the edge is kept (${again.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    // 120 (SMD-3306): a work thread's evolves on the judged pair is the subjects' order, not a judgement: --status and
+    // --list relations count and show the judge's edges alone — not as another word, nor as another judge key's.
+    const [{ id: threadEdge }] = (await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${rotaNew}::uuid, 'relation',
+        ${{ relation: "evolves", target: rotaOld, judge_key: "thread:v1", key: "ticket:SMD-9116" }}::jsonb) RETURNING id::text AS id`) as { id: string }[];
+    const [judged] = (await sql`SELECT count(*) FILTER (WHERE payload->>'relation' = 'related')::int AS related, count(*) FILTER (WHERE payload->>'relation' = 'evolves')::int AS evolves
+        FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'origin' = 'judged'`) as { related: number; evolves: number }[];
     const status = await consolidate("--status");
-    assert(/relations: \d+ standing \(\d+ related, \d+ evolves, 0 duplicate\) — --list relations shows them/.test(status.out), `--status counts the relations standing by word (${status.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    assert(new RegExp(`relations: ${judged.related + judged.evolves} standing \\(${judged.related} related, ${judged.evolves} evolves, 0 duplicate\\) — --list relations shows them`).test(status.out),
+      `--status counts the judge's relations standing by word, a thread's edge on the judged pair none of them (${judged.related} related, ${judged.evolves} evolves: ${status.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     const listed = await consolidate("--list", "relations");
-    assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out),
-      `--list relations shows the edge with both thoughts, and nothing edited since it was judged (exit ${listed.code})`);
+    assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out)
+        && !listed.out.includes(threadEdge),
+      `--list relations shows the edge with both thoughts, nothing edited since it was judged, and not the thread's edge on the pair (exit ${listed.code})`);
+    await sql`DELETE FROM thought_facets WHERE id = ${threadEdge}::uuid`;
     // SMD-3248: --key selects the relations of one pass, by the key each edge's facet names.
     const relKey = /relation \S+\s+judged by (\S+) on /.exec(listed.out)?.[1] ?? "";
     const relByKey = await consolidate("--list", "relations", "--key", relKey);
@@ -16965,10 +16978,11 @@ if (want("16")) {
         await dropR();
       }
     }
-    // The re-applies of 102 above put back its facet validator, from before 111's subject kind: the shipped one
-    // restored, 111's, with 113's door after it, which 111's re-apply replaces (SMD-3306 PR 6b-2: [38s], after this
-    // section in the rest shard, was refused its every subject).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") });
+    // The re-applies of 102 above put back its facet validator, from before 111's subject kind, and its judge's door:
+    // the shipped ones restored — 111's, with 113's door after it, which 111's re-apply replaces, and 120's validator
+    // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
+    // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -27953,6 +27967,9 @@ if (want("41")) {
     // A pair judged distinct (102, SMD-3117): two tickets the judge called unrelated are nothing to link.
     const z19 = await ticket(19, "judged apart a"), z20 = await ticket(20, "judged apart b");
     await relate(z20, z19, "distinct", 0.9);
+    // A work thread's edge between two tickets (120, SMD-3306): the subjects' order, not a judgement, so no finding.
+    const z21 = await ticket(21, "a thread's first"), z22 = await ticket(22, "a thread's next");
+    await bsql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${z22.id}::uuid, 'relation', ${{ relation: "evolves", target: z21.id, judge_key: "thread:v1", key: "phrase:board findings fixture" }}::jsonb)`;
     // Two words on one pair: one comment, two rows.
     const z15 = await ticket(15, "two words a"), z16 = await ticket(16, "two words b");
     const p1516 = await propose(z15, z16, "newer_supersedes_older", 0.6, "ZQ-16 restates ZQ-15");
@@ -28866,6 +28883,121 @@ if (want("46")) {
     await cA.close();
     await cB.close();
     await watch.close();
+  }
+}
+
+if (want("47")) {
+  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing; --key re-links one thread; a stop before a batch writes nothing; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
+  // Its own client: [24] closed the suite's.
+  const sql = new SQL({ url: URL_!, max: 1 });
+  const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runThreads({ url: URL_!, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    return { code, out: outs.join("\n"), err: errs.join("\n") };
+  };
+  const name: Record<string, string> = {};
+  const thought = async (label: string, created: string) => {
+    const id = ((await sql`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`[47] ${label}, a note on its ticket`}, ${{ source: "live" }}::jsonb, ${created}::timestamptz)
+      RETURNING id::text AS id`)[0] as { id: string }).id;
+    name[id] = label;
+    return id;
+  };
+  const subject = async (id: string, key: string) =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'first_line', 'subject:qwen3.8:27b@p1', NULL::uuid,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { action: string } }).r;
+  const pairs = async (key: string) => ((await sql`SELECT thought_id::text AS n, payload->>'target' AS o FROM thought_facets
+      WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key}`) as { n: string; o: string }[]).map((e) => `${name[e.n] ?? e.n}→${name[e.o] ?? e.o}`).sort().join(" ");
+  // A thread's standing edges taken away, as a brain upgraded to 120 holds its threads until db/threads.ts runs.
+  const unlink = (keys: string[]) => sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ANY(${sql.array(keys, "TEXT")})`;
+  const counts = (out: string) => {
+    const t = /^ {2}threads: +(\d+) .*?, (\d+) thought\(s\) in them$/m.exec(out), e = /^ {2}edges: +(\d+) standing, (\d+) once every thread is linked$/m.exec(out);
+    return { threads: Number(t?.[1]), thoughts: Number(t?.[2]), standing: Number(e?.[1]), whole: Number(e?.[2]) };
+  };
+  const KA = "ticket:SMD-9471", KB = "ticket:SMD-9472", KO = "ticket:SMD-9473";
+  let renamed = false;
+  try {
+    // Settled first: a thread another section left is linked, so the counts below move by this section's alone.
+    const settle = await threads({});
+    const settled = await threads({ status: true });
+    assert(settle.code === 0 && settled.code === 0 && /^ {2}linked: {4}every thread — nothing to do$/m.test(settled.out),
+      `a run over every key settles the brain, and --status then finds nothing to do (${settle.out.trim()} | ${settled.out.trim().split("\n").at(-1)})`);
+
+    // Two threads written, then unlinked; and an orphan's edge, under a key no subject holds.
+    const a1 = await thought("a1", "2026-11-01T01:00:00Z"), a2 = await thought("a2", "2026-11-01T02:00:00Z"), a3 = await thought("a3", "2026-11-01T03:00:00Z");
+    const b1 = await thought("b1", "2026-11-02T01:00:00Z"), b2 = await thought("b2", "2026-11-02T02:00:00Z");
+    for (const [id, key] of [[a1, KA], [a2, KA], [a3, KA], [b1, KB], [b2, KB]] as const) await subject(id, key);
+    const written = [await pairs(KA), await pairs(KB)];
+    await unlink([KA, KB]);
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${a2}::uuid, 'relation', ${{ relation: "evolves", target: a1, judge_key: "thread:v1", key: KO }}::jsonb)`;
+    const census = await threads({ status: true });
+    const was = counts(settled.out), now = counts(census.out);
+    assert(JSON.stringify(written) === JSON.stringify(["a2→a1 a3→a2", "b2→b1"]) && census.code === 0
+        && now.threads === was.threads + 2 && now.thoughts === was.thoughts + 5 && now.standing === was.standing + 1 && now.whole === was.whole + 3
+        && /^ {2}linked: {4}2 key\(s\) whose edges differ from their thread's, 1 key\(s\) no thought holds still carrying edges — threads\.ts without --status links them$/m.test(census.out),
+      `the subjects' writes linked each thread; unlinked, --status reads two more threads of five thoughts, the orphan's edge standing where three are wanted, and names both keys and the orphan's (${JSON.stringify([was, now])}; ${census.out.trim().split("\n").at(-1)})`);
+
+    const dry = await threads({ dryRun: true });
+    const dryLeft = [await pairs(KA), await pairs(KB), await pairs(KO)];
+    assert(dry.code === 0 && /^ {2}\d+ key\(s\) in \d+ batch\(es\): 1 edge\(s\) to close, 3 to write \(dry run: nothing written\)$/m.test(dry.out) && JSON.stringify(dryLeft) === JSON.stringify(["", "", "a2→a1"]),
+      `a dry run counts the orphan's edge to close and the threads' three to write, and writes nothing (${dry.out.trim()})`);
+    const ran = await threads({ batch: 1 });
+    const [, keys, batches] = /^ {2}(\d+) key\(s\) in (\d+) batch\(es\): 1 edge\(s\) closed, 3 written$/m.exec(ran.out) ?? [];
+    // Each a thread's edge by the validator's word: an older validator left by a section's swap would say judged.
+    const origins = ((await sql`SELECT DISTINCT payload->>'origin' AS o FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
+        AND payload->>'key' = ANY(${sql.array([KA, KB], "TEXT")})`) as { o: string }[]).map((r) => r.o).join();
+    assert(ran.code === 0 && keys !== undefined && keys === batches && Number(keys) >= 3 && (await pairs(KA)) === "a2→a1 a3→a2" && (await pairs(KB)) === "b2→b1" && (await pairs(KO)) === ""
+        && origins === "thread",
+      `the run, a key a transaction, links both threads, each edge origin thread, and closes the orphan's edge (${ran.out.trim()}; origin ${origins})`);
+    const done = await threads({ status: true });
+    assert(/^ {2}linked: {4}every thread — nothing to do$/m.test(done.out), `--status after it: nothing to do (${done.out.trim().split("\n").at(-1)})`);
+
+    // --key: one thread's gap, healed alone, the dry run counting first.
+    await unlink([KB]);
+    const keyDry = await threads({ key: KB, dryRun: true });
+    const keyDryLeft = await pairs(KB);
+    const keyRun = await threads({ key: KB });
+    assert(keyDry.code === 0 && keyDry.out === `  ${KB}: 2 thought(s), 0 edge(s) to close, 1 to write (dry run: nothing written)` && keyDryLeft === ""
+        && keyRun.code === 0 && keyRun.out === `  ${KB}: 2 thought(s), 0 edge(s) closed, 1 written` && (await pairs(KB)) === "b2→b1",
+      `--key re-links one thread, its dry run counting first (${keyDry.out} | ${keyRun.out})`);
+    // A thread linked wrong with the right number of edges: --status compares the edges, not their count.
+    await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${KA} AND thought_id = ${a3}::uuid`;
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${a3}::uuid, 'relation', ${{ relation: "evolves", target: a1, judge_key: "thread:v1", key: KA }}::jsonb)`;
+    const skewedPairs = await pairs(KA);
+    const skewed = await threads({ status: true });
+    const mended = await threads({ key: KA });
+    assert(skewedPairs === "a2→a1 a3→a1" && /^ {2}linked: {4}1 key\(s\) whose edges differ from their thread's — threads\.ts without --status links them$/m.test(skewed.out)
+        && mended.out === `  ${KA}: 3 thought(s), 1 edge(s) closed, 1 written` && (await pairs(KA)) === "a2→a1 a3→a2",
+      `a thread linked wrong with as many edges as it wants is read as differing, and --key mends it (${skewedPairs}; ${skewed.out.trim().split("\n").at(-1)}; ${mended.out})`);
+
+    // A stop before the first batch: nothing written, said.
+    await unlink([KA]);
+    const stopped = await threads({ signal: AbortSignal.abort() });
+    assert(stopped.code === 0 && /^ {2}stopped after 0 batch\(es\): 0 key\(s\) done, the rest the next run's$/m.test(stopped.out) && (await pairs(KA)) === "",
+      `a stop before a batch writes nothing and says so (${stopped.out.trim().replace(/\n/g, " | ")})`);
+    await threads({ key: KA });
+
+    // Usage, before any connection: a URL nothing listens on is never opened.
+    const DEAD = "postgres://nobody@127.0.0.1:1/none";
+    const usage = [
+      await threads({ url: DEAD, status: true, dryRun: true }), await threads({ url: DEAD, key: KB, batch: 5 }), await threads({ url: DEAD, key: "SMD-9472" }), await threads({ url: DEAD, batch: 0 }),
+    ];
+    assert(usage.every((u) => u.code === 2)
+        && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
+        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err),
+      `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
+
+    // A brain without 120: refused by name.
+    await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
+    renamed = true;
+    const without = await threads({ status: true });
+    await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    renamed = false;
+    assert(without.code === 2 && /thread_relink is not on this brain: migration 120 \(SMD-3306\) is missing\. Apply it — cd db && bun migrate\.ts --url <url> — and run again\./.test(without.err),
+      `a brain without 120 refused by name, 2 (${without.err.trim().slice(0, 120)})`);
+  } finally {
+    if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[47]%'`;
+    await sql.close();
   }
 }
 

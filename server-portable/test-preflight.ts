@@ -1537,6 +1537,26 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 120's edge (SMD-3306): a work thread's standing edge without its lineage
+  // row is refused the same way, counted apart from a judged relation, and the
+  // remedy is the thread's own: close the edge and re-link its key, which
+  // writes it again with its row. The thoughts are removed after.
+  const thA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the first note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const thB = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the second note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  for (const id of [thA, thB])
+    await ctx.unsafe(`SELECT record_thought_subject('${id}'::uuid, 'ticket:SMD-9120', 'first_line', 'subject:t@p1', NULL, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = '${id}'::uuid), NULL)`);
+  const edge120 = String((await ctx.unsafe(`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9120'`))[0].id);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${edge120}'::uuid`);
+  const noEdge = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noEdge.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 thread edge\\(s\\) \\(${edge120}\\)`).test(noEdge.out) && !/judged relation\(s\)/.test(noEdge.out)
+         && /A thread edge's row is written with it by 120's thread_relink: close the edge/.test(noEdge.out) && /bun db\/threads\.ts --url … --key/.test(noEdge.out),
+         `a thread's edge without its lineage row does not start, counted as a thread edge, not a judged relation, and the remedy is the thread's own (exit ${noEdge.code}: ${noEdge.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${edge120}'::uuid`);
+  const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
+  assert(relinked.added === 1 && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
+         "…and following the remedy — the edge closed, its thread re-linked — the edge stands again with its row, and the check is ok again");
+  await ctx.unsafe(`SELECT delete_thought('${thB}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${thA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger
@@ -3743,9 +3763,12 @@ else {
   // than from the generated module preflight reads it from.
   {
     const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`\\b${name}\\b`).test(l))?.trim();
-    const treeLast = Math.max(...readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+    const treeNumbers = readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+    const treeLast = Math.max(...treeNumbers);
     const last = String(treeLast).padStart(3, "0");
-    const prev = String(treeLast - 1).padStart(3, "0");
+    // The file before the last, read from the tree: a number may be skipped while a branch in review holds it
+    // (SMD-3306's 120 was numbered past SMD-3778's 119, in review then).
+    const prev = String(Math.max(...treeNumbers.filter((n) => n < treeLast))).padStart(3, "0");
     const [{ v: extversion }] = await claims`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`;
     const bare = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
