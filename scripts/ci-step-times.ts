@@ -290,17 +290,20 @@ export function findShifts(points: Point[], opensWindow = false): Shift[] {
   return out;
 }
 
-/** A run as listed: its id, and its state (`completed`, or `in_progress`, `queued` and the like while it runs). */
-export type Listed = { id: string; status: string };
+/** A run as listed: its id, its state (`completed`, or `in_progress`, `queued` and the like while it runs), and its attempt (1 the first; later ones a re-run), when the list carried it. */
+export type Listed = { id: string; status: string; attempt?: number };
 
 /**
  * The window over runs listed oldest first, whatever their state: up to `through`, or without it up to the newest
  * completed run (one running after that is a push not yet done, not the window's), then its newest `last`. A run in it
  * that is not completed is being re-run, and `running` names it: its jobs are not to be read, and its gap counts as
- * an unread run's does. "running" when `through` itself is not completed; undefined when it is not listed. Without
- * `gaps` (the per-job report) the window is over completed runs alone, so `--last n` is n of them.
+ * an unread run's does. A first attempt not completed is a push not yet done wherever it sits: main's runs no longer
+ * cancel one another (SMD-3173), so an older one can still be going when a newer one ends. It is left out before
+ * `last` is counted, and `going` names it; its own end reads it. "running" when `through` itself is not completed;
+ * undefined when it is not listed. Without `gaps` (the per-job report) the window is over completed runs alone, so
+ * `--last n` is n of them.
  */
-export function shiftWindow(listed: Listed[], through?: string, last?: number, gaps = true): { ids: string[]; running: string[] } | "running" | undefined {
+export function shiftWindow(listed: Listed[], through?: string, last?: number, gaps = true): { ids: string[]; running: string[]; going: string[] } | "running" | undefined {
   if (!gaps) listed = listed.filter((r) => r.status === "completed");
   let end: number;
   if (through !== undefined) {
@@ -308,8 +311,10 @@ export function shiftWindow(listed: Listed[], through?: string, last?: number, g
     if (end < 0) return undefined;
     if (listed[end].status !== "completed") return "running";
   } else end = listed.map((r) => r.status).lastIndexOf("completed");
-  const window = last === undefined ? listed.slice(0, end + 1) : listed.slice(0, end + 1).slice(-last);
-  return { ids: window.map((r) => r.id), running: window.filter((r) => r.status !== "completed").map((r) => r.id) };
+  const firstGoing = (r: Listed) => r.status !== "completed" && r.attempt === 1;
+  const upTo = listed.slice(0, end + 1), kept = upTo.filter((r) => !firstGoing(r));
+  const window = last === undefined ? kept : kept.slice(-last);
+  return { ids: window.map((r) => r.id), running: window.filter((r) => r.status !== "completed").map((r) => r.id), going: upTo.filter(firstGoing).map((r) => r.id) };
 }
 
 /** A shift found in a window: its series, the run that made it and the commits it landed between. */
@@ -697,6 +702,11 @@ async function selfCheck(): Promise<number> {
   ok(cut("5", 3) === "3,4,5/3" && cut() === "1,2,3,4,5/2,3" && cut(undefined, 2) === "4,5/" && cut("6") === "running" && cut("2") === "running" && cut("9") === undefined
     && cut(undefined, 3, false) === "1,4,5/",
     "the window: cut at --through or the newest completed run, then its newest --last; a run queued or running for a re-run in it named; --through not completed, or not listed; the per-job report's --last n is n completed runs");
+  // Main's runs overlap (SMD-3173): 3 still on its first attempt when 5 ends, 2 being re-run (its second attempt).
+  const overlap: Listed[] = five.map((id) => ({ id, status: id === "2" || id === "3" ? "in_progress" : "completed", attempt: id === "2" ? 2 : 1 }));
+  const lap = (through?: string, last?: number) => { const w = shiftWindow(overlap, through, last); return typeof w === "object" ? `${w.ids.join()}/${w.running.join()}/${w.going.join()}` : w; };
+  ok(lap("5") === "1,2,4,5/2/3" && lap("5", 3) === "2,4,5/2/3" && lap() === "1,2,4,5/2/3" && lap("4") === "1,2,4/2/3",
+    "an older first attempt still going is left out of the window, before --last counts, and named as going, not as a gap; a second attempt stays a re-run");
   ok(runsNamed(["40914574099", "040914574099", "9", "123456789012345678902", "123456789012345678901", "10", "0"]).join() === "0,9,10,40914574099,123456789012345678901,123456789012345678902",
     "run ids named: leading zeros dropped, each once, oldest first, a long one not rounded");
   // collectShifts over runs given out of order, as --runs takes them: 13 at 100 s and 3 at 200 s, by creation time.
@@ -912,11 +922,11 @@ if (import.meta.main) {
     let full = 0; // runs asked for when gh returned them all: the list may then hold fewer of the workflow's than wanted
     const list = async (limit: number) => {
       const asked = listLimit(limit, namedWorkflow);
-      const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--limit", String(asked), "--json", "databaseId,status,name,workflowName"]);
+      const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--limit", String(asked), "--json", "databaseId,status,attempt,name,workflowName"]);
       if (!got.ok) stop(`gh run list failed: ${got.error}`);
-      const raw = got.json as { databaseId: number; status: string; name?: string; workflowName?: string }[];
+      const raw = got.json as { databaseId: number; status: string; attempt?: number; name?: string; workflowName?: string }[];
       full = raw.length >= asked ? asked : 0;
-      return keptRuns(raw, namedWorkflow).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
+      return keptRuns(raw, namedWorkflow).map((r) => ({ id: String(r.databaseId), status: r.status, attempt: r.attempt })).reverse();
     };
     // --through names the newest run or near it, as the workflow does; one further back, with fewer than `last` runs
     // up to it in the short list, takes the whole list (~30 s). Runs still going take places in it, so 10 spare.
@@ -927,14 +937,14 @@ if (import.meta.main) {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
-    const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt,name,workflowName"]);
+    const got = await listRuns(["run", "list", ...repo, ...byWorkflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,attempt,createdAt,name,workflowName"]);
     if (!got.ok) stop(`gh run list failed: ${got.error}`);
-    const raw = got.json as { databaseId: number; status: string; createdAt: string; name?: string; workflowName?: string }[];
+    const raw = got.json as { databaseId: number; status: string; attempt?: number; createdAt: string; name?: string; workflowName?: string }[];
     const { runs, cutShort } = daysWindow(raw, cutoff, namedWorkflow);
     // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
     // gh's list is read whole, other workflows' runs included: they fill it as the workflow's do.
     if (cutShort) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
-    listed = runs.filter((r) => Date.parse(r.createdAt) >= cutoff).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
+    listed = runs.filter((r) => Date.parse(r.createdAt) >= cutoff).map((r) => ({ id: String(r.databaseId), status: r.status, attempt: r.attempt })).reverse();
     console.log(`${where} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${listed.filter((r) => r.status === "completed").length} completed runs`);
   }
   if (runsOpt === undefined) {
@@ -950,6 +960,7 @@ if (import.meta.main) {
     }
     ids = window.ids;
     running = window.running;
+    if (window.going.length) console.log(`${window.going.length} older run${window.going.length === 1 ? "" : "s"} still on ${window.going.length === 1 ? "its" : "their"} first attempt, left out: ${window.going.length === 1 ? "its" : "each one's"} own end reads ${window.going.length === 1 ? "it" : "them"} (${window.going.join(", ")})`);
     if (ids.length === running.length) stop(`no completed run of ${where}${last === undefined ? ` in the last ${days} days` : ""}: is the branch or workflow named right?`);
     if (last !== undefined || through !== undefined) console.log(`${ids.length}${shift ? "" : " completed"} run${ids.length === 1 ? "" : "s"} of ${where}${through ? ` through ${through}` : ""}${running.length ? `, ${running.length} being re-run` : ""}`);
   }

@@ -23,8 +23,8 @@
  * a directory shows as its deletion there.
  *
  * Run: bun scripts/check-landing.ts --from <base sha> --to <head sha>
- * Exit: 0 every landing carries what it must; 1 one did not (each named with
- * the files that asked); 2 the arguments, the range or this script's own
+ * Exit: 0 the landing carries what it must; 1 it does not (named with the
+ * files that asked); 2 the arguments, the range or this script's own
  * probes did not make sense — never the PR's fault.
  */
 import { execFileSync } from "node:child_process";
