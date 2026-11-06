@@ -207,26 +207,22 @@
  *      up-to-date is on and enforced on create, the four rules — deletion,
  *      non-fast-forward, pull-request with no required review and none of the
  *      four review flags, required-status- checks with its parameters — are
- *      present once each, the one optional rule — merge-queue, which GitHub
- *      refuses on a user-owned repository and the record adds the day this one
- *      is organisation-owned — at most once and, when present, with
- *      Daemonic Brain's merge method, every entry judged on its own merge
- *      commit and no PR waiting for another (SMD-1857), no other type is, the
- *      target is the default branch and nothing else, the bypass list is empty
- *      and enforcement is active; no other job reports a check under the
- *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
- *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
+ *      present once each, no other type is (a merge queue among them: main has
+ *      none, SMD-3336), the target is the default branch and nothing else, the
+ *      bypass list is empty and enforcement is active; no other job reports a
+ *      check under the aggregate's name; and ci-shift.yml's workflow_run names
+ *      that workflow's own name, and ci-step-times' DEFAULT_WORKFLOWS and
  *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
  *      and a name with an expression are allowed now, since the record names no
  *      job but the one. The rules are rulesetProblems and aggregateProblems,
- *      pure functions their probes run on in-memory records (twenty-seven
- *      ruleset mutants, one accepted addition, nine non-probes; thirty-four
- *      aggregate mutants, four accepted shapes and an empty skip list two ways,
- *      four non-probes; one other-workflow name clash; sixteen names
- *      mayReportAs must allow or refuse; a 5,000-expression name answered at
- *      once) and AGGREGATE_RUN under bash on ten cases; every workflow in
- *      .github/workflows is read for a job carrying the aggregate's name; the
- *      workflow is parsed with Bun.YAML (SMD-1856, SMD-3168); no exceptions
+ *      pure functions their probes run on in-memory records (twenty-three
+ *      ruleset mutants, eight non-probes; thirty-four aggregate mutants, four
+ *      accepted shapes and an empty skip list two ways, four non-probes; one
+ *      other-workflow name clash; sixteen names mayReportAs must allow or
+ *      refuse; a 5,000-expression name answered at once) and AGGREGATE_RUN
+ *      under bash on ten cases; every workflow in .github/workflows is read for
+ *      a job carrying the aggregate's name; the workflow is parsed with
+ *      Bun.YAML (SMD-1856, SMD-3168); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
@@ -619,6 +615,18 @@
  *      "always"), a contribution category not; a mis-cased, unspaced or colon
  *      header fails, and the rule is found by name. CI's commit-lint lints
  *      only a PR's own commits, so nothing else reads the config's categories
+ *  53. .github/ci/changes.sh's CHARGES — the gated jobs a path off the docs
+ *      allowlist can affect, which a pull request of only such paths runs —
+ *      is held to what names each path: a gated job whose steps name it in
+ *      a code line is one it charges; the files whose code names it, as an
+ *      anchored path token with comments blanked, are exactly
+ *      JOB_MAP_READERS's, each with why; a gated job whose steps run such a
+ *      reader that opens the path (the checker and changes.sh count as
+ *      opening every path) is charged, with no exceptions; a code file
+ *      compat-shim reads by content charges it; a stale entry, a row naming
+ *      no tracked path, or a HOLDS_THE_CUT other than the checker and
+ *      changes.sh fails (SMD-2435 PR 3a). Lexical and one hop deep, as
+ *      PR 3b's derived map is not. Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
@@ -4897,37 +4905,17 @@ checkConnectorRegistry();
  * verbatim — which the check runs through bash on AGGREGATE_CASES, so the
  * step's verdict is tested, not only its text.
  *
- * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
- * builds the merge result and runs the required checks on it (the workflow's
- * `merge_group` trigger), and merges only what passes — so the checks judge
- * the tree that lands without the author merging `main` first, which is what
- * strict up-to-date makes them do. GitHub offers the queue on
- * organisation-owned repositories only; this one is owned by a user account,
- * and the API refuses the rule (422, "Invalid rule 'merge_queue'") — a record
- * the PUT refuses is no record. So the rule is OPTIONAL here: absent while
- * the repository is user-owned, held to MERGE_QUEUE the day it is added,
- * which is the day the repository moves to an organisation.
+ * SMD-1857 wanted the merge queue as a fifth rule, but GitHub offers it on
+ * organisation-owned repositories only, and on 2026-10-25 the maintainer
+ * decided main gets none: strict up-to-date judges the tree that lands. So a
+ * merge_queue rule reads as drift, like any type RULE_TYPES does not name
+ * (SMD-3336 took out the optional rule built for the queue).
  */
 const RULESET = ".github/rulesets/main.json";
 /** GitHub's own app id for Actions: a required check pinned to it is satisfied by a workflow run and by nothing else — not a status another app or a token posts under the same name. */
 const GITHUB_ACTIONS_APP_ID = 15368;
 /** The rule types the record carries, each exactly once; another type (a linear-history rule, say) is a decision the ticket declined, and edits this list with it. */
 const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_status_checks"];
-/** The rule types the record MAY carry, at most once each: the merge queue, which GitHub refuses on a user-owned repository and which the record adds the day this one is organisation-owned (SMD-1857). */
-const OPTIONAL_RULE_TYPES = ["merge_queue"];
-/**
- * The merge queue's parameters when the rule is present, each held equal
- * (SMD-1857). MERGE keeps the merge commit Daemonic Brain lands with (the
- * record of how a branch diverged); ALLGREEN judges each queued PR on its own
- * merge commit, so a red run names the PR that broke the tree rather than the
- * group; min 1 means a lone PR is merged as soon as its run is green — the wait
- * applies only to reaching a minimum above one; 5 and 5 are GitHub's defaults
- * for how many entries build and merge together, more than Daemonic Brain
- * queues at once; 60 minutes is four times the longest run seen (a push run of
- * main, 16 minutes) before a check that never reports is read as failed and the
- * PR is dropped from the queue.
- */
-const MERGE_QUEUE = { check_response_timeout_minutes: 60, grouping_strategy: "ALLGREEN", max_entries_to_build: 5, max_entries_to_merge: 5, merge_method: "MERGE", min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 5 } as const;
 /** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
 const RULESET_REFS = ["~DEFAULT_BRANCH"];
 /** The pull-request rule's flags, each held false: any of them true asks a review, or blocks on a thread, that the zero count says nothing asks. */
@@ -5248,17 +5236,11 @@ function rulesetProblems(ruleset: RulesetDoc) {
   const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
   const types = rules.map((r) => (typeof r?.type === "string" ? r.type : "(untyped)"));
   for (const t of RULE_TYPES) if (types.filter((x) => x === t).length !== 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s), not once (SMD-1856)`]);
-  for (const t of OPTIONAL_RULE_TYPES) if (types.filter((x) => x === t).length > 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s) — at most once (SMD-1857)`]);
-  for (const t of new Set(types)) if (!RULE_TYPES.includes(t) && !OPTIONAL_RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
+  for (const t of new Set(types)) if (!RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
   const pr = rules.find((r) => r?.type === "pull_request");
   if (pr) {
     if (pr.parameters?.required_approving_review_count !== 0) problems.push([RULESET, `the pull_request rule's required_approving_review_count is ${JSON.stringify(pr.parameters?.required_approving_review_count)}, not 0 — one maintainer; a required review blocks every PR (SMD-1856)`]);
     for (const flag of PR_RULE_FLAGS) if (pr.parameters?.[flag] !== false) problems.push([RULESET, `the pull_request rule's ${flag} is ${JSON.stringify(pr.parameters?.[flag])}, not false — a review, or a resolved thread, asked another way than the count (SMD-1856)`]);
-  }
-  const queue = rules.find((r) => r?.type === "merge_queue");
-  if (queue) {
-    if (!queue.parameters || typeof queue.parameters !== "object") problems.push([RULESET, "the merge_queue rule has no parameters — the merge method, the grouping and the group size live there, and GitHub refuses the rule without them (SMD-1857)"]);
-    else for (const [key, want] of Object.entries(MERGE_QUEUE)) if (queue.parameters[key] !== want) problems.push([RULESET, `the merge_queue rule's ${key} is ${JSON.stringify(queue.parameters[key])}, not ${JSON.stringify(want)} — a decision MERGE_QUEUE in ${SELF} records; change both, with the reason (SMD-1857)`]);
   }
   const checksRule = rules.find((r) => r?.type === "required_status_checks");
   if (!checksRule) return problems;
@@ -5294,12 +5276,6 @@ const RULESET_PROBE = (): RulesetProbe => ({
     { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_CONTEXTS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
   ],
 });
-/** The optional merge-queue rule as the record would carry it, with a parameter overridden for a mutant. */
-const QUEUE_RULE = (over: Record<string, unknown> = {}): RulesetProbeRule => ({ type: "merge_queue", parameters: { ...MERGE_QUEUE, ...over } });
-/** [why, mutate]: records the rules must ACCEPT beyond the plain probe — the optional rule, present as recorded. */
-const RULESET_ACCEPTED: [why: string, mutate: (g: RulesetProbe) => RulesetProbe][] = [
-  ["a merge-queue rule as MERGE_QUEUE records it", (g) => { g.rules.push(QUEUE_RULE()); return g; }],
-];
 /** [why, mutate (returns the record to judge — the mutated probe, or null for no record), a phrase the ONE problem must carry]. */
 const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, says: string][] = [
   ["a record that does not require the aggregate", (g) => { g.rules[3].parameters!.required_status_checks = []; return g; }, `does not require "${AGGREGATE_NAME}"`],
@@ -5324,11 +5300,7 @@ const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe |
   ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, "conditions.ref_name is not"],
   ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, "conditions.ref_name is not"],
   ["no record at all", () => null, "is missing or does not parse"],
-  ["a doubled merge-queue rule", (g) => { g.rules.push(QUEUE_RULE(), QUEUE_RULE()); return g; }, "merge_queue rule 2 time(s) — at most once"],
-  ["a merge-queue rule with no parameters", (g) => { g.rules.push({ type: "merge_queue", parameters: null }); return g; }, "merge_queue rule has no parameters"],
-  ["a queue that squashes", (g) => { g.rules.push(QUEUE_RULE({ merge_method: "SQUASH" })); return g; }, 'merge_method is "SQUASH", not "MERGE"'],
-  ["a queue judged on the group's head only", (g) => { g.rules.push(QUEUE_RULE({ grouping_strategy: "HEADGREEN" })); return g; }, 'grouping_strategy is "HEADGREEN"'],
-  ["a queue that waits for a second PR", (g) => { g.rules.push(QUEUE_RULE({ min_entries_to_merge: 2 })); return g; }, "min_entries_to_merge is 2, not 1"],
+  ["a merge-queue rule, which main does not have (SMD-3336)", (g) => { g.rules.push({ type: "merge_queue", parameters: { merge_method: "MERGE" } }); return g; }, "carries a merge_queue rule"],
 ];
 /** Non-probes: shapes the rules must not throw on and must report at least one problem for — a record that parsed but is not a ruleset. */
 const RULESET_NON_PROBES: [why: string, record: unknown][] = [
@@ -5340,7 +5312,6 @@ const RULESET_NON_PROBES: [why: string, record: unknown][] = [
   ["a null required check", (() => { const g = RULESET_PROBE(); (g.rules[3].parameters!.required_status_checks as (object | null)[]).push(null); return g; })()],
   ["a pull-request rule with no parameters", (() => { const g = RULESET_PROBE(); delete g.rules[2].parameters; return g; })()],
   ["conditions that are a string", { ...RULESET_PROBE(), conditions: "main" }],
-  ["a merge-queue rule whose parameters are a string", (() => { const g = RULESET_PROBE(); g.rules.push({ type: "merge_queue", parameters: "MERGE" } as unknown as RulesetProbeRule); return g; })()],
 ];
 /** The skip list the probes judge against, apart from AGGREGATE_MAY_SKIP so that a change there does not move them (review pass 5). */
 const PROBE_MAY_SKIP = ["commit-lint"];
@@ -5497,10 +5468,6 @@ function checkRulesetRecord() {
   // reports something and throws nothing.
   const base = rulesetProblems(RULESET_PROBE());
   if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
-  for (const [why, mutate] of RULESET_ACCEPTED) {
-    const got = rulesetProblems(mutate(RULESET_PROBE()));
-    if (got.length) fail(SELF, `check 20 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
-  }
   for (const [why, mutate, says] of RULESET_MUTANTS) {
     const got = rulesetProblems(mutate(RULESET_PROBE()));
     if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
@@ -11269,6 +11236,318 @@ function checkCommitCategories() {
 }
 checkCommitCategories();
 
+// ── 53: the changes job's CHARGES map is held to what names its paths (SMD-2435 PR 3a) ──
+//
+// changes.sh's CHARGES gives the gated jobs a path off the docs allowlist can
+// affect, and a pull request whose every such path is there skips the gated
+// jobs nothing charged. That holds while nothing else reads the path: so the
+// gated jobs whose steps name it, in a code line, are the ones it charges, and
+// the files whose code names it (comments blanked, as an anchored path token)
+// are exactly JOB_MAP_READERS's for it, each marked as opening the path or
+// only naming it, with why. A new namer fails until it is read and listed,
+// or charged; a namer gone fails as stale. The reading is lexical, as check
+// 47's is: a path built from pieces is not seen, which PR 3b's derived map
+// replaces.
+/** A reader of a CHARGES path: one that opens it, or one in whose text it is only a word, a key or a message. */
+type MapReader = { reads: string } | { names: string };
+const reads = (why: string): MapReader => ({ reads: why });
+const names = (why: string): MapReader => ({ names: why });
+/**
+ * Per CHARGES pattern, the files whose code names it, each `reads` (it opens
+ * the path, so every gated job whose steps run it is charged, no exceptions)
+ * or `names` (the path is only a word, a key or a message in it), with why
+ * (SMD-2435's 3a survey; review pass 6 replaced per-run exemptions, which
+ * took a fix in four passes running).
+ */
+const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
+  "changes/*": {
+    ".github/workflows/release-steps.yml": reads("the release's steps read the records through release-artifacts; release.yml alone calls them, and the aggregate's rules refuse a gated job calling a reusable workflow"),
+    "dashboard/smoke.ts": names("\"changes\" is the change feed's page name"),
+    "dashboard/src/routes/changes/+page.server.ts": names("\"changes\" is the change feed route's name"),
+    "dashboard/src/routes/+error.svelte": names("a route check, pathname.endsWith('changes')"),
+    "dashboard/src/routes/+layout.svelte": names("the change feed's nav entry"),
+    "dashboard/src/routes/changes/+page.svelte": names("PageData['changes'] and a test id, the page's data key"),
+    "db/ingest-records.ts": reads("join(REPO_ROOT, \"changes\") under --source fork or all, the default, so every gated job running it is charged, its --self-check too"),
+    "releases.json": names("a release's \"changes\" key, the change numbers it carries"),
+    "scripts/assemble-release.ts": reads("the release cut, which the maintainer runs and no CI job does"),
+    "scripts/changes-index.ts": reads("readChanges and readChangeEntries, which release-artifacts and assemble-release call"),
+    "scripts/check-landing.ts": names("record names in its own cases and messages; it reads git's list of changed paths, not the records"),
+    "scripts/fragments.ts": names("a record's path pattern and a message; it parses the text its callers read and opens no file"),
+    "scripts/release-artifacts.ts": reads("deploy-stack's release rehearsal (--rehearsal) reads every record"),
+    "server-portable/open-items.ts": names("\"changes\" is an item problem's name"),
+    "server-portable/test-rest-sql.ts": names("has(\"changes\") reads a reply's key"),
+  },
+  "scripts/check-consistency.ts": {
+    "db/ci-parity.sh": reads("the local mirror of CI runs the checker; no CI job runs it"),
+    "integrations/test-writes.ts": reads("asserts over the checker's text (thoughtWritesAroundIn), in data-layer"),
+    "scripts/gen-tools.ts": names("a sentence in the note it writes into tools.json"),
+    "scripts/gen-version.ts": names("a sentence in the comment it writes into db/version.mjs"),
+    "scripts/mechanism-yield.ts": names("a sample commit body in its own cases"),
+    "server-portable/tools.json": names("the generated note's sentence"),
+  },
+  ".github/ci/typecheck.sh": {},
+  ".github/ci/full-stack-up.sh": {},
+  ".github/ci/auth-settings.sh": {},
+  ".github/ci/held-cases.sh": {},
+  ".github/ci/changes.sh": {},
+  ".github/ci/test-counts-page.ts": {
+    "db/ci-parity.sh": reads("the local mirror of CI runs it; no CI job runs ci-parity.sh"),
+  },
+  ".github/workflows/release.yml": {
+    ".github/workflows/release-steps.yml": names("the release's steps, naming the workflow that calls them"),
+    "scripts/assemble-release.ts": names("a sentence in its closing advice"),
+    "scripts/release-artifacts.ts": names("a tag's message and a header written into the release's compose overlay"),
+  },
+  ".github/workflows/release-steps.yml": {
+    ".github/workflows/release.yml": reads("the release calls its steps; the aggregate's rules refuse a gated job calling a reusable workflow"),
+  },
+  ".github/workflows/ci-shift.yml": {},
+  "db/ci-parity.sh": {},
+};
+/**
+ * Not listed as namers: the map's own home, which names every pattern in
+ * CHARGES, and this checker, which checks them. Both count as reading every
+ * path (the checker reads the records and runs typecheck.sh and changes.sh),
+ * so a gated job running either must be charged by every row (review pass 7).
+ */
+const JOB_MAP_HOMES = [CHANGES_SCRIPT, SELF];
+/** A CHARGES row: its pattern and the jobs it charges. */
+type ChargesRow = { pattern: string; jobs: string[] };
+/** CHARGES as CHANGES_SCRIPT prints it, or why it could not be read. */
+function chargesTable(): ChargesRow[] | string {
+  const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--charges"]);
+  if (r.exitCode !== 0) return `${CHANGES_SCRIPT} --charges exited ${r.exitCode}: ${r.stderr.toString().trim()}`;
+  return r.stdout.toString().split("\n").filter((l) => l.trim()).map((l) => {
+    const [pattern, jobs = ""] = l.split("\t");
+    return { pattern, jobs: jobs.split(" ").filter(Boolean) };
+  });
+}
+/** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips, the files it reads, and the marked files its parse step builds (CODEMOD_MARKER; checkJobMap fills them). */
+type CodemodWalk = { skip: string[]; code: RegExp; marked: Set<string> };
+/**
+ * compat-shim's "Migrated files parse" step builds every code file holding
+ * this marker whose path has no scripts/ in it (its grep -v scripts/), so
+ * such a mapped file charges compat-shim (review pass 4).
+ */
+const CODEMOD_MARKER = "MIGRATED OFF SUPABASE";
+const CODEMOD_MARKER_SKIP = "scripts/";
+const CODEMOD = "scripts/migrate-to-sql-shim.ts";
+const CODEMOD_JOB = "compat-shim";
+/** The codemod's SKIP_DIRS and CODE, read from its source, or why they could not be. */
+function codemodWalk(): CodemodWalk | string {
+  const src = readFileSync(join(ROOT, CODEMOD), "utf8");
+  const skip = /const SKIP_DIRS = new Set\(\[([^\]]*)\]\)/.exec(src);
+  const code = /const CODE = \/(.+)\/;/.exec(src);
+  if (!skip || !code) return `${CODEMOD} declares no SKIP_DIRS = new Set([…]) or CODE = /…/ check 53 can read`;
+  return { skip: [...skip[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]), code: new RegExp(code[1]), marked: new Set() };
+}
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * How code names a CHARGES pattern: for a directory ("changes/*"), its name
+ * then a slash, or its name alone in the forms the comment below lists; for
+ * a file, its file name, or its stem as an import's specifier. Anchored, so
+ * thought_changes/ or a URL's /changes/ is not it.
+ */
+function chargesToken(pattern: string): RegExp {
+  if (pattern.endsWith("/*")) {
+    const dir = reEscape(pattern.slice(0, -2));
+    // The name and a slash; after ./ or ../ (anywhere: $HERE/../changes, join(dir, "../changes")), a variable ($ROOT/,
+    // ${ROOT}/) or an expression (${{ … }}/), also the name alone; never a URL's /changes; a quoted name; cd or
+    // working-directory: to it (review pass 4).
+    const end = `(?:/|["'\`]|$)`;
+    return new RegExp(`(?<![\\w./-])${dir}/|(?:\\.\\.?/)+${dir}${end}|(?<=\\$\\{?\\w+\\}?/)${dir}${end}|\\}\\}/${dir}${end}|["'\`]${dir}["'\`]|(?:\\bcd\\s+|working-directory:\\s*)["']?${dir}(?![\\w.-])`, "m");
+  }
+  const base = pattern.slice(pattern.lastIndexOf("/") + 1);
+  const stem = base.replace(/\.(?:[cm]?[jt]sx?)$/, "");
+  // Without its extension only as an import's specifier (from "…/x", import("…/x"), require("…/x")), as bundler resolution reads one.
+  return new RegExp(`(?<![\\w.-])${reEscape(base)}(?![\\w.-])${stem !== base ? `|(?:\\bfrom\\s+|\\bimport\\s*\\(\\s*|\\brequire\\s*\\(\\s*)["'\`](?:[^"'\`\\n]*/)?${reEscape(stem)}["'\`]` : ""}`);
+}
+/** A file's code with its comments blanked, by its kind; null for a file this check does not read. */
+function codeForCharges(rel: string, text: string): string | null {
+  if (text.includes("\0")) return null;
+  if (/\.(?:[cm]?[jt]sx?|svelte|html)$/.test(rel)) return blanked(text, false);
+  if (text.startsWith("#!")) return hashCommentsBlanked(text, true);
+  if (/\.(?:sh|ya?ml|toml|py)$|(?:^|\/)(?:Dockerfile|[\w.-]+\.Dockerfile|\.dockerignore|\.gitignore)$/.test(rel)) return hashCommentsBlanked(text, SHELL_FILE.test(rel));
+  if (/\.sql$/.test(rel)) return text.replace(/--.*$/gm, "");
+  if (/\.json$/.test(rel)) return text;
+  return null;
+}
+/**
+ * What check 53 reports: CHARGES against JOB_MAP_READERS, the gated jobs, the
+ * files' code and the workflow's job blocks (each a job's lines, comments in).
+ */
+function jobMapProblems(table: ChargesRow[], readers: Record<string, Record<string, MapReader>>, gated: readonly string[], files: Map<string, string>, blocks: Map<string, string[]>, walk: CodemodWalk | null = null): string[] {
+  const problems: string[] = [];
+  const patterns = table.map((r) => r.pattern);
+  for (const p of patterns.filter((p, i) => patterns.indexOf(p) !== i)) problems.push(`${CHANGES_SCRIPT}'s CHARGES names ${p} twice — the first wins, so the second is dead; keep one (check 53, SMD-2435)`);
+  for (const p of Object.keys(readers)) if (!patterns.includes(p)) problems.push(`JOB_MAP_READERS has ${p}, which CHARGES does not name — take it off, or add it to CHARGES (check 53, SMD-2435)`);
+  for (const { pattern, jobs } of table) {
+    if (!(pattern in readers)) problems.push(`CHARGES names ${pattern}, which JOB_MAP_READERS does not hold — add it, with the files whose code names it and why (check 53, SMD-2435)`);
+    for (const j of jobs) if (!gated.includes(j)) problems.push(`CHARGES charges ${pattern} to ${j}, which is no gated job — a job the changes job does not gate always runs (check 53, SMD-2435)`);
+    const token = chargesToken(pattern);
+    for (const [job, lines] of blocks) {
+      if (!gated.includes(job) || jobs.includes(job)) continue;
+      if (token.test(hashCommentsBlanked(lines.join("\n"), true))) problems.push(`job ${job}'s steps name ${pattern}, but CHARGES charges it only to ${jobs.join(", ") || "no gated job"} — a change to it would skip ${job}; charge ${job} too (check 53, SMD-2435)`);
+    }
+    const listed = readers[pattern] ?? {};
+    const namers = [...files].filter(([rel, code]) => rel !== pattern && !JOB_MAP_HOMES.includes(rel) && !(pattern.endsWith("/*") && rel.startsWith(pattern.slice(0, -1))) && token.test(code)).map(([rel]) => rel).sort();
+    for (const rel of namers) if (!(rel in listed)) problems.push(`${rel} names ${pattern} in its code, which CHARGES charges only to ${jobs.join(", ") || "no gated job"} — list it in JOB_MAP_READERS as reads (it opens the path: every gated job running it is charged) or names (only a word in it), with why (check 53, SMD-2435)`);
+    for (const rel of Object.keys(listed)) if (!namers.includes(rel)) problems.push(`JOB_MAP_READERS lists ${rel} for ${pattern}, but its code no longer names it — take it off (check 53, SMD-2435)`);
+    // One hop (review passes 1 and 6): a gated job whose steps run a reader that opens the path reads it through that
+    // reader, and is charged; a reader that only names it charges nothing. The homes open every path (review pass 7).
+    const openers = [...Object.entries(listed).filter(([, kind]) => "reads" in kind).map(([rel]) => rel), ...JOB_MAP_HOMES.filter((h) => h !== pattern)];
+    for (const rel of openers) {
+      const runsIt = chargesToken(rel);
+      for (const [job, lines] of blocks) {
+        if (!gated.includes(job) || jobs.includes(job)) continue;
+        if (runsIt.test(hashCommentsBlanked(lines.join("\n"), true))) problems.push(`job ${job}'s steps name ${rel}, which reads ${pattern}, but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${job} (check 53, SMD-2435)`);
+      }
+    }
+    // The codemod walks every file CODE matches outside SKIP_DIRS's top-level directories, by content: such a path charges compat-shim.
+    if (walk && gated.includes(CODEMOD_JOB) && !jobs.includes(CODEMOD_JOB)) {
+      const walked = (rel: string) => walk.code.test(rel) && !walk.skip.includes(rel.split("/")[0]);
+      const inside = pattern.endsWith("/*") ? [...files.keys()].filter((rel) => rel.startsWith(pattern.slice(0, -1))) : [pattern];
+      const hit = inside.find((rel) => walked(rel) || walk.marked.has(rel));
+      if (hit) problems.push(`${hit} is a file compat-shim reads by its content (${walk.marked.has(hit) ? `it holds ${CODEMOD_MARKER}, which compat-shim's parse step builds` : `${CODEMOD}'s CODE, outside SKIP_DIRS`}), but CHARGES charges ${pattern} only to ${jobs.join(", ") || "no gated job"} — charge ${CODEMOD_JOB} (check 53, SMD-2435)`);
+    }
+  }
+  return problems;
+}
+/** HOLDS_THE_CUT as CHANGES_SCRIPT writes it: the files beside which a workflow edit runs every job. */
+const HOLDS_THE_CUT_LINE = /^HOLDS_THE_CUT="([^"]*)"$/m;
+/**
+ * Review pass 3: a CHARGES row naming no tracked path (a rename or a removal
+ * left it, and the new path runs every job unseen), and HOLDS_THE_CUT against
+ * the two files it must name, since a rename of either would leave a workflow
+ * edit beside it read by job. HOLDS is the line's list, or null when the line
+ * is gone.
+ */
+function chargesPathProblems(table: ChargesRow[], tracked: readonly string[], holds: string | null): string[] {
+  const problems: string[] = [];
+  for (const { pattern } of table) {
+    const live = pattern.endsWith("/*") ? tracked.some((rel) => rel.startsWith(pattern.slice(0, -1))) : tracked.includes(pattern);
+    if (!live) problems.push(`CHARGES names ${pattern}, which no tracked file is — a rename or a removal left it, and its new path runs every job; follow the path or take the row off (check 53, SMD-2435)`);
+  }
+  const want = [SELF, CHANGES_SCRIPT];
+  if (holds === null) problems.push(`${CHANGES_SCRIPT} has no HOLDS_THE_CUT="…" line, the files beside which a workflow edit runs every job (check 53, SMD-2435)`);
+  else {
+    const got = holds.split(" ").filter(Boolean);
+    if (JSON.stringify([...got].sort()) !== JSON.stringify([...want].sort())) problems.push(`HOLDS_THE_CUT is ${got.join(" ") || "empty"}, not ${want.join(" ")} — the checker, which holds the cut to Bun's reading, and ${CHANGES_SCRIPT}, whose cut the base's copy applies to the head's workflow (check 53, SMD-2435)`);
+  }
+  return problems;
+}
+function checkJobMap() {
+  const P = (pattern: string, jobs: string[]): ChargesRow => ({ pattern, jobs });
+  const blocksOf = (o: Record<string, string>) => new Map(Object.entries(o).map(([k, v]) => [k, v.split("\n")]));
+  const T = [P("changes/*", ["d"]), P("scripts/x.ts", ["l"]), P(".github/ci/s.sh", [])];
+  const R: Record<string, Record<string, MapReader>> = { "changes/*": { "scripts/rel.ts": reads("the rehearsal") }, "scripts/x.ts": { "suite/t.ts": reads("an assertion over its text") }, ".github/ci/s.sh": {} };
+  // Each file's code as the real run reads it: comments blanked by its kind.
+  const F = (o: Record<string, string>) => new Map(Object.entries({ "scripts/rel.ts": `const d = join(ROOT, "changes");`, "suite/t.ts": `read("../scripts/x.ts")`, ...o }).map(([rel, text]) => [rel, codeForCharges(rel, text) ?? ""]));
+  const B = blocksOf({ d: "    steps:\n      - run: bun scripts/rel.ts", l: "    steps:\n      - run: bun t.ts" });
+  // [why, table, readers, files, blocks, phrases its problems say, in order]
+  const cases: [string, ChargesRow[], typeof R, Map<string, string>, Map<string, string[]>, string[]][] = [
+    ["the probe as written", T, R, F({}), B, []],
+    ["a comment naming a path", T, R, F({ "a.ts": "// reads changes/ and x.ts" }), B, []],
+    ["a word, a URL and another table's name", T, R, F({ "a.ts": `const u = "/changes/x"; const t = "thought_changes/"; const n = "x.tsv";` }), B, []],
+    ["a new reader of a directory", T, R, F({ "b.ts": `readdirSync("changes/")` }), B, ["b.ts names changes/*"]],
+    ["a new reader through a quoted name", T, R, F({ "b.ts": `join(ROOT, 'changes')` }), B, ["b.ts names changes/*"]],
+    ["a new reader of a file, by a relative path", T, R, F({ "b.ts": `import "../../scripts/x.ts"` }), B, ["b.ts names scripts/x.ts"]],
+    ["a listed reader that no longer names it", T, R, F({ "suite/t.ts": "nothing" }), B, ["no longer names it"]],
+    ["another gated job's step running a mapped script", T, R, F({}), blocksOf({ d: "    steps:\n      - run: bun x", l: "    steps:\n      - run: bash .github/ci/s.sh" }), ["job l's steps name .github/ci/s.sh"]],
+    ["an ungated job's step running it", T, R, F({}), blocksOf({ d: "", l: "", lint: "      - run: bash .github/ci/s.sh" }), []],
+    ["a gated job's comment naming it", T, R, F({}), blocksOf({ d: "", l: "      # runs .github/ci/s.sh elsewhere" }), []],
+    ["a charge to a job not gated, leaving the reader's job uncharged", [P("changes/*", ["lint"]), T[1], T[2]], R, F({}), B, ["to lint, which is no gated job", "job d's steps name scripts/rel.ts"]],
+    ["a pattern twice", [...T, P("changes/*", ["d"])], R, F({}), B, ["names changes/* twice"]],
+    ["a pattern CHARGES has and the readers lack", [...T, P("db/y.sh", [])], R, F({}), B, ["CHARGES names db/y.sh"]],
+    ["readers for a pattern CHARGES lacks", T, { ...R, "db/z.sh": {} }, F({}), B, ["JOB_MAP_READERS has db/z.sh"]],
+    ["a record naming its own directory", T, R, F({ "changes/smd-1.json": `"changes/"` }), B, []],
+    ["a new reader through a variable-rooted path", T, R, F({ "b.sh": `ls "$ROOT/changes"/*.md` }), B, ["b.sh names changes/*"]],
+    ["a new reader importing a file without its extension", T, R, F({ "b.ts": `import { x } from "../scripts/x"` }), B, ["b.ts names scripts/x.ts"]],
+    // review pass 4: more forms and kinds
+    ["a new reader by a ../ path", T, R, F({ "b.ts": `join(import.meta.dir, "../changes")` }), B, ["b.ts names changes/*"]],
+    ["a new reader by a variable's ../ path", T, R, F({ "b.sh": `ls "$HERE/../changes/"` }), B, ["b.sh names changes/*"]],
+    ["a new reader by an expression's path", T, R, F({ "b.yml": "    run: ls ${{ github.workspace }}/changes/" }), B, ["b.yml names changes/*"]],
+    ["a new reader by cd", T, R, F({ "b.sh": "cd changes && ls" }), B, ["b.sh names changes/*"]],
+    ["a Svelte file importing a record", T, R, F({ "r/+page.svelte": `<script>import s from "../changes/smd-1.md?raw";</script>` }), B, ["r/+page.svelte names changes/*"]],
+    ["a shebang script with no extension", T, R, F({ "hooks/pre": "#!/bin/sh\nls changes/" }), B, ["hooks/pre names changes/*"]],
+    ["a word ending in the name, quoted", T, R, F({ "a.ts": `say("the row changes"); const v = "x changes";` }), B, []],
+    // review pass 7: each form and kind the token claims, held (a whole-diff mutation pass found them unpinned)
+    ["a new reader by a ./ path", T, R, F({ "b.ts": `readdirSync("./changes")` }), B, ["b.ts names changes/*"]],
+    ["a variable-rooted path ending a line mid-file", T, R, F({ "b.sh": "ls $ROOT/changes\necho done" }), B, ["b.sh names changes/*"]],
+    ["a gated step's working-directory", T, R, F({}), blocksOf({ d: "", l: "      - working-directory: changes\n        run: ls" }), ["job l's steps name changes/*"]],
+    ["a dynamic import without its extension", T, R, F({ "b.ts": `await import("../scripts/x")` }), B, ["b.ts names scripts/x.ts"]],
+    ["a require without its extension", T, R, F({ "b.js": `require("../scripts/x")` }), B, ["b.js names scripts/x.ts"]],
+    ["a Dockerfile copying the records", T, R, F({ "db/Dockerfile": "COPY changes/ /app/changes/" }), B, ["db/Dockerfile names changes/*"]],
+    ["a Python reader", T, R, F({ "x.py": `open("changes/smd-1.md")` }), B, ["x.py names changes/*"]],
+    ["a SQL file naming the records", T, R, F({ "x.sql": "SELECT pg_read_file('changes/smd-1.md');" }), B, ["x.sql names changes/*"]],
+    // review pass 1: a gated job running a reader that opens the path is charged by it
+    ["another gated job running a listed reader", T, R, F({}), blocksOf({ d: "      - run: bun scripts/rel.ts", l: "      - run: bun scripts/rel.ts" }), ["job l's steps name scripts/rel.ts, which reads changes/*"]],
+    ["the reader's job dropped from its row", [P("changes/*", []), T[1], T[2]], R, F({}), B, ["job d's steps name scripts/rel.ts, which reads changes/*"]],
+    // review pass 7: the homes read every path
+    ["a gated job running the checker", T, R, F({}), blocksOf({ d: "", l: "      - run: bun scripts/check-consistency.ts" }), ["job l's steps name scripts/check-consistency.ts, which reads changes/*", "job l's steps name scripts/check-consistency.ts, which reads .github/ci/s.sh"]],
+    ["a gated job running the map's home", T, R, F({}), blocksOf({ d: "", l: "      - run: bash .github/ci/changes.sh --charges" }), ["job l's steps name .github/ci/changes.sh, which reads changes/*", "job l's steps name .github/ci/changes.sh, which reads .github/ci/s.sh"]],
+  ];
+  // A reader that only names the path charges nothing when another gated job runs it (review pass 6).
+  const named = jobMapProblems(T, { ...R, "changes/*": { "scripts/rel.ts": names("a page name") } }, ["d", "l"], F({}), blocksOf({ d: "", l: "      - run: bun scripts/rel.ts" }));
+  if (named.length) fail(SELF, `check 53 charges a job for running a reader that only names the path (its own probe): ${JSON.stringify(named)} (SMD-2435)`);
+  const probeWalk = { skip: ["scripts", "db"], code: /\.(ts|tsx|js|mjs)$/, marked: new Set(["db/m.ts"]) };
+  // [why, row, what its problems say]: the codemod's walk, whose job is gated in this probe as "compat-shim".
+  const walkCases: [string, ChargesRow, string[]][] = [
+    ["a walked code file charged elsewhere", P(".github/ci/w.ts", ["d"]), [".github/ci/w.ts is a file compat-shim reads by its content (scripts/migrate-to-sql-shim.ts's CODE"]],
+    ["a walked code file charging compat-shim", P(".github/ci/w.ts", ["compat-shim"]), []],
+    ["a code file in a skipped directory", P("scripts/w.ts", []), []],
+    ["a script the walk does not read", P(".github/ci/w.sh", []), []],
+    // review pass 4: a directory's code files, and the marker's walk
+    ["a directory holding a walked code file", P("tools/*", []), ["tools/x.ts is a file compat-shim reads by its content"]],
+    ["a marked code file in a skipped directory", P("db/m.ts", []), ["db/m.ts is a file compat-shim reads by its content (it holds"]],
+  ];
+  const walkWrong = walkCases.map(([why, row, says]) => ({ why, says, got: jobMapProblems([row], { [row.pattern]: {} }, ["d", "compat-shim"], new Map([["tools/x.ts", ""]]), new Map(), probeWalk) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (walkWrong.length) fail(SELF, `check 53 no longer reads the codemod's walk as written: ${JSON.stringify(walkWrong)} (SMD-2435)`);
+  const wrong = cases.map(([why, t, r, f, b, says]) => ({ why, says, got: jobMapProblems(t, r, ["d", "l"], f, b) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 53 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
+  // [why, rows, tracked paths, HOLDS_THE_CUT, what its problems say] (review pass 3).
+  const H = `${SELF} ${CHANGES_SCRIPT}`;
+  const pathCases: [string, ChargesRow[], string[], string | null, string[]][] = [
+    ["every row live, the list as written", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], H, []],
+    ["the list in another order", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], `${CHANGES_SCRIPT} ${SELF}`, []],
+    ["a file row a rename left", T, ["changes/smd-1.md", "scripts/y.ts", ".github/ci/s.sh"], H, ["CHARGES names scripts/x.ts, which no tracked file is"]],
+    ["a directory row with no file left", T, ["scripts/x.ts", ".github/ci/s.sh"], H, ["CHARGES names changes/*, which no tracked file is"]],
+    ["the checker off the list", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], CHANGES_SCRIPT, ["HOLDS_THE_CUT is"]],
+    ["no list", T, ["changes/smd-1.md", "scripts/x.ts", ".github/ci/s.sh"], null, ["has no HOLDS_THE_CUT"]],
+  ];
+  const pathWrong = pathCases.map(([why, rows, tracked, holds, says]) => ({ why, says, got: chargesPathProblems(rows, tracked, holds) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (pathWrong.length) fail(SELF, `check 53 no longer reads a row's path or HOLDS_THE_CUT as written: ${JSON.stringify(pathWrong)} (SMD-2435)`);
+  const table = chargesTable();
+  if (typeof table === "string") return fail(CHANGES_SCRIPT, `check 53 cannot read CHARGES: ${table} (SMD-2435)`);
+  const files = new Map<string, string>();
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  for (const msg of chargesPathProblems(table, tracked, HOLDS_THE_CUT_LINE.exec(readFileSync(join(ROOT, CHANGES_SCRIPT), "utf8"))?.[1] ?? null)) fail(CHANGES_SCRIPT, msg);
+  for (const rel of tracked) {
+    if (rel === WORKFLOW || rel.endsWith(".md")) continue;
+    let text: string;
+    try { text = readFileSync(join(ROOT, rel), "utf8"); } catch { continue; }
+    const code = codeForCharges(rel, text);
+    if (code !== null) files.set(rel, code);
+  }
+  const cut = changesCut(readFileSync(join(ROOT, WORKFLOW), "utf8"));
+  if ("refused" in cut) return; // check 51 reports a workflow the cut refuses
+  const walk = codemodWalk();
+  if (typeof walk === "string") fail(CODEMOD, `check 53 cannot read the codemod's walk: ${walk} (SMD-2435)`);
+  else {
+    const step = (cut.regions.get(CODEMOD_JOB) ?? []).join("\n");
+    if (!step.includes(CODEMOD_MARKER) || !step.includes(`grep -v ${CODEMOD_MARKER_SKIP}`)) fail(WORKFLOW, `job ${CODEMOD_JOB} no longer greps for ${CODEMOD_MARKER} and leaves out ${CODEMOD_MARKER_SKIP} (grep -v), which check 53 reads as the files its parse step builds — say the new walk in CODEMOD_MARKER and CODEMOD_MARKER_SKIP (check 53, SMD-2435)`);
+    for (const rel of tracked) if (walk.code.test(rel) && !rel.includes(CODEMOD_MARKER_SKIP)) { try { if (readFileSync(join(ROOT, rel), "utf8").includes(CODEMOD_MARKER)) walk.marked.add(rel); } catch { /* unreadable: not built either */ } }
+    // The walk as read must reach a file the codemod reads (review pass 7): one read wrongly from its source would pass every row.
+    const page = ".github/ci/test-counts-page.ts";
+    if (!jobMapProblems([{ pattern: page, jobs: [] }], { [page]: {} }, AGGREGATE_GATED, files, new Map(), walk).some((m) => m.startsWith(`${page} is a file compat-shim reads by its content`))) fail(CODEMOD, `check 53 reads ${CODEMOD}'s walk (SKIP_DIRS, CODE) as not reaching ${page}, which it does — read its walk again (check 53, SMD-2435)`);
+  }
+  for (const msg of jobMapProblems(table, JOB_MAP_READERS, AGGREGATE_GATED, files, cut.regions, typeof walk === "string" ? null : walk)) fail(CHANGES_SCRIPT, msg);
+}
+checkJobMap();
+
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
 // ci-parity.sh is CI's local equivalent, and nothing held it to the workflow:
@@ -11300,7 +11579,7 @@ const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, st
     "publish-test-counts": "commits the run's counts to the wiki on a push to main (SMD-3614); its page's rules are the self-check the repo-consistency job runs",
   },
   scripts: {
-    "scripts/check-landing.ts": "reads a pull request's or merge group's commit range from the event",
+    "scripts/check-landing.ts": "reads a pull request's commit range from the event",
     "scripts/migrate-to-sql-shim.ts": "the codemod's round-trip rewrites tracked files and judges them by git diff, so a working tree with changes would be rewritten",
   },
 };
@@ -11401,7 +11680,7 @@ const PARITY_PROBE_CI = (): ScriptRun[] => [
   { dirs: ["."], script: "deploy/forwarder.ts", args: "--self-check", env: {}, job: "repo", where: "w:fwd" },
   { dirs: ["db"], script: "test-cli.ts", args: "", env: {}, job: "replay", where: "w:cli" },
   { dirs: ["db", "server-portable"], script: "test-pre.ts", args: "", env: { DATABASE_URL: "x", UPGRADE_DATABASE_URL: "y" }, job: "data-layer", where: "w:pre" },
-  { dirs: ["."], script: "scripts/check-landing.ts", args: "--event", env: { EVENT: "${{ github.event_name }}" }, job: "repo", where: "w:landing" },
+  { dirs: ["."], script: "scripts/check-landing.ts", args: '--from "$PR_FROM" --to "$PR_TO"', env: { PR_FROM: "${{ github.event.pull_request.base.sha }}", PR_TO: "${{ github.event.pull_request.head.sha }}" }, job: "repo", where: "w:landing" },
   { dirs: ["deploy"], script: "x.ts", args: "", env: {}, job: "stack", where: "w:stack" },
 ];
 const PARITY_PROBE_NOT_RUN = { jobs: { stack: "why" }, scripts: { "scripts/check-landing.ts": "why" } };
