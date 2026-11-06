@@ -44,7 +44,7 @@ Two tables of its own, in the schema `plugin_home_maintenance`, made by `migrati
   - A `completed_on` more than a day past today in UTC: `422 FUTURE_DATE`.
   - Input out of its form or range: `400`, before anything is stored.
 - **Open items** (SMD-3665 PR 3b). Each task is an open item in the brain, standing for the task's row, so a brain's reads (`list_items`, overdue among them) see it beside every other to-do:
-  - `add_maintenance_task` opens it `proposed`, due at the task's `next_due` (the start of that day in UTC), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped);
+  - `add_maintenance_task` opens it `proposed`, due at the task's `next_due` (by the end of that day: the next day's start in UTC, SMD-3778), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped);
   - `log_maintenance` moves a recurring task's item to its new `next_due`, and settles a one-time task's done, keeping the day it was due;
   - a recurring task comes round again, so its item, settled done by a key, is reopened at its next due day, by the next log or `sync_open_items`; an item a key dropped is left as it is.
 
@@ -58,7 +58,7 @@ It reads and writes no thought. It reaches the core through `ctx.call` for its t
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add tasks and log work.
 
 ## Turn it on

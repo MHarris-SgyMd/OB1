@@ -83,7 +83,7 @@ without human review.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
 - **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. In Daemonic Brain the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). (The Pro dashboard's per-item "view thought" link carried that UUID to its thought page from SMD-2128 until that dashboard retired with SMD-3309.)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
@@ -96,8 +96,8 @@ This server depends on these database functions:
 
 | RPC | Source | Purpose |
 |-----|--------|---------|
-| `upsert_thought(text, jsonb, vector)` | Core OB1 schema (`db/migrations/004`, last redefined by `046`) | Creates a thought — content, envelope and vector in one statement, Daemonic Brain's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which Daemonic Brain's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
-| `match_thoughts(vector, float, int)` | Core OB1 schema | Semantic similarity search for deduplication |
+| `upsert_thought(text, jsonb, vector)` | Core Daemonic Brain schema (`db/migrations/004`, last redefined by `080`) | Creates a thought — content, envelope and vector in one statement, Daemonic Brain's 3-argument form (SMD-1228): the vector's model label, the actor and a revision's `supersedes` ride in the envelope; the enhanced columns (`type`, `importance`, `quality_score`, `source_type`, `sensitivity_tier`) follow by an update on a fresh row. Until SMD-2128 this server called the 2-argument form with the vector inside the payload, which Daemonic Brain's function ignores, so its thoughts had no vector and default columns; `bun db/reembed.ts` embeds such rows (it takes a thought whose vector is NULL) |
+| `match_thoughts(vector, float, int)` | Core Daemonic Brain schema | Semantic similarity search for deduplication |
 | `append_thought_evidence(uuid, jsonb)` | `schemas/smart-ingest` | Appends corroborating evidence to an existing thought's metadata (`bigint` upstream; Daemonic Brain's thought id is a UUID — SMD-2128) |
 
 ## Credential Tracker
@@ -108,7 +108,7 @@ Copy this block into a text editor and fill it in as you go.
 SMART INGEST -- CREDENTIAL TRACKER
 ------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   MCP access key:        ____________
 
@@ -268,7 +268,7 @@ You need at least one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_A
 The function runs a pre-flight sensitivity check and blocks content matching restricted patterns (SSN, credit card, API keys, passwords). This is a safety feature — process sensitive content locally instead.
 
 **"upsert_thought failed" or "match_thoughts RPC failed"**
-The smart ingest tables schema has not been applied, or the base OB1 RPCs are missing. Verify that `ingestion_jobs`, `ingestion_items`, and the `upsert_thought`/`match_thoughts` RPCs exist in your database.
+The smart ingest tables schema has not been applied, or the base Daemonic Brain RPCs are missing. Verify that `ingestion_jobs`, `ingestion_items`, and the `upsert_thought`/`match_thoughts` RPCs exist in your database.
 
 **Embedding dimension mismatch**
 The function expects `vector(1536)` embeddings (OpenAI text-embedding-3-small). If your database uses a different embedding model or dimension, update the embedding configuration in `_shared/config.ts`.

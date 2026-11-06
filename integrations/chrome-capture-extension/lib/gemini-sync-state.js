@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini sync state machine (pure, node-testable)
+ * Daemonic Brain Capture — Gemini sync state machine (pure, node-testable)
  *
  * Phase C helper: the orchestrator in `background/gemini-sync.js` owns all
  * chrome.* interactions; this module owns only the pure state transitions,

@@ -3893,9 +3893,9 @@ export interface operations {
                 "application/json": {
                     /** @description 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical */
                     level: number;
-                    /** @description When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC) */
+                    /** @description When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC) */
                     due_at?: string;
-                    /** @description When the item can start at the earliest, in due_at's forms; never after due_at */
+                    /** @description When the item can start at the earliest, in due_at's forms (a date from the start of that day in UTC); never after due_at */
                     not_before?: string;
                     /** @description Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself */
                     due_ref?: {
@@ -4234,7 +4234,7 @@ export interface operations {
                     text: string;
                     /** @description Who is to do it, at most 200 characters: free text, not a key */
                     owner?: string;
-                    /** @description When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC) */
+                    /** @description When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC) */
                     due_at?: string;
                     /** @description The id of the thought the item was read from */
                     origin_thought?: string;

@@ -460,6 +460,10 @@ const FUNCTIONS = [
   // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
   "release_closed_ticket_claims(text, boolean, jsonb)",
   "ob1_work_claim_closed_head(text)",
+  // 120 (SMD-3306): a work thread's re-link and the trigger function that calls it; the triggers and the indexes go with
+  // thought_facets.
+  "thread_relink(text, boolean)",
+  "ob1_thread_relink_subject()",
 ];
 
 /**

@@ -44,7 +44,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
   - An `end_date` before the `start_date`: `422 BAD_DATES`.
   - A date, time, day, id or number out of its form or range: `400`, before anything is stored.
 - **Open items** (SMD-3665 PR 3b). A one-time date still to come, a deadline, is an open item in the brain, standing for the date's row, so a brain's reads (`list_items`, overdue among them) see it beside every other to-do. Birthdays, anniversaries and activities have none (the maintainer, 2026-11-04).
-  - `add_important_date` opens it `proposed`, due that day (the start of it in UTC), its member's name its `owner` (a whole family's names none, so one a key gives its item is kept), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped). `item` in the answer is `{ id, status }`, or `null` for a yearly date, a one-time date already past, or when the brain did not keep it: the date is stored all the same.
+  - `add_important_date` opens it `proposed`, due that day (by its end: the next day's start in UTC, SMD-3778), its member's name its `owner` (a whole family's names none, so one a key gives its item is kept), by the calling key; a write key confirms it (`set_item_status`, open) or dismisses it (dropped). `item` in the answer is `{ id, status }`, or `null` for a yearly date, a one-time date already past, or when the brain did not keep it: the date is stored all the same.
   - `sync_open_items` keeps the item of every one-time date from today on (the user's, given as `today`): it opens a missing one (a date added before items, or one whose item came back `null`) and moves a changed title, day or member onto its item. A date already past is left as it is, its item, if any, kept for a key to settle. An item a key settled or dropped is left as it is. Run it once after turning items on; it is safe to run again.
 - **MCP hints.** Every tool is closed-world, a read is read-only, and an add is marked as destroying nothing; `sync_open_items` is idempotent too.
 
@@ -54,7 +54,7 @@ It reads and writes no thought. It reaches the core through `ctx.call` for its d
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add members, activities and dates.
 
 ## Turn it on

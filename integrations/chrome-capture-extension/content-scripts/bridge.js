@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — content-script bridge.
+ * Daemonic Brain Capture — content-script bridge.
  *
  * Listens for messages from the service worker and dispatches extraction
  * requests to the platform-specific extractor loaded alongside this script.
@@ -17,7 +17,7 @@
   const OBBridge = {
     registerExtractor(name, handler) {
       if (typeof handler !== 'function') {
-        console.error(`[Open Brain Capture Bridge] Extractor "${name}" must be a function`);
+        console.error(`[Daemonic Brain Capture Bridge] Extractor "${name}" must be a function`);
         return;
       }
       extractors[name] = handler;
@@ -39,7 +39,7 @@
       try {
         sendResponse(payload);
       } catch (err) {
-        console.warn('[Open Brain Bridge] sendResponse failed (channel closed?)', err);
+        console.warn('[Daemonic Brain Bridge] sendResponse failed (channel closed?)', err);
       }
     };
 

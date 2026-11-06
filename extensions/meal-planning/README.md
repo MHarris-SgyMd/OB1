@@ -49,7 +49,7 @@ The plugin's [README](../../plugins/meal-planning/README.md) gives each one's in
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-3 recommended (Extension 3's family calendar, a plugin, is read for cross-extension integration)
 
 ## Steps

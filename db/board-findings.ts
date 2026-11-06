@@ -471,8 +471,10 @@ SELECT 'relation' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, l
           FROM thought_facets f
           JOIN thoughts h ON h.id = f.thought_id
           JOIN thoughts t ON t.id = CASE WHEN f.kind = 'relation' THEN (f.payload->>'target')::uuid END
-         -- A distinct (102) is two tickets judged apart: nothing to link, so never a finding (SMD-3117).
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x
+         -- A distinct (102) is two tickets judged apart: nothing to link, so never a finding (SMD-3117). A work
+         -- thread's edge (origin thread, 120) is the subjects' order, not the judge's finding (SMD-3306).
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+           AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x
  WHERE ${PAIR_RULE}`;
 
 /**

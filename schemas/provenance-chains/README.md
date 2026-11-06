@@ -4,7 +4,7 @@
 
 ## What It Does
 
-Open Brain captures atomic thoughts, but as soon as you start synthesizing — weekly digests, wikis, lint reports, research summaries — you lose the link between the synthesis and the evidence. This schema makes that link first-class:
+Daemonic Brain captures atomic thoughts, but as soon as you start synthesizing — weekly digests, wikis, lint reports, research summaries — you lose the link between the synthesis and the evidence. This schema makes that link first-class:
 
 - `derived_from` (JSONB): array of parent thought IDs (UUID strings) that fed into this thought.
 - `derivation_method` (TEXT): how the thought was produced. Constrained to `'synthesis'` or `NULL` on install; extend the check constraint to add methods.
@@ -26,7 +26,7 @@ Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on 
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - A connection that can alter `thoughts` and create functions (`psql` or your SQL console)
 
 ### Canonical-schema compatibility
@@ -120,7 +120,7 @@ After running the migration:
 
 ## ID Type Note
 
-This migration assumes `public.thoughts.id` is a `UUID` — the canonical Open Brain setup described in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). If you have modified your schema so `thoughts.id` is a `BIGINT` (non-canonical), you will need to change:
+This migration assumes `public.thoughts.id` is a `UUID` — the canonical Daemonic Brain setup described in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). If you have modified your schema so `thoughts.id` is a `BIGINT` (non-canonical), you will need to change:
 
 - `supersedes UUID` → `supersedes BIGINT`
 - Function parameter types (`p_thought_id UUID` → `BIGINT`)

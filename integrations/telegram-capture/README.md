@@ -10,7 +10,7 @@
 
 </div>
 
-> **Add Telegram as a quick-capture interface for your Open Brain.** Send a message to your bot (DM or a private group) and it's automatically embedded, classified, and stored, with a threaded confirmation back in the chat.
+> **Add Telegram as a quick-capture interface for your brain.** Send a message to your bot (DM or a private group) and it's automatically embedded, classified, and stored, with a threaded confirmation back in the chat.
 
 ---
 
@@ -22,7 +22,7 @@ Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sen
 
 ## Prerequisites
 
-- A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)'s stack, or any Postgres carrying the schema)
+- A working Daemonic Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)'s stack, or any Postgres carrying the schema)
 - A Telegram account (the bot is free)
 - An [OpenRouter](https://openrouter.ai) API key
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
@@ -52,7 +52,7 @@ Fill these in as you go, you'll need all of them in Step 4:
 
 1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather).
 2. Send `/newbot`.
-3. Pick a display name, then a username. The username must end in `bot` (e.g. `my_open_brain_bot`).
+3. Pick a display name, then a username. The username must end in `bot` (e.g. `my_daemonic_brain_bot`).
 4. BotFather replies with a token shaped like `123456789:ABCdefGhIJKlmnoPQRstUVwxYZ`.
 5. Copy the token into your tracker as `TELEGRAM_BOT_TOKEN`.
 
@@ -518,7 +518,7 @@ This integration **does not register any new MCP tools**. It is a capture-only i
 | Component | Type | What it does |
 |---|---|---|
 | `telegram-capture` server | Webhook receiver (not an MCP server) | Receives `message` and `edited_message` updates from Telegram, embeds the text via OpenRouter, extracts metadata, and inserts/updates a row in `thoughts`. |
-| `thoughts` table | Existing Open Brain primitive | No schema changes. Rows written here are consumed by whatever MCP tools (search, retrieval, summarization) you've already installed. |
+| `thoughts` table | Existing Daemonic Brain primitive | No schema changes. Rows written here are consumed by whatever MCP tools (search, retrieval, summarization) you've already installed. |
 
 **External services called:** `api.telegram.org` (webhook callback + send confirmation) and `openrouter.ai/api/v1` (embedding + classification). Both are outbound HTTPS; neither requires opening inbound ports beyond the capture URL itself.
 
