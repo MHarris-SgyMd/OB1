@@ -373,7 +373,7 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
 | Subject | Identity | State at a past time | Where |
 |---|---|---|---|
 | Ticket | its key, as `metadata.issue` on its board-sync rows; 068 keeps one head per key | yes: the head now, and the status history in `thought_audit` | 068; 095 and 098; `server-portable/stated-status.ts` |
-| Code artifact | an entity (016), or a path in a thought's text | not from a record of the artifact itself. A session summary lists up to 20 files edited in the span it covers, with that span's window, from the capture hook's edit events; but it is a thought that mentions the files. The fork's change records name files in their prose and carry their ingest time. The ingester's commit source, run on neither brain, carries author dates and no file list. Git has both. | 016; `recipes/session-capture-hook/session-capture.mjs`; `db/ingest-records.ts`; SMD-3006 and SMD-3011 |
+| Code artifact | an entity (016), or a path in a thought's text | not from a record of the artifact itself. A session summary lists up to 20 files edited in the span it covers, with that span's window, from the capture hook's edit events; but it is a thought that mentions the files. Daemonic Brain's change records name files in their prose and carry their ingest time. The ingester's commit source, run on neither brain, carries author dates and no file list. Git has both. | 016; `recipes/session-capture-hook/session-capture.mjs`; `db/ingest-records.ts`; SMD-3006 and SMD-3011 |
 | Deployed brain | its tier and compose project | `schema_migrations` records when each migration was applied, and `ob1_config.schema_version` holds only the current value. No table records the commit its image was built from; the running server reports it. | `server-portable/brain-info.ts`; `db/brain-compare.ts` |
 | Other entity | 016's type and normalized name | none: no status, validity or supersession column | 016 |
 | Pull request | none | none | none |
@@ -400,7 +400,7 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
    - take each one's change times from git, or from the commit source extended with file lists;
    - ignore a change made within a window after the note. SMD-2540 skips a ticket that already held its current status type an hour after the note: that is the writer's own move reaching the brain late. A session's own commits land beside its summary the same way;
    - label a hit `Changed since written: …`;
-   - measure it on the canary, against a bar fixed before the run. The canary holds the fork's change records, which SMD-3006 ingested, as canary-only rows; it holds no commits.
+   - measure it on the canary, against a bar fixed before the run. The canary holds Daemonic Brain's change records, which SMD-3006 ingested, as canary-only rows; it holds no commits.
 4. If the spike passes, the label is built beside SMD-2540's, and applied only when a thought is read.
 
 ## Not decided here

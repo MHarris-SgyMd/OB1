@@ -1,19 +1,18 @@
-# Fork-local CI.
+# Daemonic Brain's CI.
 #
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
 # workflow invokes any of them. That is how upstream's server/test-stateless.mjs
 # came to assert the opposite of production for three months without anyone
-# noticing (the Edge Function build and its three mirror suites left this fork
-# with SMD-1800; server-portable/ is the server, and its suites import it).
+# noticing (the Edge Function build and its three mirror suites left
+# Daemonic Brain with SMD-1800; server-portable/ is the server, and its
+# suites import it).
 #
-# This workflow exists so the fork's patch series cannot rot the same way. It is
-# additive — it touches no upstream workflow — so it survives a rebase onto
-# upstream/main untouched.
+# This workflow exists so Daemonic Brain's code cannot rot the same way.
 name: Brain Checks
 
 on:
   push:
-    branches: [main, "siggymd/**"]
+    branches: [main]
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -922,16 +921,18 @@ jobs:
     env:
       OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
-    # The live suite in four shards, one cell each, on a database of its own
+    # The live suite in five shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
     # SHARDS lists, split by their CI times into cells about equally long
-    # (SMD-3469); rest is [1] and every section SHARDS does not list. One
-    # job, not four copies of it, since the ruleset requires "Brain Checks
-    # passed" alone and not the cells' names (SMD-3168, SMD-3169).
+    # (SMD-3469); sweep is [38s] alone, the subject sweep under sleep, which
+    # no other cell had room for (SMD-3306 PR 6b-2); rest is [1] and every
+    # section SHARDS does not list. One job, not five copies of it, since
+    # the ruleset requires "Brain Checks passed" alone and not the cells'
+    # names (SMD-3168, SMD-3169).
     strategy:
       fail-fast: false
       matrix:
-        shard: [rest, sleep, long, extract]
+        shard: [rest, sleep, long, extract, sweep]
 
     steps:
       # The job's Postgres, started by its first step in the background
@@ -1425,7 +1426,7 @@ jobs:
 
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
-      # each is driven as deployed against this database — the fork's schema
+      # each is driven as deployed against this database — Daemonic Brain's schema
       # plus the three sidecars and the log table the writers assume, dropped again at the end —
       # and the row it leaves is compared with the row update_thought leaves
       # for the same edit. Late in the job because it applies those sidecars.
@@ -5173,8 +5174,8 @@ jobs:
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
-  # A pull request, the merge queue and a push to another branch publish
-  # nothing. contents: write, on this job alone, is what pushes to the wiki's
+  # A pull request, the merge queue and a manual run publish nothing.
+  # contents: write, on this job alone, is what pushes to the wiki's
   # repository; the token stays out of the clone's config (an extraheader on
   # each git call) and out of the checkout.
   publish-test-counts:

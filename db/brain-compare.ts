@@ -2,15 +2,16 @@
 /**
  * brain-compare.ts — one "how do these two brains differ" call (SMD-2109).
  *
- * SMD-1806 runs the fork as three brains (stable, canary, working) over one
- * corpus, each its own stack on its own port since SMD-2872. That only pays off if you can answer, in one step, "are these
- * two telling me the same thing, and if not, why?" — version, migration, corpus
- * freshness, retrieval. The pieces existed and nothing composed them: brain_info
- * (SMD-2041) reports ONE brain; tier.ts --diff (slice 2) is the merge-time replay
- * path, not "point these two live brains at each other now". A 2026-09-24 grooming
- * session built the comparison by hand — two searches, a stats compare, manual
- * staleness reasoning — and only then noticed the canary's corpus was frozen a day
- * behind (407 vs 597 thoughts) and still calling two started tickets Backlog.
+ * SMD-1806 runs Daemonic Brain as three brains (stable, canary, working) over
+ * one corpus, each its own stack on its own port since SMD-2872. That only pays
+ * off if you can answer, in one step, "are these two telling me the same thing,
+ * and if not, why?" — version, migration, corpus freshness, retrieval. The
+ * pieces existed and nothing composed them: brain_info (SMD-2041) reports ONE
+ * brain; tier.ts --diff (slice 2) is the merge-time replay path, not "point
+ * these two live brains at each other now". A 2026-09-24 grooming session built
+ * the comparison by hand — two searches, a stats compare, manual staleness
+ * reasoning — and only then noticed the canary's corpus was frozen a day behind
+ * (407 vs 597 thoughts) and still calling two started tickets Backlog.
  *
  *   bun db/tier.ts --compare <a> <b> [--replay --queries-file <path>] [--json]
  *

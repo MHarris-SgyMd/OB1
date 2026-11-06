@@ -209,11 +209,11 @@
  *      four review flags, required-status- checks with its parameters — are
  *      present once each, the one optional rule — merge-queue, which GitHub
  *      refuses on a user-owned repository and the record adds the day this one
- *      is organisation-owned — at most once and, when present, with the fork's
- *      merge method, every entry judged on its own merge commit and no PR
- *      waiting for another (SMD-1857), no other type is, the target is the
- *      default branch and nothing else, the bypass list is empty and
- *      enforcement is active; no other job reports a check under the
+ *      is organisation-owned — at most once and, when present, with
+ *      Daemonic Brain's merge method, every entry judged on its own merge
+ *      commit and no PR waiting for another (SMD-1857), no other type is, the
+ *      target is the default branch and nothing else, the bypass list is empty
+ *      and enforcement is active; no other job reports a check under the
  *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
  *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
  *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
@@ -238,7 +238,7 @@
  *      excepted by the literal-aware strip, string literals and dollar-quoted
  *      bodies read (an EXECUTE string runs; a statement quoted in prose is a
  *      hit too, and belongs in a `--` comment) — in every .sql git tracks or
- *      would track, db/migrations/ included (the fork's migrations DROP
+ *      would track, db/migrations/ included (Daemonic Brain's migrations DROP
  *      FUNCTION and DROP TRIGGER, which destroy no row, and none drops a
  *      table); the rules are db/config.mjs's
  *      DESTRUCTIVE_SQL_RULES through destructiveSqlIn, with counted
@@ -289,7 +289,7 @@
  *      `@supabase/postgrest-js` specifier, comments blanked (the JS scanner;
  *      a `#` outside a string for .py, one at a word's start for .sh), in
  *      every code file under the
- *      seven category directories and docs/: the fork's stack runs no
+ *      seven category directories and docs/: Daemonic Brain's stack runs no
  *      PostgREST, so such a script's live mode fails at its first request;
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
@@ -869,7 +869,7 @@ function checkSqlGuards() {
   }, {
     // SMD-1924. Adding a column to thoughts is fine (guarded above); dropping
     // or retyping one mutates a structure db/migrations owns, and a vendored
-    // file applied to a fork brain must not do it. The hazard was
+    // file applied to a migrated brain must not do it. The hazard was
     // recipes/email-history-import/rollback-chunking-columns.sql (DROP COLUMN
     // parent_id/chunk_index/full_text, the abandoned upstream chunking),
     // removed in SMD-1924. Scoped to vendored .sql: a core migration may own
@@ -886,10 +886,10 @@ function checkSqlGuards() {
 //
 // The number is a migration's identity — its order, and how prose names it —
 // and two branches each adding "the next number" is how two files come to
-// share one (the fork has renumbered twice; SMD-1421). migrate.ts refuses such
-// a set at run time, which is every operator's run and every compose start;
-// this is the same rule — config.mjs's duplicateMigrationNumber, one spelling
-// — where the collision is created, on every push.
+// share one (Daemonic Brain has renumbered twice; SMD-1421). migrate.ts refuses
+// such a set at run time, which is every operator's run and every compose
+// start; this is the same rule — config.mjs's duplicateMigrationNumber, one
+// spelling — where the collision is created, on every push.
 
 async function checkMigrationNumbers() {
   const { migrationNameProblem } = await import("../db/config.mjs");
@@ -906,7 +906,7 @@ async function checkMigrationNumbers() {
 // the binary path from an environment variable. `life-engine`'s recommended
 // settings.json allowed `Bash(*)` beside a skip-permissions launch, defended by
 // a prompt rule addressed to the model being injected. Both were fixed on that
-// ticket; this is what keeps the next rebase from bringing them back.
+// ticket; this is what keeps them from coming back.
 //
 // The rule this enforces, written down here because the tree is vendored from
 // upstream wholesale (MAINTAINING.md, "Vendored content"): we audit once and hold the
@@ -1182,7 +1182,7 @@ function textFilesUnder(dirs: { dir: string; rel: string }[]) {
 // thoughts.derived_from` that silently overwrote 025's contract. The
 // vendored files were fixed on that ticket (FORK.md change 58: the statements
 // cut where the file adds to a brain, the file excepted where it creates one);
-// this is what keeps the next rebase from bringing them back.
+// this is what keeps them from coming back.
 //
 // The owned set is READ from db/migrations/ — every `CREATE [OR REPLACE]
 // FUNCTION` at the start of a line, comments stripped, with the file that last
@@ -1339,8 +1339,8 @@ function checkCoreFunctions() {
 // no revocation short of re-keying every client, and full write access on a
 // key accepted from a URL query string. FORK.md change 64 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
-// is never given the tools that write — and this is what keeps the next rebase
-// from bringing the two lines back. Its first run found the same compare in
+// is never given the tools that write — and this is what keeps the two
+// lines from coming back. Its first run found the same compare in
 // seventeen more vendored files; change 67 (SMD-1455) moved every one — the
 // MCP and HTTP servers onto the module, the webhook receivers onto a
 // timing-safe compare of digests — and the exception list below emptied.
@@ -1629,14 +1629,14 @@ function checkCredentialCompares() {
 // (`agent-memory-api`, `open-brain-rest`, `rest-api`), a worker
 // (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`, retired since: SMD-2923), a
 // recipe's paste-in snippet (`provenance-chains`) and a README's sample
-// (`telegram-capture`). Every rule the fork put into the
+// (`telegram-capture`). Every rule Daemonic Brain put into the
 // writers is bypassed by such a statement: 003/018's fingerprint is left
 // describing the old text (018's `fingerprint_held_by` report exists for the
 // row it leaves), 021's label is left describing the old vector, 022's chunk
 // rows of the old vector stay under the new one, and 008's actor is not set.
 // FORK.md change 69 routed every one through `update_thought` (edits) or the
 // 3-argument `upsert_thought` (captures, the vector and its label in one
-// call); this is what keeps the next rebase from bringing one back.
+// call); this is what keeps one from coming back.
 //
 // The rule is the MECHANISM: a PostgREST table verb that replaces columns —
 // `.update(` or `.upsert(` — on `thoughts` (`.from("thoughts")`, either
@@ -1685,8 +1685,8 @@ function checkCredentialCompares() {
 // functions is listed with the reason and the line count, and its README must
 // say what its rows lack; one fixed drops out as stale, one added fails. Seven
 // today, none a bypass a fix could remove: three deployments whose database is
-// their own (the fork's functions are not in it — two of them the files check 7
-// excepts for creating a brain), the two guides and the one container init that
+// their own (Daemonic Brain's functions are not in it — two of them the files check
+// 7 excepts for creating a brain), the two guides and the one container init that
 // show an upsert_thought body (the INSERT is the function's own), and the test
 // that plants a row as an older write left it, to be moved by the writer under test.
 /** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
@@ -2007,7 +2007,7 @@ const THOUGHT_WRITE_NON_PROBES = [
   "UPDATE thoughts SET summary = 'x -- content = 1' WHERE id = $1;",
   "UPDATE thoughts SET summary = 'see, content = old' WHERE id = $1;",
 ];
-const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
+const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — Daemonic Brain's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
   // The guide that shows upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
@@ -2445,7 +2445,7 @@ function checkBunNative() {
 // no policy for the role they actually connect as denies that role every row.
 // The statements were cut on that ticket (FORK.md change 93), each file left
 // with a note pointing at `migrate.ts --grant`'s `community` group; this keeps
-// the next rebase from bringing them back — and holds db/ to the same rule
+// them from coming back — and holds db/ to the same rule
 // test-schema [10] has held the migrations to since the start, now one
 // spelling: db/config.mjs's SUPABASE_SQL_RULES over stripSqlComments, which
 // is literal-aware (a `--` inside a string no longer hides the rest of its
@@ -2481,11 +2481,11 @@ function checkSupabaseIsms() {
 //
 // SMD-1844. deploy/compose.yaml carried `"${POSTGRES_PORT:-5432}:5432"`,
 // `"${SERVER_PORT:-8000}:8000"` and `"${OLLAMA_PORT:-11434}:11434"`: an
-// address-less mapping, which compose binds to 0.0.0.0. On the first stack the
-// fork ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432` and
-// `*:8010` — the postgres superuser on the whole brain behind its password, and
-// the MCP server with its key in clear on every request, offered to every host
-// on the LAN. The file's own comment said to drop the database port in
+// address-less mapping, which compose binds to 0.0.0.0. On the first stack
+// Daemonic Brain ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432`
+// and `*:8010` — the postgres superuser on the whole brain behind its password,
+// and the MCP server with its key in clear on every request, offered to every
+// host on the LAN. The file's own comment said to drop the database port in
 // production; the default was the exposed one and no README said to. Since the
 // fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
@@ -2876,7 +2876,7 @@ checkPublishedPorts();
  * silently win over the third. Compose substitutes `${VAR:-fallback}` before the
  * process starts, so a stale fallback in compose.yaml overrides db/config.mjs
  * rather than deferring to it — the configuration would look right in the source
- * and be wrong in the container, which is the failure mode this whole fork keeps
+ * and be wrong in the container, which is the failure mode Daemonic Brain keeps
  * trying to make loud.
  */
 async function checkEmbeddingDefaults() {
@@ -3853,7 +3853,7 @@ const OVERSIZE_AT_SPLIT: Record<number, number> = {
 // after a comma when another item or "and" follows — so "(FORK.md change 90,
 // 250 ms)" and "change 90, 2 of them" cite 90 alone while "changes 31, 53, and
 // 89" cites all three. A continuation number is three digits at most: change
-// 1000, should the fork get there, is read in the leading position only.
+// 1000, should Daemonic Brain get there, is read in the leading position only.
 // A number is a change number unless it is a thousands group ("1,536 rows"), a
 // date ("2026-09-21"), a decimal ("0.51 R@10") or is followed by a unit or count
 // word ("no behaviour change 250 ms", "a schema change 200 lines long") — the
@@ -3928,7 +3928,7 @@ const CITATION_PROBES: [string, boolean, number[]][] = [
   ["- FORK.md changes 5, 6,\n  7 and 8; changes 31,\n\n53", true, [5, 6, 7, 8, 31]],
   ["change 42% of them, change 5 seconds later, change 6 minutes, change 7 hours, change 8 μs", true, []],
   ["FORK.md changes 31 and 53 of the record; changes 3, 4 and 500 rows; see FORK.md change 999\n\nlines later", true, [31, 53, 999, 3, 4]], // explicit citations first, then the record's bare ones
-  ["changes 31, 53 of the record; FORK.md change 42 of this fork; change 5 of 6", true, [42, 31, 53, 5]],
+  ["changes 31, 53 of the record; FORK.md change 42 of Daemonic Brain; change 5 of 6", true, [42, 31, 53, 5]],
   ["SMD-1541 (change 103): the key; (SMD-1541; change 103 has the why); SMD-1228 changes 38 and 40; SMD-1 is not change-free", false, [103, 103, 38, 40]],
   ["SMD-1037 (FORK 79), (FORK 82) and FORK.md 61,543 bytes, FORK.md 828 lines", false, [79, 82]],
   ["see changes/104-x.md. And ../changes/020-x.md and ./changes/021-y.md and changes/022-z.md.bak", false, [104, 20, 21]],
@@ -4241,9 +4241,9 @@ checkFragments();
 /**
  * 17a: CHANGELOG.md is Keep a Changelog 1.1.0 — Unreleased first, released
  * versions dated and newest-first, only the six headings under a version, and a
- * resolving compare link for every section. No back-fill: sections 1–100 of the
- * fork predate the first cut and live in FORK.md, so a fresh CHANGELOG has only
- * Unreleased until the first release is assembled.
+ * resolving compare link for every section. No back-fill: sections 1–100 of
+ * Daemonic Brain predate the first cut and live in FORK.md, so a fresh
+ * CHANGELOG has only Unreleased until the first release is assembled.
  */
 function changelogProblems(text: string) {
   const problems: string[] = [];
@@ -4279,7 +4279,7 @@ function checkChangelogShape() {
   ]) if (changelogProblems(probe).length === 0) fail(SELF, `check 17a no longer catches ${why} (its own probe)`);
 
   const path = join(ROOT, "CHANGELOG.md");
-  if (!existsSync(path)) return fail("CHANGELOG.md", "the fork's changelog is missing — Keep a Changelog 1.1.0, Unreleased first (SMD-1804)");
+  if (!existsSync(path)) return fail("CHANGELOG.md", "Daemonic Brain's changelog is missing — Keep a Changelog 1.1.0, Unreleased first (SMD-1804)");
   for (const p of changelogProblems(readFileSync(path, "utf8"))) fail("CHANGELOG.md", `${p} (SMD-1804)`);
 }
 checkChangelogShape();
@@ -4929,15 +4929,15 @@ const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_st
 const OPTIONAL_RULE_TYPES = ["merge_queue"];
 /**
  * The merge queue's parameters when the rule is present, each held equal
- * (SMD-1857). MERGE keeps the merge commit the fork lands with (the record of
- * how a branch diverged); ALLGREEN judges each queued PR on its own merge
- * commit, so a red run names the PR that broke the tree rather than the group;
- * min 1 means a lone PR is merged as soon as its run is green — the wait
+ * (SMD-1857). MERGE keeps the merge commit Daemonic Brain lands with (the
+ * record of how a branch diverged); ALLGREEN judges each queued PR on its own
+ * merge commit, so a red run names the PR that broke the tree rather than the
+ * group; min 1 means a lone PR is merged as soon as its run is green — the wait
  * applies only to reaching a minimum above one; 5 and 5 are GitHub's defaults
- * for how many entries build and merge together, more than this fork queues
- * at once; 60 minutes is four times the longest run seen (a push run of main,
- * 16 minutes) before a check that never reports is read as failed and the PR
- * is dropped from the queue.
+ * for how many entries build and merge together, more than Daemonic Brain
+ * queues at once; 60 minutes is four times the longest run seen (a push run of
+ * main, 16 minutes) before a check that never reports is read as failed and the
+ * PR is dropped from the queue.
  */
 const MERGE_QUEUE = { check_response_timeout_minutes: 60, grouping_strategy: "ALLGREEN", max_entries_to_build: 5, max_entries_to_merge: 5, merge_method: "MERGE", min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 5 } as const;
 /** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
@@ -5626,11 +5626,11 @@ checkRulesetRecord();
 //
 // SMD-1936. CLAUDE.md's guard rail and CONTRIBUTING.md's review checklist said
 // "no DROP TABLE, DROP DATABASE, TRUNCATE or unqualified DELETE FROM in SQL
-// files" and nothing on this fork checked it. Upstream's PR gate
+// files" and nothing in Daemonic Brain checked it. Upstream's PR gate
 // (ob1-gate-v2.yml, rule 5) greps a PR's changed .sql files for the words on
 // any line, comments included, and calls a DELETE unqualified when its own
-// line has no WHERE; the fork does not run that gate (FORK.md's detach note:
-// it enforces contribution rules this fork does not follow), and
+// line has no WHERE; Daemonic Brain does not run that gate (FORK.md's detach
+// note: it enforces contribution rules Daemonic Brain does not follow), and
 // read that literally the rail fails the one file that applies it — 046's
 // `BEFORE TRUNCATE ON thought_audit` trigger, which REFUSES truncation, was
 // flagged twice in SMD-1730's review against the sentence — and 034's
@@ -5657,7 +5657,7 @@ checkRulesetRecord();
 // Scope: every .sql git tracks or would track (citationFiles, check 15's
 // listing) — the seven category directories, docs/, deploy/ AND
 // db/migrations/; an ignored file, the Supabase CLI's supabase/migrations or
-// a recipe's data/, is not the tree's. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
+// a recipe's data/, is not the tree's. Daemonic Brain's migrations DROP FUNCTION and DROP TRIGGER deliberately
 // (032/033/046's ACL replays, 046's own trigger), which the rail does not name
 // and which destroy no row; no migration has ever dropped a table — a scratch
 // table is a TEMP table ON COMMIT DROP (016's `_rte_in`), and the dead `DROP
@@ -5795,8 +5795,8 @@ checkDestructiveSql();
 // its PostgREST store and the Cloudflare Workers target (SMD-3152, check 22b),
 // which were outside this scan (the shim's own suite writes its PostgREST
 // expectations by hand and loads no oracle; server/index.ts, the Edge Function
-// build that also held it, left with SMD-1800). This is what keeps the next rebase, or
-// the next vendored file, from bringing a PostgREST client back: a
+// build that also held it, left with SMD-1800). This is what keeps the next
+// vendored file from bringing a PostgREST client back: a
 // specifier-shaped string naming the package — "@supabase/supabase-js",
 // "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
 // ("https://esm.sh/@supabase/supabase-js@2", unpkg's), with or without a
@@ -6505,20 +6505,20 @@ checkWorkflowPins();
 // Thirty scripts in twenty-one recipes reached the brain as PostgREST clients:
 // `${SUPABASE_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>` with a service-role
 // key from a `.mjs`/`.js`/`.ts` fetch, or supabase-py's `create_client` from a
-// `.py`. The fork's stack runs no PostgREST (SETUP.md), so each one's live mode
-// failed at its first request, and neither check 10 (a URL string is not
-// `.insert(`) nor check 22 (no supabase-js import) saw them. The class decision
-// is docs/vendored-disposition.md's "PostgREST-speaking scripts" section: an
-// import emits ingestion-contract items for db/ingest-records.ts (SMD-1867,
-// SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql
-// under bun, three whose capability the core already owns retire — one ticket
-// each, filed under SMD-2126. This holds the class where it stands and stops it
-// growing back: in every code file (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py,
-// .sh) under the seven category directories and docs/, comments blanked (the
-// JS scanner for JS; a `#` outside a string for Python, and for shell one at
-// a word's start (after one of bash's metacharacters, whitespace, `;`, `(`,
-// `)`, `|`, `&`, `<`, `>`, or the text's start) — `$#`, `${#a[@]}` and `a#b`
-// are not comments, so a hit after
+// `.py`. Daemonic Brain's stack runs no PostgREST (SETUP.md), so each one's
+// live mode failed at its first request, and neither check 10 (a URL string is
+// not `.insert(`) nor check 22 (no supabase-js import) saw them. The class
+// decision is docs/vendored-disposition.md's "PostgREST-speaking scripts"
+// section: an import emits ingestion-contract items for db/ingest-records.ts
+// (SMD-1867, SMD-2136), a maintenance script reaches Postgres through
+// compat/supabase-sql under bun, three whose capability the core already owns
+// retire — one ticket each, filed under SMD-2126. This holds the class where it
+// stands and stops it growing back: in every code file
+// (.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs, .py, .sh) under the seven category
+// directories and docs/, comments blanked (the JS scanner for JS; a `#` outside
+// a string for Python, and for shell one at a word's start (after one of bash's
+// metacharacters, whitespace, `;`, `(`, `)`, `|`, `&`, `<`, `>`, or the text's
+// start) — `$#`, `${#a[@]}` and `a#b` are not comments, so a hit after
 // one on the same line is read; a docstring is a string and is read: a file
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
@@ -6651,10 +6651,10 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
   ["recipes/chatgpt-conversation-import/import-chatgpt.py", POSTGREST(`${IMPORT}; SMD-2147 decides its match_thoughts dedup and chatgpt_conversations sidecar`, "SMD-2147", 3)],
   ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
-  ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
+  ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport Daemonic Brain lacks; it emits contract items", "SMD-2149", 2)],
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
   ["recipes/email-history-import/pull-gmail.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
-  // Retire: the fork's core owns the capability.
+  // Retire: Daemonic Brain's core owns the capability.
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
   ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
@@ -6701,7 +6701,7 @@ function checkPostgrestClients() {
   if (twice.length !== 1 || twice[0] !== 1) fail(SELF, `check 24 reports lines ${twice.join(",")} for a hit beside a comment, not line 1 once (its own probe)`);
   const files = textFilesUnder(SCANNED_ROOTS).filter((f) => POSTGREST_CODE_FILE.test(f));
   if (files.length === 0) fail(SELF, "check 24 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");
-  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which this fork's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
+  const MSG = "speaks PostgREST — a `rest/v1` path, a supabase-py client or postgrest-js reaches a brain only through Supabase's PostgREST, which Daemonic Brain's stack does not run (SETUP.md), so the script's live mode fails at its first request; the class decision is docs/vendored-disposition.md's \"PostgREST-speaking scripts\" (SMD-2126): an import emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136), a maintenance script reaches Postgres through compat/supabase-sql under bun (`SUPABASE_URL` a postgres:// string), or the file is listed in POSTGREST_EXCEPTIONS with its line count and the ticket that ports or retires it";
   const seen = new Set<string>();
   for (const file of files) {
     const rel = relOf(file);
@@ -7197,7 +7197,7 @@ const TRUST_PROBES: [string, string, number, number, boolean][] = [
 const RAW_IMPORT = (ticket: string): CountedException["why"] =>
   `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
 const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 makes the script a REST-core client, SMD-3216)";
-const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
+const RAW_OWN_DATABASE = "a deployment with a database of its own and none of Daemonic Brain's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
 /**
  * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
  * new raw capture), a count no line reaches fails as stale (a port landed: lower it, or remove the entry), a file
@@ -9957,7 +9957,7 @@ checkBunPins();
 // ── 34. Every suite is run (SMD-2895) ────────────────────────────────────────
 //
 // brain-checks.yml exists because upstream's suites ran in no workflow and one
-// asserted the opposite of production for months. The fork repeated it in
+// asserted the opposite of production for months. Daemonic Brain repeated it in
 // small: db/test-weekly-digest.ts (31 assertions, SMD-2239) and
 // server-portable/test-jobs.ts (45, SMD-2273) were listed in no step, so they
 // passed when someone ran them by hand and were checked by nothing else. A

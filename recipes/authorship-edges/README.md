@@ -1,6 +1,6 @@
 # Authorship Edges
 
-> **On this fork (SMD-2126).** `lib/author-edges.mjs` (`backfill-authorship.mjs` through it) reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and this fork's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`. On a fork brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the fork's `record_thought_entities`; the decision says how.
+> **In Daemonic Brain (SMD-2126).** `lib/author-edges.mjs` (`backfill-authorship.mjs` through it) reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and Daemonic Brain's stack runs no PostgREST (SETUP.md), so it fails at its first request, `--dry-run` included (it reads the brain first). The port onto `compat/supabase-sql` under `bun` (`SUPABASE_URL` a `postgres://` string; the `node` commands below become `bun`) is SMD-2141; the decision for the class is in `docs/vendored-disposition.md`. On a migrated brain `thought_entities` is migration 016's table (a uuid `entity_id` to `ob1_entities`, no `mention_role`), not the schema's, so the port reads 016's shape and writes mentions through the brain's `record_thought_entities`; the decision says how.
 
 > **Tell apart what *you* said from what a *machine* generated — across any source.** A deterministic speaker classifier labels every captured thought `self` / `other` / `mixed` / `machine` / `unknown`, links the ones you spoke to a canonical self-entity via `thought_entities` author edges, and gives you a query layer for "my own words" vs. "the device's summary."
 
@@ -8,7 +8,7 @@
 
 ## What It Does
 
-Open Brain already has an email correspondent resolver (in the [atomizer recipe](../atomizer/)) that keys people off RFC-2822 `From`/`To`/`Cc` addresses. But spoken and machine-generated capture has no addresses — a wearable transcript chunk is labelled `You` / `Alex` / `Speaker 1`, and a device-generated title or action item has *no* human speaker at all. Nothing in OB1 turns those labels into an authorship edge, and nothing marks a row as machine-generated.
+Daemonic Brain already has an email correspondent resolver (in the [atomizer recipe](../atomizer/)) that keys people off RFC-2822 `From`/`To`/`Cc` addresses. But spoken and machine-generated capture has no addresses — a wearable transcript chunk is labelled `You` / `Alex` / `Speaker 1`, and a device-generated title or action item has *no* human speaker at all. Nothing in Daemonic Brain turns those labels into an authorship edge, and nothing marks a row as machine-generated.
 
 This recipe fills that gap. It is the **spoken / display-name counterpart** to the email resolver:
 

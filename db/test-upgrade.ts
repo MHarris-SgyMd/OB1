@@ -5399,7 +5399,7 @@ console.log("\n[20bj] Migration 118: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
+console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
 {
   // The reset drops a hand-kept list, and a name a migration added without a
   // line there survives every section boundary: 034's table did until [20]
@@ -5414,8 +5414,8 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   //
   // The sweep is asked of itself first: five objects of the kinds the drop
   // lists do not cover — a standalone composite type, a partitioned table, an
-  // enum, a domain, a function — are planted beside the fork's, and after the
-  // reset each must be seen. A third pass found the first sweep blind to
+  // enum, a domain, a function — are planted beside Daemonic Brain's, and after
+  // the reset each must be seen. A third pass found the first sweep blind to
   // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
   // and its type query excluded every composite, a table's row type and a
   // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
@@ -5451,14 +5451,14 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   });
   const planted = await sweep();
   assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
-    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside the fork's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
+    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside Daemonic Brain's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
-  // A survivor is the fork's when some migration names it — then a line is
-  // missing from test-support's lists and this section fails. One no migration
-  // names is another suite's: a run against a kept database meets whatever
-  // the last suite left there (CI's data-layer job gives this suite a fresh
-  // database of its own, SMD-2219). Those are reported in the label and do
-  // not fail the section, which is about the drop lists, not about the
+  // A survivor is Daemonic Brain's when some migration names it — then a line
+  // is missing from test-support's lists and this section fails. One no
+  // migration names is another suite's: a run against a kept database meets
+  // whatever the last suite left there (CI's data-layer job gives this suite a
+  // fresh database of its own, SMD-2219). Those are reported in the label and
+  // do not fail the section, which is about the drop lists, not about the
   // neighbours (fifth review pass).
   const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
   const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));
@@ -5468,9 +5468,9 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   };
   const left = await sweep();
   const rels = split(left.rels, (x) => x), fns = split(left.fns, (x) => x.slice(0, x.indexOf("("))), types = split(left.types, (x) => x);
-  assert(rels.ours.length === 0, `no relation of the fork's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
-  assert(fns.ours.length === 0, `no function of the fork's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
-  assert(types.ours.length === 0, `no type of the fork's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
+  assert(rels.ours.length === 0, `no relation of Daemonic Brain's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
+  assert(fns.ours.length === 0, `no function of Daemonic Brain's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
+  assert(types.ours.length === 0, `no type of Daemonic Brain's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
   await sql.close();
   await applyMigrations(URL_, OPTS);
 }

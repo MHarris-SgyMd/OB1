@@ -1,7 +1,7 @@
 {
   "name": "ob1-recipe-grok-export-import",
   "version": "1.0.0",
-  "description": "Import xAI Grok conversation exports into Open Brain as searchable thoughts",
+  "description": "Import xAI Grok conversation exports into Daemonic Brain as searchable thoughts",
   "type": "module",
   "main": "import-grok.mjs",
   "scripts": {

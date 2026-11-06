@@ -6,7 +6,7 @@
 
 This skill helps an AI client convert raw meeting material into a durable working document. It separates decisions from discussion, action items from loose ideas, and unresolved questions from false certainty, then produces a clean artifact you can use in follow-up or downstream decision work.
 
-For the OB1 workflow that chains meeting synthesis into research and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the Daemonic Brain workflow that chains meeting synthesis into research and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the OB1 workflow that chains meeting synthesis into research and memo drafti
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Notes, transcript, or a trustworthy meeting summary
 
@@ -50,7 +50,7 @@ When installed and invoked correctly, the skill should produce:
 - clear decisions and action items
 - unresolved questions and active risks
 - a clean follow-up artifact when requested
-- optional Open Brain capture of key decisions or the final synthesis
+- optional Daemonic Brain capture of key decisions or the final synthesis
 
 ## Troubleshooting
 
@@ -65,4 +65,4 @@ Solution: Include the meeting purpose and what the output should support. A part
 
 ## Notes for Other Clients
 
-Adapt the Open Brain tool names to your environment, but keep the same discipline: treat the meeting artifact as the source of truth, preserve uncertainty honestly, and produce outputs that are reusable in future work rather than just readable today.
+Adapt the Daemonic Brain tool names to your environment, but keep the same discipline: treat the meeting artifact as the source of truth, preserve uncertainty honestly, and produce outputs that are reusable in future work rather than just readable today.

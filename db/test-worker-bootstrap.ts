@@ -16,7 +16,7 @@
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -252,6 +252,9 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     answer = () => new Response('{"error":{"message":"overloaded"}}', { status: 503 });
     const out = await probeChat(at, "m", 2000);
     ok(out.state === "out" && out.why.startsWith("503 ") && out.unanswered === undefined, `a 503 is out, answered (${JSON.stringify(out)})`);
+    answer = () => new Response("request timeout", { status: 408 });
+    const timeout408 = await probeChat(at, "m", 2000);
+    ok(timeout408.state === "out" && timeout408.why.startsWith("408 "), `a 408 is out, the provider's outage as followClassify reads it, not up (SMD-3311; ${JSON.stringify(timeout408)})`);
     answer = () => new Response('{"error":{"message":"model \\"m\\" not found, try pulling it first"}}', { status: 404 });
     ok((await probeChat(at, "m", 2000)).state === "missing", "a 404 naming the model is missing");
     answer = () => new Response("404 page not found", { status: 404 });
@@ -327,6 +330,20 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   long.end();
   longClock += SUSPECT_WINDOW_MS * 4 + 1;
   ok(long.begin("500", "M") === "outage", "…and only to its own edge");
+  // A window read at each error, a caller's limit changing as it runs (consolidation's beside the sweep, SMD-3306 PR 6b-2's review pass 3).
+  let readClock = 0;
+  let windowNow = SUSPECT_WINDOW_MS;
+  const read = new ProviderOutage(() => readClock, () => windowNow);
+  read.begin("500", "R");
+  read.end();
+  windowNow = SUSPECT_WINDOW_MS * 4;
+  readClock = SUSPECT_WINDOW_MS * 4;
+  ok(read.begin("500", "R") === "thought", "a window read at the error holds a suspect past the window it had when the outage was made");
+  read.begin("500", "S");
+  read.end();
+  windowNow = SUSPECT_WINDOW_MS;
+  readClock += SUSPECT_WINDOW_MS + 1;
+  ok(read.begin("500", "S") === "outage", "…and its shorter window, read at the next error, ends at its own edge");
 
   // The schedule carried across outages that come back at once (SMD-2679 PR 4a-2b): from where the last ended, inside the window and nothing settled since.
   let resumeClock = 0;
@@ -398,6 +415,42 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   ];
   const wrong = cells.filter(([e, want]) => followClassify(e) !== want).map(([e, want, what]) => `${what}: ${followClassify(e)}, not ${want}`);
   ok(wrong.length === 0, `followClassify reads each of ${cells.length} errors as whose it is: the database's state, the provider's, the thought's, or the probe's to decide (${wrong.join("; ") || "every cell"})`);
+
+  // The extraction and judge calls' own errors — an Error carrying the answer's status (entities.ts, consolidate.ts) — and a call's deadline, read as embed.ts's (SMD-3311).
+  const own = (status: number, body = "") => Object.assign(new Error(`Extraction request to http://h/v1 failed: ${status} ${body}`), { status });
+  const ownCells: [unknown, string, string][] = [
+    [own(429, "too many requests"), "backpressure", "a 429"],
+    [own(503, "busy"), "backpressure", "a 503"],
+    [own(404, '{"error":"model \\"m\\" not found, try pulling it first"}'), "backpressure", "the model not served"],
+    [own(408), "maybe-poison", "a 408"],
+    [own(500), "maybe-poison", "a 500"],
+    [own(400, '{"error":{"message":"the input exceeds the model\'s context length"}}'), "thought", "a 400 about its length"],
+    [own(401, "invalid api key"), "probe-decides", "a 401"],
+    [own(404, "404 page not found"), "probe-decides", "a 404 naming no model"],
+    [new DOMException("The operation timed out.", "TimeoutError"), "maybe-poison", "a call's AbortSignal.timeout"],
+    [new ProviderDown("the judge call timed out after 120 s, and a one-token call got no answer either"), "maybe-poison", "consolidate's ProviderDown"],
+  ];
+  const ownWrong = ownCells.filter(([e, want]) => followClassify(e) !== want).map(([e, want, what]) => `${what}: ${followClassify(e)}, not ${want}`);
+  ok(ownWrong.length === 0, `followClassify reads the workers' own call errors as embed.ts's of the same status, and a deadline as a timeout (${ownWrong.join("; ") || `all ${ownCells.length}`})`);
+
+  // followerFault — the pausing followers' reading (SMD-3311): classifyError's kind, a 408 transient, and no suspect on backpressure.
+  const faults: [unknown, { kind: string; suspect: boolean }, string, { maxTokensFatal?: boolean }?][] = [
+    [own(408), { kind: "transient", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
+    [own(408, "litellm.Timeout: Request timed out."), { kind: "transient", suspect: true }, "a 408 whose words say \"timed out\" (a gateway's): the status outranks the words (review pass 1)"],
+    [own(504, "upstream request timed out"), { kind: "transient", suspect: true }, "a 504 saying \"timed out\": the same"],
+    [own(429, "Request timed out"), { kind: "transient", suspect: false }, "a 429 saying \"timed out\": backpressure, paused for, no suspect (review pass 2)"],
+    [own(503, "upstream timed out"), { kind: "transient", suspect: false }, "a 503 saying \"timed out\": the same"],
+    [own(400, "the tool call timed out"), { kind: "thought", suspect: true }, "a 400 saying \"timed out\": still the thought's, for the probe to decide"],
+    [own(429), { kind: "transient", suspect: false }, "a 429: paused for, then an outage with no suspect"],
+    [own(503), { kind: "transient", suspect: false }, "a 503: the same"],
+    [own(500), { kind: "transient", suspect: true }, "a 500: paused for, then an outage with a suspect"],
+    [own(404, 'model "m" not found'), { kind: "fatal", suspect: false }, "the model not served: the follower's own model-missing path, no suspect"],
+    [own(401), { kind: "fatal", suspect: true }, "a 401: still the request's"],
+    [own(400, "max_tokens is too large"), { kind: "fatal", suspect: true }, "extract's answer budget refused: still the request's", { maxTokensFatal: true }],
+    [new DOMException("The operation timed out.", "TimeoutError"), { kind: "thought", suspect: true }, "a timeout: the thought's until the probe says otherwise, a suspect if it does"],
+  ];
+  const faultWrong = faults.filter(([e, want, , o]) => { const f = followerFault(e, o); return f.kind !== want.kind || f.suspect !== want.suspect; }).map(([e, want, what, o]) => `${what}: ${JSON.stringify(followerFault(e, o))}, not ${JSON.stringify(want)}`);
+  ok(faultWrong.length === 0, `followerFault reads ${faults.length} errors through followClassify's split: a 408 the provider's, backpressure no suspect (${faultWrong.join("; ") || "every cell"})`);
 
   // A stop ends a probe in flight, as "out" (review pass 1).
   const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });

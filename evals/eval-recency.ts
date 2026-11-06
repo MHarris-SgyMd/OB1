@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * eval-recency.ts — does blending age into match_thoughts help or hurt, on the
- * corpus this fork measures everything against?
+ * corpus Daemonic Brain measures everything against?
  *
  * SMD-945 (migration 020) lets a caller weight cosine similarity against
  * 0.5 ^ (age_days / half_life_days). The default weight is 0 and the ticket says

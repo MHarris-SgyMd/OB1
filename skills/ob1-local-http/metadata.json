@@ -1,6 +1,6 @@
 {
-  "name": "OB1 Local HTTP",
-  "description": "Skill pack that lets Claude Code (or any AI coding tool that supports skills) capture, search and browse thoughts in an Open Brain over plain HTTP, without using MCP. Calls the brain's REST core at /api on the fork's own stack.",
+  "name": "Daemonic Brain Local HTTP",
+  "description": "Skill pack that lets Claude Code (or any AI coding tool that supports skills) capture, search and browse thoughts in a brain over plain HTTP, without using MCP. Calls the brain's REST core at /api on Daemonic Brain's own stack.",
   "category": "skills",
   "author": {
     "name": "dhanjit",

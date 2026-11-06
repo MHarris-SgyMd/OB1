@@ -1,6 +1,6 @@
 {
   "name": "Email History Import",
-  "description": "Import your Gmail email history into Open Brain as searchable thoughts with sender, subject, and date metadata.",
+  "description": "Import your Gmail email history into Daemonic Brain as searchable thoughts with sender, subject, and date metadata.",
   "category": "recipes",
   "author": {
     "name": "Matt Hallett",

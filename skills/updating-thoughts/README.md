@@ -1,6 +1,6 @@
 # Updating Thoughts
 
-> Behavioral skill for editing an existing Open Brain thought with the `update_thought` MCP tool.
+> Behavioral skill for editing an existing Daemonic Brain thought with the `update_thought` MCP tool.
 
 ## What It Does
 
@@ -15,12 +15,12 @@ optimistic-concurrency protection (`if_unchanged_since`).
 - Codex
 - Grok
 - Any AI client that supports reusable skills, rules, or custom instructions and
-  is connected to the core Open Brain MCP server with a write-scoped key
+  is connected to the core Daemonic Brain MCP server with a write-scoped key
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A write-scoped key on your Open Brain connector — the core MCP server lists
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
+- A write-scoped key on your Daemonic Brain connector — the core MCP server lists
   `update_thought` only for a write key (the standalone `update-thought-mcp`
   server retired with SMD-1931)
 - A read tool (`search_thoughts` / `list_thoughts`) to resolve thought ids
@@ -61,5 +61,5 @@ and retry.
 ## Notes for Other Clients
 
 The skill is client-agnostic — it names the tool (`update_thought`) on the core
-Open Brain connector, not a specific client. Adapt only the
+Daemonic Brain connector, not a specific client. Adapt only the
 skills-directory path per client.

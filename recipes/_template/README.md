@@ -4,11 +4,11 @@
 
 ## What It Does
 
-1-2 sentences explaining the capability this adds to Open Brain.
+1-2 sentences explaining the capability this adds to Daemonic Brain.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - List any additional requirements (API keys, tools, services)
 - If this recipe depends on a reusable skill from `skills/`, link it here and declare it in `metadata.json` via `requires_skills`
 

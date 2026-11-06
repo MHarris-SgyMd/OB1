@@ -50,7 +50,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
 
 It reads and writes no thought. It reaches the core through `ctx.call` for its deadlines' open items alone.
 
-**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row. The column waits for a multi-user change that may never come (decided 2026-11-02).
+**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. Daemonic Brain is one operator's brain (SMD-1716), so every key that may read sees every row. The column waits for a multi-user change that may never come (decided 2026-11-02).
 
 ## Prerequisites
 
@@ -105,6 +105,7 @@ The standalone server kept its rows in `public.family_members`, `public.activiti
      If a row breaks one of these, the copy names the check and nothing is copied. Fix that row in `public` and run the block again.
    - **Times.** A time stored with seconds (`16:00:30`) is answered to the minute (`16:00`).
    - **Leftover tables.** Once the plugin's answers look right, the old tables can be dropped by hand.
+3. Give the copied one-time dates still to come their open items (SMD-3665): call `sync_open_items` once with a write key (`POST /v1/plugins/family-calendar/items/sync`, `today` the user's date). A copy writes the tables alone, so until then no copied deadline is in the brain's reads.
 
 ## Troubleshooting
 

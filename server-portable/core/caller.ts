@@ -31,8 +31,11 @@ export async function asked<T, E extends Error>(Refused: abstract new (...args: 
 }
 
 type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED";
-/** What a claim's refusal names beyond its cause: its id and whether a force was asked. The other two name nothing more. */
-type ClaimFacts = { id: string; forced: boolean };
+/**
+ * What a claim's refusal names beyond its cause: its id, whether a force was asked, and when the caller's own claim
+ * had lapsed, if it had (SMD-3705). The other two name nothing more.
+ */
+type ClaimFacts = { id: string; forced: boolean; lapsedAt?: string };
 
 /**
  * The registry's failure to give the caller's agent id (`agentUnresolved`) as `code`'s refusal: retryable while it

@@ -4,7 +4,7 @@
 
 Use this file as repository context for the Open Brain Assistant GPT. It is written for a user-facing helper that supports people building, troubleshooting, and extending Open Brain from the OB1 repository.
 
-Last reviewed against this repo: September 24, 2026 (this fork: the compose stack in `SETUP.md`, no Supabase).
+Last reviewed against this repo: September 24, 2026 (Daemonic Brain: the compose stack in `SETUP.md`, no Supabase).
 
 ## Assistant Role
 
@@ -72,8 +72,8 @@ The core MCP server (`mcp-server/`, at `/mcp`) exposes:
 - `search_thoughts`: semantic search over stored thoughts.
 - `list_thoughts`: browse thoughts, newest or oldest first, a page at a time (the reply ends with the cursor for the next page), with optional filters.
 - `thought_stats`: summarize total thoughts, types, top topics, and people.
-- `thought_changes`: what changed since a time or a cursor — every capture, edit and deletion, who made it, and what moved (this fork's `server-portable` server only, migration 052).
-- `brain_info`: what this brain is — the server's version and commit, the store and tier, the Postgres and pgvector versions, the highest migration applied against the server's own, row counts, size, vector-index parameters, the board-sync watermark — the newest Linear update any thought reflects — the long-running workers' heartbeats, and what consolidation found: the supersession proposals pending review and the judged relations standing (this fork's `server-portable` server only).
+- `thought_changes`: what changed since a time or a cursor — every capture, edit and deletion, who made it, and what moved (Daemonic Brain's `server-portable` server only, migration 052).
+- `brain_info`: what this brain is — the server's version and commit, the store and tier, the Postgres and pgvector versions, the highest migration applied against the server's own, row counts, size, vector-index parameters, the board-sync watermark — the newest Linear update any thought reflects — the long-running workers' heartbeats, and what consolidation found: the supersession proposals pending review and the judged relations standing (Daemonic Brain's `server-portable` server only).
 - `search`: ChatGPT-compatible read-only search alias.
 - `fetch`: ChatGPT-compatible read-only fetch-by-id alias.
 
@@ -152,11 +152,11 @@ Recipes are standalone builds that add capabilities without being part of the or
 
 Major recipe categories:
 
-- Data imports: ChatGPT, Perplexity, X/Twitter, Instagram, Google Activity, Grok, Blogger/Journals, Gmail. An Obsidian or Markdown vault is the fork's `db/` tooling, not a recipe: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) (SMD-2137).
+- Data imports: ChatGPT, Perplexity, X/Twitter, Instagram, Google Activity, Grok, Blogger/Journals, Gmail. An Obsidian or Markdown vault is Daemonic Brain's `db/` tooling, not a recipe: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) (SMD-2137).
 - Capture and workflow: auto-capture, panning for gold, schema-aware routing, source filtering, daily digest, research-to-decision workflow.
 - Knowledge graph/wiki: entity wiki, wiki compiler, wiki synthesis, typed edge classifier.
 - Agent workflows: OpenClaw Agent Memory, code review memory, TaskFlow work log.
-- Alternate architecture: Vercel/Neon/Telegram. The brain itself deploys as the compose stack only (the Kubernetes deployment retired, SMD-2288). Local embedding is the fork's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
+- Alternate architecture: Vercel/Neon/Telegram. The brain itself deploys as the compose stack only (the Kubernetes deployment retired, SMD-2288). Local embedding is Daemonic Brain's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
 
 When helping users pick a recipe, start from their goal and data source. Do not suggest bulk imports until the base Open Brain setup is working and they can capture/search a test thought.
 

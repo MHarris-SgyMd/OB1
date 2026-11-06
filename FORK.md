@@ -307,7 +307,8 @@ unattended bot commit to the default branch.
 So all eleven are deleted, from `main` and from the working branch. Only
 `fork-checks.yml` remains. `.github/disable-upstream-workflows.sh` is kept for the
 case a rebase reintroduces one **and** it has already run, which is the only
-situation where disabling works.
+situation where disabling works. SMD-3757 retired the script on 2026-11-05:
+once the pin froze, no rebase was coming, and GitHub listed none of the eleven.
 
 Removing them from `main` is safe because nothing reads our `main`: the pin is held
 by the annotated tag `upstream-pin-9543c29`, and the procedure below rebases onto

@@ -23,7 +23,7 @@ Panning for Gold turns messy source material into an evaluated inventory of idea
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want the skill to use `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
 - An AI client that can load a reusable skill or prompt file
 - A project workspace where the skill can save inventory and synthesis files
 
@@ -48,7 +48,7 @@ When the skill is working correctly, it should:
 - Produce a numbered thread inventory file
 - Evaluate the strongest threads with clear verdicts
 - Write a final gold-found synthesis file
-- Optionally capture the strongest outcomes back into Open Brain
+- Optionally capture the strongest outcomes back into Daemonic Brain
 
 ## Full Recipe
 

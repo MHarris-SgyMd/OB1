@@ -1,6 +1,6 @@
 {
   "name": "Home Maintenance Tracker",
-  "description": "Track recurring maintenance tasks, log completed work, and surface upcoming and overdue items before they become emergencies. On this fork it is the home-maintenance plugin, turned on in the brain itself (SMD-2311).",
+  "description": "Track recurring maintenance tasks, log completed work, and surface upcoming and overdue items before they become emergencies. In Daemonic Brain it is the home-maintenance plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

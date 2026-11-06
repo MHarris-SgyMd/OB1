@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
 /**
  * bench-plan.ts — does the unfiltered `match_thoughts` reach the HNSW index,
- * at the width this fork actually ships, measured rather than argued.
+ * at the width Daemonic Brain actually ships, measured rather than argued.
  *
  * SMD-969 (upstream NateBJones-Projects/OB1#469) reports that even the plain
  * `match_thoughts` shape gets `Seq Scan` + `Sort` at ~9,300 rows, and only
  * `SET LOCAL enable_seqscan = off` makes the planner take the index — 5.9 s
- * and ~30,000 buffers a call against 180 ms and ~3,200. This fork's function
- * has the more indexable shape (the threshold applied after the `ORDER BY <=>
- * LIMIT` candidate CTEs), which is an argument, and the fork's rule is that a
- * plan is measured, not inferred (SMD-925). db/bench-hnsw.ts explains only
- * the filtered branches, and at 64 dimensions; this explains the unfiltered
- * one at the shipped width, where the answer turns out to be different.
+ * and ~30,000 buffers a call against 180 ms and ~3,200. Daemonic Brain's
+ * function has the more indexable shape (the threshold applied after the `ORDER
+ * BY <=> LIMIT` candidate CTEs), which is an argument, and Daemonic Brain's
+ * rule is that a plan is measured, not inferred (SMD-925). db/bench-hnsw.ts
+ * explains only the filtered branches, and at 64 dimensions; this explains the
+ * unfiltered one at the shipped width, where the answer turns out to be
+ * different.
  *
  * One note on the filtered `exact` rows: since SMD-1018 the shared rewrite
  * (test-support's extractBody) splices the routing collection into the exact

@@ -1076,10 +1076,10 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    * These are text searches over the migration files, so they cannot tell a
    * statement from prose ABOUT a statement. Migration 012's header quotes the
    * `GRANT EXECUTE ... TO authenticated, service_role` that upstream's version
-   * ends with, in order to explain why this fork does not have it — and that
-   * quotation failed this assertion. A guard that forbids DISCUSSING the thing
-   * it forbids pushes the explanation out of the file, which is the opposite of
-   * what these headers are for.
+   * ends with, in order to explain why Daemonic Brain does not have it — and
+   * that quotation failed this assertion. A guard that forbids DISCUSSING the
+   * thing it forbids pushes the explanation out of the file, which is the
+   * opposite of what these headers are for.
    *
    * Stripping first makes the check strictly sharper, not laxer: it still sees
    * every executable statement, and it stops seeing text that only describes
@@ -1531,8 +1531,8 @@ console.log("\n[15] thought_work_claims: the pool, the lease, the release");
   const pendingIdx = (await db.query<{ def: string }>(`SELECT indexdef AS def FROM pg_indexes WHERE indexname = 'thought_work_claims_pending_idx'`)).rows[0]?.def ?? "";
   assert(/\(work_type, enqueued_at\)/.test(pendingIdx) && /WHERE \(status = 'pending'::text\)/.test(pendingIdx),
          `the claim's index is partial on pending rows and ordered by enqueued_at (${pendingIdx.replace(/^.*USING /, "")})`);
-  // 015 must be the fork's shape: no DELETE anywhere, since expiry and clean
-  // shutdown are UPDATEs and the record of a pass is meant to survive.
+  // 015 must be Daemonic Brain's shape: no DELETE anywhere, since expiry and
+  // clean shutdown are UPDATEs and the record of a pass is meant to survive.
   const f015 = files.find((f) => f.startsWith("015"))!;
   const src015 = readFileSync(join(MIGRATIONS, f015), "utf8").replace(/--[^\n]*/g, "");
   // `ON DELETE CASCADE` on the foreign key is a clause, not a statement.
@@ -2952,7 +2952,7 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
   // carries the OLD trace_provenance body — so re-applying it reverted 026's
   // here. 033 is the last definer now and touches no trace_provenance, but the
   // restore stays: it is cheap, and the trap comes back the day 025 is the
-  // last definer of anything a section restores. The fork's own trap in
+  // last definer of anything a section restores. Daemonic Brain's own trap in
   // miniature: CREATE OR REPLACE takes the whole file, so re-applying an
   // earlier migration out of order clobbers a later redefinition (production
   // applies 001→026 in order and is unaffected).
@@ -7381,7 +7381,9 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   // The rule, from inside the suite, over the whole of both trees as check 12
   // walks them — not the listed files alone, since the two directories also
   // hold SQL no brain applies as a schema, and a Supabase-ism there is as
-  // much a stop for the reader who runs it.
+  // much a stop for the reader who runs it. The extension template's plugin
+  // migration (extensions/_template/plugin/, SMD-3747) is such SQL too: copied
+  // to plugins/<name>/, it is a plugin's, which the migrator runs.
   const walkSql = (dir: string, out: string[] = []): string[] => {
     for (const name of readdirSync(dir)) {
       if (name === "node_modules" || name.startsWith(".")) continue;
@@ -7393,8 +7395,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
   const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
   const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
-  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
-    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/") || f.startsWith("extensions/_template/plugin/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ or the extension template's plugin (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
 
   const xdb = new PGlite({ extensions: { vector, pg_trgm } });
   for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
@@ -15612,8 +15614,9 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
     "a two- or three-argument call — a caller from before 109 — resolves to this form through the default and lists every pass");
 
   // 070 re-applied by hand lands its three-argument form beside 109's: a call
-  // passing three is ambiguous (not unique) and fails, four resolve — why the
-  // fork's callers pass four, and what preflight names. 109 again drops it.
+  // passing three is ambiguous (not unique) and fails, four resolve — why
+  // Daemonic Brain's callers pass four, and what preflight names. 109 again
+  // drops it.
   await reapply("070");
   let short = "resolved";
   try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`); } catch (e) { short = (e as Error).message; }

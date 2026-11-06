@@ -10,7 +10,7 @@
 
 </div>
 
-> Import blog posts from Google Blogger Atom XML exports into Open Brain.
+> Import blog posts from Google Blogger Atom XML exports into Daemonic Brain.
 
 ## What It Does
 
@@ -20,7 +20,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
 - **Blogger export files** — `.atom` files from Google Blogger
 - **Bun** (the runtime the brain's tools use)
 

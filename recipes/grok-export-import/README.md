@@ -1,6 +1,6 @@
 # Grok Export Import
 
-> Import xAI Grok conversation history into Open Brain as searchable thoughts.
+> Import xAI Grok conversation history into Daemonic Brain as searchable thoughts.
 
 ## What It Does
 
@@ -10,7 +10,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
 - **Grok data export**: the JSON file from X/Grok
 - **Bun** (the runtime the brain's tools use)
 

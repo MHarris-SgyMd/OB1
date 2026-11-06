@@ -1,6 +1,6 @@
 {
   "name": "Household Knowledge Base",
-  "description": "Store and retrieve household facts — paint colors, appliance details, vendor contacts, measurements, and more. On this fork it is the household-knowledge plugin, turned on in the brain itself (SMD-2311).",
+  "description": "Store and retrieve household facts — paint colors, appliance details, vendor contacts, measurements, and more. In Daemonic Brain it is the household-knowledge plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

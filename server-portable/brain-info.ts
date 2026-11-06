@@ -242,7 +242,7 @@ export interface WorkerHeartbeat {
   resting?: true;
   /**
    * The sleep scheduler's re-embed pass set aside or down (SMD-2679 PR 4b),
-   * while extraction and consolidation run on: aside on a model switch it
+   * while the other passes run on: aside on a model switch it
    * will not make — the embedding model the brain records unlike the stack's,
    * re-read at each sleep's start and each poll while aside, so a record put
    * right clears it — or down
@@ -494,16 +494,18 @@ export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
  * Why the sleep scheduler holds a pass (WorkerHeartbeat.holds, SMD-3379 PR
  * 1c): re-embed's set-downs — `model` and `provider` among them, the start
  * refusals it retries with `lookup` — and re-embed's model switch; and the
- * subject sweep's `judge`, a garbage-judge alarm's trip holding the judge
+ * subject sweep's: `judge`, a garbage-judge alarm's trip holding the judge
  * model it names until a hand run checks it (db/subject-sweep.ts's
- * judgeHeld, SMD-3306 PR 6b-1).
+ * judgeHeld, SMD-3306 PR 6b-1), `key`, another subject pool named, which
+ * the scheduler never switches, and its set-downs by its start refusal's
+ * kind, `identity` among them (SMD-3306 PR 6b-2).
  */
-export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch", "judge"] as const;
+export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch", "judge", "key", "identity"] as const;
 export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
 /**
  * The passes the sleep scheduler runs, as its `holds` and its waiting name
- * them: the subject sweep the fourth (SMD-3306 PR 6b-1), read here before the
- * scheduler that runs it writes it, as SMD-3379 PR 1c-2's readers were.
+ * them: the subject sweep the fourth, beside consolidation (SMD-3306 PR 6b-2;
+ * read since PR 6b-1, as SMD-3379 PR 1c-2's readers were before it).
  */
 export const SLEEP_PASSES = ["reembed", "extract", "consolidate", "subjects"] as const;
 /** A pass the sleep scheduler runs (SLEEP_PASSES). */
@@ -1433,7 +1435,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
              to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS tickets_linked,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
-               -- The fork's ledger resolves only if the table the path
+               -- Daemonic Brain's ledger resolves only if the table the path
                -- reaches carries migrate.ts's sha256 column: another tool's
                -- schema_migrations on the path is not it (review pass 4).
                'schema_migrations', EXISTS (SELECT 1 FROM pg_attribute a

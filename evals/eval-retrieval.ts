@@ -24,7 +24,7 @@
 
 /**
  * Any OpenAI-compatible endpoint. Ollama by default, but the point of the
- * indirection is that the *hosted* defaults this fork inherited can be measured
+ * indirection is that the *hosted* defaults Daemonic Brain inherited can be measured
  * on the same corpus as the local ones — otherwise the comparison is a leaderboard
  * citation, not a measurement.
  *

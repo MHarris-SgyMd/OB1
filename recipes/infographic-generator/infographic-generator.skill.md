@@ -1,6 +1,6 @@
 ---
 name: infographic-generator
-description: Generate infographic images from any research doc, Open Brain thoughts, or analysis. Auto-chunks content, writes prompts, generates images via Gemini API (free tier), and saves to media/. Use --premium for better text rendering.
+description: Generate infographic images from any research doc, Daemonic Brain thoughts, or analysis. Auto-chunks content, writes prompts, generates images via Gemini API (free tier), and saves to media/. Use --premium for better text rendering.
 ---
 
 # Infographic Generator
@@ -137,8 +137,8 @@ When user says "redo N" or "fix that one" or "redo N premium":
 - Each prompt is independently useful (don't reference other prompts).
 - Default to FREE model. Only use premium when user explicitly asks or when redoing a specific image.
 
-## Open Brain Integration
+## Daemonic Brain Integration
 
 **As source:** Use `search_thoughts` to find content on a topic, synthesize it, then generate infographics from the synthesis.
 
-**As storage:** After generation, capture the prompts to Open Brain with `capture_thought`. This creates a searchable library of visual templates that can be regenerated or adapted in future sessions.
+**As storage:** After generation, capture the prompts to Daemonic Brain with `capture_thought`. This creates a searchable library of visual templates that can be regenerated or adapted in future sessions.

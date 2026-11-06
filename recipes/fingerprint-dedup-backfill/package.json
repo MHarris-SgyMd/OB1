@@ -1,7 +1,7 @@
 {
   "name": "fingerprint-dedup-backfill",
   "version": "1.0.0",
-  "description": "Backfill content fingerprints and remove duplicates from Open Brain thoughts table",
+  "description": "Backfill content fingerprints and remove duplicates from Daemonic Brain thoughts table",
   "type": "module",
   "scripts": {
     "backfill": "node backfill-fingerprints.mjs",

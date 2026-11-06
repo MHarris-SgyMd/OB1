@@ -1,10 +1,10 @@
 # Skills
 
-Reusable AI client skills and prompt packs for Open Brain workflows. These are the canonical home for reusable agent behavior: install the file, reload your client, and reuse the behavior across projects or other contributions.
+Reusable AI client skills and prompt packs for Daemonic Brain workflows. These are the canonical home for reusable agent behavior: install the file, reload your client, and reuse the behavior across projects or other contributions.
 
 | Skill | What It Does | Contributor |
 | ----- | ------------ | ----------- |
-| [Auto-Capture Skill Pack](auto-capture/) | Captures ACT NOW items and session summaries to Open Brain when a session ends | [@jaredirish](https://github.com/jaredirish) |
+| [Auto-Capture Skill Pack](auto-capture/) | Captures ACT NOW items and session summaries to Daemonic Brain when a session ends | [@jaredirish](https://github.com/jaredirish) |
 | [Competitive Analysis Skill Pack](competitive-analysis/) | Builds competitor briefs, pricing comparisons, market maps, and strategic recommendations | [@NateBJones](https://github.com/NateBJones) |
 | [Financial Model Review Skill Pack](financial-model-review/) | Reviews an existing model for assumption quality, structural risk, and scenario gaps | [@NateBJones](https://github.com/NateBJones) |
 | [Deal Memo Drafting Skill Pack](deal-memo-drafting/) | Turns existing diligence materials into structured deal, IC, or partnership memos | [@NateBJones](https://github.com/NateBJones) |

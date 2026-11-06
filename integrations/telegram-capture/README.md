@@ -16,7 +16,7 @@
 
 ## What It Does
 
-Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label (FORK.md change 71; the raw insert it replaced left both NULL; no audit actor either way — the bot holds a shared secret, not an access key). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
+Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label (FORK.md change 71; the raw insert it replaced left both NULL; no audit actor either way — the bot holds a shared secret, not an access key). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; Daemonic Brain's default is 1024).
 
 ---
 
@@ -25,7 +25,7 @@ Runs one HTTP server under Bun as a Telegram bot webhook. Every text message sen
 - A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)'s stack, or any Postgres carrying the schema)
 - A Telegram account (the bot is free)
 - An [OpenRouter](https://openrouter.ai) API key
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - Shell access with `curl` and `openssl`
 
 **Cost**: Telegram is free. OpenRouter embedding + classification is the same as slack-capture, roughly **$0.10–0.30/month** for 20 captures per day.
@@ -377,7 +377,7 @@ OPENROUTER_API_KEY='sk-or-v1-your-openrouter-key' \
 bun integrations/telegram-capture/index.ts
 ```
 
-Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
+Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
 
 Your capture URL will look like:
 

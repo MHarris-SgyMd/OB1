@@ -997,7 +997,7 @@ async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], deriv
   const g = decideCalls(subject, w.cfg, w.cfg.egress);
   if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, ...(await chain()) }; }
   // The vector first, the tags after: an embedder that throws (a provider
-  // answering no vector) fails the edit — the fork's rule, only an egress
+  // answering no vector) fails the edit — Daemonic Brain's rule, only an egress
   // refusal stores a row bare — and paid for no chat call it would have thrown
   // away (tenth review pass). A capture runs the two together because it keeps
   // both; here the second is worth making only once the first is in hand.
@@ -1339,7 +1339,7 @@ function fakeBrain(seed: Record<string, FakeRow>) {
  * `import … from "./x.ts"`, `import "./x.ts"`, `export … from "./x.ts"`, and a
  * dynamic `import("./x.ts")` with a literal specifier — as paths relative to
  * the repository root. A regex over the source, not a
- * bundler: the fork's imports are static relative specifiers with their
+ * bundler: Daemonic Brain's imports are static relative specifiers with their
  * extensions written, which is all this needs to hold the container's mount
  * to what the sync loads (third review pass).
  */

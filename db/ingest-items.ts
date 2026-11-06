@@ -66,11 +66,11 @@ export const ITEM_KEYS = ["identity", "scope", "canonical", "text", "links", "me
 export const REQUIRED_KEYS = ["identity", "scope", "canonical", "text", "links", "mentions", "facets"] as const;
 /**
  * The pipeline's own sources (ingest-records.ts SOURCES — its self-check
- * holds the two lists equal). A file may not claim one: the fork's records
- * have no adapter and their rows are the tree's; `linear` and `markdown` are
- * the adapters' id spaces, where a file's row would land on the board sync's
- * row for a ticket and overwrite it — same id, so `held` never trips (first
- * review pass, run-it); `items` is this flag's name, not a system.
+ * holds the two lists equal). A file may not claim one: Daemonic Brain's
+ * records have no adapter and their rows are the tree's; `linear` and
+ * `markdown` are the adapters' id spaces, where a file's row would land on the
+ * board sync's row for a ticket and overwrite it — same id, so `held` never
+ * trips (first review pass, run-it); `items` is this flag's name, not a system.
  */
 export const RESERVED_SYSTEMS = ["fork", "commit", "linear", "memory", "markdown", "items"] as const;
 /**

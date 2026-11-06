@@ -35,7 +35,8 @@
  *   1. $OB1_ENV_FILE   — explicit, for anything unusual
  *   2. evals/.env      — beside the scripts that use it
  *   3. <repo>/.env     — the obvious place to look
- *   4. deploy/.env     — the fork's existing convention, already gitignored
+ *   4. deploy/.env     — Daemonic Brain's existing convention, already
+ *                        gitignored
  *
  * and none of them when OB1_ENV_FILES=off (deploy/tier.sh's container, whose
  * environment is the stack's and nothing else).

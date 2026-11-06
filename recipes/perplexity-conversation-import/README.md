@@ -1,6 +1,6 @@
 # Perplexity Conversation Import
 
-> **On this fork (SMD-2126).** `import-perplexity.py` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; this fork's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --source items --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2148 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
+> **In Daemonic Brain (SMD-2126).** `import-perplexity.py` reaches the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — and embeds each item itself; Daemonic Brain's stack runs no PostgREST (SETUP.md), so the import fails at its first request (`--dry-run` runs). It becomes an adapter of the ingestion contract — the parser emits items for `bun db/ingest-records.ts --source items --items`, which inserts each row itself with 003's fingerprint function, the audit actor and its `thought_sources` identity (`bun db/reembed.ts` embeds it) — in SMD-2148 (after SMD-2136); the decision for the class is in `docs/vendored-disposition.md`.
 
 <div align="center">
 
@@ -12,7 +12,7 @@
 
 </div>
 
-Import your Perplexity AI search history and memory entries into Open Brain as searchable thoughts.
+Import your Perplexity AI search history and memory entries into Daemonic Brain as searchable thoughts.
 
 ## What It Does
 
@@ -25,7 +25,7 @@ Deduplication via a sync log ensures safe re-runs without duplicates.
 
 ## Prerequisites
 
-- Working Open Brain setup ([getting started guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([getting started guide](../../docs/01-getting-started.md))
 - Perplexity data export (`.xlsx` file)
 - Python 3.10+
 - OpenRouter API key (for embeddings + conversation summarization)

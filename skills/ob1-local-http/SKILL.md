@@ -1,7 +1,7 @@
 ---
 name: ob1-local-http
 description: |
-  Capture, search and browse thoughts in an Open Brain over plain HTTP, with
+  Capture, search and browse thoughts in a brain over plain HTTP, with
   no MCP transport involved. Use this skill where Claude Code's MCP feature
   is disabled or the network blocks remote MCP endpoints, but the brain's
   REST core (`/api` on the brain's origin, as this skill's README says) is
@@ -12,11 +12,11 @@ author: dhanjit
 version: 0.4.0
 ---
 
-# OB1 Local HTTP
+# Daemonic Brain Local HTTP
 
 ## Problem
 
-The canonical Open Brain path is a remote MCP server. In environments that
+The canonical Daemonic Brain path is a remote MCP server. In environments that
 disable MCP entirely -- corporate networks, air-gapped offices, restricted
 Claude Code builds -- that path is not available. This skill replaces it with
 `curl` calls to the brain's REST core, the same operations the MCP tools
@@ -34,7 +34,7 @@ SMD-1800.)
 
 ## When Not to Use
 
-- The environment has a working remote Open Brain MCP connection -- prefer
+- The environment has a working remote Daemonic Brain MCP connection -- prefer
   the canonical MCP-based capture/search tools.
 - The required environment variables `BRAIN_URL` and `BRAIN_KEY` are not set
   on the dev host -- this skill cannot function without them; ask the user to
