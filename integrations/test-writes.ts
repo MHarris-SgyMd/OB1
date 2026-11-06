@@ -45,22 +45,24 @@
  * profile's own row kept out of its sources.
  *
  * SMD-1541 (FORK.md change 103) reads 008's row after every driven capture and
- * edit through change 69's servers (five then; one, agent-memory-api, since
- * SMD-1931 retired the two REST gateways and the two MCP servers). Their
+ * edit through change 69's servers (five then; one, agent-memory-api, from
+ * SMD-1931, which retired the two REST gateways and the two MCP servers, to
+ * SMD-2690, which made it a plugin; smart-ingest since SMD-2128). Their
  * headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
  * for every write through them, as for the raw writes they replaced. It names
  * the key now: `principal.name`, since it authenticates through
- * `_shared/auth.ts` — `MCP_ACCESS_KEY` under this suite's legacy single key —
- * and one write through it runs under a NAMED key too, the arm that tells the
- * principal's name from a constant that spells the legacy key's name. No actor carries a
+ * `_shared/auth.ts` — `MCP_ACCESS_KEY` under this suite's legacy single key.
+ * (A NAMED key's arm, which told the principal's name from a constant that
+ * spells the legacy key's, left with agent-memory-api: the plugins name their
+ * caller through the core, which their suites hold.) No actor carries a
  * source — the trigger (008; its body is 025's now) reads the row's own
  * `metadata.source`, so the column means the thought's origin on every row,
  * and a copy of it in the actor was indistinguishable from that fallback under
  * the mutant run — and every actor names the server as `via`, which the
  * trigger keeps in `actor_context`: the arm that holds the actor object's
- * arrival on every site; the write-back's runtime lands beside it. The
+ * arrival on every site. The
  * `source` column is judged against the thought's own `metadata.source`, which
  * is what the trigger writes when no actor names one: the arm fails for a
  * server that starts naming a source of its own (the first draft's server name
@@ -104,17 +106,17 @@
  * everything below the tool or route boundary is real; test-auth.ts is where
  * the servers start under bun for real.
  *
- * The database is Daemonic Brain's migrations plus three vendored sidecars the
+ * The database is Daemonic Brain's migrations plus two vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
- * beside the function — type, importance, sensitivity_tier …),
- * schemas/agent-memory (the write-back's own tables) and schemas/smart-ingest (the
+ * beside the function — type, importance, sensitivity_tier …) and
+ * schemas/smart-ingest (the
  * ingest server's job tables, SMD-2110) — and the bio worker's log
  * table, `consolidation_log`, from `schemas/entity-extraction/schema.sql`'s
  * definition alone (that sidecar's other tables include a `thought_entities`
  * migration 016 owns). Their tables and
  * functions are dropped before they are applied and again at the end, whether
- * or not the run finished (an aborted run's orphaned agent_memories row made
- * the next run's write-back short-circuit on its idempotency key), because CI
+ * or not the run finished (an aborted run's orphaned rows would meet the next
+ * run's: agent-memory-api's write-back once short-circuited on one), because CI
  * shares one Postgres across the job; the three Supabase roles, and the
  * columns and indexes the enhanced sidecar adds to `thoughts`, stay until the
  * next suite's reset drops the table — nothing a later suite reads.
@@ -132,7 +134,6 @@
  *   ../db/with-postgres.sh bun test-writes.ts
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,7 +158,7 @@ const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
-const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/smart-ingest/schema.sql"];
+const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/smart-ingest/schema.sql"];
 // The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
 // suite still created the three, and since CI ran it before test-tools.ts on one Postgres (until SMD-2311 retired
 // that suite), test-tools' "no Supabase role" probe met them on every run.
@@ -307,20 +308,15 @@ type Handler = (req: Request) => Response | Promise<Response>;
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
-// and smart-ingest, on a constant-time compare, accepts as its only key. And
-// a second, NAMED key in MCP_ACCESS_KEYS, which only the servers on the module
-// know — agent-memory-api is the one this suite drives since SMD-1931, so the
-// arm has one witness: one write through it runs under that key (SMD-1541), the arm that
-// tells `principal.name` on the audit row from a constant that happens to
-// spell the legacy key's name — every other arm runs under the legacy key,
-// whose name smart-ingest's in-place compare records too.
+// and smart-ingest, on a constant-time compare, accepts as its only key, whose
+// name its in-place compare records. No named key: its one witness here,
+// agent-memory-api's write-back (SMD-1541), is the agent-memory plugin since
+// SMD-2690, which names its caller through the core.
 const KEY = "one-write-key-for-every-writer";
-const NAMED_KEY = "a-second-key-with-a-name-of-its-own";
-const NAMED = "named-client";
 process.env.SUPABASE_URL = URL_;
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEY = KEY;
-process.env.MCP_ACCESS_KEYS = `${NAMED}:write:${createHash("sha256").update(NAMED_KEY, "utf8").digest("hex")}`;
+delete process.env.MCP_ACCESS_KEYS;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
 // smart-ingest's upstream address (SMD-2110), read at import: the stub answers at it, and refuses the DSN's paths.
 process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
@@ -468,74 +464,6 @@ function judgeActor(label: string, a: Audit | undefined, via: string, name = "MC
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
 try {
-
-// ── integrations/agent-memory-api ────────────────────────────────────────────
-
-{
-  const F = "integrations/agent-memory-api/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const decision = "We decided to keep the ledger in Postgres and replay it nightly.";
-  const r = await send(h, "POST", "/writeback", {
-    schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-test", runtime: { name: "test" },
-    memory_payload: { decisions: [decision] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
-  });
-  assert(r.status === 200 && Array.isArray(r.json?.memories) && r.json.memories.length === 1, `POST /writeback stores one memory (${r.status})`);
-  const id = await idOf(decision);
-  assert(id !== null, "…and its thought");
-  if (id) {
-    judgeCapture("agent-memory-api writeback", await row(id, decision), decision);
-    const audit = await auditRow(id, "capture");
-    judgeActor("agent-memory-api writeback", audit, "agent-memory-api");
-    assert(audit?.actor_context?.runtime === "test", `…and the runtime that wrote back rides in actor_context (${JSON.stringify(audit?.actor_context)})`);
-    const [m] = await sql`SELECT thought_id FROM agent_memories WHERE content = ${decision}`;
-    assert(m?.thought_id === id, "the memory row points at the thought");
-  }
-  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
-  const decision2 = "We decided the named key writes back too, and the audit row says so.";
-  const named = await send(h, "POST", "/writeback", {
-    schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-test", runtime: { name: "test" },
-    memory_payload: { decisions: [decision2] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
-  }, NAMED_KEY);
-  assert(named.status === 200, `a named write key (MCP_ACCESS_KEYS) writes back (${named.status})`);
-  const nid = await idOf(decision2);
-  assert(nid !== null, "…and its thought");
-  if (nid) judgeActor("agent-memory-api writeback under a named key", await auditRow(nid, "capture"), "agent-memory-api", NAMED);
-
-  // The read and review routes, on the shim (SMD-1798): the recall through match_thoughts, the trace it leaves, its
-  // usage, the listings and the review — every route the server has.
-  const health = await send(h, "GET", "/health");
-  assert(health.status === 200 && health.json?.ok === true, `GET /health (${health.status})`);
-  const [{ id: memoryId }] = await sql`SELECT id FROM agent_memories WHERE content = ${decision}`;
-  const recallBody = { schema_version: "openbrain.agent_memory.recall.v1", workspace_id: "ws-test", runtime: { name: "test" }, query: decision, scope: { visibility: "personal", project_only: false }, limits: { max_items: 5 } };
-  const recall = await send(h, "POST", "/recall", recallBody);
-  const recalled = ((recall.json?.memories ?? []) as { memory_id: string }[]).map((m) => m.memory_id); // responseMemory's shape
-  assert(recall.status === 200 && UUID.test(String(recall.json?.request_id)) && recalled.includes(memoryId),
-    `POST /recall under a write key: the query embedded through the stub, match_thoughts on the shim, the written-back memory ranked and a trace stored (${recall.status}: ${recall.json?.error ?? recalled.length + " memories"})`);
-  const requestId = String(recall.json?.request_id);
-  const trace = await send(h, "GET", `/recall-traces/${requestId}`);
-  const items = (trace.json?.items ?? []) as { memory_id: string; agent_memories: { id: string } | null }[];
-  assert(trace.status === 200 && trace.json?.trace?.request_id === requestId && items.some((i) => i.memory_id === memoryId && i.agent_memories?.id === memoryId),
-    `GET /recall-traces/:request_id: the trace and its items, each with the memory embedded (${trace.status}: ${trace.json?.error ?? items.length + " items"})`);
-  const usage = await send(h, "POST", `/recall/${requestId}/usage`, { used_memory_ids: [memoryId], ignored: [] });
-  const [{ used }] = await sql`SELECT used FROM agent_memory_recall_items WHERE memory_id = ${memoryId} AND trace_id = (SELECT id FROM agent_memory_recall_traces WHERE request_id = ${requestId})`;
-  assert(usage.status === 200 && usage.json?.ok === true && used === true, `POST /recall/:request_id/usage marks the memory used, in the row (${usage.status}: ${used})`);
-  const list = await send(h, "GET", "/memories?workspace_id=ws-test&limit=10");
-  assert(list.status === 200 && list.json?.count >= 2 && ((list.json?.memories ?? []) as { memory_id: string }[]).some((m) => m.memory_id === memoryId), `GET /memories lists the workspace's memories (${list.status}: ${list.json?.count})`);
-  const byRuntime = await send(h, "GET", "/memories?workspace_id=ws-test&runtime_name=nobody");
-  assert(byRuntime.status === 200 && byRuntime.json?.count === 0, `…filtered by runtime (${byRuntime.json?.count})`);
-  const review = await send(h, "GET", "/memories/review?workspace_id=ws-test");
-  assert(review.status === 200 && Array.isArray(review.json?.memories), `GET /memories/review answers the pending list (${review.status})`);
-  const one = await send(h, "GET", `/memories/${memoryId}`);
-  assert(one.status === 200 && one.json?.memory?.id === memoryId && Array.isArray(one.json?.memory?.agent_memory_source_refs) && Array.isArray(one.json?.memory?.agent_memory_artifacts),
-    `GET /memories/:id, its two one-to-many embeds as arrays (${one.status}: ${one.json?.error ?? Object.keys(one.json?.memory ?? {}).length + " keys"})`);
-  const reviewed = await send(h, "PATCH", `/memories/${memoryId}/review`, { action: "mark_stale", notes: "driven" });
-  const [{ n: actions }] = await sql`SELECT count(*)::int AS n FROM agent_memory_review_actions WHERE memory_id = ${memoryId}`;
-  assert(reviewed.status === 200 && reviewed.json?.memory?.review_status === "stale" && reviewed.json?.memory?.lifecycle_status === "stale" && actions === 1,
-    `PATCH /memories/:id/review marks it stale and records the action (${reviewed.status}: ${reviewed.json?.error ?? reviewed.json?.memory?.review_status}; ${actions} action)`);
-  const staleOut = await send(h, "POST", "/recall", recallBody);
-  assert(staleOut.status === 200 && !((staleOut.json?.memories ?? []) as { memory_id: string }[]).some((m) => m.memory_id === memoryId), "…and a recall no longer returns it without include_stale");
-}
 
 // ── integrations/consolidation-workers/metadata-norm (SMD-1798) ──────────────
 
@@ -850,28 +778,6 @@ try {
   for (const label of labels) kindsBefore.push(...(await sql`SELECT label, kind FROM ob1_agents WHERE label = ${label}`) as { label: string; kind: string | null }[]);
   for (const label of labels) await sql`SELECT set_agent_kind(${label}, 'operator')`;
   try {
-    // agent-memory-api's POST /writeback.
-    {
-      const h = await load("integrations/agent-memory-api/index.ts");
-      const decision = "We decided the ledger is replayed from the import, declared ingested.";
-      const r = await send(h, "POST", "/writeback", {
-        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "ingested",
-        memory_payload: { decisions: [decision] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
-      });
-      const plain = "We decided the runtime keeps its own cache, trust undeclared.";
-      const p2 = await send(h, "POST", "/writeback", {
-        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" },
-        memory_payload: { decisions: [plain] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
-      });
-      const offLadder = "We decided nothing, declaring a word off the ladder.";
-      const bad = await send(h, "POST", "/writeback", {
-        schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-trust", runtime: { name: "test" }, trust: "root",
-        memory_payload: { decisions: [offLadder] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
-      });
-      assert(r.status === 200 && await trustOf(decision) === "ingested" && p2.status === 200 && await trustOf(plain) === "operator",
-        `agent-memory-api's /writeback forwards the runtime's trust to each memory's thought, the key's when undeclared (${r.status}; ${await trustOf(decision)}, ${await trustOf(plain)})`);
-      assert(bad.status === 400 && await trustOf(offLadder) === null, `…and refuses a word off the ladder (${bad.status}; first review pass)`);
-    }
     // smart-ingest: an ingest executed at once, and a dry run executed later — the job carries the declaration.
     {
       const h = await load("integrations/smart-ingest/index.ts");
@@ -928,15 +834,14 @@ for (const [file, readme] of [["recipes/vercel-neon-telegram/src/lib/db.ts", "re
 }
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
-const DRIVEN = ["integrations/agent-memory-api/index.ts", BIO, // repo-learning-coach's brain.ts retired (SMD-2923)
+const DRIVEN = [BIO, // repo-learning-coach's brain.ts retired (SMD-2923), agent-memory-api is the agent-memory plugin (SMD-2690)
   "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["recipes/editorial-policy/auditor/index.ts", BIO]; // readwise-capture is the readwise plugin since SMD-2690
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
-const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
-  "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128
+const DRIVEN_1541 = ["integrations/smart-ingest/index.ts"]; // passes the actor since SMD-2128; change 69's last server that held a key, agent-memory-api, is the agent-memory plugin since SMD-2690
 // Every vendored .ts, read once; each ticket's rule tests the same texts. The suites beside the install in
 // integrations/ (here since SMD-3747) are not vendored servers: they name the tickets they test.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]

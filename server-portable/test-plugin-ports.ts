@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 /**
  * test-plugin-ports.ts — the extensions ported to plugins (SMD-2311) and the
- * vendored integrations ported since (SMD-2690: readwise, with its webhook), each
+ * vendored integrations ported since (SMD-2690: readwise, with its webhook, and
+ * agent-memory), each
  * against real Postgres through both servers: the migrator makes each
  * plugin's tables in its own schema, owned by its own role, and every
  * operation answers through the REST core and through the MCP server (a
@@ -11,7 +12,8 @@
  * extensions/test-tools.ts drove the standalone servers' tools (until the
  * last became a plugin, SMD-2311): each filter on its own, each refusal, what
  * a write stored and what a read chose; readwise's, its webhook through the
- * REST core as Readwise posts to it.
+ * REST core as Readwise posts to it; agent-memory's, its write-backs and recalls
+ * through the core's capture and search, the provider stubbed down once.
  *
  * The drift guard: every tool a write key's tools/list shows for a ported
  * plugin is driven here, and nothing else, so an operation added to one fails
@@ -30,6 +32,7 @@ import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hmacSha256Hex, keepItemPriority, keepRowItem } from "./plugin-sdk.ts";
 import { BODY_MAX, isoTime, LEASE_S, LIMITS } from "../plugins/readwise/index.ts";
+import { LIMITS as AM_LIMITS } from "../plugins/agent-memory/index.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -42,7 +45,7 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 /** The learning path's plugins, the six SMD-2311 ported and any extension since (extensions/_template/AGENT_SPEC.md), and the vendored integrations SMD-2690 ports: each turned on for the migrator here, its section below drives it. */
-const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt", "readwise"] as const;
+const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt", "readwise", "agent-memory"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 
 const { assert, report } = createAssert();
@@ -70,11 +73,14 @@ console.log(`\n[1] The migrator makes each ported plugin's tables in its own sch
 
 // ── Both servers, the ported plugins enabled, over this database ─────────────
 const STUB_BASE = "https://stub.invalid/v1";
+/** The embedding provider answering 503, as one that is down (agent-memory's section sets it). */
+let embedDown = false;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
     if (url.endsWith("/embeddings")) {
+      if (embedDown) return new Response("down", { status: 503 });
       const v = new Array(EMBEDDING_DIM).fill(0);
       v[0] = 1;
       return Response.json({ data: [{ embedding: v }] });
@@ -3002,6 +3008,206 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     await sql`DELETE FROM thoughts WHERE id = ${broken.id}`;
   } finally {
     await copy.close();
+  }
+}
+
+// ── plugins/agent-memory ─────────────────────────────────────────────────────
+
+console.log("\n[agent-memory] write-back through capture_thought, recall through search_thoughts, the trace, usage and review");
+{
+  const am = (key: string, input: Body, opts: { as?: string; door?: "rest" | "mcp" } = {}) => call("agent-memory", key, input, opts);
+  type Mem = {
+    memory_id: string; thought_id: string | null; memory_type: string; content: string; summary: string; review_status: string; lifecycle_status: string;
+    use_policy: { can_use_as_instruction: boolean; can_use_as_evidence: boolean; requires_user_confirmation: boolean };
+    scope: { visibility: string; project_id: string | null }; provenance: { status: string }; related_artifacts: { kind: string; uri: string }[];
+  };
+  const mems = (r: { body: Body }) => (r.body.memories ?? []) as Mem[];
+  const ids = (r: { body: Body }) => mems(r).map((m) => m.memory_id);
+  const rows = async (table: string) => (await one<{ n: number }>(sql.unsafe(`SELECT count(*)::int AS n FROM plugin_agent_memory.${table}`))).n;
+  const thoughtOf = (id: string | null) => one<{ source: string; ws: string; type: string; runtime: string; actor: string | null; vector: boolean } | undefined>(sql`
+    SELECT t.metadata->>'source' AS source, t.metadata->>'agent_memory_workspace' AS ws, t.metadata->>'agent_memory_type' AS type,
+           t.metadata->>'agent_memory_runtime' AS runtime, t.embedding IS NOT NULL AS vector,
+           (SELECT a.actor_name FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.seq LIMIT 1) AS actor
+      FROM thoughts t WHERE t.id = ${id}::uuid`);
+  const WB = "openbrain.agent_memory.writeback.v1";
+  const base = { schema_version: WB, workspace_id: "ws-am", project_id: "proj-a", task_id: "task-1", runtime: { name: "codex", version: "1.0" } };
+  const firstBody = {
+    ...base,
+    models_used: [{ provider: "openai", model: "gpt-x", role: "worker" }],
+    source_refs: [{ kind: "doc", uri: "https://docs.example/a", title: "A", timestamp: "2026-11-05T10:00:00Z" }, { kind: "chat", timestamp: "not a time" }],
+    memory_payload: {
+      decisions: ["am_ledger keeps the ledger in Postgres."], lessons: ["am_ledger replays nightly."], next_steps: ["am_ledger gets a dashboard."],
+      artifacts: [{ kind: "pr", uri: "https://git.example/pr/1", description: "am_ledger's PR" }, { kind: "doc", uri: "https://docs.example/am_ledger" }],
+    },
+  };
+
+  // ── The write-back ──
+  const first = await am("writeback", firstBody);
+  const w = mems(first);
+  assert(first.status === 200 && first.body.schema_version === "openbrain.agent_memory.writeback_response.v1" && w.map((m) => m.memory_type).join() === "decision,lesson,work_log,artifact_reference,artifact_reference",
+    `writeback: one memory per item, in the old server's order (${first.status} ${JSON.stringify(first.body).slice(0, 200)})`);
+  assert(w[2]?.content === "Next step: am_ledger gets a dashboard." && w[3]?.content === "pr: am_ledger's PR\nhttps://git.example/pr/1"
+    && w[4]?.content === "doc: https://docs.example/am_ledger\nhttps://docs.example/am_ledger",
+    `…a next step a work_log, an artifact its kind, description (or uri) and uri (${JSON.stringify(w.map((m) => m.content))})`);
+  assert(w.length === 5 && w.every((m) => m.review_status === "pending" && m.use_policy.can_use_as_evidence && !m.use_policy.can_use_as_instruction && m.use_policy.requires_user_confirmation
+    && m.scope.visibility === "project" && m.provenance.status === "generated" && UUID.test(m.thought_id ?? "")),
+    `…each waiting for review, evidence alone, project-visible, a thought of its own (${JSON.stringify(w.map((m) => [m.review_status, m.scope.visibility, m.thought_id]))})`);
+  assert(JSON.stringify(w.map((m) => m.related_artifacts.map((a) => a.uri))) === JSON.stringify([[], [], [], ["https://git.example/pr/1"], ["https://docs.example/am_ledger"]]),
+    `…each artifact_reference with its own artifact alone, the others none (${JSON.stringify(w.map((m) => m.related_artifacts.length))})`);
+  const th = await thoughtOf(w[0]?.thought_id ?? null);
+  assert(th?.source === "agent-memory" && th.ws === "ws-am" && th.type === "decision" && th.runtime === "codex" && th.actor === "writer",
+    `…its thought captured through the core: source agent-memory, the agent_memory_* keys, the caller's key on its audit row (${JSON.stringify(th)})`);
+  const refs = (await sql`SELECT source_kind, source_timestamp FROM plugin_agent_memory.source_refs WHERE memory_id = ${w[0]?.memory_id}::uuid ORDER BY source_kind`) as { source_kind: string; source_timestamp: Date | null }[];
+  assert(refs.length === 2 && refs[0].source_kind === "chat" && refs[0].source_timestamp === null && refs[1].source_timestamp?.toISOString() === "2026-11-05T10:00:00.000Z",
+    `…each source ref beside it, a time that is no time stored as none (${JSON.stringify(refs)})`);
+  const [memoriesBefore, refsBefore] = [await rows("memories"), await rows("source_refs")];
+  const again = await am("writeback", firstBody);
+  assert(again.status === 200 && ids(again).join() === ids(first).join() && (await rows("memories")) === memoriesBefore && (await rows("source_refs")) === refsBefore,
+    "the same write-back again answers the memories it wrote and writes nothing");
+
+  // A capture key writes back (over MCP here): a person's confirmation, OpenClaw's alias.
+  const conf = await am("writeback", {
+    schema_version: "openbrain.openclaw.writeback.v1", workspace_id: "ws-am", project_id: "proj-a", runtime: { name: "openclaw" }, trust: "ingested",
+    provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false }, memory_payload: { constraints: ["am_ledger never drops rows."] },
+  }, { as: KEYS.capture, door: "mcp" });
+  const c = mems(conf)[0];
+  assert(conf.status === 200 && conf.body.schema_version === "openbrain.openclaw.writeback_response.v1" && c?.review_status === "confirmed" && c.use_policy.can_use_as_instruction
+    && !c.use_policy.requires_user_confirmation && c.provenance.status === "user_confirmed",
+    `a capture key writes back; user_confirmed without review is confirmed at once, usable as an instruction; OpenClaw's alias answered in kind (${JSON.stringify(conf.body).slice(0, 200)})`);
+  assert((await thoughtOf(c?.thought_id ?? null))?.actor === "capturer", "…its thought's audit row names the capture key");
+  const personal = mems(await am("writeback", { schema_version: WB, workspace_id: "ws-am", runtime: { name: "codex" }, provenance: { default_status: "imported", requires_review: false }, memory_payload: { lessons: ["am_ledger personal note."] } }))[0];
+  const otherProject = mems(await am("writeback", { ...base, project_id: "proj-b", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger in project b."] } }))[0];
+  const otherWorkspace = mems(await am("writeback", { ...base, workspace_id: "ws-other", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger keeps the ledger in Postgres."] } }))[0];
+  assert(personal?.scope.visibility === "personal" && personal.review_status === "confirmed" && otherProject?.scope.project_id === "proj-b",
+    "a memory with no project is personal; imported without review is confirmed");
+  assert(otherWorkspace?.thought_id === w[0]?.thought_id && otherWorkspace?.memory_id !== w[0]?.memory_id,
+    "the same text in another workspace is a memory of its own on the one thought the core keeps for that text");
+
+  // The refusals.
+  const idem = { ...base, workspace_id: "ws-idem", idempotency_key: "am-key-1" };
+  const alpha = await am("writeback", { ...idem, memory_payload: { decisions: ["am_ledger alpha."] } });
+  const beta = await am("writeback", { ...idem, memory_payload: { decisions: ["am_ledger beta."] } });
+  const alphaAgain = await am("writeback", { ...idem, memory_payload: { decisions: ["am_ledger alpha."] } });
+  assert(alpha.status === 200 && beta.status === 409 && beta.body.code === "IDEMPOTENCY_KEY_REUSED" && beta.body.retryable === false && beta.body.idempotency_key === "am-key-1:0"
+    && !JSON.stringify(beta.body).includes("alpha") && alphaAgain.status === 200 && ids(alphaAgain).join() === ids(alpha).join(),
+    `an idempotency key holding other text is refused, naming the key and not the text; the same text answers its memory (${beta.status} ${JSON.stringify(beta.body)})`);
+  const beforeUnsafe = await rows("memories");
+  const unsafe = await am("writeback", { ...base, memory_payload: { decisions: ["am_ledger is fine."], lessons: [`am_ledger uses sk-${"a".repeat(24)}`] } });
+  const rejected = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_rejected' AND workspace_id = 'ws-am'`);
+  assert(unsafe.status === 422 && unsafe.body.code === "UNSAFE_WRITEBACK" && JSON.stringify(unsafe.body.unsafe) === JSON.stringify([{ reason: "api_key", memory_type: "lesson" }])
+    && (await rows("memories")) === beforeUnsafe && rejected.n === 1,
+    `a write-back with an unsafe memory is refused whole, saying why, nothing written but its audit row (${unsafe.status} ${JSON.stringify(unsafe.body)})`);
+  const none = await am("writeback", { ...base, memory_payload: {} });
+  const badVersion = await am("writeback", { ...base, schema_version: "openbrain.agent_memory.writeback.v2", memory_payload: { decisions: ["x"] } });
+  const tooLong = await am("writeback", { ...base, memory_payload: { decisions: ["x".repeat(AM_LIMITS.memory + 1)] } });
+  assert(none.status === 400 && none.body.code === "NO_MEMORIES" && badVersion.status === 400 && badVersion.body.code === "REFUSED_INPUT" && tooLong.status === 400 && tooLong.body.code === "REFUSED_INPUT",
+    `no memory, an unknown version and a memory past its bound are refused (${none.status} ${none.body.code}, ${badVersion.status}, ${tooLong.status})`);
+
+  // ── The recall ──
+  const RC = "openbrain.agent_memory.recall.v1";
+  const rq = (over: Body = {}) => ({ schema_version: RC, workspace_id: "ws-am", project_id: "proj-a", query: "what am_ledger does", ...over });
+  const plain = await am("recall", rq(), { as: KEYS.reader });
+  assert(plain.status === 200 && plain.body.schema_version === "openbrain.agent_memory.recall_response.v1" && plain.body.request_id === null && ids(plain).join() === c?.memory_id,
+    `recall under a read key: the project's confirmed memories alone, nothing traced (${plain.status} ${JSON.stringify(plain.body).slice(0, 200)})`);
+  const all = await am("recall", rq({ scope: { include_unconfirmed: true } }), { as: KEYS.reader });
+  assert(all.status === 200 && ids(all)[0] === c?.memory_id && ids(all).slice(1).sort().join() === ids(first).sort().join(),
+    `…with include_unconfirmed, those waiting too, the confirmed one ranked first (${JSON.stringify(mems(all).map((m) => [m.memory_type, m.review_status]))})`);
+  const wide = await am("recall", rq({ scope: { project_only: false, visibility: "personal" } }), { as: KEYS.reader });
+  assert([c?.memory_id, otherProject?.memory_id, personal?.memory_id].every((id) => ids(wide).includes(id!)) && !ids(wide).includes(otherWorkspace!.memory_id),
+    `…project_only false the workspace's other projects, visibility personal its personal memories, never another workspace's (${ids(wide).length})`);
+  const capped = await am("recall", rq({ scope: { include_unconfirmed: true }, limits: { max_items: 2 } }), { as: KEYS.reader });
+  const elsewhere = await am("recall", rq({ workspace_id: "ws-other", schema_version: "openbrain.openclaw.recall.v1" }), { as: KEYS.reader });
+  assert(ids(capped).length === 2 && ids(elsewhere).join() === otherWorkspace?.memory_id && elsewhere.body.schema_version === "openbrain.openclaw.recall_response.v1",
+    `…max_items caps it; another workspace recalls its own memory of the shared thought, OpenClaw's alias answered in kind (${ids(capped).length}, ${ids(elsewhere).join()})`);
+  const traced = await rest("POST", "/v1/plugins/agent-memory/recall", rq({ scope: { include_unconfirmed: true } }), KEYS.writer);
+  const requestId = String(traced.body.request_id);
+  const items = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.recall_items i JOIN plugin_agent_memory.recall_traces t ON t.id = i.trace_id WHERE t.request_id = ${requestId}::uuid`);
+  assert(traced.status === 200 && UUID.test(requestId) && ids(traced).join() === ids(all).join() && items.n === ids(all).length,
+    `recall under a write key is traced: its request_id, an item per memory returned (${traced.status} ${requestId}, ${items.n})`);
+
+  // ── Usage and the trace ──
+  const usage = await am("record_usage", { request_id: requestId, used_memory_ids: [c!.memory_id, NO_ROW], ignored: [{ memory_id: w[0]!.memory_id, reason: "stale already" }] });
+  const noTrace = await am("record_usage", { request_id: NO_ROW, used_memory_ids: [c!.memory_id] });
+  assert(usage.status === 200 && JSON.stringify(usage.body.recorded) === JSON.stringify({ used: 1, ignored: 1 }) && noTrace.status === 404 && noTrace.body.code === "NO_SUCH_RECALL",
+    `record_usage marks the recall's memories, a memory it did not return changing nothing; an unknown request_id is refused (${JSON.stringify(usage.body)}, ${noTrace.status})`);
+  const trace = await am("get_recall", { request_id: requestId }, { as: KEYS.reader });
+  const its = (trace.body.items ?? []) as { rank: number; used: boolean | null; ignored_reason: string | null; memory: Mem }[];
+  const by = new Map(its.map((i) => [i.memory.memory_id, i]));
+  assert(trace.status === 200 && trace.body.trace?.request_id === requestId && trace.body.trace?.query === "what am_ledger does" && its.map((i) => i.rank).join() === its.map((_, n) => n + 1).join()
+    && by.get(c!.memory_id)?.used === true && by.get(w[0]!.memory_id)?.used === false && by.get(w[0]!.memory_id)?.ignored_reason === "stale already" && by.get(w[1]!.memory_id)?.used === null,
+    `get_recall: what was asked, each memory in rank order, used, ignored with why, or not said (${trace.status} ${JSON.stringify(its.map((i) => [i.rank, i.used]))})`);
+  assert((await am("get_recall", { request_id: NO_ROW }, { as: KEYS.reader })).body.code === "NO_SUCH_RECALL", "…an unknown request_id refused");
+
+  // ── The lists ──
+  const queue = await am("review_queue", { workspace_id: "ws-am" }, { as: KEYS.reader });
+  const queueB = await am("review_queue", { workspace_id: "ws-am", project_id: "proj-b" }, { as: KEYS.reader });
+  assert(queue.status === 200 && ids(queue).sort().join() === ids(first).sort().join() && mems(queue).every((m) => m.review_status === "pending") && ids(queueB).length === 0,
+    `review_queue: the workspace's memories waiting for review alone, a project's when named (${ids(queue).length}, ${ids(queueB).length})`);
+  const list = async (f: Body) => ids(await am("list_memories", { workspace_id: "ws-am", ...f }, { as: KEYS.reader }));
+  assert((await list({ memory_type: "work_log" })).join() === w[2]?.memory_id && (await list({ runtime_name: "openclaw" })).join() === c?.memory_id
+    && (await list({ task_id_prefix: "task-", project_id: "proj-a" })).sort().join() === ids(first).sort().join()
+    && (await list({ review_status: "confirmed" })).length === 3 && (await list({ limit: 1 })).length === 1,
+    "list_memories: by kind, runtime, task prefix and project, review status, and limit");
+  const counted = await am("list_memories", { workspace_id: "ws-am", lifecycle_status: "active", limit: 200 }, { as: KEYS.reader });
+  assert(counted.body.count === mems(counted).length && counted.body.count === 8, `…count is how many it answered (${counted.body.count})`);
+  const got = await am("get_memory", { memory_id: w[0]!.memory_id }, { as: KEYS.reader });
+  assert(got.status === 200 && got.body.memory?.memory_id === w[0]?.memory_id && got.body.source_refs?.length === 2 && got.body.source_refs.some((r: Body) => r.timestamp === "2026-11-05T10:00:00.000Z")
+    && JSON.stringify(got.body.models_used) === JSON.stringify([{ provider: "openai", model: "gpt-x", role: "worker" }]) && got.body.relations?.length === 0,
+    `get_memory: the memory, its sources, its models and its relations (${JSON.stringify(got.body).slice(0, 200)})`);
+  assert((await am("get_memory", { memory_id: NO_ROW }, { as: KEYS.reader })).body.code === "NO_SUCH_MEMORY", "…an unknown id refused");
+
+  // ── Review ──
+  const review = (memory_id: string, f: Body) => am("review_memory", { memory_id, ...f });
+  const confirmed = await review(w[1]!.memory_id, { action: "confirm", actor_label: "Maintainer", notes: "checked" });
+  const action = await one<{ actor_id: string; actor_label: string; was: string; now: string }>(sql`
+    SELECT actor_id, actor_label, before->>'review_status' AS was, after->>'review_status' AS now FROM plugin_agent_memory.review_actions WHERE memory_id = ${w[1]!.memory_id}::uuid`);
+  assert(confirmed.status === 200 && confirmed.body.memory?.review_status === "confirmed" && confirmed.body.memory?.provenance?.status === "user_confirmed" && confirmed.body.memory?.use_policy?.can_use_as_instruction === true
+    && action?.actor_id === "writer" && action.actor_label === "Maintainer" && action.was === "pending" && action.now === "confirmed",
+    `confirm: user_confirmed, usable as an instruction, the review kept with the key's name and the memory before and after (${JSON.stringify(action)})`);
+  const edited = await review(w[0]!.memory_id, { action: "edit", content: "am_ledger keeps the ledger in Postgres, replayed hourly.", summary: "Postgres, hourly" });
+  const em = edited.body.memory as Mem | undefined;
+  assert(edited.status === 200 && em?.content === "am_ledger keeps the ledger in Postgres, replayed hourly." && em.summary === "Postgres, hourly" && UUID.test(em.thought_id ?? "") && em.thought_id !== w[0]?.thought_id
+    && (await thoughtOf(w[0]!.thought_id))?.source === "agent-memory" && ids(await am("list_memories", { workspace_id: "ws-other" }, { as: KEYS.reader })).length === 1
+    && mems(await am("list_memories", { workspace_id: "ws-other" }, { as: KEYS.reader }))[0]?.thought_id === w[0]?.thought_id,
+    `edit: the new text captured as a thought of its own the memory now names; the old thought, another workspace's memory's too, left as it was (${JSON.stringify(em).slice(0, 160)})`);
+  const nothing = await review(w[0]!.memory_id, { action: "edit" });
+  const self = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[2]!.memory_id });
+  const missing = await review(w[2]!.memory_id, { action: "merge", related_memory_id: NO_ROW });
+  const gone = await review(NO_ROW, { action: "confirm" });
+  assert(nothing.body.code === "NOTHING_TO_CHANGE" && self.body.code === "SAME_MEMORY" && missing.status === 404 && missing.body.code === "NO_SUCH_MEMORY" && gone.body.code === "NO_SUCH_MEMORY",
+    `refused: an edit with nothing to change, a merge into itself or into nothing, a memory that is not there (${nothing.body.code}, ${self.body.code}, ${missing.body.code}, ${gone.body.code})`);
+  const merged = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[3]!.memory_id });
+  const rel = (await am("get_memory", { memory_id: w[3]!.memory_id }, { as: KEYS.reader })).body.relations as Body[];
+  assert(merged.status === 200 && JSON.stringify(rel) === JSON.stringify([{ from_memory_id: w[2]!.memory_id, to_memory_id: w[3]!.memory_id, relation: "merged_into" }]),
+    `merge: the relation recorded, read from either end (${JSON.stringify(rel)})`);
+  const restricted = await review(w[3]!.memory_id, { action: "restrict_scope" });
+  const rejectedB = await review(otherProject!.memory_id, { action: "reject" });
+  assert(restricted.body.memory?.review_status === "restricted" && restricted.body.memory?.scope?.visibility === "personal"
+    && rejectedB.body.memory?.lifecycle_status === "rejected" && rejectedB.body.memory?.use_policy?.can_use_as_evidence === false && rejectedB.body.memory?.use_policy?.can_use_as_instruction === false,
+    "restrict_scope: personal by default; reject: used for neither");
+  await review(c!.memory_id, { action: "mark_stale" });
+  const afterStale = await am("recall", rq(), { as: KEYS.reader });
+  const withStale = await am("recall", rq({ scope: { include_stale: true } }), { as: KEYS.reader });
+  assert(!ids(afterStale).includes(c!.memory_id) && ids(afterStale).includes(w[1]!.memory_id) && ids(withStale).includes(c!.memory_id),
+    `mark_stale: recall leaves it out unless include_stale; the memory confirmed above is recalled now (${ids(afterStale).length}, ${ids(withStale).length})`);
+  const disputed = await review(w[1]!.memory_id, { action: "dispute" });
+  assert(disputed.body.memory?.lifecycle_status === "disputed" && disputed.body.memory?.provenance?.status === "disputed" && disputed.body.memory?.use_policy?.can_use_as_instruction === false,
+    "dispute: disputed, never an instruction");
+
+  // ── The embedding provider down ──
+  embedDown = true;
+  try {
+    const down = await am("recall", rq({ query: "am_ledger while the provider is away" }), { as: KEYS.reader });
+    const sc = down.viaMcp.result?.structuredContent;
+    assert(down.status === 503 && down.body.code === "PROVIDER_UNAVAILABLE" && down.body.retryable === true && down.body.base === STUB_BASE
+      && down.viaMcp.result?.isError === true && sc?.code === "PROVIDER_UNAVAILABLE" && sc?.retryable === true,
+      `recall while the provider does not answer: 503 PROVIDER_UNAVAILABLE, retryable, on REST and on MCP (${down.status} ${JSON.stringify(down.body)}; ${JSON.stringify(sc)})`);
+    const kept = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger was written back while the provider was away."] } });
+    const k = mems(kept)[0];
+    assert(kept.status === 200 && k?.review_status === "pending" && (await thoughtOf(k.thought_id))?.vector === false,
+      `writeback while the provider does not answer: the memory kept, its thought without a vector for the mender (${kept.status} ${JSON.stringify(kept.body).slice(0, 160)})`);
+  } finally {
+    embedDown = false;
   }
 }
 

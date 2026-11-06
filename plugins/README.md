@@ -4,6 +4,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 
 | Plugin | What it does |
 | --- | --- |
+| [agent-memory](agent-memory/) | An agent runtime's governed memory: write back what a task decided and learnt (each memory a thought, waiting for review unless a person confirmed it), recall a workspace's memories by meaning ranked by provenance and review, record which were used, and review them. Ported from the Agent Memory API integration's server and the Agent Memory schema (SMD-2690) |
 | [example](example/) | The fullest example: a read operation over the core, notes pinned to thoughts in a table of its own, a GUI page and a webhook. An extension's plugin starts from [extensions/_template/plugin/](../extensions/_template/plugin/) |
 | [family-calendar](family-calendar/) | The household's members, their weekly and dated activities, and the dates to remember: the learning path's Extension 3 (SMD-2311) |
 | [home-maintenance](home-maintenance/) | The house's maintenance tasks, what is due or overdue, and the log of work done: the learning path's Extension 2 (SMD-2311) |
@@ -70,7 +71,7 @@ Checked when the server starts, so a malformed manifest stops it:
 - A GET's or a DELETE's other input fields ride the query string: each is text, a number, a boolean (an enum or a format of one is fine), or a list of text defaulted to `[]`, with a name of letters, digits, `_`, `.` and `-`. A query string carries no null, no empty list and no object, and reads back text, so a nullable, a union, a list of numbers or an object is a POST's or a PATCH's body field. So is a path or query field with a step that takes a value of any type (a coerce, a catch, a preprocess): the URL would carry its client's value back as another.
 - An input schema is one JSON Schema can state (no date, bigint or map): tools/list shows it. A transform, a codec, an async refinement or (in a body) a preprocess gives its value once, on either server; the MCP server's SDK validates with the steps too, so keep them free of side effects. A path or query value holding a lone surrogate, or a GET's query past 16 KB, is no URL: send such text in a POST's body.
 - An output schema does not transform: MCP holds the answer to it a second time.
-- A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
+- A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable: it is the operation's answer to this input. The one retryable refusal is a 503, for a service the plugin needs that did not answer (the core's embedding provider: a search's or a capture's `vectorFailed`), so the same call may succeed later (SMD-1992).
 
 Held by check 31 of `scripts/check-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
 

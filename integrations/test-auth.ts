@@ -107,7 +107,9 @@ const LEGACY_KEY = "old-style-key";
 const FORWARD_KEY = "f".repeat(64);
 const KEYS = [`laptop:write:${hashKey(WRITE_KEY)}`, `chatgpt:read:${hashKey(READ_KEY)}`].join(",");
 
-type Kind = "rest" | "worker";
+// The HTTP APIs' kind, its routes and its read probe, left with the last of them, agent-memory-api, which is the
+// agent-memory plugin since SMD-2690; its route classifier (RPC_READS, LOG_TABLES) went with it.
+type Kind = "worker";
 type Server = {
   /** Relative to the repository root. */
   file: string;
@@ -117,12 +119,7 @@ type Server = {
   legacy: string;
   /** What SUPABASE_URL must look like: the SQL shim wants postgres:// (every server is on it since SMD-1798). */
   url: string;
-  /** HTTP: "METHOD /path". A worker has one operation, gated by dry_run. */
-  reads: string[];
-  writes: string[];
-  /** HTTP: a read route that answers before any query — proof a read key passes the gate. */
-  readProbe?: string;
-  /** Worker: where dry_run is said. */
+  /** Where dry_run is said: a worker has one operation, gated by it. */
   dryRun?: "query" | "body";
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
@@ -130,32 +127,26 @@ type Server = {
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
 const PG_REFUSED = "postgres://ob1:stub@127.0.0.1:1/ob1";
-const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
-  ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
+const vendored = (file: string, kind: Kind, o: Partial<Server> = {}): Server =>
+  ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, ...o });
 // To add a server: one entry below — `url` PG_REFUSED when a handler queries
 // before it can answer (every server is on the SQL shim since SMD-1798; the
-// HTTPS stubs supabase-js took went with it); `kind` picks the assertions; a REST server
-// lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
-// and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
-// reads may call; a package.json of the server's own folder for a new npm package, with a
+// HTTPS stubs supabase-js took went with it); a worker needs `dryRun` and
+// `unconfigured`. Then, as needed: a package.json of the server's own folder for a new npm package, with a
 // `bun install --frozen-lockfile` step for that folder in each brain-checks.yml job that runs
 // this suite (this directory's install is the stack alone, held below); a TEXT_ONLY entry for a file
-// that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
-// REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
-// the classifier cannot see them.
+// that cannot run; COPIES and package.json's sync-auth for a new _shared/. New
+// operations on the brain are a plugin (plugins/README.md), not a vendored API.
 const SERVERS: Server[] = [
   // The extension servers (change 64) are gone: the six are plugins since SMD-2311, served by the brain itself, and
   // meal-planning's shared server retired with them. The recipes and integrations (change 67): no MCP server among
   // them, so the MCP kind retired with SMD-3747 (the guard below fails a vendored file that imports an MCP server
   // package or builds a transport).
-  vendored("integrations/agent-memory-api/index.ts", "rest",
-    ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
-    ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: PG_REFUSED, readProbe: "POST /recall" }),
-  vendored("recipes/editorial-policy/auditor/index.ts", "worker", [], [],
+  vendored("recipes/editorial-policy/auditor/index.ts", "worker",
     { keys: "AUDITOR_ACCESS_KEYS", legacy: "AUDITOR_ACCESS_KEY", url: PG_REFUSED, dryRun: "body", unconfigured: 401 }),
-  vendored("integrations/entity-extraction-worker/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
-  vendored("integrations/consolidation-workers/bio/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
-  vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
+  vendored("integrations/entity-extraction-worker/index.ts", "worker", { dryRun: "query", unconfigured: 503 }),
+  vendored("integrations/consolidation-workers/bio/index.ts", "worker", { dryRun: "query", unconfigured: 503 }),
+  vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", { dryRun: "query", unconfigured: 503 }),
 ];
 
 // The webhook receiver, readwise-capture, is the readwise plugin's hook since SMD-2690: the brain serves it behind its
@@ -275,16 +266,11 @@ async function parse(r: Response): Promise<Reply> {
   try { json = line ? JSON.parse(line) : null; } catch { json = null; }
   return { status: r.status, json, text };
 }
-/** An HTTP API request, `route` as "METHOD /path" with any `:param` filled in; an empty JSON object as the body unless `rawBody` says otherwise. */
-const http = (s: Server, key: string | null, route: string, via: Via = "x-access-key", rawBody?: string) => {
-  const [method, path] = route.split(" ");
-  return request(s, key, via, {}, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, rawBody });
-};
-/** A worker run, dry or not, the key in the form given. */
-const run = (s: Server, key: string | null, dryRun: boolean, via: Via = "x-access-key") =>
-  request(s, key, via, {}, s.dryRun === "body"
-    ? { method: "POST", path: "/", body: { dry_run: dryRun } }
-    : { method: "POST", path: dryRun ? "/?dry_run=true" : "/", body: undefined });
+/** A worker run, dry or not, the key in the form given, and `also` any further forms beside it. */
+const run = (s: Server, key: string | null, dryRun: boolean, via: Via = "x-access-key", also: Partial<Record<Via, string>> = {}, accept = true) =>
+  request(s, key, via, also, s.dryRun === "body"
+    ? { method: "POST", path: "/", body: { dry_run: dryRun }, accept }
+    : { method: "POST", path: dryRun ? "/?dry_run=true" : "/", body: undefined, accept });
 /** Past the gate: whatever the handler answers once the key and the scope let it through — not a refusal by another status. */
 const passed = (r: Reply) => r.status !== 401 && r.status !== 403 && !/access key|read-scoped/i.test(r.text);
 
@@ -292,41 +278,6 @@ const env = (s: Server, keys: string | undefined, legacy?: string) => {
   if (keys === undefined) delete process.env[s.keys]; else process.env[s.keys] = keys;
   if (legacy === undefined) delete process.env[s.legacy]; else process.env[s.legacy] = legacy;
 };
-
-// ── The HTTP APIs ────────────────────────────────────────────────────────────
-
-for (const s of SERVERS.filter((s) => s.kind === "rest")) {
-  console.log(`\n[${s.file}]`);
-  env(s, KEYS);
-
-  assert(passed(await http(s, READ_KEY, s.readProbe!)), `a read-scoped key passes the gate on ${s.readProbe}`);
-  for (const w of s.writes) {
-    // A body no route could parse: the 403 has to come from the gate, before parsing.
-    const r = await http(s, READ_KEY, w, "x-access-key", "{not json");
-    assert(r.status === 403 && /read-scoped/.test(r.text), `a read-scoped key is told ${w} writes (403), before the route parses anything`);
-  }
-  for (const w of s.writes) assert(passed(await http(s, WRITE_KEY, w)), `a write-scoped key passes the gate on ${w}`);
-
-  assert((await http(s, "not-a-key", s.readProbe!)).status === 401, "a wrong key is refused with 401");
-  assert((await http(s, null, s.readProbe!)).status === 401, "no key is refused with 401");
-  assert((await http(s, hashKey(WRITE_KEY), s.readProbe!)).status === 401,
-    "presenting the HASH does not authenticate — a leaked config is not a credential");
-
-  env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
-  assert((await http(s, WRITE_KEY, s.readProbe!)).status === 401, "the removed key stops working");
-  assert(passed(await http(s, READ_KEY, s.readProbe!)), "…and the other keeps working");
-
-  env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
-  assert((await http(s, FORWARD_KEY, s.readProbe!)).status === 401, "a configured forwarder key is refused with 401 — it grants nothing, and no vendored server admits it (SMD-2284)");
-  env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
-
-  env(s, undefined, LEGACY_KEY);
-  assert(passed(await http(s, LEGACY_KEY, s.writes[0])), `the legacy single ${s.legacy} still authenticates, as write`);
-  assert((await http(s, "nope", s.readProbe!)).status === 401, "…and a wrong legacy key is refused");
-  env(s, undefined, undefined);
-  assert((await http(s, LEGACY_KEY, s.readProbe!)).status === 401, "no keys configured at all refuses everything");
-  env(s, KEYS);
-}
 
 // ── The workers ──────────────────────────────────────────────────────────────
 
@@ -407,24 +358,15 @@ console.log("\n[each server on the SQL shim starts under bun and answers over th
 type Live = { file: string; env: Record<string, string>; probe: (base: string) => Promise<void> };
 const onShim = (file: string) => /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, file), "utf8"));
 const rpcHeaders = (key: string) => ({ ...RPC, "x-access-key": key });
-const fill = (path: string) => path.replace(/:[a-z_]+/g, "test-id");
 const LIVE: Live[] = [
   ...SERVERS.filter((s) => onShim(s.file)).map((s): Live => ({
     file: s.file,
     env: { [s.keys]: KEYS, SUPABASE_URL: s.url },
     probe: async (base) => {
-      if (s.kind === "rest") {
-        const [method, path] = s.readProbe!.split(" ");
-        const body = method === "GET" ? undefined : "{}";
-        const r = await parse(await fetch(base + fill(path), { method, headers: rpcHeaders(READ_KEY), body }));
-        assert(passed(r), `${s.file}: under bun, a read key passes the gate on ${s.readProbe} (${r.status})`);
-        assert((await fetch(base + fill(path), { method, headers: rpcHeaders("not-a-key"), body })).status === 401, "…and a wrong key is refused with 401");
-      } else {
-        const dry = s.dryRun === "body" ? { path: "/", body: JSON.stringify({ dry_run: true }) } : { path: "/?dry_run=true", body: undefined };
-        const r = await parse(await fetch(base + dry.path, { method: "POST", headers: rpcHeaders(READ_KEY), body: dry.body }));
-        assert(passed(r), `${s.file}: under bun, a read key may dry-run (${r.status})`);
-        assert((await fetch(base + dry.path, { method: "POST", headers: rpcHeaders("not-a-key"), body: dry.body })).status === 401, "…and a wrong key is refused with 401");
-      }
+      const dry = s.dryRun === "body" ? { path: "/", body: JSON.stringify({ dry_run: true }) } : { path: "/?dry_run=true", body: undefined };
+      const r = await parse(await fetch(base + dry.path, { method: "POST", headers: rpcHeaders(READ_KEY), body: dry.body }));
+      assert(passed(r), `${s.file}: under bun, a read key may dry-run (${r.status})`);
+      assert((await fetch(base + dry.path, { method: "POST", headers: rpcHeaders("not-a-key"), body: dry.body })).status === 401, "…and a wrong key is refused with 401");
     },
   })),
   ...([["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
@@ -541,42 +483,25 @@ assert(second !== null && askedElsewhere > 0 && answeredElsewhere.length === 0, 
 // ── Where the key may travel ─────────────────────────────────────────────────
 
 console.log("\n[where the key may travel]");
-for (const s of SERVERS.filter((s) => s.kind === "rest" && s.writes.length > 0)) {
-  // Each form a key may travel in authenticates, and the scope applies through it: a read key passes the read probe
-  // and is told a write route writes, and a wrong key in it is refused. (An MCP server's tools/list asked this until
-  // the last left: SMD-3747.)
-  env(s, KEYS);
-  for (const via of ["x-access-key", "x-brain-key", "bearer", "query"] as Via[]) {
-    const read = await http(s, READ_KEY, s.readProbe!, via);
-    const write = await http(s, READ_KEY, s.writes[0], via, "{not json");
-    const wrong = await http(s, "not-a-key", s.readProbe!, via);
-    assert(passed(read) && write.status === 403 && /read-scoped/.test(write.text) && wrong.status === 401,
-      `${s.file}: the ${via} form authenticates, scope applies through it, and a wrong key in it is refused (${read.status}, ${write.status}, ${wrong.status})`);
-  }
-}
 {
   // Every form presented is tried: a gateway's own token in Authorization, or a
   // stale header a client keeps sending, does not shadow the key the client means.
-  // Asked of the first HTTP API, at its read probe and its first write route: the
-  // auth module is the same byte copy behind every vendored server. Past the
-  // gate is the assertion: the handler's own answer after it (a refused
-  // database here) is no refusal of the key.
-  const s = SERVERS.find((x) => x.kind === "rest")!;
+  // Asked of the first worker, a dry run for a read and a real run for a write:
+  // the auth module is the same byte copy behind every vendored server (asked of
+  // an HTTP API until the last left, SMD-2690). Past the gate is the assertion:
+  // the handler's own answer after it (no model key here) is no refusal of the key.
+  const s = SERVERS.find((x) => x.kind === "worker")!;
   env(s, KEYS);
-  const at = (route: string, key: string | null, via: Via, also: Partial<Record<Via, string>>, accept = true) => {
-    const [method, path] = route.split(" ");
-    return request(s, key, via, also, { method, path: fill(path), body: method === "GET" ? undefined : {}, accept });
-  };
-  assert(passed(await at(s.readProbe!, READ_KEY, "query", { bearer: "eyJ.a.gateway-jwt" })),
+  assert(passed(await run(s, READ_KEY, true, "query", { bearer: "eyJ.a.gateway-jwt" })),
     `${s.file}: a gateway's bearer token beside a right ?key= does not shadow it`);
-  assert(passed(await at(s.writes[0], WRITE_KEY, "x-access-key", { "x-brain-key": "stale" })),
-    `${s.file}: a wrong x-brain-key beside a right x-access-key does not shadow it (${s.writes[0]}, a write, passes the gate)`);
-  assert((await at(s.readProbe!, "wrong-one", "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
+  assert(passed(await run(s, WRITE_KEY, false, "x-access-key", { "x-brain-key": "stale" })),
+    `${s.file}: a wrong x-brain-key beside a right x-access-key does not shadow it (a real run, a write, passes the gate)`);
+  assert((await run(s, "wrong-one", true, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
     "three wrong forms are three refusals, not one acceptance");
   // Claude Desktop's connectors may send no Accept header (change 84): the key is
   // read from the request as it came, so ?key= on a bare request authenticates.
-  assert(passed(await at(s.readProbe!, READ_KEY, "query", {}, false)), "a request without an Accept header still authenticates from ?key=");
-  assert((await at(s.readProbe!, "not-a-key", "x-access-key", {}, false)).status === 401, "…and is still refused with a wrong key");
+  assert(passed(await run(s, READ_KEY, true, "query", {}, false)), "a request without an Accept header still authenticates from ?key=");
+  assert((await run(s, "not-a-key", true, "x-access-key", {}, false)).status === 401, "…and is still refused with a wrong key");
 }
 
 // ── A request URL that will not parse ────────────────────────────────────────
@@ -616,8 +541,6 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   type Row = [method: string, target: string, headers: string[], status: number, says: string];
   const worker: Row[] = [["POST", "/", [], 401, "Unauthorized"], ["POST", "/", read, 403, "dry_run=true"], ["POST", `/?dry_run=true&key=${READ_KEY}`, [], 503, "API key"]];
   const ROWS: [string, Row[]][] = [
-    // The prefix stripped from a URL that parses: the route is reached under it.
-    ["integrations/agent-memory-api/index.ts", [["GET", "/health", [], 401, "access key"], ["POST", "/agent-memory-api/writeback", read, 403, "write"], ["GET", "/agent-memory-api/none", read, 404, "Not Found"]]],
     ["integrations/consolidation-workers/bio/index.ts", worker],
     ["integrations/consolidation-workers/metadata-norm/index.ts", worker],
     ["integrations/entity-extraction-worker/index.ts", worker],
@@ -654,8 +577,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     // does, where a copy made by `new Request(url, req)` never settles and its
     // handler waits forever. Each server that reads a body, at a route that
     // reads it.
-    const write = [`x-brain-key: ${WRITE_KEY}`];
-    for (const [file, target, headers] of [["integrations/agent-memory-api/index.ts", "/writeback", write], ["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
+    for (const [file, target, headers] of [["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
       const server = servers.get(file);
       if (!server) continue;
       for (const host of ["localhost", "x:99999", null]) {
@@ -673,68 +595,13 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
 
 // ── Drift guards ─────────────────────────────────────────────────────────────
 
-/** Stored functions a route or worker may call and still be a read; any other `.rpc(` is a write. */
-const RPC_READS = ["match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
-/** Tables a READ may insert into: a recall records itself (for a write-scoped key). An update or delete on them, or an insert anywhere else, is a write. */
-const LOG_TABLES = ["agent_memory_recall_traces", "agent_memory_recall_items", "agent_memory_audit_events"];
-const LOG_INSERT = new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)\s*\.insert\(`);
-/**
- * Whether a body writes: a table verb (not a read's own log insert; `.delete()`
- * with no argument or an options object — `searchParams.delete("page")` and a
- * Map's `.delete(id)` are not table verbs), an SQL write, or an RPC not named
- * by a literal in RPC_READS (a variable name is a write).
- */
-const writes = (reach: string) => {
-  const rest = reach.replace(new RegExp(LOG_INSERT.source, "g"), ".from(LOG).logged(");
-  return /\.(insert|update|upsert)\(|\.delete\(\s*[){]/.test(rest)
-    || /\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b/.test(rest)
-    || [...rest.matchAll(/\.rpc\(\s*(?:(["'`])([^"'`]+)\1)?/g)].some((m) => !m[2] || !RPC_READS.includes(m[2]));
-};
-/** `reach` plus the bodies of the file-level functions it calls, one level down — where a route's work often lives. */
-const withCallees = (text: string, reach: string) => {
-  let out = reach;
-  for (const name of new Set([...reach.matchAll(/\b([a-zA-Z_]\w*)\(/g)].map((m) => m[1]))) {
-    const at = text.search(new RegExp(String.raw`^(?:async )?function ${name}\(`, "m"));
-    if (at >= 0) out += text.slice(at, text.indexOf("\n}", at));
-  }
-  return out;
-};
 const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:process\.env\.)?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, s.file), "utf8");
-  if (s.kind === "rest") {
-    const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
-      .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
-    assert(mounted.map((m) => m.route).sort().join() === [...s.reads, ...s.writes].sort().join(),
-      `${s.file}: every mounted route is classified above (${mounted.length})`);
-    assert(mounted.filter((m) => m.gated).map((m) => m.route).sort().join() === [...s.writes].sort().join(),
-      `…and exactly the writes take requireWrite (${mounted.filter((m) => m.gated).length})`);
-    // The last route's block ends where the entry shape begins: the wrapper that strips the Edge Function
-    // path prefix (`const handler = …`), then the export (SMD-1799).
-    const starts = mounted.map((m) => m.at).concat(text.search(/^(?:const handler = |export default \{)/m));
-    for (const m of mounted) {
-      const end = Math.min(...starts.filter((a) => a > m.at));
-      const block = text.slice(m.at, end);
-      const reach = withCallees(text, block);
-      if (s.writes.includes(m.route)) assert(writes(reach), `…${m.route} does write (the route or a function it calls inserts, updates, upserts or deletes, or calls an RPC not listed as a read)`);
-      else {
-        assert(!writes(reach), `…${m.route} does not write (a read may insert its own trace; any RPC it calls is in RPC_READS)`);
-        // A read that records itself does so only for a principal that could write anyway.
-        if (LOG_INSERT.test(reach)) {
-          // Not merely present: the check returns, and it sits before the insert (a no-op body was let through once).
-          const gate = block.search(/if \(!canWrite\(c\.get\("principal"\)\)\) \{\s*return /);
-          assert(gate >= 0 && gate < block.search(LOG_INSERT), `…${m.route} returns for a read-scoped key before it records its trace — the check precedes the insert and returns`);
-        }
-      }
-    }
-    assert(text.includes("authenticateRequest(c.req.raw,") && text.includes('c.set("principal", principal)'),
-      "…the key is read and resolved from the request in one middleware, the principal handed to the routes");
-  } else {
-    assert(text.includes("authenticateRequest(req,") && text.includes("if (!canWrite(principal) && !dryRun)"),
-      `${s.file}: the key is resolved from the request through the module, and a read-scoped key may only dry-run`);
-  }
+  assert(text.includes("authenticateRequest(req,") && text.includes("if (!canWrite(principal) && !dryRun)"),
+    `${s.file}: the key is resolved from the request through the module, and a read-scoped key may only dry-run`);
   assert(text.includes('from "../_shared/auth.ts"'), "…the module is ../_shared/auth.ts — the one import a function one level under supabase/functions/ resolves");
   assert(!OLD_SPELLINGS.test(text), "…and the key is compared nowhere else");
 }

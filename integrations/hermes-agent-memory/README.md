@@ -19,8 +19,7 @@ The same backend serves both runtimes — OpenClaw agents and Hermes agents shar
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- [`schemas/agent-memory`](../../schemas/agent-memory/) applied
-- [`integrations/agent-memory-api`](../agent-memory-api/) deployed
+- The brain's [agent-memory plugin](../../plugins/agent-memory/) turned on: it was the `integrations/agent-memory-api` server and the `schemas/agent-memory` tables until SMD-2690. This client still calls the old server's routes until SMD-2690 PR 2b moves it onto the plugin's.
 - Hermes Agent 0.13.0+ installed
 - Python 3.11+
 

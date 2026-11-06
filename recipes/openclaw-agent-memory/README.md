@@ -16,8 +16,8 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 
 ## Quick Path
 
-1. Install [the Agent Memory schema](../../schemas/agent-memory/schema.sql).
-2. Deploy [the Agent Memory API](../../integrations/agent-memory-api/).
+1. Turn on the brain's [agent-memory plugin](../../plugins/agent-memory/) (the Agent Memory schema and API until SMD-2690; this recipe's steps still name the old server's routes until SMD-2690 PR 2b).
+2. (The Agent Memory API is the plugin now: nothing more to deploy.)
 3. Install the live OpenClaw plugin:
 
    ```bash

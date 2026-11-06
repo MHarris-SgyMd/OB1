@@ -17713,18 +17713,18 @@ if (want("18")) {
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
-      assert(!/ON SEQUENCE|agent_memories/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+      assert(!/ON SEQUENCE|openbrain_agents/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
 
       const failed: string[] = [];
-      // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
+      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges,
       // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
       // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 13 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 12 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }

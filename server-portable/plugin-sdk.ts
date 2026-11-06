@@ -27,8 +27,14 @@ export type PluginScope = Exclude<Scope, "forward">;
 /** An input or an output: a zod object's shape, each field its own schema — the form core/schemas.ts gives a tool's input. */
 export type Shape = Record<string, z.ZodType>;
 
-/** A refusal a plugin answers: its status, its own code, and facts beside it — JSON a caller can act on. */
-export type PluginRefusal = { status: 400 | 403 | 404 | 409 | 422; code: string; message?: string } & Record<string, unknown>;
+/**
+ * A refusal a plugin answers: its status, its own code, and facts beside it —
+ * JSON a caller can act on. 400, 403, 404, 409 and 422 say this input will not
+ * do and are never retryable. 503 is the one retryable refusal (SMD-1992): a
+ * service the plugin needs did not answer — the core's embedding provider, a
+ * search's `vectorFailed` or a capture's — so the same call may succeed later.
+ */
+export type PluginRefusal = { status: 400 | 403 | 404 | 409 | 422 | 503; code: string; message?: string } & Record<string, unknown>;
 
 /** An operation's answer: the value its output schema describes, or a refusal. A fault is thrown. */
 export type PluginOutcome<T> = { ok: true; value: T } | { ok: false; refusal: PluginRefusal };

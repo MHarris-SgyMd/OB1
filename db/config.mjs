@@ -2692,15 +2692,6 @@ export const ROLE_GRANTS = Object.freeze({
     // schemas/thought-audit (008's table, and author-session-id.sql's view over `thoughts` — a view needs its own SELECT)
     Object.freeze({ table: "thought_audit", privileges: Object.freeze(["SELECT", "INSERT"]), since: "schemas/thought-audit" }),
     Object.freeze({ view: "thought_provenance", privileges: Object.freeze(["SELECT"]), since: "schemas/thought-audit" }),
-    // schemas/agent-memory
-    Object.freeze({ table: "agent_memories",              privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_source_refs",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_artifacts",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_relations",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_review_actions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_recall_traces",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_recall_items",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
-    Object.freeze({ table: "agent_memory_audit_events",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
     // schemas/per-agent-identity (the SECURITY DEFINER lookup is REVOKEd FROM PUBLIC)
     Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
