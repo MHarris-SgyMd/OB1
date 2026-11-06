@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Open Brain Capture</title>
+  <title>Daemonic Brain Capture</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <header>
     <div>
-      <h1>Open Brain Capture</h1>
+      <h1>Daemonic Brain Capture</h1>
       <p class="subtitle">Capture Claude / ChatGPT / Gemini</p>
     </div>
     <div id="status-dot" class="status-dot disconnected" title="Not connected"></div>
@@ -18,7 +18,7 @@
   <!-- First-run / missing-config state. Hidden once the user has a working
        API URL + key; surfaced whenever isConfigured() returns false. -->
   <section id="config-missing" class="config-missing" hidden>
-    <h2>Configure Open Brain</h2>
+    <h2>Configure Daemonic Brain</h2>
     <p>The extension has no REST core URL or key yet.</p>
     <button id="open-config-btn" class="btn btn-capture">Open Configure screen</button>
   </section>
@@ -32,7 +32,7 @@
   <section id="tab-overview" class="tab-panel active">
     <div class="capture-action">
       <button id="capture-current" class="btn btn-capture">Capture Current Response</button>
-      <p class="hint">Open a Claude, ChatGPT, or Gemini conversation tab and click Capture to send the latest user + assistant exchange to Open Brain.</p>
+      <p class="hint">Open a Claude, ChatGPT, or Gemini conversation tab and click Capture to send the latest user + assistant exchange to Daemonic Brain.</p>
       <div id="capture-result" class="result"></div>
     </div>
 
@@ -155,7 +155,7 @@
   <section id="tab-settings" class="tab-panel">
     <div class="form-group">
       <button id="reconfigure-btn" class="btn btn-secondary" style="width:100%;">Reconfigure API URL & Key</button>
-      <p class="hint" style="margin-top:6px;">Opens the first-run Configure screen where you can change the Open Brain REST API URL and API key. Values are stored in chrome.storage.local on this device.</p>
+      <p class="hint" style="margin-top:6px;">Opens the first-run Configure screen where you can change the Daemonic Brain REST API URL and API key. Values are stored in chrome.storage.local on this device.</p>
     </div>
 
     <div class="form-group">

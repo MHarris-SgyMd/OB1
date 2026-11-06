@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini batchexecute history extractor (Phase B).
+ * Daemonic Brain Capture — Gemini batchexecute history extractor (Phase B).
  *
  * Pure function. No chrome.* calls, no fetches. Takes the response body of a
  * Gemini batchexecute `rpcids=hNvQHb` call and returns an array of normalized
