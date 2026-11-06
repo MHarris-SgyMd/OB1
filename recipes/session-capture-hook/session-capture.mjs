@@ -3241,8 +3241,10 @@ function noteAgentClaimCall(hook, brains) {
   if (!f) return;
   const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
   useStateRoot(brain.root);
-  // A failure's words are its `error`, a string in Claude Code; any other shape, or the text left in tool_response, is read as a result is (review pass 1).
-  const text = event !== "PostToolUseFailure" ? resultText(hook.tool_response) : typeof hook.error === "string" ? hook.error : resultText(hook.error ?? hook.tool_response);
+  // What the call answered: a failure's is its `error`, a string in Claude Code; any other shape, or none with the
+  // answer left in tool_response, is read as a result is, its words and its facts alike (review passes 1 and 2).
+  const answer = event === "PostToolUseFailure" ? hook.error ?? hook.tool_response : hook.tool_response;
+  const text = event === "PostToolUseFailure" && typeof answer === "string" ? answer : resultText(answer);
   // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
@@ -3258,7 +3260,7 @@ function noteAgentClaimCall(hook, brains) {
   }
   // CLAIM_UNATTRIBUTED on its own lapsed claim (SMD-3807): the lapse recorded, and the claim made due, so this run's
   // renewal checks the claims made since at once, as the hook's own renewal does (review pass 1).
-  const lapsedAt = unattributedLapse(resultFacts(event === "PostToolUseFailure" ? hook.error ?? hook.tool_response : hook.tool_response), text, f.claim.id);
+  const lapsedAt = unattributedLapse(resultFacts(answer), text, f.claim.id);
   if (lapsedAt) {
     const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "made due, so the hook's renewal checks the claims made or renewed on its work since" : "its token file names no ticket, so the claims made since are not checked"}`;
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: 0, expiresAt: lapsedAt, last: line });
@@ -3497,8 +3499,9 @@ export async function main(argv) {
     if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
-    // The claims hook (SMD-3602): Claude Code's async PostToolUse, PostToolUseFailure
-    // (SMD-3874) and UserPromptSubmit, renewing the claims a session's worktree holds tokens for.
+    // The claims hook (SMD-3602): Claude Code's async PostToolUse,
+    // PostToolUseFailure (SMD-3874) and UserPromptSubmit, renewing the claims a
+    // session's worktree holds tokens for.
     if (has(args, "--claims")) {
       if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
       for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }

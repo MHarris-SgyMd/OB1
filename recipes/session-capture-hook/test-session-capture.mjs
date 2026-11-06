@@ -4072,14 +4072,15 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
 
   // Claude Code hands a refused MCP call to PostToolUseFailure: the reply's text in `error`, no `tool_response` (SMD-3874,
   // the shape probed on the canary). The agent's own refusals reach the hook there.
-  const agentFailure = (tool, input, error) => claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: `mcp__open-brain__${tool}`, tool_input: input, error, is_interrupt: false, tool_response: undefined });
+  const agentFailure = (tool, input, error) => claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: `mcp__open-brain__${tool}`, tool_input: input, error, is_interrupt: false });
+  const coveredRefusal = `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.`;
   putClaim(110);
   putClaim(111, {}, "unattributed");
   putClaim(112);
   for (const n of [110, 111, 112]) age(n, 0); // not due: only the agent's call marks or makes them so
   listed.set("SMD-9001", [listEntry(111), coveringSince(uuid(8991))]);
   calls.length = 0;
-  await agentFailure("renew_claim", { id: C(110), token: tok(110) }, `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.`);
+  await agentFailure("renew_claim", { id: C(110), token: tok(110) }, coveredRefusal);
   const failBlocked = revivedMarker(110);
   assert(failBlocked?.blocked?.code === "WORK_CLAIMED" && !JSON.stringify(failBlocked).includes("wc_") && new RegExp(`claims: blocked: SMD-9001 \\(claim ${C(110)}\\) — the agent's own renew_claim met WORK_CLAIMED`).test(logText()),
     "a PostToolUseFailure carrying the agent's own renew_claim refused WORK_CLAIMED leaves a .blocked.json, read off `error`");
@@ -4089,12 +4090,12 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   // A failure whose `error` is not a string, the text in content blocks as another harness might hand it: read as a result is (review pass 1).
   putClaim(113);
   age(113, 0);
-  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(113), token: tok(113) }, error: [{ type: "text", text: `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.` }] });
+  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(113), token: tok(113) }, error: [{ type: "text", text: coveredRefusal }] });
   assert(revivedMarker(113)?.blocked?.code === "WORK_CLAIMED", "…an `error` handed as content blocks is read as a result's text");
   // …and a failure with no `error`, its text left in tool_response (review pass 2: the fallback was untested).
   putClaim(114);
   age(114, 0);
-  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(114), token: tok(114) }, tool_response: [{ type: "text", text: `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.` }] });
+  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(114), token: tok(114) }, tool_response: [{ type: "text", text: coveredRefusal }] });
   assert(revivedMarker(114)?.blocked?.code === "WORK_CLAIMED", "…and a failure with no `error`, its text in tool_response, is read from there");
   // …its facts too: a CLAIM_UNATTRIBUTED whose words carry no lapse, the lapse in the facts alone.
   putClaim(115, {}, "unattributed");
