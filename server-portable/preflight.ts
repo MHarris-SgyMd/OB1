@@ -2542,8 +2542,8 @@ if (configFailed) {
                    -- 084 (SMD-1873): an active judged relation and its lineage row. A brain before 084 holds no relation facet, so
                    -- the CTE reads nothing there; a closed relation is history, its row kept or not. Since 120 a relation naming a
                    -- subject key is a work thread's edge, its row thread_relink's: counted apart, its remedy its own (SMD-3306).
-                   re_s AS (SELECT id, payload ? 'key' AS thread FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
-                   re AS (SELECT s.id, s.thread FROM re_s s
+                   re_s AS (SELECT id, payload ? 'key' AS thread, payload->>'key' AS key FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
+                   re AS (SELECT s.id, s.thread, s.key FROM re_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
                    -- 111 (SMD-3306): a standing own subject and its lineage row, as a relation's. A brain before 111 holds no
                    -- subject facet, so the CTE reads nothing there.
@@ -2587,7 +2587,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
                      (SELECT count(*)::int FROM re WHERE NOT thread) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re WHERE NOT thread LIMIT 3) s) AS relation_ids,
-                     (SELECT count(*)::int FROM re WHERE thread) AS thread_edges, (SELECT array_agg(id::text) FROM (SELECT id FROM re WHERE thread LIMIT 3) s) AS thread_edge_ids,
+                     (SELECT count(*)::int FROM re WHERE thread) AS thread_edges, (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM re WHERE thread LIMIT 3) s) AS thread_edge_ids,
                      (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
@@ -2630,7 +2630,7 @@ if (configFailed) {
               // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
               + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "")
               // 120 (SMD-3306): a thread's edge and its row are thread_relink's, written together; a re-link writes a closed one again.
-              + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the edge's payload key>'." : "")
+              + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
               + (Number(c.subjects) ? " An own subject's row is written by 111's record_thought_subject: close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;

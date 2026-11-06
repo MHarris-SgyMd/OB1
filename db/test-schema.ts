@@ -17452,8 +17452,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const [caLineage] = await lineage(ca?.id ?? "");
   assert((await pairs(K)) === "c→a" && ca?.origin === "thread" && ca?.relation === "evolves" && ca?.judge === "thread:v1" && ca?.key === K && ca?.conf === null
          && caLineage?.inputs.join() === `${a},${c}` && caLineage?.fps.join() === `${await fp(a)},${await fp(c)}` && caLineage?.by === "thread:v1"
-         && caLineage?.recipe.deterministic === true && caLineage?.recipe.declared === false,
-    `two thoughts on one key: the newer evolves the older — origin thread, judge key thread:v1, the key, no confidence — its lineage the older and the newer at their fingerprints, thread:v1, deterministic (${JSON.stringify(ca)}, ${JSON.stringify(caLineage)})`);
+         && caLineage?.recipe.deterministic === true && caLineage?.recipe.key === K && !("declared" in (caLineage?.recipe ?? {})),
+    `two thoughts on one key: the newer evolves the older — origin thread, judge key thread:v1, the key, no confidence — its lineage the older and the newer at their fingerprints, thread:v1, its recipe declared: deterministic, the key (${JSON.stringify(ca)}, ${JSON.stringify(caLineage)})`);
   await subject(b, K);
   const caAfter = await facet(ca?.id ?? "");
   assert((await pairs(K)) === "b→a c→b" && caAfter?.open === false && (await lineage(ca?.id ?? "")).length === 1,

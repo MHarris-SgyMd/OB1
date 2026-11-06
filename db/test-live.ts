@@ -29042,6 +29042,11 @@ if (want("47")) {
     assert(keyDry.code === 0 && keyDry.out === `  ${KB}: 2 thought(s), 0 edge(s) to close, 1 to write (dry run: nothing written)` && keyDryLeft === ""
         && keyRun.code === 0 && keyRun.out === `  ${KB}: 2 thought(s), 0 edge(s) closed, 1 written` && (await pairs(KB)) === "b2→b1",
       `--key re-links one thread, its dry run counting first (${keyDry.out} | ${keyRun.out})`);
+    // A key nothing holds is said so, not read as a thread linked already.
+    const nothing = await threads({ key: "ticket:SMD-9479" });
+    assert(nothing.code === 0 && nothing.out === "  ticket:SMD-9479: 0 thought(s), 0 edge(s) closed, 0 written\n  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the keys whose edges differ)"
+        && !/no thought holds this key/.test(keyRun.out),
+      `--key on a key nothing holds says so (${nothing.out})`);
     // A thread linked wrong with the right number of edges: --status compares the edges, not their count.
     await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${KA} AND thought_id = ${a3}::uuid`;
     await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${a3}::uuid, 'relation', ${{ relation: "evolves", target: a1, judge_key: "thread:v1", key: KA }}::jsonb)`;

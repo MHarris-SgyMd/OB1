@@ -2567,7 +2567,8 @@ closes the judge's edge alone, and `brain_info`, board-sync's findings and
 `consolidate.ts --status` count the judge's alone. The upgrade writes no edge:
 run `threads.ts` once after it, which links every thread, a batch of at most 200
 keys a transaction, a key that writes ending its batch and the next batch taking
-the page's rest:
+the page's rest (on the compose stack, from a checkout, reaching its Postgres
+through deploy/README's host-ports file):
 
 ```bash
 bun threads.ts --url … --status                # the threads, and the keys whose edges differ

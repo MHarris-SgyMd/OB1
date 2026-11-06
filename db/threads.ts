@@ -22,9 +22,9 @@
  * waits behind it, holding the brain's review lock (delete_thought's), so every other delete with it. A batch is a
  * thread's write and its no-op keys' reads at most, which is why --batch stops at 200: more keys a batch buy no speed,
  * a writing key ending it anyway, and hold more locks longer (10,000 held ten thousand advisory locks, enough to run a
- * default server's lock table short). --key re-links that one key's thread. --dry-run calls thread_relink(key, true),
+ * default server's lock table short). --key re-links that one key's thread, and says so of a key nothing holds. --dry-run calls thread_relink(key, true),
  * which counts what a re-link now would write and close and writes nothing, a key a transaction (a batch each, in its
- * count), so it holds one key's lock at a time (a batch's held through it would leave a delete beside it its gap).
+ * count, whatever --batch says: it sizes the pages alone), so it holds one key's lock at a time (a batch's held through it would leave a delete beside it its gap).
  * Every transaction runs under READ COMMITTED, which thread_relink needs, whatever the role's default. A key a
  * thread's edge still stands under with no subject left is re-linked too, its edges closed. A writing run needs a
  * re-link's writes, refused up front, by name, without them (a dry run and --status read). A writer outside the
@@ -208,6 +208,8 @@ export async function run(opts: ThreadsOptions): Promise<number> {
     if (KEY !== undefined) {
       const r = await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${KEY}, ${DRY}) AS r`) as { r: Relink }[])[0].r);
       out(`  ${KEY}: ${r.thoughts} thought(s), ${r.closed} edge(s) ${DRY ? "to close" : "closed"}, ${r.added} ${DRY ? "to write" : "written"}${DRY ? " (dry run: nothing written)" : ""}`);
+      // A key nothing holds reads the same as a thread already linked: said, so a mistyped key is not taken for one.
+      if (r.thoughts === 0 && r.closed === 0) out("  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the keys whose edges differ)");
       return 0;
     }
     let after = "";

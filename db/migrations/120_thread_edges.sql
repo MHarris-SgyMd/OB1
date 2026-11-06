@@ -53,11 +53,11 @@
 --     valid_until) re-links its key; a standing subject deleted with its
 --     thought (AFTER DELETE) re-links its key when the deleting role may make
 --     a re-link's writes — INSERT and UPDATE on thought_facets (the structure
---     and capture groups'), UPDATE on thoughts (the row locks) and the writes
---     on derivations (the capture group's) — its transaction is READ
---     COMMITTED and no other transaction holds the key's lock: a delete's own
---     re-link never waits on the key's lock, which a re-link waiting on the
---     deleted thought may hold.
+--     and capture groups'), UPDATE on thoughts (the row locks) and INSERT,
+--     UPDATE and SELECT on derivations (the capture group's) — its
+--     transaction is READ COMMITTED and no other transaction holds the key's
+--     lock: a delete's own re-link never waits on the key's lock, which a
+--     re-link waiting on the deleted thought may hold.
 --   * READ COMMITTED alone: thread_relink refuses a transaction above it
 --     (feature_not_supported, 115's rule), since its reads after the key's
 --     lock would see a snapshot taken before it; a subject written in such a
@@ -687,7 +687,7 @@ BEGIN
       -- ob1:thread-lineage-with-its-artifact — a CONTRACT SENTINEL, not prose:
       -- the edge and its lineage are one transaction (061's rule).
       PERFORM ob1_record_derivation('relation', v_id, ARRAY[r.older, r.newer], ARRAY[r.older_fp, r.newer_fp], 'thread:v1',
-                                    jsonb_build_object('deterministic', true, 'declared', false), NULL);
+                                    jsonb_build_object('deterministic', true, 'key', p_key), NULL);
       v_added := v_added + 1;
     END LOOP;
     EXIT reads WHEN NOT v_lost;
@@ -748,7 +748,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thread_relink(text, boolean) IS
-  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in capture order (created_at, then id), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each edge the thread has that does not stand is written first, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1) in the same transaction, its two thoughts locked FOR KEY SHARE before the write — a delete in flight is waited out, a pair it took a thought from is passed over, and the thread is read again once the round is through, each read again following a delete — then each standing edge of the key''s that the thread no longer has is closed, the two sides read once each and set against each other (EXCEPT), each close counted as it lands. p_dry counts and writes nothing. READ COMMITTED alone (feature_not_supported above it, 115''s rule): its reads must postdate the key''s lock. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT and UPDATE on thoughts (the row locks), and the writes on derivations (the capture group). Called by the triggers on subjects, at their writer''s commit, and by db/threads.ts. Migration 120 / SMD-3306.';
+  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in capture order (created_at, then id), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each edge the thread has that does not stand is written first, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1, its recipe deterministic and naming the key) in the same transaction, its two thoughts locked FOR KEY SHARE before the write — a delete in flight is waited out, a pair it took a thought from is passed over, and the thread is read again once the round is through, each read again following a delete — then each standing edge of the key''s that the thread no longer has is closed, the two sides read once each and set against each other (EXCEPT), each close counted as it lands. p_dry counts and writes nothing. READ COMMITTED alone (feature_not_supported above it, 115''s rule): its reads must postdate the key''s lock. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT and UPDATE on thoughts (the row locks), and INSERT, UPDATE and SELECT on derivations (the capture group). Called by the triggers on subjects, at their writer''s commit, and by db/threads.ts. Migration 120 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The triggers that keep the threads
@@ -824,7 +824,7 @@ CREATE CONSTRAINT TRIGGER thought_facets_thread_deleted
 -- A close re-links its thread now: close_thought_subject's comment (113's)
 -- says what its caller needs since.
 COMMENT ON FUNCTION close_thought_subject(uuid, uuid, text) IS
-  'Closes a thought''s standing subject only when it is still the facet the caller read and the thought''s text still has the fingerprint read (113, SMD-3306): the subject sweep''s close of an out-of-date subject the model now names nothing for. Under record_thought_subject''s advisory lock, the thought locked FOR KEY SHARE first. Returns {ok, action: closed | none, id?, gone?, stale?, moved?}: none with gone for a thought deleted, with stale for a text that moved, with moved (and the standing id) when another subject stands, and alone when none does. SECURITY INVOKER: the caller needs UPDATE on thought_facets and on thoughts (the row locks), as the door''s close does; since 120 a close re-links the subject''s thread (thought_facets_thread_closed), which needs INSERT on thought_facets (the structure group) and INSERT and UPDATE on derivations (the capture group) too, as the door''s writes do. Migrations 113, 120 / SMD-3306.';
+  'Closes a thought''s standing subject only when it is still the facet the caller read and the thought''s text still has the fingerprint read (113, SMD-3306): the subject sweep''s close of an out-of-date subject the model now names nothing for. Under record_thought_subject''s advisory lock, the thought locked FOR KEY SHARE first. Returns {ok, action: closed | none, id?, gone?, stale?, moved?}: none with gone for a thought deleted, with stale for a text that moved, with moved (and the standing id) when another subject stands, and alone when none does. SECURITY INVOKER: the caller needs UPDATE on thought_facets and on thoughts (the row locks), as the door''s close does; since 120 a close re-links the subject''s thread (thought_facets_thread_closed), which needs INSERT on thought_facets (the structure group) and INSERT, UPDATE and SELECT on derivations (the capture group) too, as the door''s writes do. Migrations 113, 120 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 6. The catalog's copy of the vocabulary

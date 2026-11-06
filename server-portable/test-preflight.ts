@@ -1548,8 +1548,8 @@ else {
   const edge120 = String((await ctx.unsafe(`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9120'`))[0].id);
   await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${edge120}'::uuid`);
   const noEdge = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
-  assert(noEdge.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 thread edge\\(s\\) \\(${edge120}\\)`).test(noEdge.out) && !/judged relation\(s\)/.test(noEdge.out)
-         && /A thread edge's row is written with it by 120's thread_relink: close the edge/.test(noEdge.out) && /bun db\/threads\.ts --url … --key/.test(noEdge.out),
+  assert(noEdge.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 thread edge\\(s\\) \\(${edge120} under ticket:SMD-9120\\)`).test(noEdge.out) && !/judged relation\(s\)/.test(noEdge.out)
+         && /A thread edge's row is written with it by 120's thread_relink: close the edge/.test(noEdge.out) && /bun db\/threads\.ts --url … --key '<the key each edge is named under above>'/.test(noEdge.out),
          `a thread's edge without its lineage row does not start, counted as a thread edge, not a judged relation, and the remedy is the thread's own (exit ${noEdge.code}: ${noEdge.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
   await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${edge120}'::uuid`);
   const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
