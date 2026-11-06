@@ -10,11 +10,21 @@ import { definePlugin, hmacSha256Hex, ok, onceById, operation, safeEqual, z } fr
 
 /** The one event the hook captures; any other Readwise sends with the secret is answered 200 and ignored. */
 const HIGHLIGHT_CREATED = "readwise.highlight.created";
+/**
+ * How long a claim whose capture never finished holds its id, in seconds: an
+ * hour. Past it a resend may take the claim and capture again. Readwise
+ * documents no retries, so a long lease costs little; the SDK's default (one
+ * capture's model calls and a minute) let a capture held up past it, on a lock
+ * say, be captured twice (review pass 2).
+ */
+export const LEASE_S = 3600;
 
 /**
- * A text Postgres stores and JSON carries intact: no NUL, and no lone surrogate
- * (half of a character such as an emoji), which a jsonb cast refuses after the
- * thought is captured. encodeURIComponent throws on one.
+ * A text the hook can store: no NUL, which Postgres will not keep, and no lone
+ * surrogate (half of a character such as an emoji). The tags reach Postgres as
+ * JSON, whose jsonb cast refuses one after the thought is captured; the passage
+ * and note go to the capture; the other fields would land as U+FFFD, refused
+ * here all the same. encodeURIComponent throws on one.
  */
 const stored = (s: string) => {
   if (s.includes("\u0000")) return false;
@@ -25,29 +35,36 @@ const stored = (s: string) => {
     return false;
   }
 };
-/** An ISO 8601 date, or date and time, as Readwise sends them ("2022-09-13T16:41:53.186Z"); a time with no offset is read as UTC. */
-const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+/**
+ * An ISO 8601 date, or date and time, as Readwise sends them
+ * ("2022-09-13T16:41:53.186Z"): T or a space between them, either case, an
+ * offset of hours (+05) or hours and minutes (+05:30, +0530); a time with no
+ * offset is read as UTC.
+ */
+const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?([Zz]|[+-]\d{2}(?::?\d{2})?)?)?$/;
 const leap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 /**
- * The time as stored, ISO in UTC; null for one that is no real time Postgres
- * keeps: 30 February, hour 24, an offset past 14 hours, or a year outside 1 to
- * 9999 once in UTC. Date.parse alone took "2026-02-30" as 2 March and gave
+ * The time as stored, ISO in UTC to the millisecond (a finer fraction cut);
+ * null for one that is no real clock time (30 February, hour 24, second 60, an
+ * offset past +14:00) or whose year, once in UTC, is outside 1 to 9999, which
+ * Postgres refuses. Date.parse alone took "2026-02-30" as 2 March and gave
  * years Postgres refuses, after the thought was captured (review pass 1).
  */
 export function isoTime(s: string): string | null {
   const m = ISO_TIME.exec(s);
   if (!m) return null;
-  const [, y, mo, d, h = "00", mi = "00", se = "00", zone] = m;
+  const [, y, mo, d, h = "00", mi = "00", se = "00", fraction = "", zone = "Z"] = m;
   const [year, month, day] = [Number(y), Number(mo), Number(d)];
   const days = [31, leap(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
   if (days === undefined || day < 1 || day > days || Number(h) > 23 || Number(mi) > 59 || Number(se) > 59) return null;
-  const offset = zone === undefined || zone === "Z" ? "Z" : `${zone.slice(0, 3)}:${zone.slice(-2)}`;
-  if (offset !== "Z" && (Number(offset.slice(1, 3)) > 14 || Number(offset.slice(4)) > 59)) return null;
-  const at = new Date(`${s.slice(0, 10)}T${h}:${mi}:${se}${s.slice(10).match(/\.\d+/)?.[0]?.slice(0, 4) ?? ""}${offset}`);
+  const offset = zone.toUpperCase() === "Z" ? "Z" : `${zone.slice(0, 3)}:${zone.length > 3 ? zone.slice(-2) : "00"}`;
+  const [oh, om] = offset === "Z" ? [0, 0] : [Number(offset.slice(1, 3)), Number(offset.slice(4))];
+  if (om > 59 || oh * 60 + om > 14 * 60) return null;
+  const ms = fraction ? `.${fraction.slice(0, 3).padEnd(3, "0")}` : "";
+  const at = new Date(`${y}-${mo}-${d}T${h}:${mi}:${se}${ms}${offset}`);
   if (Number.isNaN(at.getTime()) || at.getUTCFullYear() < 1 || at.getUTCFullYear() > 9999) return null;
   return at.toISOString();
 }
-const when = z.string().refine((s) => isoTime(s) !== null, "not an ISO 8601 time");
 
 /** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
 const HighlightEvent = z.object({
@@ -56,10 +73,11 @@ const HighlightEvent = z.object({
   note: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
   location: z.number().nullish(),
   location_type: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
-  highlighted_at: when.nullish(),
+  // A time is metadata beside the passage: one the hook cannot read is stored as none, never a reason to lose the highlight (review pass 2).
+  highlighted_at: z.string().nullish(),
   url: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
   color: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
-  updated: when.nullish(),
+  updated: z.string().nullish(),
   book_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   tags: z.array(z.object({ name: z.string().refine(stored, "a NUL or a lone surrogate") })).nullish(),
 });
@@ -90,8 +108,10 @@ type HighlightRow = {
 const iso = (d: Date | string | null) => (d === null ? null : new Date(d).toISOString());
 const asHighlight = (r: HighlightRow) => ({ ...r, highlighted_at: iso(r.highlighted_at), updated_at: iso(r.updated_at), captured_at: iso(r.captured_at)! });
 
+/** The reader's note, or null for none: an empty one, or one of whitespace alone. */
+const noteOf = (e: HighlightEvent) => (e.note?.trim() ? e.note : null);
 /** A highlight's thought text: the passage, and the reader's note after it as the old server wrote it. */
-const contentOf = (e: HighlightEvent) => (e.note ? `${e.text}\n\n— ${e.note}` : e.text);
+const contentOf = (e: HighlightEvent) => (noteOf(e) ? `${e.text}\n\n— ${noteOf(e)}` : e.text);
 
 export default definePlugin({
   name: "readwise",
@@ -132,14 +152,14 @@ export default definePlugin({
           // Before onceById records the id: a row that fails to write throws, the id is given back, and a resend captures again (the same text: the same thought).
           if (thoughtId !== null) await ctx.db.tx((sql) => sql`
             INSERT INTO highlights (highlight_id, thought_id, book_id, note, location, location_type, color, url, tags, highlighted_at, updated_at)
-            VALUES (${e.id}, ${thoughtId}, ${e.book_id}, ${e.note || null}, ${e.location ?? null}, ${e.location_type || null}, ${e.color || null}, ${e.url || null},
+            VALUES (${e.id}, ${thoughtId}, ${e.book_id}, ${noteOf(e)}, ${e.location ?? null}, ${e.location_type || null}, ${e.color || null}, ${e.url || null},
                     (SELECT coalesce(array_agg(t ORDER BY n), '{}') FROM jsonb_array_elements_text((${JSON.stringify(tags)}::text)::jsonb) WITH ORDINALITY AS x(t, n)),
                     ${e.highlighted_at ? isoTime(e.highlighted_at) : null}::timestamptz, ${e.updated ? isoTime(e.updated) : null}::timestamptz)
             ON CONFLICT (highlight_id) DO UPDATE SET thought_id = excluded.thought_id, book_id = excluded.book_id, note = excluded.note, location = excluded.location,
               location_type = excluded.location_type, color = excluded.color, url = excluded.url, tags = excluded.tags, highlighted_at = excluded.highlighted_at,
               updated_at = excluded.updated_at`);
           return { value: captured, thoughtId };
-        }, { keepSeconds: Infinity });
+        }, { keepSeconds: Infinity, leaseSeconds: LEASE_S });
         if ("duplicate" in once) return { status: 200, body: { id: once.duplicate, duplicate: true } };
         if ("inFlight" in once) return { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
         const captured = once.ran;

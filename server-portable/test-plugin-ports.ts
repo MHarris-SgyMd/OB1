@@ -29,6 +29,7 @@ import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/i
 import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hmacSha256Hex, keepRowItem } from "./plugin-sdk.ts";
+import { isoTime, LEASE_S } from "../plugins/readwise/index.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -2647,8 +2648,6 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     ["a fractional id", { id: 9001.5 }, "id"],
     ["no book id", { book_id: undefined }, "book_id"],
     ["a book id of zero", { book_id: 0 }, "book_id"],
-    ["a highlight time that is no time", { highlighted_at: "around lunch" }, "highlighted_at"],
-    ["an update time that is no time", { updated: "soon" }, "updated"],
     ["a location as text", { location: "12" }, "location"],
     ["tags as bare names", { tags: ["stoicism"] }, "tags.0"],
     // Each would otherwise be captured first and then fail its row: a 500 on every resend (review pass 1).
@@ -2659,9 +2658,6 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     ["half an emoji in a tag", { tags: [{ id: 1, name: "half \ud83d" }] }, "tags.0.name"],
     ["half an emoji in the text", { text: "half \ud83d" }, "text"],
     ["a fractional book id", { book_id: 42.5 }, "book_id"],
-    ["30 February", { highlighted_at: "2026-02-30T00:00:00Z" }, "highlighted_at"],
-    ["a year Postgres does not keep", { highlighted_at: "+010000-01-01T00:00:00Z" }, "highlighted_at"],
-    ["a time Date.parse reads and Postgres does not", { updated: "12/31/99999" }, "updated"],
   ];
   for (const [label, over, field] of bad) {
     const r = await send(over);
@@ -2775,24 +2771,56 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const half = await send({ id: 9008, text: "Loss is nothing else but change.", location: 12.5 });
   assert(half.status === 200 && (await keptRow(9008))?.location === 12.5, "a fractional location is kept as sent");
   // A row with no recorded delivery (a claim that lapsed after its row was written): the capture's row replaces it.
-  await sql`INSERT INTO plugin_readwise.highlights (highlight_id, thought_id, book_id, note) VALUES (9007, ${NO_ROW}, 1, 'old')`;
+  await sql`INSERT INTO plugin_readwise.highlights (highlight_id, thought_id, book_id, note, tags, highlighted_at, updated_at)
+            VALUES (9007, ${NO_ROW}, 1, 'old', '{stale}', '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z')`;
   const lapsed = await send({ id: 9007, text: "Very little is needed to make a happy life.", note: "fresh", book_id: 44 });
   const lapsedRow = await keptRow(9007);
-  assert(lapsed.status === 200 && UUID.test(String(lapsed.body.id)) && lapsedRow?.thought_id === lapsed.body.id && lapsedRow.note === "fresh" && lapsedRow.book_id === 44,
+  assert(lapsed.status === 200 && UUID.test(String(lapsed.body.id)) && lapsedRow?.thought_id === lapsed.body.id && lapsedRow.note === "fresh" && lapsedRow.book_id === 44
+    && JSON.stringify(lapsedRow.tags) === '["stoicism","attention"]' && at(lapsedRow.highlighted_at) === "2026-09-01T10:00:00.000Z" && at(lapsedRow.updated_at) === "2026-09-02T00:00:00.000Z",
     `a row left with no recorded delivery is replaced by the capture's (${JSON.stringify(lapsed.body)}; ${JSON.stringify(lapsedRow)})`);
   // The highlight that was in flight above, sent once its claim is gone: captured, then a duplicate.
   const busyAgain = await send({ id: 9005, text: BUSY });
   const busyDup = await send({ id: 9005, text: BUSY });
   assert(busyAgain.status === 200 && UUID.test(String(busyAgain.body.id)) && busyDup.body.duplicate === true && busyDup.body.id === busyAgain.body.id,
     `once the claim in flight is gone, a resend captures, and the next is its duplicate (${JSON.stringify(busyAgain.body)}; ${JSON.stringify(busyDup.body)})`);
+  // A time is metadata beside the passage: one the hook cannot read is stored as none, and the highlight captured (review pass 2).
+  for (const [hid, label, times] of [[9011, "times that are no times", { highlighted_at: "around lunch", updated: "soon" }], [9012, "30 February and a year Postgres refuses", { highlighted_at: "2026-02-30T00:00:00Z", updated: "+010000-01-01T00:00:00Z" }],
+    [9013, "a time Date.parse reads and Postgres does not, and a NUL", { highlighted_at: "12/31/99999", updated: "2026-01-01T00:00:00Z\u0000" }]] as const) {
+    const r = await send({ id: hid, text: `A highlight with ${label}.`, ...times });
+    const row = await keptRow(hid);
+    assert(r.status === 200 && UUID.test(String(r.body.id)) && row?.highlighted_at === null && row.updated_at === null, `${label}: captured, its times stored as none (${r.status} ${JSON.stringify(row)})`);
+  }
+  const spaced = await send({ id: 9014, text: "Waste no time.", note: "   ", highlighted_at: "2026-09-04 10:00:00+02" });
+  const spacedRow = await keptRow(9014);
+  const spacedThought = await one<{ content: string }>(sql`SELECT content FROM thoughts WHERE id = ${UUID.test(String(spaced.body.id)) ? String(spaced.body.id) : NO_ROW}`);
+  assert(spaced.status === 200 && spacedThought?.content === "Waste no time." && spacedRow?.note === null && at(spacedRow.highlighted_at) === "2026-09-04T08:00:00.000Z",
+    `a note of whitespace alone is none, in the thought and the row, and a time with a space and an hours offset is read (${JSON.stringify(spacedThought)}; ${JSON.stringify(spacedRow)})`);
+
+  // isoTime, the times' reading: ISO 8601 as Readwise sends them, each bound on its own (review pass 2).
+  const times: [string, string | null][] = [
+    ["2022-09-13T16:41:53.186Z", "2022-09-13T16:41:53.186Z"], ["2022-09-13T16:41:53.186000Z", "2022-09-13T16:41:53.186Z"], ["2022-09-13T16:41:53.123456789Z", "2022-09-13T16:41:53.123Z"],
+    ["2022-09-13T16:41:53.5Z", "2022-09-13T16:41:53.500Z"], ["2022-09-13T16:41:53Z", "2022-09-13T16:41:53.000Z"], ["2022-09-13T16:41Z", "2022-09-13T16:41:00.000Z"],
+    ["2022-09-13T16:41:53+05:30", "2022-09-13T11:11:53.000Z"], ["2022-09-13T16:41:53+0530", "2022-09-13T11:11:53.000Z"], ["2022-09-13T16:41:53-08", "2022-09-14T00:41:53.000Z"],
+    ["2022-09-13T16:41:53", "2022-09-13T16:41:53.000Z"], ["2022-09-13 16:41:53z", "2022-09-13T16:41:53.000Z"], ["2022-09-13t16:41:53Z", "2022-09-13T16:41:53.000Z"], ["2022-09-13", "2022-09-13T00:00:00.000Z"],
+    ["2024-02-29", "2024-02-29T00:00:00.000Z"], ["2000-02-29", "2000-02-29T00:00:00.000Z"], ["2023-02-29", null], ["1900-02-29", null], ["2026-02-28", "2026-02-28T00:00:00.000Z"], ["2026-04-31", null],
+    ["2026-00-10", null], ["2026-13-01", null], ["2026-01-00", null], ["2026-01-01T24:00:00Z", null], ["2026-01-01T23:60:00Z", null], ["2026-01-01T23:59:60Z", null],
+    ["2026-01-01T00:00:00+14:00", "2025-12-31T10:00:00.000Z"], ["2026-01-01T00:00:00+14:01", null], ["2026-01-01T00:00:00-14:30", null], ["2026-01-01T00:00:00+05:60", null],
+    ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000Z"], ["0001-01-01T00:00:00+01:00", null], ["0000-06-01T00:00:00Z", null], ["9999-12-31T23:00:00Z", "9999-12-31T23:00:00.000Z"], ["9999-12-31T23:00:00-02:00", null],
+    ["2026-01-01T00:00:00Zjunk", null], ["junk2026-01-01", null], ["12/31/99999", null], ["+010000-01-01T00:00:00Z", null], ["Tue", null], ["", null],
+  ];
+  const misread = times.filter(([input, want]) => isoTime(input) !== want).map(([input, want]) => `${input}: ${isoTime(input)}, not ${want}`);
+  assert(misread.length === 0, `isoTime reads each of ${times.length} times as it should (${misread.join("; ") || "all"})`);
+  assert(LEASE_S === 3600, "a claim whose capture never finished holds its id for an hour");
 
   // The core's refusal, which no capture this hook sends can draw today: through a stub core, as [keepRowItem] does.
   // One the core calls retryable is a 503 Readwise may send again, any other a 422; either way no row, and the id given back.
   for (const retryable of [true, false]) {
     const queries: string[] = [];
-    const stubSql = ((strings: TemplateStringsArray) => {
+    const values: unknown[][] = [];
+    const stubSql = ((strings: TemplateStringsArray, ...args: unknown[]) => {
       const q = strings.join("$");
       queries.push(q);
+      values.push(args);
       return Promise.resolve(q.includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : q.includes("RETURNING id") ? [{ id: "9100" }] : []);
     }) as unknown;
     const stubCtx = {
@@ -2802,8 +2830,9 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     };
     const answer = await manifest.hooks!.highlight.handler(stubCtx as never, { headers: {}, query: {}, body: new Uint8Array(), text: JSON.stringify(event({ id: 9100 })) });
     assert(answer.status === (retryable ? 503 : 422) && answer.body?.code === "CORE_REFUSED" && answer.body?.retryable === retryable && answer.body?.refused === "STUB_REFUSED"
-      && !queries.some((q) => q.includes("INSERT INTO highlights")) && queries.some((q) => q.includes("DELETE FROM deliveries")),
-      `a ${retryable ? "retryable" : "final"} refusal of the core's: ${retryable ? 503 : 422} CORE_REFUSED naming it, no row written, the id given back (${JSON.stringify(answer)})`);
+      && !queries.some((q) => q.includes("INSERT INTO highlights")) && queries.some((q) => q.includes("DELETE FROM deliveries") && q.includes("RETURNING id"))
+      && values[queries.findIndex((q) => q.includes("RETURNING claimed_at"))]?.includes(LEASE_S),
+      `a ${retryable ? "retryable" : "final"} refusal of the core's: ${retryable ? 503 : 422} CORE_REFUSED naming it, no row written, the id given back, the claim held for LEASE_S (${JSON.stringify(answer)})`);
   }
 
   // The README's copy block, as the README gives it: the standalone server's thoughts become the plugin's rows.
@@ -2820,13 +2849,16 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const [oldBare] = (await old("An old highlight with nothing beside it.", { source: "readwise", readwise_highlight_id: 8002, readwise_book_id: 7, note: "", color: "", location_type: "", url: "" })) as { id: string }[];
   await old("Another source's thought that names a highlight id.", { source: "mcp", readwise_highlight_id: 8003, readwise_book_id: 7 });
   await old("A readwise thought whose id is not a number.", { source: "readwise", readwise_highlight_id: "x8004", readwise_book_id: 7 });
+  // Any capture key may label a capture readwise: the block copies only thoughts first captured by no key, as the old server's and readwise-import's were.
+  const keyed = await rest("POST", "/v1/thoughts", { content: "A capture key's thought labelled readwise.", source: "readwise", metadata: { readwise_highlight_id: 8006, readwise_book_id: 7 } }, KEYS.capture);
+  assert(keyed.status === 201, `a capture key may label a capture readwise (${keyed.status})`);
   const copy = new SQL({ url: URL_, max: 1 });
   try {
     for (let run = 1; run <= 2; run++) await copy.unsafe(statements);
     const copied = await one<{ ids: string }>(sql`SELECT string_agg(highlight_id::text, ',' ORDER BY highlight_id) AS ids FROM plugin_readwise.highlights WHERE highlight_id < 9000`);
     const a = await keptRow(8001);
     const bareCopied = await keptRow(8002);
-    assert(copied.ids === "8001,8002", `run twice, it copies each readwise thought with a numeric highlight id once, and no other source's (${copied.ids})`);
+    assert(copied.ids === "8001,8002", `run twice, it copies each readwise thought with a numeric highlight id once, no other source's, and no key's capture labelled readwise (${copied.ids})`);
     assert(a?.thought_id === oldA.id && a.note === "kept" && a.location === 3 && a.color === "blue" && JSON.stringify(a.tags) === '["old","copied"]' && at(a.highlighted_at) === "2026-01-01T00:00:00.000Z",
       `…an id on two thoughts copied from the first captured, with what the server kept in its metadata (${JSON.stringify(a)})`);
     assert(bareCopied?.thought_id === oldBare.id && bareCopied.note === null && bareCopied.color === null && bareCopied.location_type === null && bareCopied.url === null
