@@ -188,11 +188,11 @@ Once the agenda read lands (SMD-3669, ranked by effective priority, SMD-3667), t
 **On a failure** at any step after the claim, the runner hands the ticket back:
 
 * **A work failure:** the gate, a limit, the way out, or any failure once the worker session has started.
-  * Release the claim with a reason naming the step, and delete its token.
+  * Release the claim with a reason naming the step; once the release lands, delete its token.
   * In one Linear write, take the runner's label off, add the label for a person, and move the ticket back to Backlog.
   * Comment with the step the run ended at, and end as in step 10. When the agent took the way out, its own words stay in the run's record.
-* **An environment failure:** stable, GitHub, Linear or Anthropic not answering before the worker session starts. Release the claim, delete its token, and move the ticket back to Backlog, keeping its label, so a later tick can take it.
-* **A step that can't be done now,** such as a release while stable is down, stays in the run's record as owed, and step 0 retries it each tick. A record is finished only when nothing is owed.
+* **An environment failure:** stable, GitHub, Linear or Anthropic not answering before the worker session starts. Release the claim (its token deleted once the release lands), and move the ticket back to Backlog, keeping its label, so a later tick can take it.
+* **A step that can't be done now,** such as a release while stable is down or one refused `CLAIM_UNATTRIBUTED`, stays in the run's record as owed, and step 0 retries it each tick. A claim's token is deleted only once its release lands (CLAUDE.md step 6). A release that an operator must act on goes to a person, and waits for the maintainer's word. A record is finished only when nothing is owed.
 * **A signal.** `launchctl bootout` sends SIGTERM. The runner ends the session's process group, records the step, and leaves the rest to the next tick's step 0. If the runner itself is killed, step 0 ends the recorded process group before it hands the run back. It clears any file flags the agent set before deleting the clone.
 
 ## Limits
@@ -258,9 +258,9 @@ Step 0 of every tick, under the lock and after the brain check, for every run wh
 * **A run that died before publishing** (a crash, a sleep, a reboot): handed back, naming the step, once its recorded process group is ended. If its worker session had started, as a work failure; if not, as an environment failure.
 * **Owed steps:** retried.
 * **A published run:** the runner reads its PR first, since a PR merged just before board-sync closed its ticket is done, not closed under it (CLAUDE.md step 4).
-  * **Merged:** release the claim (reason: the merged PR) and delete its token; delete the fork's branch; comment on the ticket. The ticket's state stays the maintainer's, since its Verify may still need a live check.
-  * **Closed without merging:** release with a reason, delete the token and the fork's branch, label the ticket for a person, and move it back to Backlog.
-  * **Handed over** (a review requesting changes, or the ticket assigned to anyone but the bot): release the claim with "handed to <person>", delete the token, and stop renewing, so the maintainer's own sessions can claim the work. The PR stays, open to the maintainer's pushes.
+  * **Merged:** release the claim (reason: the merged PR), deleting its token once the release lands; delete the fork's branch; comment on the ticket. The ticket's state stays the maintainer's, since its Verify may still need a live check.
+  * **Closed without merging:** release with a reason, delete the fork's branch and, once the release lands, the token, label the ticket for a person, and move it back to Backlog.
+  * **Handed over** (a review requesting changes, or the ticket assigned to anyone but the bot): release the claim with "handed to <person>" (its token deleted once the release lands), and stop renewing, so the maintainer's own sessions can claim the work. The PR stays, open to the maintainer's pushes.
   * **Still open:** renew the claim with the record's lease, and read the reply as step 8 does.
     * `WORK_CLAIMED`, or a lapse naming another claim made meanwhile, means someone else may have worked on it: comment, label the ticket for a person, and stop renewing.
     * `CLAIM_RELEASED` means the same, whether it is an operator's release or board-sync's after the ticket closed while its PR was open (`ticketClosed`).
@@ -310,7 +310,7 @@ Each its own PR, in order:
 2. **One run, local:**
    * First, the probes above, on the pinned version.
    * Then the claim, the clone, the worker and review sessions, the bundle, the gate and the record, ending at a branch in the runner's bare repository with no push.
-   * Each run then releases its claim with a reason, deletes its token and moves the ticket back to Backlog. The maintainer reads the bundle with nothing left held.
+   * Each run then releases its claim with a reason (its token deleted once the release lands) and moves the ticket back to Backlog. The maintainer reads the bundle with nothing left held.
    * Amends CLAUDE.md's "Claim your work" for a runner (decision 6), and checks that stable's server sets `OB1_TIER=stable`.
    * Needs stable on v2.0.0, SMD-4086, SMD-4088, and SMD-4089's brain key, API key and Linear key: this cut moves the ticket and comments.
 3. **Publish and reconcile:**
