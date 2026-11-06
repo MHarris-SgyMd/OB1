@@ -494,13 +494,23 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const writer = { out: (l: string) => lines.push(`out ${l}`), err: (l: string) => lines.push(`err ${l}`) };
   const instant = async () => {};
   const wake = new AbortController().signal;
-  const scripted = (states: Probe[]) => async () => states.shift() ?? { state: "up" as const };
+  /** Probes answered in order; asked past the script it throws, so a helper that probes too often is reported, not looped (review pass 4). */
+  const scripted = (states: Probe[]) => async () => {
+    const next = states.shift();
+    if (!next) throw new Error("probed past the script");
+    return next;
+  };
   const refuseMissing = async (p: Probe) => (p.state === "missing" ? { kind: "model" as const, line: "unserved" } : null);
 
   // probeAtStart: a refusal only of a probe that answered; no answer is the start's wait, not its refusal.
   ok("refused" in (await probeAtStart({ probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing })), "probeAtStart: a model unserved at the first probe is refused");
-  const outFirst = await probeAtStart({ probe: scripted([{ state: "out", why: "ECONNREFUSED" }]), refusal: async () => ({ kind: "provider", line: "never asked" }) });
-  ok("out" in outFirst && outFirst.out === "ECONNREFUSED", `probeAtStart: no answer refuses nothing, its why kept for the wait (${JSON.stringify(outFirst)})`);
+  let refusalsAsked = 0;
+  const outFirst = await probeAtStart({ probe: scripted([{ state: "out", why: "ECONNREFUSED" }]), refusal: async () => { refusalsAsked++; return { kind: "provider", line: "never asked" }; } });
+  ok("out" in outFirst && outFirst.out === "ECONNREFUSED" && refusalsAsked === 0, `probeAtStart: no answer refuses nothing and asks no refusal — extract's is a GET /models to a provider that is down (review pass 4) — its why kept for the wait (${JSON.stringify(outFirst)}, ${refusalsAsked} asked)`);
+  const startStop = new AbortController().signal;
+  const signalsSeen: (AbortSignal | undefined)[] = [];
+  await probeAtStart({ probe: async (w) => { signalsSeen.push(w); return { state: "up" }; }, refusal: async (_p, w) => { signalsSeen.push(w); return null; }, wake: startStop });
+  ok(signalsSeen.length === 2 && signalsSeen.every((w) => w === startStop), "probeAtStart: the caller's stop reaches the probe and the refusal (review pass 4)");
   const upFirst = await probeAtStart({ probe: scripted([{ state: "up" }]), refusal: refuseMissing });
   ok("out" in upFirst && upFirst.out === null, "probeAtStart: an answer through its refusals is no wait");
 
@@ -508,9 +518,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const stamps: boolean[] = [];
   lines.length = 0;
   const startStates: Probe[] = [{ state: "out", why: "503" }, { state: "up" }];
-  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: scripted(startStates), refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
+  const waitSignals: AbortSignal[] = [];
+  const nextStart = scripted(startStates);
+  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: (w) => { waitSignals.push(w); return nextStart(); }, refusal: (p, w) => { waitSignals.push(w); return refuseMissing(p); }, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
   // Both probes asked: an out probe is waited past, not taken for the answer (review pass 3).
-  ok(up === "up" && startStates.length === 0 && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after \d+ s$/.test(lines[1] ?? ""),
+  ok(up === "up" && startStates.length === 0 && waitSignals.length === 3 && waitSignals.every((w) => w === wake) && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after [01] s$/.test(lines[1] ?? ""),
     `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
   lines.length = 0;
   const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing, wake, writer, sleep: instant });
@@ -527,7 +539,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   let checks = 0;
   ok((await waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: instant, firstLine: true })) && checks === 2
-    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after/.test(lines[0] ?? "") && /^out {3}the database answers again after \d+ s; polling resumes$/.test(lines[1] ?? ""),
+    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after/.test(lines[0] ?? "") && /^out {3}the database answers again after [01] s; polling resumes$/.test(lines[1] ?? ""),
     `waitForDatabase: said with the error's first line, checked until it answers, said again (${checks} checks; ${lines.join(" | ").slice(0, 200)})`);
   lines.length = 0;
   await waitForDatabase(pgDown(), { check: async () => {}, wake, writer, sleep: instant });
@@ -535,6 +547,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   ok((await waitForDatabase(pgDown(), { check: async () => {}, wake: stop.signal, writer, sleep: instant })) === false && !lines.some((l) => / answers again/.test(l)),
     "waitForDatabase: a stop ends the wait, false, nothing said to answer (review pass 3)");
+  let authChecks = 0;
+  let authThrew = "";
+  await waitForDatabase(pgDown(), { check: async () => { if (authChecks++ === 0) throw Object.assign(new Error("password authentication failed"), { name: "PostgresError", errno: "28P01" }); }, wake, writer, sleep: instant })
+    .catch((e: { errno?: string }) => { authThrew = e.errno ?? ""; });
+  ok(authThrew === "28P01" && authChecks === 1, `waitForDatabase: a check the database refuses otherwise — a password changed while it was down — is thrown, not waited on (review pass 4; ${authThrew}, ${authChecks} check(s))`);
   let afterThrows = 0;
   let afterPasses = 0;
   const throughAfter = await followedPass({ pass: async () => { afterPasses++; return 7; }, afterPass: async () => { if (afterThrows++ === 0) throw pgDown(); }, follow: true, check: async () => {}, wake, writer, sleep: instant });
@@ -544,8 +561,9 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const twice = await followedPass({ pass: async () => { if (passes++ === 0) throw pgDown(); return passes; }, afterPass: async () => { afters++; }, follow: true, check: async () => {}, wake, writer, sleep: instant });
   ok(twice === 2 && afters === 1, `followedPass: a database outage waited out, the pass run again, its counts returned, the wait for the provider after it (${twice}, ${afters} after)`);
   let threw = "";
-  await followedPass({ pass: async () => { throw new Error("a writer threw"); }, afterPass: async () => {}, follow: true, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.message; });
-  ok(threw === "a writer threw", "followedPass: any other error ends the run");
+  let otherPasses = 0;
+  await followedPass({ pass: async () => { if (otherPasses++ === 0) throw new Error("a writer threw"); return 1; }, afterPass: async () => {}, follow: true, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.message; });
+  ok(threw === "a writer threw" && otherPasses === 1, `followedPass: any other error ends the run (review pass 4: its pass throws once too; ${otherPasses} pass(es))`);
   threw = "";
   // Passes that throw once, so a broken helper returns and is reported here rather than looping (review pass 3).
   let oneShotPasses = 0;
@@ -577,6 +595,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   await leases.returnAtEnd(30, writer.err);
   ok(released.join() === "w1,w3" && /^err {3}1 worker\(s\)' leases could not be returned as the run ended; they expire within 30 s$/.test(lines[0] ?? ""), `Unreturned.returnAtEnd: all at once, one line for those that could not go (${released}; ${lines[0]})`);
+  lines.length = 0;
+  const allBack = new Unreturned(async () => {});
+  allBack.add("a1");
+  await allBack.returnAtEnd(45, writer.err);
+  ok(lines.length === 0, `Unreturned.returnAtEnd: nothing said when every lease went back (review pass 4; ${lines.join(" | ")})`);
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);
