@@ -4,10 +4,10 @@
 // image carries no db/migrations/ to read.
 
 /** db/version.mjs's BRAIN_VERSION — the version this server reports. */
-export const BRAIN_VERSION = "1.9.0+upstream.9543c29";
+export const BRAIN_VERSION = "2.0.0";
 
 /** The migration range releases.json records for BRAIN_VERSION, or null when it records none (a version bumped and not yet cut). */
-export const RELEASE_RANGE: readonly [number, number] | null = [90, 103];
+export const RELEASE_RANGE: readonly [number, number] | null = null;
 
 /** The highest migration file in the tree this server was built from — what a brain migrated for it has applied. */
-export const LATEST_MIGRATION = 120;
+export const LATEST_MIGRATION = 121;

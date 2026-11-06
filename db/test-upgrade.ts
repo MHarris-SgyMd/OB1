@@ -719,13 +719,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // re-link, its trigger function, three triggers on thought_facets and two
   // indexes, 084's made again — and redefines 111's validator and 102's
   // record_thought_relation on their own bodies, refusing by name without
-  // 061, 084, 111 or 113 ([20bl]) — all
+  // 061, 084, 111 or 113 ([20bl]); 121 upserts ob1_config.schema_version
+  // for the 2.0.0 cut, needing only 006's table — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 91, `030 is among the last ninety-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 92, `030 is among the last ninety-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
