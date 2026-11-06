@@ -1,6 +1,6 @@
 {
   "name": "Live Retrieval",
-  "description": "Automatically surfaces relevant Open Brain thoughts during active work. Searches when topic shifts are detected, shows brief context notes on hits, stays silent on misses. The read side of the flywheel.",
+  "description": "Automatically surfaces relevant Daemonic Brain thoughts during active work. Searches when topic shifts are detected, shows brief context notes on hits, stays silent on misses. The read side of the flywheel.",
   "category": "recipes",
   "author": {
     "name": "Jared Irish",

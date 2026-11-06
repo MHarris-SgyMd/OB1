@@ -31,7 +31,7 @@ export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 /** Postgres's text holds no NUL character, and refuses one as a 22021 the store would raise as a fault (review pass 3). */
 const NO_NUL = (s: string) => !s.includes(String.fromCharCode(0));
 const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
-/** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
+/** A priority's or an item's time (SMD-3664): an instant with its offset, or a date alone — a due time by the end of that day (the next day's start in UTC, SMD-3778), a not_before from its start. */
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
 // Open items (SMD-3665 PR 2): an id 117 reads (a uuid, in any case, white space around it), a short free text, a reason.
 const ITEM_ID = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
@@ -591,8 +591,8 @@ export const SPECS = {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity, or item (an open item)"),
       key: PRIORITY_KEY.describe("The item's key: a thought's or an entity's id (a uuid), or a ticket's key such as SMD-3664 (case and surrounding white space don't matter)"),
       level: z.number().int().min(0).max(5).describe("0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical"),
-      due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
-      not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms; never after due_at"),
+      due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC)"),
+      not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms (a date from the start of that day in UTC); never after due_at"),
       due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: PRIORITY_KEY }).strict().optional()
         .describe("Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself"),
       // 116 counts a reason's characters once cleaned; the schema's cap only bounds the request, four UTF-16 units a
@@ -631,7 +631,7 @@ export const SPECS = {
       // 117 counts a text's characters once cleaned (at most 1000); the schema's cap only bounds the request (set_priority's reason's rule).
       text: z.string().min(1).max(4000).refine(NO_NUL, "may not hold a NUL character").describe("What is to be done, at most 1000 characters"),
       owner: ITEM_OWNER.optional().describe("Who is to do it, at most 200 characters: free text, not a key"),
-      due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
+      due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC)"),
       origin_thought: UUID_ARG.optional().describe("The id of the thought the item was read from"),
       plugin_row: ITEM_OWNER.optional().describe("Through a plugin's ctx.call alone: the plugin's row the item stands for. Refused from any other caller"),
       proposed: z.boolean().optional().describe("True for an item inferred, not stated (the extractor's): it reads as not yet open until a write key confirms it"),

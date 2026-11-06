@@ -1,6 +1,6 @@
 {
   "name": "Readwise Import",
-  "description": "One-shot backfill of your Readwise highlight history into Open Brain via the /api/v2/export/ endpoint. Pair with the readwise-capture integration to keep it live.",
+  "description": "One-shot backfill of your Readwise highlight history into Daemonic Brain via the /api/v2/export/ endpoint. Pair with the readwise-capture integration to keep it live.",
   "category": "recipes",
   "author": {
     "name": "Mark Lavercombe",

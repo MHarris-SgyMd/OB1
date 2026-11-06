@@ -2,7 +2,7 @@
 /**
  * backfill-gmail-wikis.mjs — decoupled wiki synthesis for Gmail threads.
  *
- * Assumes you have already imported Gmail messages into Open Brain via
+ * Assumes you have already imported Gmail messages into Daemonic Brain via
  * `recipes/email-history-import/` (or a compatible importer that writes
  * `metadata.gmail.thread_id` and `metadata.gmail.gmail_id` on each
  * thought with `source_type='gmail_export'`). This script groups those
@@ -28,7 +28,7 @@
  *   LLM_MODEL               (default: anthropic/claude-haiku-4-5)
  *
  * Schema assumptions:
- *   - `public.thoughts` exists (core OB1 schema).
+ *   - `public.thoughts` exists (core Daemonic Brain schema).
  *   - `public.thought_edges (from_thought_id, to_thought_id, relation,
  *     metadata jsonb)` exists — ships in OB1's knowledge-graph schema.
  *   - Optional: `public.upsert_thought(p_content, p_payload)` RPC for

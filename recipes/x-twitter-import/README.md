@@ -10,7 +10,7 @@
 
 </div>
 
-> Import your X (Twitter) data export — tweets, DMs, and Grok chats — into Open Brain.
+> Import your X (Twitter) data export — tweets, DMs, and Grok chats — into Daemonic Brain.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)), and this repository checked out beside it
 - **X/Twitter data export** — request from X Settings → Your Account → Download an archive
 - **Bun** (the runtime the brain's tools use)
 

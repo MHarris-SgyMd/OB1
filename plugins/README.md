@@ -4,7 +4,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 
 | Plugin | What it does |
 | --- | --- |
-| [example](example/) | The template: a read operation over the core, and notes pinned to thoughts in a table of its own |
+| [example](example/) | The fullest example: a read operation over the core, notes pinned to thoughts in a table of its own, a GUI page and a webhook. An extension's plugin starts from [extensions/_template/plugin/](../extensions/_template/plugin/) |
 | [family-calendar](family-calendar/) | The household's members, their weekly and dated activities, and the dates to remember: the learning path's Extension 3 (SMD-2311) |
 | [home-maintenance](home-maintenance/) | The house's maintenance tasks, what is due or overdue, and the log of work done: the learning path's Extension 2 (SMD-2311) |
 | [household-knowledge](household-knowledge/) | Facts about the things in the home and the vendors who work on it: the learning path's Extension 1 (SMD-2311) |
@@ -89,6 +89,7 @@ Held by the maintainer's review:
 
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **A row that is a to-do keeps an open item** (SMD-3665 PR 3b) with the SDK's `keepRowItem(ctx, { row, text, due, owner?, done? })`, called after the plugin's own transaction commits. It opens the row's item through `ctx.call("open_item")` with `plugin_row`, `proposed`, so a write key confirms it. The same row again is the item already there: its text, due day and owner (when given) are moved to the row's, and `done` settles it. A dropped item is left as it is, and so is a done one, unless the row comes round again (`reopenDone`, a recurring task), which reopens it. A refusal or a fault is answered `{ did: "failed", code }` and never fails the plugin's write, so a plugin that keeps items gives an operation that keeps every row's at once (`sync_open_items`, as home-maintenance and family-calendar do). `RowItemAnswer` is the `{ id, status }` or `null` an operation's output declares for it.
+- **A row's own priority** (SMD-3666 PR 3) goes on its item with the SDK's `keepItemPriority(ctx, itemId, { scale, value, chosen? })`: the row's word on its source's scale (`PriorityScale`, `server-portable/priority-scale.ts`, docs/priority.md's table) set through `ctx.call("set_priority")` with the word as the reason, or cleared when it reads as unknown, a source's default not `chosen` among them. The tier is the caller's key's. As `keepRowItem`, it answers a refusal or a fault as `failed` and never fails the plugin's write.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 
 Plugins are **curated**: they run inside the brain's servers with their privileges, so a new one needs maintainer review. That review is the control; the roles and check 31 catch what review misses by accident.

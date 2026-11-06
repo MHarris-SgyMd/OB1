@@ -781,32 +781,35 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
- * The MCP stack — the four packages integrations/package.json installs for the
- * vendored servers, one list (SMD-1800): integrations/test-auth.ts's pin guard
- * holds that install to them, and server-portable's and mcp-server's to the
- * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
+ * The vendored servers' stack — the packages integrations/package.json installs
+ * for them, one list (SMD-1800): integrations/test-auth.ts's pin guard holds
+ * that install to exactly these, and server-portable's and mcp-server's to the
+ * same versions (the Kubernetes image's, held exactly, retired: SMD-2288). The
  * integrations reach that install from under it, the recipes through the
  * committed recipes/node_modules link (SMD-1991; in integrations/ since
- * SMD-3747). A name added here alone reaches every reader.
+ * SMD-3747). The v1 MCP pair, `@hono/mcp` and `@modelcontextprotocol/sdk`, left
+ * it with SMD-3747: no vendored server on this install imports an MCP package
+ * (the Vercel recipe's route has its own). A name added here alone reaches
+ * every reader.
  */
-export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
+export const STACK: readonly string[] = ["hono", "zod"];
+/** The v1 MCP packages: in none of the installs integrations/test-auth.ts holds since SMD-2278 (server-portable, mcp-server) and SMD-3747 (integrations); the Vercel recipe's route keeps its own. */
+export const RETIRED_V1_MCP: readonly string[] = ["@hono/mcp", "@modelcontextprotocol/sdk"];
 
 /**
  * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
  * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
  * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
  * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
- * `hono` and `zod` are shared with STACK. The vendored servers (integrations/) stay
- * on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
- * during the window the two stacks coexist and integrations/test-auth.ts's pin guard
- * holds each install to its own.
+ * `hono` and `zod` are shared with STACK, and integrations/test-auth.ts's pin guard
+ * holds them to the versions integrations/package.json pins. The vendored
+ * servers import no MCP package since SMD-3747, so integrations/ installs `hono`
+ * and `zod` alone.
  */
 export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
 /**
  * The v2 packages' pinned versions — the independent truth the drift guard holds
- * server-portable and mcp-server to while they are the v2 installs. Stages 2 and
- * 3 (SMD-2279, SMD-2281) move the vendored servers onto these too and the
- * cross-install version check resumes.
+ * server-portable and mcp-server to, the two installs that serve MCP.
  */
 export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
   "@modelcontextprotocol/core": "2.1.0",

@@ -10,7 +10,7 @@
 
 ## What It Does
 
-Lint Sweep is a read-only quality audit for your Open Brain. It runs the same way a code linter runs — scan the content, flag suspicious items, leave everything to a human to fix. Three cost tiers let you trade completeness for budget: Tier 1 runs entirely in SQL (free), Tier 2 walks the knowledge graph (free), and Tier 3 uses an LLM to sample a small batch of thoughts for contradictions and missing-links (capped LLM spend).
+Lint Sweep is a read-only quality audit for your brain. It runs the same way a code linter runs — scan the content, flag suspicious items, leave everything to a human to fix. Three cost tiers let you trade completeness for budget: Tier 1 runs entirely in SQL (free), Tier 2 walks the knowledge graph (free), and Tier 3 uses an LLM to sample a small batch of thoughts for contradictions and missing-links (capped LLM spend).
 
 Inspired by Andrej Karpathy's "lint the wiki" pattern and the [CRATE CLI](https://github.com/GuiminChen/CRATE) compile/ask/lint/ingest loop.
 
@@ -26,7 +26,7 @@ Tier 1 and Tier 2 run against your brain's Postgres through `compat/supabase-sql
 
 ## Prerequisites
 
-- Working [Open Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
+- Working [Daemonic Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
 - The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 those two and `type`; without it the sweep stops at its first read of those columns
 - (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent. On a migrated brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
@@ -144,7 +144,7 @@ started_at: 2026-04-18T14:22:04.112Z
 finished_at: 2026-04-18T14:22:11.031Z
 ---
 
-# Open Brain Lint Sweep — 2026-04-18
+# Daemonic Brain Lint Sweep — 2026-04-18
 
 *Read-only audit. This script never mutates thoughts.*
 
@@ -219,7 +219,7 @@ After a successful run you should see:
 
 - A markdown report at the path you passed to `--report` (or `./lint-report-YYYY-MM-DD.md` by default).
 - Console output showing progress per tier and final counts — something like `[tier 1] done — 12847 total thoughts, 43 orphans-by-tag, 2 dup groups, 0 missing-fingerprint`.
-- No changes to your Open Brain. The result of the sweep is the report file — nothing else is written back to the database.
+- No changes to your brain. The result of the sweep is the report file — nothing else is written back to the database.
 
 The report is designed to be triaged by hand: scan each section, follow up on anything that looks real, ignore anything that is a false positive. Over several weeks you should see Tier 1 and Tier 2 counts shrink as you clean up obvious hygiene issues, leaving Tier 3 findings as the main source of ongoing work.
 
@@ -262,7 +262,7 @@ Run the sweep weekly with cron (Linux/macOS):
 
 Or with Windows Task Scheduler (`schtasks /create`), systemd timers, or a GitHub Actions scheduled workflow.
 
-After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings, and act on anything worth fixing via your normal Open Brain tooling.
+After each run, open the latest `lint-report-YYYY-MM-DD.md`, triage the findings, and act on anything worth fixing via your normal Daemonic Brain tooling.
 
 ## Troubleshooting
 

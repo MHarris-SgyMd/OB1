@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Open Brain — Gmail Pull Script
+ * Daemonic Brain — Gmail Pull Script
  *
  * Fetches emails from Gmail via REST API, cleans them, generates embeddings
  * and metadata, and inserts each as a thought into Supabase with SHA-256

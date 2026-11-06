@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Open Brain — Google Activity Import
+ * Daemonic Brain — Google Activity Import
  *
  * Reads Google Takeout "My Activity" JSON files, filters noise, groups entries
  * by day, summarizes each day via LLM into 1-3 standalone thoughts, and loads
- * them into your Open Brain with vector embeddings and metadata.
+ * them into your brain with vector embeddings and metadata.
  *
  * Usage:
  *   node import-google-activity.mjs ./Takeout/My\ Activity [options]
@@ -131,7 +131,7 @@ function parseArgs() {
 
 function printUsage() {
   console.log(`
-Open Brain — Google Activity Import
+Daemonic Brain — Google Activity Import
 
 Usage:
   node import-google-activity.mjs <takeout-path> [options]

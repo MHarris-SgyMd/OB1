@@ -1,6 +1,6 @@
 {
   "name": "Grok Export Import",
-  "description": "Import xAI Grok conversation exports (JSON format with MongoDB-style dates) into Open Brain as searchable thoughts.",
+  "description": "Import xAI Grok conversation exports (JSON format with MongoDB-style dates) into Daemonic Brain as searchable thoughts.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",

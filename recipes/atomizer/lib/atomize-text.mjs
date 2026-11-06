@@ -200,7 +200,7 @@ async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey,
         Authorization: `Bearer ${openrouterApiKey}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/NateBJones-Projects/OB1",
-        "X-Title": "OB1 Atomizer",
+        "X-Title": "Daemonic Brain Atomizer",
       },
       body: JSON.stringify({
         model: openrouterModel,

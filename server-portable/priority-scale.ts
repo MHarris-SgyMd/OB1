@@ -46,6 +46,9 @@ export function levelOf(scale: PriorityScale, value: string | null | undefined, 
   return Object.hasOwn(MAPPINGS[scale], word) ? MAPPINGS[scale][word] : null;
 }
 
+/** A calendar day's end: the next day's start in UTC, as an ISO instant (SMD-3778). */
+export const endOfDay = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString();
+
 /** Each scale's name as a reason says it. */
 const SCALE_NAMES: Record<PriorityScale, string> = { linear: "Linear", frontmatter: "frontmatter", github: "GitHub label", "home-maintenance": "home-maintenance" };
 
@@ -57,9 +60,10 @@ export const reasonOf = (scale: PriorityScale, value: string) => `${SCALE_NAMES[
 export const isPriorityScale = (s: unknown): s is PriorityScale => typeof s === "string" && (PRIORITY_SCALES as readonly string[]).includes(s);
 
 /**
- * A due time as 116 takes it, or null: a date alone is the start of that day in UTC, so `2027-03-01` means one
- * instant whatever the database's time zone; a time with its offset is that instant. Anything else — a time with no
- * offset, which the database would read in its own zone, or text that is no time — is null.
+ * A due time as 116 takes it, or null: a date alone is due by the end of that day, the next day's start in UTC
+ * (SMD-3778, the maintainer's rule of 2026-11-05: one reading for a priority's due time and an open item's), so
+ * `2027-03-01` means one instant whatever the database's time zone; a time with its offset is that instant. Anything
+ * else — a time with no offset, which the database would read in its own zone, or text that is no time — is null.
  */
 export function dueInstant(t: string | null | undefined): string | null {
   if (typeof t !== "string") return null;
@@ -67,6 +71,6 @@ export function dueInstant(t: string | null | undefined): string | null {
   const m = /^(\d{4}-\d{2}-\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/.exec(s);
   // A calendar day that is one (2026-02-30 is not): the day read back from its own midnight in UTC.
   if (!m || Number.isNaN(Date.parse(`${m[1]}T00:00:00Z`)) || new Date(`${m[1]}T00:00:00Z`).toISOString().slice(0, 10) !== m[1]) return null;
-  if (m[2] === undefined) return `${m[1]}T00:00:00Z`;
+  if (m[2] === undefined) return endOfDay(m[1]);
   return Number.isNaN(Date.parse(s)) ? null : s;
 }

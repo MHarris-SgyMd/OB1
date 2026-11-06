@@ -1,6 +1,6 @@
 {
   "name": "Editorial Policy + Weekly Auditor",
-  "description": "A 40-rule constitution that governs every synthesis prompt in your Open Brain, paired with a weekly drift/contradiction auditor that enforces it. When synthesis drifts, you fix the policy first and the rules propagate to prompts — making drift detectable and giving the brain a stable identity.",
+  "description": "A 40-rule constitution that governs every synthesis prompt in your brain, paired with a weekly drift/contradiction auditor that enforces it. When synthesis drifts, you fix the policy first and the rules propagate to prompts — making drift detectable and giving the brain a stable identity.",
   "category": "recipes",
   "author": {
     "name": "Hans Bohlmann",

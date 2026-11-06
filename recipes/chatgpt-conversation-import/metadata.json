@@ -1,6 +1,6 @@
 {
   "name": "ChatGPT Conversation Import",
-  "description": "Parse your ChatGPT data export, resolve conversation branches, extract 2-5 typed thoughts per conversation via LLM knowledge extraction (decisions, preferences, learnings, context, brainstorms, references), and ingest them into Open Brain with enriched metadata and embeddings.",
+  "description": "Parse your ChatGPT data export, resolve conversation branches, extract 2-5 typed thoughts per conversation via LLM knowledge extraction (decisions, preferences, learnings, context, brainstorms, references), and ingest them into Daemonic Brain with enriched metadata and embeddings.",
   "category": "recipes",
   "author": {
     "name": "Matt Hallett",

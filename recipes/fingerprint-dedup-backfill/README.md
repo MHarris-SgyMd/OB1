@@ -26,7 +26,7 @@ Two scripts work together:
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [Content Fingerprint Dedup](../../recipes/content-fingerprint-dedup/) primitive applied (so `content_fingerprint` column exists)
 - Node.js 18+
 

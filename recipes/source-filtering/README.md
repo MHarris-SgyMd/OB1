@@ -10,7 +10,7 @@ Source filtering lets you scope `search_thoughts`, `list_thoughts`, and `thought
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [Bun](https://bun.sh) 1.2+ (for the backfill script only)
 - Supabase project URL and service role key
 - OpenRouter API key (for backfill script only)

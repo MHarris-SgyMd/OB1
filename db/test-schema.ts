@@ -7381,7 +7381,9 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   // The rule, from inside the suite, over the whole of both trees as check 12
   // walks them — not the listed files alone, since the two directories also
   // hold SQL no brain applies as a schema, and a Supabase-ism there is as
-  // much a stop for the reader who runs it.
+  // much a stop for the reader who runs it. The extension template's plugin
+  // migration (extensions/_template/plugin/, SMD-3747) is such SQL too: copied
+  // to plugins/<name>/, it is a plugin's, which the migrator runs.
   const walkSql = (dir: string, out: string[] = []): string[] => {
     for (const name of readdirSync(dir)) {
       if (name === "node_modules" || name.startsWith(".")) continue;
@@ -7393,8 +7395,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   const treeSql = [...walkSql(join(CONTRIB_DIR, "extensions")), ...walkSql(join(CONTRIB_DIR, "recipes"))].map((p) => p.slice(CONTRIB_DIR.length + 1));
   const treeIsms = treeSql.flatMap((f) => supabaseIsmsIn(readFileSync(join(CONTRIB_DIR, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
   const unlistedSql = treeSql.filter((f) => !contribFiles.includes(f));
-  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/")) && treeIsms.length === 0,
-    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
+  assert(contribFiles.every((f) => treeSql.includes(f)) && unlistedSql.every((f) => f.startsWith("recipes/") || f.startsWith("extensions/_template/plugin/")) && treeIsms.length === 0,
+    `no .sql under extensions/ or recipes/ runs a Supabase-ism — the ${contribFiles.length} listed files and the ${unlistedSql.length} a brain does not apply as a schema, all of those under recipes/ or the extension template's plugin (${treeIsms.length}: ${treeIsms.slice(0, 4).join("; ") || "none"})`);
 
   const xdb = new PGlite({ extensions: { vector, pg_trgm } });
   for (const f of files) await xdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
@@ -17081,6 +17083,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
     `a due time with a relative word anywhere raises 22023 from both writers; a date, a time with an offset and one with Z are kept, the offset honoured (${isoBad.map((d) => d.code).join(",")}; ${isoGood.map((d) => d.outcome).join(",")}, ${isoGood[1].item?.due_at})`);
 
   // A due time without an offset is UTC whatever the session's time zone, as set_priority reads a bare date (review pass 4).
+  // This is 117's reader, which this section re-applied: 119 makes a bare date the end of its day ([107], SMD-3778).
   let nyEpoch = -1;
   await db.transaction(async (tx) => {
     await tx.exec(`SET LOCAL TimeZone = 'America/New_York'`);
@@ -17346,6 +17349,28 @@ console.log("\n[106] Migration 118: a closed ticket's claims released — every 
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
+}
+
+console.log("\n[107] Migration 119: a due date alone is due by the end of that day — ob1_item_due reads 2027-04-01 as the next day's start in UTC whatever the session's time zone, a date and time with no offset as that instant in UTC, a year's end into the next; a relative word still refused 22023; a re-apply a no-op (SMD-3778)");
+{
+  // [105] re-applied 117's reader; 119's is put back first, by name (renumbered when main takes its number).
+  const file = files.find((f) => /^\d{3}_due_date_end_of_day\.sql$/.test(f)) ?? "no NNN_due_date_end_of_day.sql";
+  await reapply(file.slice(0, 4));
+  const epochOf = async (text: string, zone = "UTC") => {
+    let e = -1;
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL TimeZone = '${zone}'`);
+      e = Number((await tx.query<{ e: string }>(`SELECT extract(epoch FROM ob1_item_due($1))::text AS e`, [text])).rows[0].e);
+    });
+    return e;
+  };
+  const [ny, utc, timed, yearEnd] = [await epochOf("2027-04-01", "America/New_York"), await epochOf("2027-04-01"), await epochOf("2027-04-01T17:00:00", "America/New_York"), await epochOf("2027-12-31")];
+  assert(ny === Date.UTC(2027, 3, 2) / 1000 && utc === ny && timed === Date.UTC(2027, 3, 1, 17) / 1000 && yearEnd === Date.UTC(2028, 0, 1) / 1000,
+    `a bare date is due by its day's end, the next day's start in UTC, under a New York session as under UTC; a date and time with no offset that instant in UTC; a year's end the next year's start (${ny} ${utc} ${timed} ${yearEnd})`);
+  let word = "";
+  try { await db.query(`SELECT ob1_item_due('2027-04-01 tomorrow')`); } catch (e) { word = String((e as { code?: string }).code ?? "?"); }
+  await reapply(file.slice(0, 4));
+  assert(word === "22023" && (await epochOf("2027-04-01")) === Date.UTC(2027, 3, 2) / 1000, `a relative word is still refused 22023, and a re-apply is a no-op (${word})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

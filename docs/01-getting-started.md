@@ -290,7 +290,7 @@ Each of these tunnels works with a key in the URL, the quick one included. OAuth
 
 ![Step 7](https://img.shields.io/badge/Step_7-Connect_to_Your_AI-5C6BC0?style=for-the-badge)
 
-Every client below is pointed at a URL: no config file that spawns a process, no local bridge unless your client can speak only stdio. Pick yours:
+Every client below is pointed at a URL: no config file that spawns a process, no local bridge unless your client can speak only stdio. [Remote MCP Connection](../primitives/remote-mcp/) has each client's steps in one place, with which tools each key's scope shows and troubleshooting. Pick yours:
 
 <details>
 <summary>🤖 <strong>7.1 — Claude Desktop</strong></summary>
@@ -546,7 +546,7 @@ Your MCP server handles both reading and writing. But if you want a quick-captur
 - **[Telegram Capture](../integrations/telegram-capture/)** — Message a bot, get a thought
 - More integrations in [`/integrations`](../integrations/)
 
-Each one is a small server of its own that runs beside the stack — [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the pattern.
+Each one is a small server of its own that runs beside the stack — [Run a Vendored Server](../primitives/deploy-remote-mcp/) is the pattern.
 
 </details>
 

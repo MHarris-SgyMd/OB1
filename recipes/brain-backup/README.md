@@ -10,11 +10,11 @@
 
 </div>
 
-Export the Open Brain tables to local JSON files. The script pages each table through `compat/supabase-sql` (1 000 rows per query), writes each table to a dated JSON file, and prints a summary.
+Export the brain's tables to local JSON files. The script pages each table through `compat/supabase-sql` (1 000 rows per query), writes each table to a dated JSON file, and prints a summary.
 
 ## Prerequisites
 
-- An Open Brain setup: the brain's Postgres, reachable from where the script runs (`deploy/README.md`: a checkout reaches the stack's database with `-f deploy/compose.host-ports.yaml`)
+- A Daemonic Brain setup: the brain's Postgres, reachable from where the script runs (`deploy/README.md`: a checkout reaches the stack's database with `-f deploy/compose.host-ports.yaml`)
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
 - A `.env.local` file in the directory you run from (or an exported environment variable) containing:
   - `SUPABASE_URL` -- the brain's `postgres://` connection string (`SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored: the credentials live in the URL)
@@ -63,7 +63,7 @@ The console output shows row counts and file sizes for each table, making it eas
 
 - **`expected a postgres:// connection URL`** -- `SUPABASE_URL` still holds a Supabase project URL. In Daemonic Brain it is the brain's `postgres://` connection string (`SETUP.md`); the script refuses before any query.
 - **`Postgres error 3D000 on thoughts: database "…" does not exist`** -- the URL names a database the server does not have; every table shows the same error, `0/6`, exit 1. Fix the path in the connection string.
-- **`Required table "thoughts" not found in the database`** -- the connection reached a database without the Open Brain schema: a brain whose migrations have not run (`bun db/migrate.ts`), or the server's default `postgres` database named by mistake. Only Postgres's "relation does not exist" (`42P01`) is treated as "table not present"; everything else is surfaced so you can diagnose it.
+- **`Required table "thoughts" not found in the database`** -- the connection reached a database without the Daemonic Brain schema: a brain whose migrations have not run (`bun db/migrate.ts`), or the server's default `postgres` database named by mistake. Only Postgres's "relation does not exist" (`42P01`) is treated as "table not present"; everything else is surfaced so you can diagnose it.
 - **`Postgres error 42501 on thoughts: permission denied for table thoughts`** -- the connection's role has no SELECT on the table. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the export reads; a read-only credential is a hand `GRANT SELECT ON thoughts, entities, edges, thought_entities, ingestion_jobs, ingestion_items TO <role>` instead.
 - **`skipped (table not present)` for optional tables** -- expected on a brain without the companion schemas (`schemas/entity-extraction`, `schemas/smart-ingest`).
 - **A table shows `ERROR … timed out after 60000 ms`** -- set `FETCH_TIMEOUT_MS` to a larger value (milliseconds) if the database is slow or a table very large. The page is abandoned, not cancelled: the other tables still export, the run exits 1, and it ends within a few seconds of its summary rather than waiting for the abandoned query.

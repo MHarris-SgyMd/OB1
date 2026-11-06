@@ -14,7 +14,7 @@ Content fingerprint dedup solves all of that at the database level. Re-running a
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - The `thoughts` table must already exist
 
 > [!NOTE]
