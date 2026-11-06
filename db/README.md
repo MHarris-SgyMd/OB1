@@ -2224,8 +2224,8 @@ brains); a re-apply
 is a no-op. No grant is issued, but the
 trigger runs as the caller, as 016's does: a ticket edit reads `ob1_config`
 (above), and once a pool is named a capturing role needs `SELECT, INSERT,
-UPDATE` on `thought_work_claims`, which preflight checks (below). The sweep's
-place in sleep is SMD-3306 PR 6b-2. test-schema [101] (the trigger, a blank key,
+UPDATE` on `thought_work_claims`, which preflight checks (below). Sleep runs
+the sweep since SMD-3306 PR 6b-2. test-schema [101] (the trigger, a blank key,
 the ticket filed later, each action of the close and its refusals, the door's
 refusals by the ticket a thought is filed under, `ob1_filed_ticket`'s values),
 test-upgrade [20be] (refused without each prerequisite and on a SQL_ASCII
@@ -3624,7 +3624,8 @@ its predecessor named nothing for: the pool's key names whether a model is asked
 not which. Nothing asks them again yet, but the garbage-judge alarm (below) hands
 back those a judge it stops named nothing for.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today); its counts follow
+been measured on the question (the stable brain's, today), and the sleep
+scheduler follows the rules' pool it names, asking no model (PR 6b-2); its counts follow
 `OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
 out of date while it is on. On a brain upgraded
 from version 1 it finds every filed ticket again, unchanged, under the metadata
@@ -3644,8 +3645,9 @@ would take (the pool's claims, a gone worker's run-out leases among them, or eve
 thought with no current subject while its pool is not named), and reads on
 through a signal, as the pass's does; its pages go by thought id, so with
 `--limit` it counts the first by id, which a run need not take first. Sleep
-does not run the sweep yet: that is SMD-3306 PR 6b-2, on SMD-3379's scheduler,
-for which PRs 6a and 6b-1 ready it (a scheduler's run of the sweep, below).
+runs the sweep beside consolidation since SMD-3306 PR 6b-2, PRs 6a and 6b-1
+having readied it (a scheduler's run of the sweep, below; "Sleep", below,
+**The subject sweep**).
 
 **A judge that answers garbage stops the sweep, exit 3 (SMD-3306 PR 5b).** The
 pass's alarm (SMD-2266, above), for the judge model, judged after each claim the
@@ -3720,7 +3722,7 @@ each such claim fails at the limit a call, through the pool.
 
 **A scheduler's run of the sweep (SMD-3306 PRs 6a and 6b-1).** `sweepSubjects`
 takes most of the options the sleep scheduler drives the claim passes with, so
-that sleep can run it (PR 6b-2); none is the CLI's. It reports its start as a
+that sleep runs it (PR 6b-2); none is the CLI's. It reports its start as a
 claim pass does (`onStart`, PR 6b-1): each refusal of its start by its kind —
 its options' (`usage`), the egress gate's (`egress`), the tables' and the
 grants' (`tables`), the worker key's (`identity`, `lookup`), another pool named
@@ -3774,14 +3776,16 @@ longer; after the wait a thought that made none, or hung, goes behind the rest,
 30 days ahead, an order, not a delay, as `db/sleep.ts` dates its stopped
 extraction thoughts, so the thoughts pooled since are asked first (the
 maintainer's choice), though one holding a one-slot provider for many limits
-holds up the period it hangs in; SMD-3379's drain counts a claim at any date as
-work, so a set-back is asked again in its period, a hung thought failed as its
-own at its second hang there, and a pool of thoughts whose own errors make no
-suspect would keep the period open for good, which PR 6b-2 is to count drained,
-a pending claim of the sweep's pool dated past now no work and a claim in hand
-work at any date (the probe after a timeout dates its claim ahead as it begins),
-the claim's mark carrying a hang to a later
-period (the maintainer's choice); a thought answered is a suspect no longer; a
+holds up the period it hangs in; SMD-3379's drain counted a claim at any date as
+work, a set-back asked again in its period and a pool of thoughts whose own
+errors make no suspect keeping the period open for good, so since PR 6b-2 sleep
+starts the sweep once a period and bounds its claims by the period's start
+plus 30 days: a thought set back before the period is asked once in it, one set
+back in it waits for the next, and a claim in hand is the period's work only
+while its run took it in the period, at any date (the probe after a timeout
+dates its claim ahead as it begins), the claim's mark carrying a hang to a
+later period (the maintainer's choices; **Sleep**, below); a thought
+answered is a suspect no longer; a
 stopping run's timeout is the thought's, unprobed, and one whose probe a stop
 or a kill cuts is left 30 days ahead too, its claim dated so as the probe
 begins; and a probe that answers ends the provider's
@@ -3825,8 +3829,8 @@ a pool, a scheduler's row being the scheduler's to keep. It hears the run's
 waits for the provider too, as a claim pass's caller does (PR 6b-1): `startWait`
 while a following run waits at its start, `providerWait` while it waits out an
 outage past its pauses, or hung, not through the pauses, its outage stamping no
-`failed` as it begins, where extraction's follower does: how a scheduler reads
-that wait is the scheduler's (PR 6b-2). `session` opens the run's own client and
+`failed` as it begins, where extraction's follower does: sleep's row says the
+wait by the sweep's name, as it says re-embed's (PR 6b-2). `session` opens the run's own client and
 its watching connection with the scheduler's per-pass settings (refused beside a
 caller's client; the worker key's lookup opens its one connection without them,
 as the claim passes' does). A statement past its statement_timeout at the run's
@@ -4615,7 +4619,8 @@ one a raw `BEGIN` opened); a transaction's handle is refused for one.
 
 ## Sleep: the passes in work periods (SMD-1794)
 
-`sleep.ts` runs re-embed, extraction and consolidation in work periods: a
+`sleep.ts` runs re-embed, extraction, consolidation and, since SMD-3306 PR
+6b-2, the subject sweep in work periods: a
 period begins once a pass has work and no live write has landed for
 `--capture` seconds, its passes pause within `--poll` seconds of a live write
 until `--capture` seconds pass with none, and it ends once its pools drain —
@@ -4626,11 +4631,11 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 bun sleep.ts --url … --follow      # a period whenever there is work, for ever
 bun sleep.ts --url …               # one period, if there is work, until its pools drain, pausing for live writes
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
-#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held, or no work but a backlog a model switch leaves aside, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
@@ -4642,7 +4647,9 @@ in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
 `deploy/README.md`, "The `sleep` pass instead", has the first start, the
-move from the `workers` pass and the dump's volume):
+move from the `workers` pass and the dump's volume). Before its first period
+on a release with the subject sweep, settle the sweep's first pool
+(Upgrading to the release that brings it, under The subject sweep, below):
 
 ```bash
 podman compose -f deploy/compose.yaml up -d coordinator
@@ -4692,7 +4699,7 @@ stop the coordinator first.
 **When a period begins** (SMD-3379 PR 1c-4b). Once a pass has work and no
 live write has landed for `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20). The
 work is read whole at the scheduler's start — each pass's pool, re-embed's
-backlog among them, and the sweep's orphans — and every `--rescan` seconds
+backlog among them, and the re-derive sweep's orphans — and every `--rescan` seconds
 after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
 lands. A vector arriving queues no claim, yet consolidation judges only a
@@ -4705,14 +4712,16 @@ clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
 delete of a window or a replay leaves, re-embed's backlog — waits for the
 rescan, or goes with a period other work begins (deleting a thought leaves
 none: its lineage rows go with it); the next poll reads it whole after a
-live write or its limit cut the sweep, a retried start refusal's wait, or a
-re-embed set-aside cleared. The sweep's census reads one window of 10,001
+live write or its limit cut the re-derive sweep, a retried start refusal's
+wait, or a re-embed set-aside cleared. That sweep's census reads one window of 10,001
 lineage rows a whole read, an empty window moving it on, so on an idle brain
 an orphan far into a large table is found one whole read a window later — a
 one-shot run, and `--dry-run`, walk up to 100 windows, having no later read. A
 pass held begins none: one a statement held (**Its budget**, below), re-embed
-set aside or set down (a set-down is tried again at the next period's start, or
-by the next rescan). A one-shot run exits 0 once a read finds no work — at
+set aside or set down, the subject sweep held or set down (a set-down is tried
+again at the next period's start, or by the next rescan). The subject sweep's
+claims are read forward (**The subject sweep**, below): a thought it set back
+behind the rest begins no period. A one-shot run exits 0 once a read finds no work — at
 once, or when what it found has been done elsewhere; `--dry-run` says whether a
 period would begin, and when.
 
@@ -4739,9 +4748,10 @@ and `resumed:`, and the row `paused { since }`. While paused, a model call in
 hand longer than `--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at
 least the stall floor) is aborted and its thought set back in the queue,
 extraction keeping its answered windows and counting the stop (093);
-consolidation's at most three an hour of a period. As the passes go on, the
+consolidation's at most three an hour of a period, and the subject sweep's,
+whose median call runs past the minute. As the passes go on, the
 thoughts stopped that way are moved behind the newer work. A live write
-during the sweep ends the period, the passes not yet started; the next reads
+during the re-derive sweep ends the period, the passes not yet started; the next reads
 its work whole. A period ends once its pools drain — the log says `the pools
 drained — the period ends` — and the next begins once there is work again.
 
@@ -4777,14 +4787,14 @@ endpoint at all: re-embed's start is not among those the scheduler checks.
 Until its pool drains; anything else that ends it sets it down for that
 period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
-its kind; a thrown error's reason in the log), and extraction and
-consolidation run on; the next period tries it again. A statement past its
+its kind; a thrown error's reason in the log), and the other passes run on;
+the next period tries it again. A statement past its
 timeout holds it until a restart, as it holds any pass (**Its budget**).
 A model switch it will not make —
 the brain recording an embedding model other than the stack's
 `OB1_EMBEDDING_MODEL` — sets it aside, said and on the row, which reads
 failed (briefly at each later period; idle too, a one-shot run with no other
-work exiting 1), extraction and consolidation running on; the record is read
+work exiting 1), the other passes running on; the record is read
 again at each period's start and each poll while it is aside, so running
 `reembed.ts --switch-model` clears it — re-embed runs in that period if read
 at its start, else in the next period with work. Putting the variable back
@@ -4855,6 +4865,111 @@ extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
 
+**The subject sweep** (SMD-3306 PR 6b-2). `extract-entities.ts --subjects`'s
+following run ([the subject pool](#extract-entitiests), above) starts beside
+consolidation, once extraction has drained or been joined past, once a
+period, and runs until the period ends (the maintainer's choice). Its claims
+are bounded by the period's start plus 30 days: it asks the thoughts pooled
+since and, once each, those it set back before the period — 30 days ahead,
+after an outage they did not make, or a hang — then waits as at an empty
+pool, so a period the other passes keep open does not ask them back to back.
+One it sets back in the period waits for the next period other work begins,
+or for its date: set-backs alone begin no period. The period ends once the
+sweep's pool by that bound has drained, a claim in hand counting only while
+its run took it in the period; another run's lease, one a gone scheduler
+left, or one an earlier period's run left stranded holds none open, and none
+begins a period. Where no pool is named, the first period names one at the
+stack's key — the judge model's question with `OB1_SUBJECT_REASONING` — and
+pools every thought with no current subject, the rules keying what they can
+and the judge model asked the rest, one call at a time at a median of 71 s
+for the 27B with its reasoning on (the question's own reasoning, above): at
+most about 1,200 a day, fewer beside consolidation's calls and between
+periods, so weeks on a brain of tens of thousands of thoughts. A blank name
+is none named: under the rules' pool blanking it brings the judge model's
+pool back, the sweep started again under it; under the judge model's pool it
+sets the sweep down `failed` for that period, the next naming it again.
+**Upgrading to the release that brings it** — from a stack that runs `sleep`
+already, from 1.9.0, where `sleep` was a service of its own, from the
+`workers` pass, or at a first start: what the first period asks is settled
+before that period, so do this before the scheduler runs on the release:
+leave `sleep` out of `OB1_PASSES` in `deploy/.env` — from 1.9.0, name the
+other passes there as its upgrade says but `sleep` not yet; take `workers`
+out too, whose followers would run the claim passes unpaused meanwhile — and
+bring the stack up on the release (its migrations apply, and no scheduler
+runs; where it ran before, preflight's `sleep` row warns it stopped meanwhile,
+as expected); set `OB1_SUBJECT_REASONING` as wanted first (off is about 8x
+faster a call), since the count's pool and limit follow it; count the first
+pooling in the stack —
+`podman compose -f deploy/compose.yaml run --rm --no-deps coordinator
+db/coordinator.ts run extract --subjects --dry-run`, with the -f files and -p
+the stack was started with — whose `ask <model> about N` is the number; on a
+brain whose judge model is not yet measured on the question (the metadata
+model's default judges when `OB1_JUDGE_MODEL` is unset, and gave the 27B's key
+for 60 of 99, above), name the rules' pool with the same one-off and
+`--subjects rules --limit 1`, which the scheduler then follows, asking no
+model; then put `sleep` in `OB1_PASSES` and recreate the coordinator (`up -d
+coordinator`). A scheduler that named the judge model's pool first moves to
+the rules' with `--subjects rules --switch-key --limit 1`, once the judge
+call in hand ends, its answer dropped: what the judge recorded meanwhile
+stands, current under the rules' pool, and under a judge model's pool unless
+that one turns the reasoning on (those found with it off are asked again).
+From the rules' pool to the judge model's later, `--subjects --switch-key
+--dry-run` counts and `--subjects --switch-key --limit 1` switches, the
+scheduler's runs taking the rest. A hand run that asks the judge model — that
+switch, `--judge-checked` — lengthens no limit of the scheduler's
+(consolidation's, below): on a model server of one slot run it while
+preflight's `sleep` row reads idle, or retry the claims consolidation failed
+beside it after. The scheduler never switches
+a pool: while `ob1_config` names one that is neither the stack's judge
+model's nor its rules', after a rule's, the question's or the reasoning's
+change since it was named, the sweep is held (`key`), its log naming the
+pools and the ways out: `--subjects --switch-key --limit 1` by hand in the
+stack, which pools again every thought whose subject is not current under the
+stack's key (those keyed by no rule among them, and, under a key with the
+reasoning on, those found with it off; `--subjects --switch-key --dry-run`
+counts them),
+the scheduler's runs taking the rest; `--subjects rules --switch-key --limit
+1`, to the rules' pool; or `OB1_SUBJECT_REASONING` set back where the
+reasoning alone tells them apart. While a garbage-judge alarm's trip holds
+the scheduler's runs of the stack's judge model it is held (`judge`) until a
+`--judge-checked --limit 1` run by hand lifts it. Each hold, and the pool it
+follows, is read before the start's check, at each idle poll, each period's
+start and as the sweep ends; a held sweep's pool is no work, and a one-shot
+run exits 1, saying why last. A refusal at its start — the scheduler's
+check's, a period's — sets it down for the period alone, as re-embed's
+set-down does (the maintainer's choice), and so does any other end of its
+own (`failed`, its log naming the cause: the provider refusing a question, a
+grant refused, the pool's name blanked under the judge model's pool, the
+database lost, its naming or pooling broken off, another judge model's trip,
+a throw): said, on the row, the period's outcome failed,
+the others running on; the next period or rescan tries it again, a setting
+mended in `deploy/.env` reaching it once the coordinator is recreated. A
+statement past its timeout holds it until a restart, as any pass. N12 aborts
+its calls in hand, at most three a period's hour, as consolidation's: its
+median call runs past the minute. While its run asks the judge model,
+consolidation's judge calls get their own limit and one of the sweep's calls
+— 1,020 s with the reasoning on, 420 s off — read as each call starts, so a
+switch to the judge model's pool lengthens the next call's and the sweep's
+end shortens it: on a model server of one slot a call of consolidation's
+waits out the sweep's call in hand, and its own 120 s, which counts the wait,
+timed calls out and failed their claims (the maintainer's choice; SMD-3379 PR
+2b, keeping a slot's wait out of the limit, replaces it). A hung judgement
+takes that long a pair to notice, and a hung provider up to twice that, the
+probe after the call getting the call's limit; the window in which a thought
+that hangs the provider is its own grows with it, so such a thought is still
+failed. Its stop lines are left out of the log, as the claim passes' are, and
+its waits for the provider stamp no failed word: the row says them. Not here:
+a setting that keeps it out of sleep (the rules still run under the rules'
+pool); its failed claims on the row (its log names them); a thought set back
+whose own error is a 429 or a 503, never failed, which costs each period other
+work begins its pauses (about 65 s); captures pooled after the 30th day of a
+period that long, past its bound; a claim's lease, renewed only before a
+timeout's probe, against a wait for a model slot SMD-3379 PR 2b brings;
+extraction's own limit, 300 s a window, which a capture extracted mid-period
+behind a sweep call past it on a model server of one slot meets, its claim
+failed for `--retry-failed` (2 of 200 measured calls, the reasoning on); and
+a row that shows a hung judgement before its limit has passed.
+
 **Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
 from the brain's size) — its session settings; the clock went in 2.0.0:
 
@@ -4903,12 +5018,15 @@ past its timeout holds its pass until a restart, where it stopped the sleep.
 `OB1_SLEEP_RESCAN` (3600) sets how often the idle scheduler reads its work
 whole; a vector arriving brings a read forward (SMD-3379 PR 1d). A row a
 scheduler before 2.0.0 wrote — `slept.budget`, `slept.limit`, `resting` — is
-still read, for a rollback.
+still read, for a rollback. The subject sweep runs in it from 2.0.0: settle
+its first pool before the scheduler runs on the release (Upgrading to the
+release that brings it, under The subject sweep, above).
 
 **Its start, and refusals.** Before its first period it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
-the model's probe, the worker key, extraction's recorded key. A refusal there
-ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
+the model's probe, the worker key, extraction's recorded key, and the subject
+sweep's pool name and grants, its hold read first and no check under one. A
+refusal there but the sweep's ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
 not served (the judge's met there, not once extraction's backlog drains), or an
 `entity_extraction_key` recorded under another model. A provider that does not
 answer is no refusal; each pass waits for it at its own start. The passes each
@@ -4926,7 +5044,11 @@ passes meet their start's refusals again, and each names which it is:
   401/403/404 — and at a pass's first start ends it with 2;
 - a refusal mid-pass (the provider refusing the request itself) ends the
   scheduler with 2, as it ends a follower — so the same 402 ends it mid-pass
-  and is retried when a period's start meets it first.
+  and is retried when a period's start meets it first;
+- but the subject sweep's: whatever refuses it, at the check, a period's
+  start or mid-pass, sets it down for the period alone, or holds it — another
+  pool named, a trip on its judge model — and the scheduler runs on (**The
+  subject sweep**, above; SMD-3306 PR 6b-2).
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
 with `slept`, the current or last period's start and, once it is over, its
@@ -4966,7 +5088,7 @@ before 2.0.0 wrote reads as it did: its last sleep's `slept.budget` (`clock`
 or `statement`), the bound it stopped at (`slept.limit`), and `resting`
 while it waited for a live call. Since SMD-2679's PR 4b its `waiting` and
 `waitingMidPass` name `reembed` too (and `subjects`, the subject sweep, read
-since SMD-3306 PR 6b-1 for the scheduler PR 6b-2 makes run it), `reembedJob`
+since SMD-3306 PR 6b-1 and written since PR 6b-2), `reembedJob`
 is its own re-embed key (`reembed:<model>@<dim>`,
 which preflight reads whose key it is from, not from its own environment; a
 row without one is read as a scheduler that runs no re-embed — v1.9.0's, one
@@ -5026,12 +5148,15 @@ its work waiting for the capture time. It is read on a live row alone, and
 scheduler holds out
 of its work, one to four, each `{ pass, why, until }`:
 - `pass` is `reembed`, `extract`, `consolidate` or `subjects` (the subject
-  sweep, read since SMD-3306 PR 6b-1, which PR 6b-2's scheduler runs);
+  sweep, read since SMD-3306 PR 6b-1 and written since PR 6b-2);
 - `why` is one of re-embed's set-down kinds (above), `lookup`,
-  `model-switch`, `statement` or `judge` — the garbage-judge alarm's trip
+  `model-switch`, `statement`, `judge` — the garbage-judge alarm's trip
   holding the sweep's judge model, for which preflight's `sleep` row names the
   hand run that lifts it (`--subjects --judge-checked --limit 1`, once the
-  model is checked);
+  model is checked) — `key`, another subject pool named, for which it names
+  the switch by hand (`--subjects --switch-key --limit 1`), or `identity`,
+  the sweep set down by its start refusal's kind as by the others (PR 6b-2),
+  each with its remedy;
 - `until` is the time it re-arms on the database's clock, or null for an
   event rather than a time.
 
@@ -5053,7 +5178,9 @@ Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
 **From the `workers` pass.** Its followers do not yield, so the two are
 alternatives: the coordinator never runs both (`OB1_PASSES` naming both runs
-`sleep`), and a run refuses (exit 2) while any follower's heartbeat is fresh
+`sleep`; on a release with the subject sweep, settle its first pool before
+`sleep` goes in — Upgrading to the release that brings it, above), and a run
+refuses (exit 2) while any follower's heartbeat is fresh
 — one run by hand, or an old stack's container — at its start, and when a
 poll, idle or in a period, finds one (a follower brought up beside it stamps only
 after its start probe), and `--dry-run` names them. Name `sleep` in place of
@@ -6550,6 +6677,7 @@ bun test-schema.ts                          # PGlite, no container
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
+OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s] alone, the subject sweep under sleep (SMD-3306 PR 6b-2)
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

@@ -235,7 +235,7 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
 
 SMD-2278 (server-portable to SDK v2) has landed (#226), so the current server is on v2 through the transition. SMD-2279 (vendored servers to v2) mostly becomes retirement under SMD-1931.
 
-**Rule for new work while the migration runs:** a new brain operation (SMD-1715's deliverables, SMD-1723's forget, SMD-2272's drain, SMD-2273's jobs, SMD-2261's watermark, SMD-1812's page store, and any contributed capability as a plugin, SMD-2310) is written as a core operation in the shared zod contract (SMD-2283 / SMD-1931), exposed by the REST core and projected to MCP. It is never an MCP-only tool. Until SMD-2283 lands, it may still land in `index.ts`, but its logic goes in a module the core can import.
+**Rule for new work while the migration runs:** a new brain operation (SMD-1715's deliverables, SMD-1723's forget, SMD-2272's drain, SMD-2273's jobs, SMD-2261's watermark, SMD-1812's page store, and any contributed capability as a plugin, SMD-2310) is written as a core operation in the shared zod contract (SMD-2283 / SMD-1931), exposed by the REST core and projected to MCP. It is never an MCP-only tool. SMD-2283 extracted that core and SMD-2287 retired `server-portable/index.ts`, so its logic goes in `server-portable/core/`: the REST core serves it, and `mcp-server/` projects it to MCP.
 
 ## What else this touches
 
