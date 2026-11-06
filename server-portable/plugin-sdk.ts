@@ -16,7 +16,7 @@ import type { CoreAnswer } from "./core/calls.ts";
 import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
 import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
-import { levelOf, reasonOf, type PriorityScale } from "./priority-scale.ts";
+import { dueInstant, levelOf, reasonOf, type PriorityScale } from "./priority-scale.ts";
 
 export { z };
 export type { PluginSql, PriorityScale };
@@ -419,7 +419,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
 
 /**
  * A plugin's row as the open item it stands for (SMD-3665 PR 3b): `row` its key (the row's id, plugin_row), `text`
- * what is to be done, `due` the day it is due (YYYY-MM-DD, the start of that day in UTC) or null, `owner` who is to
+ * what is to be done, `due` the day it is due (YYYY-MM-DD, due by the end of that day: SMD-3778) or null, `owner` who is to
  * do it (left as it is when undefined), and `done` when the row is finished — its item is then settled done with
  * that reason, and its due time left as it was. `reopenDone` for a row that comes round again (a recurring task): an
  * item a key settled done is reopened with that reason, since the row falls due anew (review pass 1, the
@@ -470,7 +470,9 @@ export async function keepRowItem(ctx: Pick<PluginContext, "call">, want: RowIte
       did = "reopened";
     }
     if (opened.value.outcome === "unchanged") {
-      const sameDue = item.dueAt === null ? want.due === null : want.due !== null && Date.parse(item.dueAt) === Date.parse(`${want.due}T00:00:00Z`);
+      // The row's day as 117 reads it (dueInstant: the end of that day, SMD-3778).
+      const wantDue = dueInstant(want.due);
+      const sameDue = item.dueAt === null ? wantDue === null : wantDue !== null && Date.parse(item.dueAt) === Date.parse(wantDue);
       const changes = {
         ...(asItemText(item.text) === asItemText(want.text) ? {} : { text: want.text }),
         ...(want.done || sameDue ? {} : { due_at: want.due }),

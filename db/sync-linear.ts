@@ -1882,13 +1882,13 @@ function selfCheck(): Promise<number> {
         head({ issue: "SMD-2", ...stated }),                                                        // as it stands: left
         head({ issue: "SMD-3", ...stated, label: "Urgent" }),                                       // a new level: stated
         head({ issue: "SMD-4", ...stated, due: "2026-12-01" }),                                     // a due day added: stated
-        head({ issue: "SMD-5", ...stated, due: "2026-12-01", due_at: "2026-12-01T00:00:00+00:00" }), // the same instant, another spelling: left
+        head({ issue: "SMD-5", ...stated, due: "2026-12-01", due_at: "2026-12-02T00:00:00+00:00" }), // the same instant (the day's end, SMD-3778), another spelling: left
         head({ issue: "SMD-6", ...stated, label: "No priority" }),                                  // unknown now: cleared
         head({ issue: "SMD-7", label: "No priority" }),                                             // unknown and none stated: left
         head({ issue: "SMD-8", ...stated, reason: null }),                                          // stated by an older writer's reason: stated
       ], false);
       const declaredMoves = priorityMoves([head({ issue: "SMD-2", ...stated }), head({ issue: "SMD-9", ...stated, source: true })], true);
-      ok(JSON.stringify(moves.map((m) => `${m.issue} ${m.act}${m.act === "assert" ? ` ${m.level} ${m.due}` : ""}`)) === JSON.stringify(["SMD-1 assert 3 null", "SMD-3 assert 4 null", "SMD-4 assert 3 2026-12-01T00:00:00Z", "SMD-6 clear", "SMD-8 assert 3 null"])
+      ok(JSON.stringify(moves.map((m) => `${m.issue} ${m.act}${m.act === "assert" ? ` ${m.level} ${m.due}` : ""}`)) === JSON.stringify(["SMD-1 assert 3 null", "SMD-3 assert 4 null", "SMD-4 assert 3 2026-12-02T00:00:00.000Z", "SMD-6 clear", "SMD-8 assert 3 null"])
          && JSON.stringify(declaredMoves.map((m) => m.issue)) === JSON.stringify(["SMD-2"]),
         `a ticket's priority is stated when none is, or the level, due day or reason moved; cleared when unknown; left as it stands; stated again when its tier would move with the declaration (${JSON.stringify(moves.map((m) => m.issue))} | ${JSON.stringify(declaredMoves.map((m) => m.issue))})`);
       const fakeSql = (answers: Record<string, unknown>[][], seen: unknown[][]) =>
