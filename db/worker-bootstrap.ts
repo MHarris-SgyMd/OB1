@@ -886,8 +886,8 @@ export async function waitForDatabase(e: unknown, o: {
  * A follower's pass, which a database outage does not end (SMD-2599; extract's and consolidate's): an error
  * databaseUnavailable reads as the database not answering is waited out (waitForDatabase), and the pass runs again at
  * once, so its counts are read — or a stop ends the wait, and the counts are null. `afterPass` runs after a pass that
- * returns, inside the same catch: the worker's wait for its provider. Any other error ends the run; a run without
- * --follow (`follow` false) is unchanged.
+ * returns, inside the same catch: the worker's wait for its provider. Any other error ends the run, and with `follow`
+ * false a database outage too, as a run without --follow always ended.
  */
 export async function followedPass<C>(o: {
   pass: () => Promise<C>;
@@ -936,7 +936,7 @@ export class Unreturned {
     }
   }
 
-  /** As returnAll, but one the database refuses ends the returns quietly, it and the rest kept for later (re-embed's before its admit gate, review pass 7). */
+  /** As returnAll, but one the database refuses ends the returns quietly, it and the rest kept for later (re-embed's before its admit gate, SMD-3379 PR 1b-1 review pass 7). */
   async returnWhileAnswered(): Promise<void> {
     for (const w of [...this.workers]) {
       try {
