@@ -207,26 +207,22 @@
  *      up-to-date is on and enforced on create, the four rules — deletion,
  *      non-fast-forward, pull-request with no required review and none of the
  *      four review flags, required-status- checks with its parameters — are
- *      present once each, the one optional rule — merge-queue, which GitHub
- *      refuses on a user-owned repository and the record adds the day this one
- *      is organisation-owned — at most once and, when present, with
- *      Daemonic Brain's merge method, every entry judged on its own merge
- *      commit and no PR waiting for another (SMD-1857), no other type is, the
- *      target is the default branch and nothing else, the bypass list is empty
- *      and enforcement is active; no other job reports a check under the
- *      aggregate's name; and ci-shift.yml's workflow_run names that workflow's
- *      own name, and ci-step-times' DEFAULT_WORKFLOWS and
+ *      present once each, no other type is (a merge queue among them: main has
+ *      none, SMD-3336), the target is the default branch and nothing else, the
+ *      bypass list is empty and enforcement is active; no other job reports a
+ *      check under the aggregate's name; and ci-shift.yml's workflow_run names
+ *      that workflow's own name, and ci-step-times' DEFAULT_WORKFLOWS and
  *      DEFAULT_WORKFLOW_PATHS start with its name and file (SMD-3765). A matrix
  *      and a name with an expression are allowed now, since the record names no
  *      job but the one. The rules are rulesetProblems and aggregateProblems,
- *      pure functions their probes run on in-memory records (twenty-seven
- *      ruleset mutants, one accepted addition, nine non-probes; thirty-four
- *      aggregate mutants, four accepted shapes and an empty skip list two ways,
- *      four non-probes; one other-workflow name clash; sixteen names
- *      mayReportAs must allow or refuse; a 5,000-expression name answered at
- *      once) and AGGREGATE_RUN under bash on ten cases; every workflow in
- *      .github/workflows is read for a job carrying the aggregate's name; the
- *      workflow is parsed with Bun.YAML (SMD-1856, SMD-3168); no exceptions
+ *      pure functions their probes run on in-memory records (twenty-three
+ *      ruleset mutants, eight non-probes; thirty-four aggregate mutants, four
+ *      accepted shapes and an empty skip list two ways, four non-probes; one
+ *      other-workflow name clash; sixteen names mayReportAs must allow or
+ *      refuse; a 5,000-expression name answered at once) and AGGREGATE_RUN
+ *      under bash on ten cases; every workflow in .github/workflows is read for
+ *      a job carrying the aggregate's name; the workflow is parsed with
+ *      Bun.YAML (SMD-1856, SMD-3168); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
@@ -4909,37 +4905,17 @@ checkConnectorRegistry();
  * verbatim — which the check runs through bash on AGGREGATE_CASES, so the
  * step's verdict is tested, not only its text.
  *
- * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
- * builds the merge result and runs the required checks on it (the workflow's
- * `merge_group` trigger), and merges only what passes — so the checks judge
- * the tree that lands without the author merging `main` first, which is what
- * strict up-to-date makes them do. GitHub offers the queue on
- * organisation-owned repositories only; this one is owned by a user account,
- * and the API refuses the rule (422, "Invalid rule 'merge_queue'") — a record
- * the PUT refuses is no record. So the rule is OPTIONAL here: absent while
- * the repository is user-owned, held to MERGE_QUEUE the day it is added,
- * which is the day the repository moves to an organisation.
+ * SMD-1857 wanted the merge queue as a fifth rule, but GitHub offers it on
+ * organisation-owned repositories only, and on 2026-10-25 the maintainer
+ * decided main gets none: strict up-to-date judges the tree that lands. So a
+ * merge_queue rule reads as drift, like any type RULE_TYPES does not name
+ * (SMD-3336 took out the optional rule built for the queue).
  */
 const RULESET = ".github/rulesets/main.json";
 /** GitHub's own app id for Actions: a required check pinned to it is satisfied by a workflow run and by nothing else — not a status another app or a token posts under the same name. */
 const GITHUB_ACTIONS_APP_ID = 15368;
 /** The rule types the record carries, each exactly once; another type (a linear-history rule, say) is a decision the ticket declined, and edits this list with it. */
 const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_status_checks"];
-/** The rule types the record MAY carry, at most once each: the merge queue, which GitHub refuses on a user-owned repository and which the record adds the day this one is organisation-owned (SMD-1857). */
-const OPTIONAL_RULE_TYPES = ["merge_queue"];
-/**
- * The merge queue's parameters when the rule is present, each held equal
- * (SMD-1857). MERGE keeps the merge commit Daemonic Brain lands with (the
- * record of how a branch diverged); ALLGREEN judges each queued PR on its own
- * merge commit, so a red run names the PR that broke the tree rather than the
- * group; min 1 means a lone PR is merged as soon as its run is green — the wait
- * applies only to reaching a minimum above one; 5 and 5 are GitHub's defaults
- * for how many entries build and merge together, more than Daemonic Brain
- * queues at once; 60 minutes is four times the longest run seen (a push run of
- * main, 16 minutes) before a check that never reports is read as failed and the
- * PR is dropped from the queue.
- */
-const MERGE_QUEUE = { check_response_timeout_minutes: 60, grouping_strategy: "ALLGREEN", max_entries_to_build: 5, max_entries_to_merge: 5, merge_method: "MERGE", min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 5 } as const;
 /** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
 const RULESET_REFS = ["~DEFAULT_BRANCH"];
 /** The pull-request rule's flags, each held false: any of them true asks a review, or blocks on a thread, that the zero count says nothing asks. */
@@ -5260,17 +5236,11 @@ function rulesetProblems(ruleset: RulesetDoc) {
   const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
   const types = rules.map((r) => (typeof r?.type === "string" ? r.type : "(untyped)"));
   for (const t of RULE_TYPES) if (types.filter((x) => x === t).length !== 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s), not once (SMD-1856)`]);
-  for (const t of OPTIONAL_RULE_TYPES) if (types.filter((x) => x === t).length > 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s) — at most once (SMD-1857)`]);
-  for (const t of new Set(types)) if (!RULE_TYPES.includes(t) && !OPTIONAL_RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
+  for (const t of new Set(types)) if (!RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
   const pr = rules.find((r) => r?.type === "pull_request");
   if (pr) {
     if (pr.parameters?.required_approving_review_count !== 0) problems.push([RULESET, `the pull_request rule's required_approving_review_count is ${JSON.stringify(pr.parameters?.required_approving_review_count)}, not 0 — one maintainer; a required review blocks every PR (SMD-1856)`]);
     for (const flag of PR_RULE_FLAGS) if (pr.parameters?.[flag] !== false) problems.push([RULESET, `the pull_request rule's ${flag} is ${JSON.stringify(pr.parameters?.[flag])}, not false — a review, or a resolved thread, asked another way than the count (SMD-1856)`]);
-  }
-  const queue = rules.find((r) => r?.type === "merge_queue");
-  if (queue) {
-    if (!queue.parameters || typeof queue.parameters !== "object") problems.push([RULESET, "the merge_queue rule has no parameters — the merge method, the grouping and the group size live there, and GitHub refuses the rule without them (SMD-1857)"]);
-    else for (const [key, want] of Object.entries(MERGE_QUEUE)) if (queue.parameters[key] !== want) problems.push([RULESET, `the merge_queue rule's ${key} is ${JSON.stringify(queue.parameters[key])}, not ${JSON.stringify(want)} — a decision MERGE_QUEUE in ${SELF} records; change both, with the reason (SMD-1857)`]);
   }
   const checksRule = rules.find((r) => r?.type === "required_status_checks");
   if (!checksRule) return problems;
@@ -5306,12 +5276,6 @@ const RULESET_PROBE = (): RulesetProbe => ({
     { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_CONTEXTS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
   ],
 });
-/** The optional merge-queue rule as the record would carry it, with a parameter overridden for a mutant. */
-const QUEUE_RULE = (over: Record<string, unknown> = {}): RulesetProbeRule => ({ type: "merge_queue", parameters: { ...MERGE_QUEUE, ...over } });
-/** [why, mutate]: records the rules must ACCEPT beyond the plain probe — the optional rule, present as recorded. */
-const RULESET_ACCEPTED: [why: string, mutate: (g: RulesetProbe) => RulesetProbe][] = [
-  ["a merge-queue rule as MERGE_QUEUE records it", (g) => { g.rules.push(QUEUE_RULE()); return g; }],
-];
 /** [why, mutate (returns the record to judge — the mutated probe, or null for no record), a phrase the ONE problem must carry]. */
 const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, says: string][] = [
   ["a record that does not require the aggregate", (g) => { g.rules[3].parameters!.required_status_checks = []; return g; }, `does not require "${AGGREGATE_NAME}"`],
@@ -5336,11 +5300,7 @@ const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe |
   ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, "conditions.ref_name is not"],
   ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, "conditions.ref_name is not"],
   ["no record at all", () => null, "is missing or does not parse"],
-  ["a doubled merge-queue rule", (g) => { g.rules.push(QUEUE_RULE(), QUEUE_RULE()); return g; }, "merge_queue rule 2 time(s) — at most once"],
-  ["a merge-queue rule with no parameters", (g) => { g.rules.push({ type: "merge_queue", parameters: null }); return g; }, "merge_queue rule has no parameters"],
-  ["a queue that squashes", (g) => { g.rules.push(QUEUE_RULE({ merge_method: "SQUASH" })); return g; }, 'merge_method is "SQUASH", not "MERGE"'],
-  ["a queue judged on the group's head only", (g) => { g.rules.push(QUEUE_RULE({ grouping_strategy: "HEADGREEN" })); return g; }, 'grouping_strategy is "HEADGREEN"'],
-  ["a queue that waits for a second PR", (g) => { g.rules.push(QUEUE_RULE({ min_entries_to_merge: 2 })); return g; }, "min_entries_to_merge is 2, not 1"],
+  ["a merge-queue rule, which main does not have (SMD-3336)", (g) => { g.rules.push({ type: "merge_queue", parameters: { merge_method: "MERGE" } }); return g; }, "carries a merge_queue rule"],
 ];
 /** Non-probes: shapes the rules must not throw on and must report at least one problem for — a record that parsed but is not a ruleset. */
 const RULESET_NON_PROBES: [why: string, record: unknown][] = [
@@ -5352,7 +5312,6 @@ const RULESET_NON_PROBES: [why: string, record: unknown][] = [
   ["a null required check", (() => { const g = RULESET_PROBE(); (g.rules[3].parameters!.required_status_checks as (object | null)[]).push(null); return g; })()],
   ["a pull-request rule with no parameters", (() => { const g = RULESET_PROBE(); delete g.rules[2].parameters; return g; })()],
   ["conditions that are a string", { ...RULESET_PROBE(), conditions: "main" }],
-  ["a merge-queue rule whose parameters are a string", (() => { const g = RULESET_PROBE(); g.rules.push({ type: "merge_queue", parameters: "MERGE" } as unknown as RulesetProbeRule); return g; })()],
 ];
 /** The skip list the probes judge against, apart from AGGREGATE_MAY_SKIP so that a change there does not move them (review pass 5). */
 const PROBE_MAY_SKIP = ["commit-lint"];
@@ -5509,10 +5468,6 @@ function checkRulesetRecord() {
   // reports something and throws nothing.
   const base = rulesetProblems(RULESET_PROBE());
   if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
-  for (const [why, mutate] of RULESET_ACCEPTED) {
-    const got = rulesetProblems(mutate(RULESET_PROBE()));
-    if (got.length) fail(SELF, `check 20 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
-  }
   for (const [why, mutate, says] of RULESET_MUTANTS) {
     const got = rulesetProblems(mutate(RULESET_PROBE()));
     if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
@@ -11624,7 +11579,7 @@ const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, st
     "publish-test-counts": "commits the run's counts to the wiki on a push to main (SMD-3614); its page's rules are the self-check the repo-consistency job runs",
   },
   scripts: {
-    "scripts/check-landing.ts": "reads a pull request's or merge group's commit range from the event",
+    "scripts/check-landing.ts": "reads a pull request's commit range from the event",
     "scripts/migrate-to-sql-shim.ts": "the codemod's round-trip rewrites tracked files and judges them by git diff, so a working tree with changes would be rewritten",
   },
 };
@@ -11725,7 +11680,7 @@ const PARITY_PROBE_CI = (): ScriptRun[] => [
   { dirs: ["."], script: "deploy/forwarder.ts", args: "--self-check", env: {}, job: "repo", where: "w:fwd" },
   { dirs: ["db"], script: "test-cli.ts", args: "", env: {}, job: "replay", where: "w:cli" },
   { dirs: ["db", "server-portable"], script: "test-pre.ts", args: "", env: { DATABASE_URL: "x", UPGRADE_DATABASE_URL: "y" }, job: "data-layer", where: "w:pre" },
-  { dirs: ["."], script: "scripts/check-landing.ts", args: "--event", env: { EVENT: "${{ github.event_name }}" }, job: "repo", where: "w:landing" },
+  { dirs: ["."], script: "scripts/check-landing.ts", args: '--from "$PR_FROM" --to "$PR_TO"', env: { PR_FROM: "${{ github.event.pull_request.base.sha }}", PR_TO: "${{ github.event.pull_request.head.sha }}" }, job: "repo", where: "w:landing" },
   { dirs: ["deploy"], script: "x.ts", args: "", env: {}, job: "stack", where: "w:stack" },
 ];
 const PARITY_PROBE_NOT_RUN = { jobs: { stack: "why" }, scripts: { "scripts/check-landing.ts": "why" } };

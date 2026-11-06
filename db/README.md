@@ -6141,10 +6141,10 @@ Basic beside the key, on any Bun, and are in neither the label nor the
 request's URL (SMD-2894).
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
-runs the refresh and then the replay/diff against the **published** images
-through the merge queue) and `--promote`'s image-repoint half. The engine, the
-compose stack and the end-to-end tests ([20], and `test-brain-compare.ts` for the
-replay over HTTP) do not need them and are here now.
+runs the refresh and then the replay/diff against the **published** images)
+and `--promote`'s image-repoint half. The engine, the compose stack and the
+end-to-end tests ([20], and `test-brain-compare.ts` for the replay over HTTP)
+do not need them and are here now.
 
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
 server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
