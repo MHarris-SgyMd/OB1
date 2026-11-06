@@ -93,7 +93,7 @@
       "text": "the highlight text; the user's note appended as `Note: …`; the source title and author named once",
       "edges": ["source-document edge (a document entity per book or article, cached in schemas/readwise-books today)", "author person edge"],
       "metadata": ["vendor", "highlight_id", "book_id", "title", "author", "category", "location", "highlighted_at", "tags"],
-      "identity": "`<vendor>:<highlight id>`; the id is stable across a note edit and a re-export, which is why readwise-capture answers `existed` on a re-delivery",
+      "identity": "`<vendor>:<highlight id>`; the id is stable across a note edit and a re-export, which is why the readwise plugin's webhook answers a re-delivery with the thought the first captured",
       "typical_transport": ["push", "pull"],
       "dividing_line": "the live webhook is a push → tool node (or the native receiver today); the history backfill is a pull the tool can page → tool node, or the native script; both map to one identity so running both makes no duplicate"
     },
@@ -147,7 +147,7 @@
     "discord": { "direction": "sink", "note": "life-engine's briefings are the sink; discord-capture, the source, retired with SMD-1931 (a README with no code)." },
     "telegram": { "direction": "bidirectional", "note": "telegram-capture and vercel-neon-telegram's bot route are the source; weekly-digest, life-engine and life-engine-video are the sink. Five artifacts, one vendor driver's worth of client." },
     "gmail": { "direction": "bidirectional", "note": "email-history-import and gmail-smart-pull are the source (pull); daily-digest's draft is the sink, through the client's Gmail MCP connector." },
-    "readwise": { "direction": "source", "note": "readwise-capture (push) and readwise-import (pull) are two transports of one source capability; both resolve to `readwise:<highlight id>`." },
+    "readwise": { "direction": "source", "note": "the readwise plugin's webhook (push) and readwise-import (pull) are two transports of one source capability; both resolve to `readwise:<highlight id>`." },
     "claude-ai": { "direction": "source", "note": "captured by chrome-capture-extension: a manual push of the open exchange and a pull over the internal conversation API for bulk and auto sync." },
     "chatgpt": { "direction": "source", "note": "two fetchers, one vendor: chrome-capture-extension (push and pull) and chatgpt-conversation-import (batch) — the same conversation id from either." },
     "gemini": { "direction": "source", "note": "chrome-capture-extension: a best-effort manual push and a debugger-observed history pull." },
@@ -173,9 +173,9 @@
       ]
     },
     {
-      "path": "integrations/readwise-capture",
+      "path": "plugins/readwise",
       "capabilities": [
-        { "vendor": "readwise", "family": "annotation/highlight", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "highlight webhook; schemas/readwise-books caches the source-document side of the edge" }
+        { "vendor": "readwise", "family": "annotation/highlight", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "highlight webhook, a plugin's hook (SMD-2690); it keeps the book id alone (a plugin makes no outbound call), and schemas/readwise-books, readwise-import's, caches the source-document side of the edge" }
       ]
     },
     {
@@ -304,7 +304,7 @@
       "recipes/atomizer": "tagged gmail: it re-atomizes Gmail thoughts gmail-smart-pull already captured and backfills their correspondents; no Gmail client",
       "recipes/infographic-generator": "tagged gemini: the Gemini image-generation API is a model provider here, not the Gemini chat product the Chrome extension captures",
       "recipes/schema-aware-routing": "tagged slack: a metadata-routing pattern in its own project that keeps a slack_ts column for thoughts a Slack capture wrote; the recipe has no Slack client of its own",
-      "schemas/readwise-books": "tagged readwise: the source-document cache table readwise-capture and readwise-import write; a table is not a fetcher",
+      "schemas/readwise-books": "tagged readwise: the source-document cache table readwise-import writes (the readwise plugin keeps the book id alone, SMD-2690); a table is not a fetcher",
       "primitives/remote-mcp": "tagged chatgpt: a guide to connecting AI clients (ChatGPT among them) to the brain's own MCP surface"
     }
   }

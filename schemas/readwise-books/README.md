@@ -11,14 +11,15 @@
 This schema extension creates a single new table, `readwise_books`, keyed by Readwise's `user_book_id`, plus two RPC functions:
 
 - **`get_book_highlights(p_book_id, p_limit)`** — Returns all highlights for a book from the `thoughts` table, ordered by in-source location so you can re-read them the way you originally encountered them.
-- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Called by the readwise-capture server on each new highlight insert to avoid running `COUNT(*)` against the `thoughts` table.
+- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Saves running `COUNT(*)` against the `thoughts` table. The readwise-capture server called it for each new highlight; since SMD-2690 made that server a plugin, which keeps the book id alone, nothing in the tree calls it: call it yourself after inserting a highlight to keep the count.
 
 The table stays small (one row per book, typically a few hundred rows per user), so it's primarily a convenience cache for cover images, category, and source attribution that would otherwise need to be fetched from the Readwise API on every UI render.
 
 This schema is required by:
 
-- [integrations/readwise-capture](../../integrations/readwise-capture/) — webhook receiver for live highlight capture
 - [recipes/readwise-import](../../recipes/readwise-import/) — one-shot backfill of your Readwise history
+
+The [readwise plugin](../../plugins/readwise/), the brain's webhook for live highlight capture since SMD-2690, does not use this table: it keeps Readwise's book id alone and writes nothing here, and `get_book_highlights` does not find its highlights (it sets no `source_type`); its own `readwise_list_highlights` lists them.
 
 ## Prerequisites
 
@@ -67,4 +68,4 @@ Solution: Run the core Daemonic Brain setup first — the `get_book_highlights` 
 Solution: The function filters on `source_type = 'readwise'` (a column added by the [enhanced-thoughts](../enhanced-thoughts/) schema). If you skipped that schema, your highlights will be in `thoughts` but without the top-level `source_type` column set. Either install `enhanced-thoughts` and run its backfill, or modify your import to set `source_type` explicitly.
 
 **Issue: `increment_book_highlight_count` runs but counts stay at 0**
-Solution: Confirm the book row exists in `readwise_books` before the first highlight arrives. The readwise-capture server handles this automatically via a write-through cache lookup; if you're calling the RPC manually, you'll need to `INSERT` the book row first.
+Solution: Confirm the book row exists in `readwise_books` before the first highlight arrives. If you're calling the RPC manually, you'll need to `INSERT` the book row first.
