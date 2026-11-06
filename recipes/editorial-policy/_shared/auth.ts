@@ -74,8 +74,9 @@
  * recipes and integrations that compared with `key !== expected` — nine MCP and
  * HTTP servers, four workers and one webhook receiver when they became
  * consumers (SMD-1455, change 67), an HTTP API and four workers now (the
- * webhook receiver is the readwise plugin's hook since SMD-2690). The six vendored extensions under extensions/ (seven servers),
- * which authenticated with `key !== expected` on a URL query key and ran as the
+ * webhook receiver is the readwise plugin's hook since SMD-2690). The six
+ * vendored extensions under extensions/ (seven servers), which authenticated
+ * with `key !== expected` on a URL query key and ran as the
  * service role until they were made consumers of this module (SMD-1252, FORK.md
  * change 64), are plugins since SMD-2311. Each vendored server imports
  * `../_shared/auth.ts` — a Supabase Edge Function is bundled from

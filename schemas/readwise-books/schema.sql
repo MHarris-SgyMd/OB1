@@ -85,8 +85,8 @@ $$;
 
 -- ============================================================
 -- 3. INCREMENT HIGHLIGHT COUNT
---    Called (by the readwise-capture server until SMD-2690) on each new
---    highlight insert. Keeps num_highlights and last_highlight_at
+--    For a caller to run on each new highlight insert (the readwise-capture
+--    server did, until SMD-2690). Keeps num_highlights and last_highlight_at
 --    fresh without requiring a COUNT over the thoughts table.
 -- ============================================================
 

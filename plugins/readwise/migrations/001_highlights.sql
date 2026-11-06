@@ -2,7 +2,7 @@
 -- naming the thought it became and keeping what Readwise sent beside the text.
 -- The text itself is the thought's alone: deleting the thought leaves no copy of
 -- it here. The thought carries two metadata keys (readwise_highlight_id and
--- readwise_book_id), as many as capture_thought's limits leave room for; the
+-- readwise_book_id); capture_thought takes at most eight, none an array, so the
 -- rest of what Readwise sent is here, keyed by the highlight. Ported from
 -- integrations/readwise-capture, which wrote all of it into the thought's
 -- metadata.

@@ -24,7 +24,7 @@ export const LEASE_S = 3600;
  * surrogate, half of a character such as an emoji (the tags' jsonb cast
  * refuses one; elsewhere it would be stored as U+FFFD). Checked before the
  * capture, so no captured thought is left with a row that cannot be written.
- * encodeURIComponent throws on a lone surrogate.
+ * The surrogate test: encodeURIComponent throws on a lone one.
  */
 const stored = (s: string) => {
   if (s.includes("\u0000")) return false;
@@ -77,10 +77,10 @@ export const LIMITS = { text: 16_384, note: 8_192, url: 4_096, short: 64, tag: 1
 /** At most `max` characters, counted as code points (zod's .max counts UTF-16 units, an emoji two). */
 const chars = (max: number) => (s: string) => [...s].length <= max;
 /**
- * The most a delivery's body may be, in bytes, before it is parsed: a highlight
- * with every field at its bound, each character one past the BMP and escaped as
- * two \uXXXX (twelve bytes, as an encoder that escapes everything past ASCII
- * writes it), fits.
+ * The most a delivery's body may be, in bytes, before it is parsed. A highlight
+ * with every field at its bound fits even with each character past the BMP and
+ * written as two \uXXXX escapes (twelve bytes), as an encoder that escapes
+ * everything past ASCII writes it.
  */
 export const BODY_MAX = 512 * 1024;
 /** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
@@ -145,7 +145,7 @@ export default definePlugin({
       async handler(ctx, request) {
         // Readwise's Test Endpoint posts nothing; webhook creation waits on its 2xx. Nothing is read or written.
         if (request.text.trim() === "") return { status: 200, body: { test: true } };
-        // Before JSON.parse, which would otherwise spend the event loop on a stranger's 1 MiB body.
+        // Before JSON.parse, which would otherwise spend the event loop on a stranger's body of up to 1 MiB (the REST core's bound).
         if (request.body.length > BODY_MAX) return { status: 413, body: { code: "TOO_LARGE", retryable: false, limit: BODY_MAX } };
         let body: unknown;
         try {
@@ -173,7 +173,8 @@ export default definePlugin({
           // A refusal hands back no thought: the id is given back, so a resend captures.
           const thoughtId = captured.ok ? captured.value.id : null;
           const tags = (e.tags ?? []).map((t) => t.name);
-          // Before onceById records the id: a row that fails to write throws, the id is given back, and a resend captures again (the same text: the same thought).
+          // Before onceById records the id: a row that fails to write throws, the id is
+          // given back, and a resend captures again (the same text: the same thought).
           if (thoughtId !== null) await ctx.db.tx((sql) => sql`
             INSERT INTO highlights (highlight_id, thought_id, book_id, note, location, location_type, color, url, tags, highlighted_at, updated_at)
             VALUES (${e.id}, ${thoughtId}, ${e.book_id}, ${noteOf(e)}, ${e.location ?? null}, ${e.location_type || null}, ${e.color || null}, ${e.url || null},
