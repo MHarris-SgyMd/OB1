@@ -1,6 +1,6 @@
 {
   "name": "Shared MCP Server",
-  "description": "Guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.",
+  "description": "Guide to building scoped MCP servers that give other people limited access to specific parts of your brain.",
   "category": "primitives",
   "author": {
     "name": "Nate B. Jones",

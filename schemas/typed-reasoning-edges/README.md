@@ -8,7 +8,7 @@ Open Brain's knowledge graph (from the [`entity-extraction` schema (PR #197)](ht
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [`entity-extraction` schema (PR #197)](https://github.com/NateBJones-Projects/OB1/pull/197) applied (this schema extends its `edges` table)
 - (Recommended) the companion [`recipes/typed-edge-classifier/`](../../recipes/typed-edge-classifier/) to populate `thought_edges` automatically
 

@@ -1,8 +1,8 @@
 -- ============================================================
 -- Thought Audit — append-only log of every capture / update / delete
 --
--- Rationale: once more than one participant writes to the same Open
--- Brain (Claude Desktop, Codex, ChatGPT via API, background workers),
+-- Rationale: once more than one participant writes to the same
+-- brain (Claude Desktop, Codex, ChatGPT via API, background workers),
 -- "who changed what, and when" becomes an operational question.
 -- This schema is the answer — an append-only table plus a metadata
 -- convention (author_session_id) that ties related writes together.
