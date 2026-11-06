@@ -8,7 +8,7 @@ A design record. **Drafted 2026-11-06; every question in it answered, and the re
 
 **It is not:**
 
-* **a merger.** Merges stay the maintainer's word (SMD-2682 step 4). The bot holds no write access to this repo, and GitHub requires the maintainer's approval once SMD-4090 lands.
+* **a merger.** Merges stay the maintainer's word (SMD-2682 step 4). The bot holds no write access to this repo, so it can't merge. SMD-4090's review rule on `main` is the backstop for any agent that does hold write access.
 * **a planner.** It picks a ticket by a rule, not a model's judgement, and the agent works only the ticket it was given. The brain stores and labels; the client executes (SMD-1721).
 * **part of the brain.** The coordinator (SMD-3215, `brain-coordinator.md`) runs the brain's own passes. The runner is a client on the maintainer's machine, like the session-capture hook.
 * **an operator of stable or the canary.** It never runs `canary.sh`, a migration or a container command. It reaches stable only through the REST core, with its own agent-kind key, and holds no database credential.
@@ -22,11 +22,12 @@ Each is a ticket SMD-4087 is blocked by, or a release:
 2. **SMD-4086:** the label that marks a ticket as the runner's to take, and the criteria the maintainer attests by adding it.
 3. **SMD-4088:** the agent's permission profile.
 4. **SMD-4089:** identities of the runner's own, none of them the maintainer's: a GitHub machine account with a fork of this repo and no write access here; a Linear key; an agent-kind brain key; and an Anthropic API key (decision 4a) in a Console workspace with a spend limit.
-5. **SMD-4090:** `main` requires one approving review, with the maintainer as bypass actor.
-6. **SMD-3606:** a cap on one holder's live claims, the brain's backstop if the runner's loop goes wrong.
-7. **SMD-2682 step 4 amended.** Decided by the maintainer 2026-11-06: the brain's runner may start work; merges stay the maintainer's.
+5. **SMD-3606:** a cap on one holder's live claims, the brain's backstop if the runner's loop goes wrong.
+6. **SMD-2682 step 4 amended.** Decided by the maintainer 2026-11-06: the brain's runner may start work; merges stay the maintainer's.
 
 The assessment also linked SMD-3874 (the claims hook misses an agent's MCP refusals) and SMD-4080 (an agent can reopen an item a person closed) as blockers. Neither touches the pilot: the agent has no MCP server (decision 4b), the session hook doesn't load in its sessions, and the runner touches no items. They apply again once an agent session gets a brain connection.
+
+SMD-4090 (one approving review on `main`, with the maintainer as bypass actor) is related, not a blocker (decided by the maintainer 2026-11-06). The bot pushes only to its fork and can't merge (decision 13), so the rule is the backstop for any agent that does hold write access.
 
 ## Decisions
 
@@ -88,7 +89,7 @@ So the agent's limits come in layers, set so that a layer that fails is caught b
 5. **The runner's own checks.**
    * The session's `system/init` event must show the pinned `claude_code_version`, the `dontAsk` permission mode, the helper as the `apiKeySource` and the expected tools. A profile that failed validation would show otherwise, and the runner ends that session.
    * The gate checks the branch again (below).
-   * GitHub refuses the bot any push but to its fork, and refuses a merge without the maintainer (SMD-4090).
+   * GitHub refuses the bot any push but to its fork, so the bot can't merge. SMD-4090's review rule is the backstop for any agent that holds write access.
 
 **Cut 2's probes** run on the pinned version before any real ticket, and again before the runner moves to a new version:
 
@@ -261,7 +262,7 @@ Each its own PR, in order:
 
 1. **Selection and a dry run:** the selection rule and CLAUDE.md step 1's checks, printing what it would take and why it skips the rest. No claims or writes. It can land before stable runs v2.0.0, but until then its claim check says it can't read claims, and it takes nothing. Needs SMD-4089's Linear key, to read.
 2. **One run, local:** first the probes above, on the pinned version. Then the claim, the clone, the worker and review sessions, the bundle, the gate and the record, ending at a branch in the runner's bare repository with no push. Amends CLAUDE.md step 3 for a runner's token (decision 6). Needs stable on v2.0.0, SMD-4088, and SMD-4089's brain key, API key and Linear key: this cut moves the ticket and comments.
-3. **Publish and reconcile:** the bot's fork, the push, the draft PR and its body, CI's result, the week lease, reconciliation, handover, and the launchd schedule. Needs SMD-4089's GitHub identity and SMD-4090. This repo asks the maintainer to approve CI on a first-time contributor's PR, so the bot's first PR waits for that click.
+3. **Publish and reconcile:** the bot's fork, the push, the draft PR and its body, CI's result, the week lease, reconciliation, handover, and the launchd schedule. Needs SMD-4089's GitHub identity. This repo asks the maintainer to approve CI on a first-time contributor's PR, so the bot's first PR waits for that click.
 4. **The pilot and its report** (SMD-4091).
 
 ## Alternatives considered
@@ -286,6 +287,7 @@ Each its own PR, in order:
 6. The cost ceilings: $10 for the worker session and $3 for the review session (`--max-budget-usd`, Claude Code's own estimate, which can overshoot), and $40 a day, counted from each run's reported cost.
 7. The hours and the daily cap: runs start on weekdays between 09:00 and 16:00 Central, at most 3 a day, one at a time. With the 60-minute wall-clock limit, a run started at 16:00 ends by 17:00. The pilot's numbers (SMD-4091) can justify widening either.
 8. The reviews' changes 1 to 5 (below): the runner runs none of the agent's code, and GitHub CI is the code gate; each run works in a standalone clone and hands back a bundle; the bot pushes to its own fork, with no write access here; the claim token sits beside the runner's secrets, which cut 2 writes into CLAUDE.md step 3; and the profile closes the sandbox's open defaults and denies reading the home directory.
+9. SMD-4090 is related to SMD-4087, not a blocker: with the bot on its fork, its review rule on `main` is a backstop.
 
 ## Changed by the reviews, 2026-11-06
 
