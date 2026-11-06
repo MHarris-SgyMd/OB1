@@ -6479,9 +6479,10 @@ if (want("10")) {
   const waitNote = await seed("Kenji's note whose call waits on the seam.");
   const passes: string[] = [];
   let holding = false;
-  const hookBefore = setModelCallHook(async (call, run) => {
+  const hookBefore = setModelCallHook(async (call, run, waiting) => {
     passes.push(`${call.pass}/${call.purpose}`);
     if (call.purpose !== "extraction") return run();
+    waiting();
     holding = true;
     await Bun.sleep(1500);
     holding = false;
@@ -15042,8 +15043,9 @@ if (want("16")) {
   const slotOlder = await seed("slotcase: the first note on the shared kettle.", 9, 3, ["slotcase"]);
   const slotNewer = await seed("slotcase: the second note on the shared kettle.", 9, 0, ["slotcase"]);
   let heldJudge = 0;
-  const hookBeforeSlot = setModelCallHook(async (call, run) => {
+  const hookBeforeSlot = setModelCallHook(async (call, run, waiting) => {
     if (call.purpose === "judge") {
+      waiting();
       heldJudge++;
       await Bun.sleep(1500);
     }
@@ -15068,8 +15070,9 @@ if (want("16")) {
   const stopNewer = await seed("stopcase: the second note on the blue kettle.", 9, 0, ["stopcase"]);
   const firstStop = new AbortController();
   let waitedJudge = 0;
-  const hookBeforeStop = setModelCallHook(async (call, run) => {
+  const hookBeforeStop = setModelCallHook(async (call, run, waiting) => {
     if (call.purpose === "judge") {
+      waiting();
       waitedJudge++;
       // The stop lands while this call waits; a slot that never comes ends only on the call's own signal.
       firstStop.abort();

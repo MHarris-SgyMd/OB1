@@ -864,6 +864,13 @@ console.log("\n[11] Hybrid decide (SMD-2321): identifiers carved by rule, the de
   const boom: DecideFn = async () => { throw new Error("decider down"); };
   const fb = await decideEntities(text, [E("Anita", "organization")], cfg, subj, boom);
   assert(fb.stats.deciderError === true && fb.entities.length === 1 && fb.entities[0].type === "organization", "a decider outage falls back to the model's entities, flagged");
+  // A stop is the caller's, not an outage: the call throws, no undecided entities for it, the signal handed on to the
+  // decide call (SMD-3379 PR 2b-1, review pass 6).
+  const stopped = new AbortController();
+  let handed: AbortSignal | undefined;
+  const halts: DecideFn = async (_c, _d, _s, opts) => { handed = opts?.signal; stopped.abort(new Error("the pass stopped")); throw new Error("aborted"); };
+  const halted = await decideEntities(text, [E("Anita", "organization")], cfg, subj, halts, stopped.signal).then(() => "decided", (e: Error) => `threw: ${e.message}`);
+  assert(handed === stopped.signal && halted === "threw: aborted", `a stopped decider's call throws rather than falling back as an outage, its signal handed on (${halted})`);
 }
 
 console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides without a call, the tier decides the rest, an abstain/outage/tier-unset fall back to other");

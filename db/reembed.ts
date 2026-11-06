@@ -2716,7 +2716,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return hardStopped ? 130 : 0;
   }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
   if (SUMMARY) {
     printCounts(after, "after");
     await printDuplicateGroups();

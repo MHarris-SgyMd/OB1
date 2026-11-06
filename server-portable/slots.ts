@@ -19,22 +19,25 @@
  * never takes a slot.
  *
  * In a process, one of a share's calls polls for a slot at a time, the rest
- * queued in order there, each polling and then holding its slot on a
- * connection of its own — so a share costs a process a connection for each
- * slot it holds and one for its poller (review passes 1 and 2: a pool opened
- * all its connections at the first call, then every queued call polled on its
- * own). A connection that lets its slot go cleanly is kept 2 s for the
- * process's next call, at most four of them, then closed: none when idle
- * (review pass 5). A poller holds the
- * share's WAITING lock (slot -1) shared, and a call about to make its first
- * try that finds it held elsewhere sits out a poll first, so a process with a
- * backlog, or making calls back to back, does not take every slot let go
- * before another process's poller asks again (review pass 2). A stop ends a
- * wait at once, a connect or a statement in flight included: the call's own
- * signal, or the process's (`stop`, or `uninstall`, which leaves a call
- * already running its slot until it ends). Every statement is bounded, as
- * the connect is, by 5 s: a database that stops answering fails a waiting
- * call open, and a slot's unlock gives up, the call's answer returned.
+ * queued in order there, each polling and then holding its slot on a connection
+ * of its own — so a share costs a process a connection for each slot it holds
+ * and one for its poller (review passes 1 and 2: a pool opened all its
+ * connections at the first call, then every queued call polled on its own). A
+ * connection that lets its slot go cleanly is kept 2 s for the process's next
+ * call, at most four of them, then closed: none when idle (review pass 5). A
+ * poller holds the share's WAITING lock (slot -1) shared, and a call about to
+ * make its first try that finds it held elsewhere sits out a poll first, so a
+ * process with a backlog, or making calls back to back, does not take every
+ * slot let go before another process's poller asks again (review pass 2). A
+ * slot the process lets go while no other process waits goes to its own poller
+ * at once, woken from its nap; with one waiting, whichever poller asks first
+ * takes it (review pass 6: a poll a handoff made 424 embeddings at embed=1 take
+ * 36 s against 0.6). A stop ends a wait at once, a connect or a statement in
+ * flight included: the call's own signal, or the process's (`stop`, or
+ * `uninstall`, which leaves a call already running its slot until it ends).
+ * Every statement is bounded, as the connect is, by 5 s: a database that stops
+ * answering fails a waiting call open, and a slot's unlock gives up, the call's
+ * answer returned.
  *
  * Written as types, with per-model overrides: `chat=1,embed=2,decide=1,
  * chat:qwen3.8:27b=1`. A type left out is unlimited; unset, empty or `off`,
@@ -166,8 +169,13 @@ function sessionEnded(e: unknown): boolean {
   return code === "ERR_POSTGRES_CONNECTION_CLOSED" || (typeof errno === "string" && /^(08|57P0)/.test(errno));
 }
 
-/** A share's calls in this process: whether one of them polls for a slot, and those queued behind it, in order. */
-type Local = { key: string; limit: number; polling: boolean; queue: { go: () => void }[] };
+/**
+ * A share's calls in this process: whether one of them polls for a slot, those queued behind it, in order, whether the
+ * poller holds the WAITING lock, and how to wake it from its nap — a slot this process let go with no other process
+ * waiting goes to it at once, not at its next poll (review pass 6: 424 embeddings at embed=1, two workers, took 36 s
+ * against 0.6).
+ */
+type Local = { key: string; limit: number; polling: boolean; queue: { go: () => void }[]; marked: boolean; wake?: () => void };
 
 /** Slot -1 of a share: the lock each poller holds shared, so a call about to try can see others waiting. */
 const WAITING = -1;
@@ -200,15 +208,17 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   const locals = new Map<string, Local>();
   const localOf = (key: string, limit: number): Local => {
     let l = locals.get(key);
-    if (!l) locals.set(key, (l = { key, limit, polling: false, queue: [] }));
+    if (!l) locals.set(key, (l = { key, limit, polling: false, queue: [], marked: false }));
     return l;
   };
   /** The share's turn to poll in this process: at once when no call of it polls, else in order; a stop takes a call out of the queue. */
-  const takeTurn = (l: Local, signal: AbortSignal): Promise<void> => {
+  const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void): Promise<void> => {
     if (!l.polling) {
       l.polling = true;
       return Promise.resolve();
     }
+    // Queued: a wait, told before the queue — a stopping pass aborts it there.
+    waiting();
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(signal.reason);
       const entry = { go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
@@ -217,6 +227,15 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       l.queue.push(entry);
     });
   };
+  /** The poller's sleep between polls: `ms`, ended early by a stop (rejecting) or by a slot this process let go (`wake`). */
+  const nap = (l: Local, ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const done = () => { clearTimeout(t); signal.removeEventListener("abort", onAbort); l.wake = undefined; };
+    const t = setTimeout(() => { done(); resolve(); }, ms);
+    const onAbort = () => { done(); reject(signal.reason); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    l.wake = () => { done(); resolve(); };
+  });
   /** The turn handed to the next call queued, or given up. */
   const passTurn = (l: Local) => {
     const next = l.queue.shift();
@@ -226,7 +245,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   /** A connection of the semaphore's, and whether it has closed since it opened. */
   type Session = { client: SQL; conn: { lost: boolean } };
   /** A slot held: its session, and the backend that holds its lock. */
-  type Held = Session & { key: string; slot: number; pid: number };
+  type Held = Session & { local: Local; key: string; slot: number; pid: number };
   /** Sessions that let their slot go cleanly, holding no lock, kept a while for the next call. */
   const idle: { session: Session; timer: ReturnType<typeof setTimeout> }[] = [];
   const close = (s: Session) => s.client.close({ timeout: 0 }).catch(() => {});
@@ -246,9 +265,11 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     return undefined;
   };
   /** A slot of the share, held on a connection of its own; null where the semaphore fails open. A stop rejects with its reason. */
-  const acquire = async (l: Local, signal: AbortSignal): Promise<Held | null> => {
+  const acquire = async (l: Local, signal: AbortSignal, waiting: () => void): Promise<Held | null> => {
+    // Stopped already — a pass's first stop aborts a call's wait as it comes: no turn, no kept session spent.
+    if (signal.aborted) throw signal.reason;
     if (Date.now() < downUntil) return null;
-    await takeTurn(l, signal);
+    await takeTurn(l, signal, waiting);
     let client: SQL | undefined;
     try {
       // Queued behind a poller that found the database down: run without a slot as well.
@@ -278,7 +299,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
           // every slot let go before a poller elsewhere asks again (review pass 2: one process's backlog held the
           // share).
           const [w] = (await ask(session`SELECT CASE WHEN pg_try_advisory_lock(hashtext(${l.key}), ${WAITING}) THEN pg_advisory_unlock(hashtext(${l.key}), ${WAITING}) ELSE false END AS alone`)) as { alone: boolean }[];
-          if (!w.alone) await wait(POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
+          if (!w.alone) {
+            waiting();
+            await wait(POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
+          }
           // Whether this call holds its WAITING lock: taken with a try, again each poll, as a call checking for others
           // holds it alone for a moment.
           let marked = false;
@@ -290,23 +314,27 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
               // lost one (review pass 3: read as a slot lost at the unlock, the waiter's mark gone).
               if (conn.lost) {
                 conn.lost = false;
-                marked = false;
+                marked = l.marked = false;
               }
               const [r] = (await ask(session`SELECT pg_try_advisory_lock(hashtext(${l.key}), ${slot}) AS got, pg_backend_pid() AS pid`)) as { got: boolean; pid: number }[];
               if (r.got) {
                 // Stopped as the lock came: the finally closes the connection, and its locks go with the session.
                 if (signal.aborted) throw signal.reason;
                 if (marked) await ask(session`SELECT pg_advisory_unlock_shared(hashtext(${l.key}), ${WAITING})`);
+                l.marked = false;
                 if (saidDown) log("  background slots: the semaphore's database answers again");
                 saidDown = false;
                 downUntil = 0;
-                const held = { client: session, conn, key: l.key, slot, pid: r.pid };
+                const held = { client: session, conn, local: l, key: l.key, slot, pid: r.pid };
                 client = undefined;
                 return held;
               }
             }
+            // No slot free: a wait, told now — a stopping pass aborts it here.
+            waiting();
             if (!marked) [{ marked }] = (await ask(session`SELECT pg_try_advisory_lock_shared(hashtext(${l.key}), ${WAITING}) AS marked`)) as { marked: boolean }[];
-            await wait(POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
+            l.marked = marked;
+            await nap(l, POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
           }
         } catch (e) {
           if (signal.aborted || !answered || !sessionEnded(e)) throw e;
@@ -326,6 +354,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     } finally {
       // Not awaited: a close waits on a connect or a statement in flight, which a stalled database never ends.
       if (client) void client.close({ timeout: 0 }).catch(() => {});
+      l.marked = false;
+      l.wake = undefined;
       passTurn(l);
     }
   };
@@ -338,9 +368,18 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       if (held.conn.lost) return lost("the connection closed");
       // Unlocked only on the backend that took the lock. Another answering is Bun's quiet reconnect after the
       // connection ended, or, the connection never closed, a pooler handing the statement to another backend.
-      const [u] = (await bounded(held.client`SELECT pg_backend_pid() = ${held.pid} AS same, CASE WHEN pg_backend_pid() = ${held.pid} THEN pg_advisory_unlock(hashtext(${held.key}), ${held.slot}) END AS released`, boundS * 1000)) as { same: boolean; released: boolean | null }[];
+      // With it, the pollers waiting for the share across the brain: WAITING locks held, slot -1 read as an oid.
+      const [u] = (await bounded(held.client`
+        SELECT pg_backend_pid() = ${held.pid} AS same,
+               CASE WHEN pg_backend_pid() = ${held.pid} THEN pg_advisory_unlock(hashtext(${held.key}), ${held.slot}) END AS released,
+               (SELECT count(*)::int FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295
+                   AND classid::bigint = (hashtext(${held.key})::bigint & 4294967295) AND granted) AS waiters`, boundS * 1000)) as { same: boolean; released: boolean | null; waiters: number }[];
       answered = true;
-      if (u.same === true && u.released === true) clean = true;
+      if (u.same === true && u.released === true) {
+        clean = true;
+        // This process's poller napping, and no poller elsewhere: the slot is its at once, not a poll later.
+        if (held.local.wake && u.waiters - (held.local.marked ? 1 : 0) <= 0) held.local.wake();
+      }
       else if (u.same !== true && held.conn.lost) lost("a new session answered the unlock");
       else sayOnce("unlock", "  background slots: a slot's unlock reached another backend than its lock, or found no lock: a pooler between this process and Postgres? Session locks need a direct connection");
     } catch (e) {
@@ -352,10 +391,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       else void close(held);
     }
   };
-  const hook: ModelCallHook = async (call, run) => {
+  const hook: ModelCallHook = async (call, run, waiting) => {
     const share = shareOf(slots, call);
     if (!share) return run();
-    const held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop);
+    const held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, waiting);
     try {
       return await run();
     } finally {

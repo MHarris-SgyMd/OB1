@@ -199,7 +199,7 @@ import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -1401,7 +1401,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // made carried on the mark, where a gate's own error or a stop between
       // windows is left as it is (SMD-3379 PR 1b-2, review pass 1).
       if (call?.aborted && !hardStopped && !(e instanceof StoppedBetweenWindows || e instanceof ClaimGoneAtGate || e instanceof AdmitThrow)) {
-        throw Object.assign(new AbortedInHand(), { callsMade: callsMadeBy(e) });
+        throw Object.assign(call.abort.signal.reason instanceof StoppedWaiting ? new StoppedWaiting() : new AbortedInHand(), { callsMade: callsMadeBy(e) });
       }
       throw e;
     } finally {
@@ -1450,8 +1450,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // answer for replay; a decider outage falls back to the 7B's entities inside
     // decideEntities. The row's metadata is the egress subject, as extraction's.
     if (jevCfg && extraction.entities.length) {
-      // The decider's call takes no signal: no call abortInHand can abort.
-      const decided = await idleWhile(call, decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }));
+      // Not a call abortInHand aborts (idleWhile), but the hard stop's, and a first stop's while it waits for a
+      // slot (review pass 6: it took no signal, its slot wait outliving both).
+      let decided: Awaited<ReturnType<typeof decideEntities>>;
+      try {
+        decided = await idleWhile(call, decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, call ? AbortSignal.any([onHardStop.signal, call.abort.signal]) : onHardStop.signal));
+      } catch (e) {
+        if (hardStopped) return { outcome: "abandoned" };
+        if (call?.aborted) throw call.abort.signal.reason instanceof StoppedWaiting ? new StoppedWaiting() : new AbortedInHand();
+        throw e;
+      }
       extraction = { ...extraction, entities: decided.entities };
     }
     if (hardStopped) return { outcome: "abandoned" };
@@ -1624,6 +1632,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // the thought to the back of the queue; the worker goes on with its
                 // next claim. A set-back the database refuses leaves the claim for
                 // the finally's release (SMD-3379 PR 1b-2).
+                // A first stop that found its call waiting for a slot (review pass 6): as a stop between windows,
+                // those answered kept, no stop counted — not the caller's abort below.
+                if (e instanceof StoppedWaiting) return;
                 if (e instanceof AbortedInHand) {
                   // Counted once: out of inHand first, so a hard stop racing the
                   // count finds none to count again (review pass 1).

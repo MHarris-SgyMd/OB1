@@ -490,10 +490,12 @@ export type InHandAbort = (olderThanMs?: number) => number;
  * which the engine joins with the hard stop's for the calls; when it began —
  * the thought taken up, the admit gate last passed or a provider pause ended;
  * whether it has no call to abort now (at the gate, in a pause, in the
- * decider's call); whether it was aborted; and whether a wait for a slot
- * aborts it (`abortWaiting`: the pass stopping).
+ * decider's call); whether it was aborted; whether a wait for a slot aborts
+ * it (`abortWaiting`: the pass stopping); and whether its call waits for a
+ * slot now — on the hook alone, where `waiting` covers the gate, a pause and
+ * the decider's whole call too (review pass 6).
  */
-export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean };
+export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean; slotWait?: boolean };
 
 /**
  * The calls a pass's workers hold, behind its InHandAbort (SMD-3379 PR 1b-2):
@@ -538,7 +540,8 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
       let n = 0;
       for (const c of calls.values()) {
         c.noWait = true;
-        if (c.waiting && waitAborted(c)) n++;
+        // On the hook only: a call running — the decider's, inside idleWhile's `waiting` — finishes (review pass 6).
+        if (c.slotWait && waitAborted(c)) n++;
       }
       return n;
     },
@@ -549,7 +552,7 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
 function waitAborted(c: InHandCall): boolean {
   if (!c.noWait || c.aborted) return false;
   c.aborted = true;
-  c.abort.abort(new AbortedInHand());
+  c.abort.abort(new StoppedWaiting());
   return true;
 }
 
@@ -586,13 +589,17 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
       if (waiting++ > 0) return;
       const c = get();
       before = c?.waiting;
-      if (c) c.waiting = true;
+      if (c) {
+        c.waiting = true;
+        c.slotWait = true;
+      }
       also?.waiting();
       if (c) waitAborted(c);
     },
     running() {
       if (waiting === 0 || --waiting > 0) return;
       const c = get();
+      if (c) c.slotWait = false;
       if (c && before === false) {
         c.waiting = false;
         c.since = Date.now();
@@ -649,6 +656,20 @@ export class AbortedInHand extends Error {
   constructor() {
     super("the call in hand was aborted by the pass's caller; the thought goes to the back of the queue");
     this.name = "AbortedInHand";
+  }
+}
+
+/**
+ * A call in hand aborted as it waited for a slot at the pass's first stop
+ * (`abortWaiting`, SMD-3379 PR 2b-1): an engine that tells it apart treats
+ * it as that stop — extraction counts no stop for it (review pass 6: counted
+ * as an N12 abort, a deploy's restart reset the thought's gained windows).
+ */
+export class StoppedWaiting extends AbortedInHand {
+  constructor() {
+    super();
+    this.name = "StoppedWaiting";
+    this.message = "the pass stopped while the call in hand waited for a slot; the thought goes back to the pool";
   }
 }
 

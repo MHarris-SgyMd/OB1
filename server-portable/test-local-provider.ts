@@ -1713,7 +1713,8 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     const { inHandCalls, callWaitsFor } = await import("../db/lease.ts");
     const holds = new Map<string, number>([["a", 200], ["b", 400]]);
     const seenPasses: (string | undefined)[] = [];
-    const before = setModelCallHook(async (call, run) => { seenPasses.push(call.pass); await Bun.sleep(holds.get(call.purpose) ?? 0); return run(); });
+    // A hold is a wait, told as the hook starts it (review pass 6).
+    const before = setModelCallHook(async (call, run, waiting) => { seenPasses.push(call.pass); if (holds.has(call.purpose)) waiting(); await Bun.sleep(holds.get(call.purpose) ?? 0); return run(); });
     try {
       const calls2 = inHandCalls(() => false);
       const entry = calls2.begin("w");
@@ -1810,12 +1811,14 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     await Promise.all(["m-a", "m-b", "m-c"].map((m) => modelCall(call(m), async () => { starts.push(Date.now() - t2); await Bun.sleep(300); })));
     assert(starts.length === 3 && Math.max(...starts) < 250, `three models under chat=1 each take their own share's slot at once (${JSON.stringify(starts)} ms)`);
     // Another process waiting: this one's calls, back to back, sit out a poll before each first try, and the other gets
-    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it).
-    {
+    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it); two workers at
+    // once — three, so one always polls here — their poller not woken by a slot this process lets go while the other
+    // waits (review pass 6), so each slot goes to whichever poller asks first.
+    for (const shape of [{ workers: 1, calls: 14, most: 4 }, { workers: 3, calls: 21, most: 10 }]) {
       const startsA: number[] = [];
-      const backlog = (async () => {
-        for (let i = 0; i < 14; i++) await modelCall(call(), async () => { startsA.push(Date.now()); await Bun.sleep(150); });
-      })();
+      const backlog = Promise.all(Array.from({ length: shape.workers }, async () => {
+        for (let i = 0; i < shape.calls / shape.workers; i++) await modelCall(call(), async () => { startsA.push(Date.now()); await Bun.sleep(150); });
+      }));
       for (let i = 0; i < 100 && startsA.length === 0; i++) await Bun.sleep(10);
       const child = Bun.spawn(["bun", "-e", `
         const { installBackgroundSlots } = await import("./slots.ts");
@@ -1827,11 +1830,77 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const [askedAt, childAt] = (await new Response(child.stdout).text()).trim().split("\n").map(Number);
       await child.exited;
       await backlog;
-      // Each slot let go goes to the other process's poller more often than not (it asks within a poll, this one's
-      // next call after one): four in a row lost is about one run in a few thousand.
+      // Back to back, each slot let go goes to the other process's poller more often than not (it asks within a poll,
+      // this one's next call after one): four in a row lost is about one run in a few thousand. Two at once, a coin
+      // each: eleven in a row lost about one in two thousand.
       const passedBy = startsA.filter((t) => t > askedAt && t < childAt).length;
-      assert(childAt > askedAt && askedAt > 0 && passedBy <= 4,
-        `a call in another process gets one of the first slots this one's back-to-back calls let go once it asks, not after the backlog: ${passedBy} of ${startsA.length} started between its ask and its run`);
+      assert(childAt > askedAt && askedAt > 0 && passedBy <= shape.most,
+        `a call in another process gets one of the first slots this one's ${shape.workers === 1 ? "back-to-back calls" : "three workers"} let go once it asks, not after the backlog: ${passedBy} of ${startsA.length} started between its ask and its run`);
+    }
+    // No other process waiting, a slot this process lets go goes to its own poller at once, not at its next poll:
+    // ten 10 ms calls two at a time run in about their own time (review pass 6: a poll a handoff, 36 s for 424
+    // embeddings against 0.6).
+    {
+      const tw = Date.now();
+      await Promise.all(Array.from({ length: 2 }, async () => { for (let i = 0; i < 5; i++) await modelCall(call(), () => Bun.sleep(10)); }));
+      const wokeMs = Date.now() - tw;
+      assert(wokeMs < 1500, `ten 10 ms calls two at a time under chat=1, no other process waiting, run in ${wokeMs} ms — each slot let go handed to this process's poller at once`);
+    }
+    // Another process waiting — here a session holding the share's WAITING lock — a slot this process lets go is not
+    // handed to its own napping poller: it takes it at its next poll, not at once. Five handoffs, one gap at least past
+    // 100 ms (all five under it about one run in a thousand; woken, each is a few ms).
+    {
+      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+      const waiter = new SQL({ url: URL_, max: 1 });
+      const gaps: number[] = [];
+      try {
+        await waiter`SELECT pg_advisory_lock_shared(hashtext(${key}), -1)`;
+        for (let i = 0; i < 5; i++) {
+          let polling = 0;
+          const holder = modelCall(call(), () => Bun.sleep(900)).then(() => Date.now());
+          await Bun.sleep(50);
+          const poller = modelCall(call(), async () => { polling = Date.now(); });
+          const releasedAt = await holder;
+          await poller;
+          gaps.push(polling - releasedAt);
+        }
+      } finally {
+        await waiter.close();
+      }
+      assert(gaps.length === 5 && Math.max(...gaps) > 100,
+        `another process waiting, a slot this process lets go waits for its own poller's next poll rather than waking it (${JSON.stringify(gaps)} ms after each release)`);
+    }
+    // The call's observer is told of a wait only where the hook waits: a call whose slot is free tells it nothing, one
+    // queued behind another tells it once (review pass 6: told before every hook, a stopping pass gave back calls
+    // that never waited).
+    {
+      const { withCallWaits } = await import("./model-call.ts");
+      const told = { waiting: 0, running: 0 };
+      const observer = { waiting: () => { told.waiting++; }, running: () => { told.running++; } };
+      await withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      const free = { ...told };
+      // Queued: a holder, a poller, and the call behind it — told as it queues, while the holder still holds.
+      const holder = modelCall(call(), () => Bun.sleep(300));
+      await Bun.sleep(30);
+      const poller = modelCall(call(), async () => undefined);
+      await Bun.sleep(30);
+      const behind = withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      await Bun.sleep(30);
+      const toldWhileQueued = told.waiting;
+      await Promise.all([holder, poller, behind]);
+      const queued = { ...told };
+      // …and one whose slot another process holds, told once too.
+      const elsewhere = new SQL({ url: URL_, max: 1 });
+      try {
+        const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+        await elsewhere`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+        setTimeout(() => { elsewhere`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 300);
+        await withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      } finally {
+        await elsewhere.close();
+      }
+      assert(free.waiting === 0 && free.running === 0 && toldWhileQueued === 1 && queued.waiting === 1 && queued.running === 1 && told.waiting === 2 && told.running === 2,
+        `a call whose slot is free tells its observer nothing (${JSON.stringify(free)}); one queued behind this process's poller tells it as it queues (${toldWhileQueued}) and once each way (${JSON.stringify(queued)}), and one whose slot another process holds (${JSON.stringify(told)})`);
     }
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
@@ -2076,7 +2145,11 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await Bun.sleep(1500);
       const opened = proxy.opened;
       stopper.abort(new Error("the case ended"));
+      // A stop the call does not honour would loop for ever: 3 s on, the proxy passes and the slot is let go, so the
+      // row fails instead of hanging the suite.
+      const cut = setTimeout(() => { proxy.mode = "pass"; other`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 3000);
       const ended = await waiting;
+      clearTimeout(cut);
       assert(ended === "rejected: the case ended" && opened >= 2 && opened <= 10 && !loopSaid.some((l) => /did not answer/.test(l)),
         `a database ending each session after it answers once is asked again a poll later, not in a loop: ${opened} connections in 1.5 s, the call waiting on, not failed open (${ended}; ${JSON.stringify(loopSaid.map((l) => l.slice(0, 70)))})`);
     } finally {
@@ -2169,6 +2242,27 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     closer.stop(true);
   }
   await watch.close();
+  // A pass's first stop aborts a call in hand waiting on the hook, and one that starts to after it, the thought to go
+  // back as that stop; a call idle on the gate or running inside idleWhile — the decider's — is left to finish
+  // (review passes 5 and 6).
+  {
+    const { inHandCalls, callWaitsFor: waitsFor, StoppedWaiting } = await import("../db/lease.ts");
+    const ih = inHandCalls(() => false);
+    const running = ih.begin("w1"), onHook = ih.begin("w2");
+    running.waiting = true;
+    waitsFor(() => ih.get("w2")).waiting();
+    const swept = ih.abortWaiting();
+    const later = ih.begin("w3");
+    const laterWaits = waitsFor(() => ih.get("w3"));
+    const afterRun = ih.begin("w4");
+    afterRun.noWait = false;
+    const ranWaits = waitsFor(() => ih.get("w4"));
+    ranWaits.waiting();
+    ranWaits.running();
+    laterWaits.waiting();
+    assert(swept === 1 && !running.aborted && onHook.aborted && onHook.abort.signal.reason instanceof StoppedWaiting && later.aborted && later.abort.signal.reason instanceof StoppedWaiting && afterRun.slotWait === false,
+      `a first stop aborts the call waiting on the hook (${swept} swept), not the one idle around a running call, and a call that starts to wait after it; a call's slot wait ends when it runs`);
+  }
   // The pair's bound pauses while its calls wait: 600 ms, paused from about 400 to 900, fires about 200 ms after the
   // resume. Bounded tight on its early side, with room on its late one for a loaded runner's timer (review pass 4):
   // resumed in full it would fire 400 ms late, never paused 500 ms early.
