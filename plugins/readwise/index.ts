@@ -8,27 +8,60 @@
 
 import { definePlugin, hmacSha256Hex, ok, onceById, operation, safeEqual, z } from "../../server-portable/plugin-sdk.ts";
 
-/** The one event the hook captures; any other Readwise sends is answered 200 and ignored. */
+/** The one event the hook captures; any other Readwise sends with the secret is answered 200 and ignored. */
 const HIGHLIGHT_CREATED = "readwise.highlight.created";
 
-/** A text Postgres stores: no NUL. */
-const stored = (s: string) => !s.includes("\u0000");
-/** A time Readwise sent, read by Date.parse; Postgres takes the ISO form it is stored as. */
-const when = z.string().refine((s) => !Number.isNaN(Date.parse(s)), "not a time");
+/**
+ * A text Postgres stores and JSON carries intact: no NUL, and no lone surrogate
+ * (half of a character such as an emoji), which a jsonb cast refuses after the
+ * thought is captured. encodeURIComponent throws on one.
+ */
+const stored = (s: string) => {
+  if (s.includes("\u0000")) return false;
+  try {
+    encodeURIComponent(s);
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** An ISO 8601 date, or date and time, as Readwise sends them ("2022-09-13T16:41:53.186Z"); a time with no offset is read as UTC. */
+const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+const leap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+/**
+ * The time as stored, ISO in UTC; null for one that is no real time Postgres
+ * keeps: 30 February, hour 24, an offset past 14 hours, or a year outside 1 to
+ * 9999 once in UTC. Date.parse alone took "2026-02-30" as 2 March and gave
+ * years Postgres refuses, after the thought was captured (review pass 1).
+ */
+export function isoTime(s: string): string | null {
+  const m = ISO_TIME.exec(s);
+  if (!m) return null;
+  const [, y, mo, d, h = "00", mi = "00", se = "00", zone] = m;
+  const [year, month, day] = [Number(y), Number(mo), Number(d)];
+  const days = [31, leap(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (days === undefined || day < 1 || day > days || Number(h) > 23 || Number(mi) > 59 || Number(se) > 59) return null;
+  const offset = zone === undefined || zone === "Z" ? "Z" : `${zone.slice(0, 3)}:${zone.slice(-2)}`;
+  if (offset !== "Z" && (Number(offset.slice(1, 3)) > 14 || Number(offset.slice(4)) > 59)) return null;
+  const at = new Date(`${s.slice(0, 10)}T${h}:${mi}:${se}${s.slice(10).match(/\.\d+/)?.[0]?.slice(0, 4) ?? ""}${offset}`);
+  if (Number.isNaN(at.getTime()) || at.getUTCFullYear() < 1 || at.getUTCFullYear() > 9999) return null;
+  return at.toISOString();
+}
+const when = z.string().refine((s) => isoTime(s) !== null, "not an ISO 8601 time");
 
 /** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
 const HighlightEvent = z.object({
   id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  text: z.string().refine((s) => s.trim().length > 0, "no text").refine(stored, "a NUL character"),
-  note: z.string().refine(stored, "a NUL character").nullish(),
+  text: z.string().refine((s) => s.trim().length > 0, "no text").refine(stored, "a NUL or a lone surrogate"),
+  note: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
   location: z.number().nullish(),
-  location_type: z.string().refine(stored, "a NUL character").nullish(),
+  location_type: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
   highlighted_at: when.nullish(),
-  url: z.string().refine(stored, "a NUL character").nullish(),
-  color: z.string().refine(stored, "a NUL character").nullish(),
+  url: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
+  color: z.string().refine(stored, "a NUL or a lone surrogate").nullish(),
   updated: when.nullish(),
   book_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  tags: z.array(z.object({ name: z.string().refine(stored, "a NUL character") })).nullish(),
+  tags: z.array(z.object({ name: z.string().refine(stored, "a NUL or a lone surrogate") })).nullish(),
 });
 type HighlightEvent = z.output<typeof HighlightEvent>;
 
@@ -66,7 +99,7 @@ export default definePlugin({
   description: "Readwise's highlights as thoughts: a webhook Readwise posts each new highlight to, captured once by its id as outside text, and the highlights it captured, by book.",
   hooks: {
     highlight: {
-      description: "Captures a readwise.highlight.created event's passage (and its note) as a thought of trust ingested, when the body carries the secret OB1_HOOK_SECRETS gives readwise; a highlight whose id it has captured is answered with that thought and runs nothing. An empty body (Readwise's Test Endpoint) and any other event are answered 200 and change nothing.",
+      description: "Captures a readwise.highlight.created event's passage (and its note) as a thought of trust ingested, when the body carries the secret OB1_HOOK_SECRETS gives readwise; a highlight whose id it has captured is answered with that thought and runs nothing. An empty body (Readwise's Test Endpoint), and any other event carrying the secret, are answered 200 and change nothing.",
       async handler(ctx, request) {
         // Readwise's Test Endpoint posts nothing; webhook creation waits on its 2xx. Nothing is read or written.
         if (request.text.trim() === "") return { status: 200, body: { test: true } };
@@ -101,7 +134,7 @@ export default definePlugin({
             INSERT INTO highlights (highlight_id, thought_id, book_id, note, location, location_type, color, url, tags, highlighted_at, updated_at)
             VALUES (${e.id}, ${thoughtId}, ${e.book_id}, ${e.note || null}, ${e.location ?? null}, ${e.location_type || null}, ${e.color || null}, ${e.url || null},
                     (SELECT coalesce(array_agg(t ORDER BY n), '{}') FROM jsonb_array_elements_text((${JSON.stringify(tags)}::text)::jsonb) WITH ORDINALITY AS x(t, n)),
-                    ${e.highlighted_at ? new Date(e.highlighted_at).toISOString() : null}::timestamptz, ${e.updated ? new Date(e.updated).toISOString() : null}::timestamptz)
+                    ${e.highlighted_at ? isoTime(e.highlighted_at) : null}::timestamptz, ${e.updated ? isoTime(e.updated) : null}::timestamptz)
             ON CONFLICT (highlight_id) DO UPDATE SET thought_id = excluded.thought_id, book_id = excluded.book_id, note = excluded.note, location = excluded.location,
               location_type = excluded.location_type, color = excluded.color, url = excluded.url, tags = excluded.tags, highlighted_at = excluded.highlighted_at,
               updated_at = excluded.updated_at`);

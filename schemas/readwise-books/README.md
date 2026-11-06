@@ -11,7 +11,7 @@
 This schema extension creates a single new table, `readwise_books`, keyed by Readwise's `user_book_id`, plus two RPC functions:
 
 - **`get_book_highlights(p_book_id, p_limit)`** — Returns all highlights for a book from the `thoughts` table, ordered by in-source location so you can re-read them the way you originally encountered them.
-- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Called on each new highlight insert to avoid running `COUNT(*)` against the `thoughts` table (the readwise-capture server called it until SMD-2690 made it a plugin, which keeps the book id alone).
+- **`increment_book_highlight_count(p_book_id, p_highlighted_at)`** — Bumps `num_highlights` and refreshes `last_highlight_at` on the book row. Saves running `COUNT(*)` against the `thoughts` table. The readwise-capture server called it for each new highlight; since SMD-2690 made that server a plugin, which keeps the book id alone, nothing in the tree calls it: call it yourself after inserting a highlight to keep the count.
 
 The table stays small (one row per book, typically a few hundred rows per user), so it's primarily a convenience cache for cover images, category, and source attribution that would otherwise need to be fetched from the Readwise API on every UI render.
 

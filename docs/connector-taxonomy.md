@@ -247,8 +247,9 @@ The primitives that remain the brain's after the tool takes the transport, and
 their home under `primitives/` once SMD-1918 extracts them:
 
 - **Webhook receiver verification** — the shared-secret compare
-  (`integrations/_shared/auth.ts`'s `secretMatches`, SMD-1455) every push receiver
-  in the tree already uses; a low-code node inherits it as the node's auth, a
+  (`integrations/_shared/auth.ts`'s `secretMatches`, SMD-1455) the vendored push
+  receivers used, and a plugin's hook does with the SDK's `safeEqual` or
+  `verifyTimestamped` (SMD-2690); a low-code node inherits it as the node's auth, a
   native driver keeps it.
 - **The ack reply** — the source capability's confirmation to the captured
   message, one helper per chat family, never a sink.

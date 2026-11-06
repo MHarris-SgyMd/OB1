@@ -2621,14 +2621,17 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   }
   for (const [label, body] of [["text that is no JSON", "{not json"], ["a JSON array", "[1,2]"], ["JSON null", "null"], ["a JSON string", '"hi"']] as const) {
     const r = await post(body);
-    assert(r.status === 400 && r.body.code === "NOT_JSON", `${label}: 400 NOT_JSON (${r.status} ${JSON.stringify(r.body)})`);
+    assert(r.status === 400 && r.body.code === "NOT_JSON" && r.body.retryable === false, `${label}: 400 NOT_JSON, not retryable (${r.status} ${JSON.stringify(r.body)})`);
   }
   // The secret, compared digest to digest: wrong at the same length, wrong at another, missing, of another type, its own digest.
   for (const [label, secret] of [["a wrong secret of the same length", "x".repeat(READWISE_SECRET.length)], ["a wrong secret", "not-the-secret"], ["no secret", undefined],
     ["a secret that is a number", 12345], ["the secret's digest", hmacSha256Hex("readwise-webhook-secret", READWISE_SECRET)], ["the secret with a space after it", `${READWISE_SECRET} `]] as const) {
     const r = await send({ secret });
-    assert(r.status === 401 && r.body.code === "BAD_SECRET", `${label}: 401 BAD_SECRET (${r.status} ${JSON.stringify(r.body)})`);
+    assert(r.status === 401 && r.body.code === "BAD_SECRET" && r.body.retryable === false, `${label}: 401 BAD_SECRET, not retryable (${r.status} ${JSON.stringify(r.body)})`);
   }
+  // A GET (the old server's health check): the hook takes POST alone.
+  const got = await fetch(HOOK);
+  assert(got.status === 405, `a GET: 405 (${got.status})`);
   const otherWrong = await send({ event_type: "reader.any_document.created", secret: "nope" });
   assert(otherWrong.status === 401, `another event with a wrong secret is refused too: the secret is checked first (${otherWrong.status})`);
   const ignored = await send({ event_type: "reader.any_document.created" });
@@ -2648,12 +2651,25 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     ["an update time that is no time", { updated: "soon" }, "updated"],
     ["a location as text", { location: "12" }, "location"],
     ["tags as bare names", { tags: ["stoicism"] }, "tags.0"],
+    // Each would otherwise be captured first and then fail its row: a 500 on every resend (review pass 1).
+    ["a NUL in the location type", { location_type: "a\u0000b" }, "location_type"],
+    ["a NUL in the url", { url: "a\u0000b" }, "url"],
+    ["a NUL in the colour", { color: "a\u0000b" }, "color"],
+    ["a NUL in a tag", { tags: [{ id: 1, name: "a\u0000b" }] }, "tags.0.name"],
+    ["half an emoji in a tag", { tags: [{ id: 1, name: "half \ud83d" }] }, "tags.0.name"],
+    ["half an emoji in the text", { text: "half \ud83d" }, "text"],
+    ["a fractional book id", { book_id: 42.5 }, "book_id"],
+    ["30 February", { highlighted_at: "2026-02-30T00:00:00Z" }, "highlighted_at"],
+    ["a year Postgres does not keep", { highlighted_at: "+010000-01-01T00:00:00Z" }, "highlighted_at"],
+    ["a time Date.parse reads and Postgres does not", { updated: "12/31/99999" }, "updated"],
   ];
   for (const [label, over, field] of bad) {
     const r = await send(over);
-    assert(r.status === 400 && r.body.code === "BAD_HIGHLIGHT" && Array.isArray(r.body.fields) && (r.body.fields as string[]).includes(field),
-      `${label}: 400 BAD_HIGHLIGHT naming ${field} (${r.status} ${JSON.stringify(r.body)})`);
+    assert(r.status === 400 && r.body.code === "BAD_HIGHLIGHT" && r.body.retryable === false && Array.isArray(r.body.fields) && (r.body.fields as string[]).includes(field),
+      `${label}: 400 BAD_HIGHLIGHT naming ${field}, not retryable (${r.status} ${JSON.stringify(r.body)})`);
   }
+  const twoBad = await send({ url: "a\u0000b", book_id: 0 });
+  assert(twoBad.status === 400 && JSON.stringify(twoBad.body.fields) === '["url","book_id"]', `two bad fields: both named (${JSON.stringify(twoBad.body)})`);
   assert((await thoughtsNow()) === before && (await deliveriesNow()) === 0, "none of those captured a thought or claimed an id");
 
   // A highlight: captured as the hook, its two ids on the thought, the rest in the plugin's row.
@@ -2700,7 +2716,7 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const BARE = "Waste no more time arguing what a good man should be. Be one.";
   const bare = await send({ id: 9003, text: BARE, note: "", highlighted_at: null, updated: null, tags: null, url: null, color: "", location: null, location_type: null });
   const bareRow = await keptRow(9003);
-  const bareThought = await one<{ content: string }>(sql`SELECT content FROM thoughts WHERE id = ${String(bare.body.id)}`);
+  const bareThought = await one<{ content: string }>(sql`SELECT content FROM thoughts WHERE id = ${UUID.test(String(bare.body.id)) ? String(bare.body.id) : NO_ROW}`);
   assert(bare.status === 200 && bareThought?.content === BARE && bareRow?.note === null && bareRow.color === null && bareRow.url === null && bareRow.location === null
     && bareRow.highlighted_at === null && JSON.stringify(bareRow.tags) === "[]", `a highlight with no note is its passage alone, and what it lacks is none in its row (${JSON.stringify(bareRow)})`);
 
@@ -2734,7 +2750,7 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   assert(all.status === 200 && ids(all) === "9002,9004,9001,9003" && all.body.truncated === false, `a read key lists them newest highlighted first, a tie by the higher id, none last (${ids(all)})`);
   const one9001 = ((all.body.highlights ?? []) as Body[]).find((h) => h.highlight_id === 9001);
   assert(one9001?.thought_id === id && one9001.book_id === 42 && one9001.note === NOTE && JSON.stringify(one9001.tags) === '["stoicism","attention"]'
-    && one9001.highlighted_at === "2026-09-01T10:00:00.000Z" && one9001.updated_at === "2026-09-02T00:00:00.000Z" && typeof one9001.captured_at === "string",
+    && one9001.highlighted_at === "2026-09-01T10:00:00.000Z" && one9001.updated_at === "2026-09-02T00:00:00.000Z" && typeof one9001.captured_at === "string" && new Date(one9001.captured_at as string).toISOString() === one9001.captured_at,
     `each names its thought, its book and what Readwise sent (${JSON.stringify(one9001)})`);
   const book = await call(P, "list_highlights", { book_id: 43 });
   assert(book.status === 200 && ids(book) === "9002", `book_id lists that book's alone (${ids(book)})`);
@@ -2748,6 +2764,47 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     const r = await rest("GET", `/v1/plugins/readwise/highlights${query}`, undefined, KEYS.reader);
     assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `${label}: refused as input (${r.status})`);
   }
+  const limitField = (manifest.operations.list_highlights.input as Record<string, { parse(v: unknown): unknown }>).limit;
+  assert(limitField.parse(undefined) === 50, "limit is 50 when not given");
+
+  // Below the list, so its order above stays four rows. What Readwise sends empty or as zero, stored as sent.
+  const zero = await send({ id: 9006, text: "Begin at once to live.", location: 0, color: null, location_type: "", url: "" });
+  const zeroRow = await keptRow(9006);
+  assert(zero.status === 200 && zeroRow?.location === 0 && zeroRow.color === null && zeroRow.location_type === null && zeroRow.url === null,
+    `location 0 is kept as 0, and a null colour and empty location type and url are stored as none (${zero.status} ${JSON.stringify(zeroRow)})`);
+  const half = await send({ id: 9008, text: "Loss is nothing else but change.", location: 12.5 });
+  assert(half.status === 200 && (await keptRow(9008))?.location === 12.5, "a fractional location is kept as sent");
+  // A row with no recorded delivery (a claim that lapsed after its row was written): the capture's row replaces it.
+  await sql`INSERT INTO plugin_readwise.highlights (highlight_id, thought_id, book_id, note) VALUES (9007, ${NO_ROW}, 1, 'old')`;
+  const lapsed = await send({ id: 9007, text: "Very little is needed to make a happy life.", note: "fresh", book_id: 44 });
+  const lapsedRow = await keptRow(9007);
+  assert(lapsed.status === 200 && UUID.test(String(lapsed.body.id)) && lapsedRow?.thought_id === lapsed.body.id && lapsedRow.note === "fresh" && lapsedRow.book_id === 44,
+    `a row left with no recorded delivery is replaced by the capture's (${JSON.stringify(lapsed.body)}; ${JSON.stringify(lapsedRow)})`);
+  // The highlight that was in flight above, sent once its claim is gone: captured, then a duplicate.
+  const busyAgain = await send({ id: 9005, text: BUSY });
+  const busyDup = await send({ id: 9005, text: BUSY });
+  assert(busyAgain.status === 200 && UUID.test(String(busyAgain.body.id)) && busyDup.body.duplicate === true && busyDup.body.id === busyAgain.body.id,
+    `once the claim in flight is gone, a resend captures, and the next is its duplicate (${JSON.stringify(busyAgain.body)}; ${JSON.stringify(busyDup.body)})`);
+
+  // The core's refusal, which no capture this hook sends can draw today: through a stub core, as [keepRowItem] does.
+  // One the core calls retryable is a 503 Readwise may send again, any other a 422; either way no row, and the id given back.
+  for (const retryable of [true, false]) {
+    const queries: string[] = [];
+    const stubSql = ((strings: TemplateStringsArray) => {
+      const q = strings.join("$");
+      queries.push(q);
+      return Promise.resolve(q.includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : q.includes("RETURNING id") ? [{ id: "9100" }] : []);
+    }) as unknown;
+    const stubCtx = {
+      call: async () => ({ ok: false, refusal: { code: "STUB_REFUSED", retryable } }),
+      db: { tx: async (fn: (sql: unknown) => Promise<unknown>) => fn(stubSql) },
+      secret: READWISE_SECRET, captureSeconds: 30, defer: () => undefined,
+    };
+    const answer = await manifest.hooks!.highlight.handler(stubCtx as never, { headers: {}, query: {}, body: new Uint8Array(), text: JSON.stringify(event({ id: 9100 })) });
+    assert(answer.status === (retryable ? 503 : 422) && answer.body?.code === "CORE_REFUSED" && answer.body?.retryable === retryable && answer.body?.refused === "STUB_REFUSED"
+      && !queries.some((q) => q.includes("INSERT INTO highlights")) && queries.some((q) => q.includes("DELETE FROM deliveries")),
+      `a ${retryable ? "retryable" : "final"} refusal of the core's: ${retryable ? 503 : 422} CORE_REFUSED naming it, no row written, the id given back (${JSON.stringify(answer)})`);
+  }
 
   // The README's copy block, as the README gives it: the standalone server's thoughts become the plugin's rows.
   const readme = readFileSync(join(import.meta.dir, "../plugins/readwise/README.md"), "utf8");
@@ -2759,7 +2816,8 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const [oldA] = (await old("An old highlight, captured by the standalone server.", { source: "readwise", readwise_highlight_id: 8001, readwise_book_id: 7, note: "kept", location: 3, location_type: "page", color: "blue", url: "https://readwise.io/open/8001", tags: ["old", "copied"], highlighted_at: "2026-01-01T00:00:00Z", book_title: "Letters" })) as { id: string }[];
   const [oldTwin] = (await old("The same highlight id on a later thought.", { source: "readwise", readwise_highlight_id: 8001, readwise_book_id: 7 })) as { id: string }[];
   await sql`UPDATE thoughts SET created_at = created_at + interval '1 second' WHERE id = ${oldTwin.id}`;
-  const [oldBare] = (await old("An old highlight with nothing beside it.", { source: "readwise", readwise_highlight_id: 8002, readwise_book_id: 7 })) as { id: string }[];
+  // As the old server wrote what Readwise sent empty: "" for a note or colour it did not have.
+  const [oldBare] = (await old("An old highlight with nothing beside it.", { source: "readwise", readwise_highlight_id: 8002, readwise_book_id: 7, note: "", color: "", location_type: "", url: "" })) as { id: string }[];
   await old("Another source's thought that names a highlight id.", { source: "mcp", readwise_highlight_id: 8003, readwise_book_id: 7 });
   await old("A readwise thought whose id is not a number.", { source: "readwise", readwise_highlight_id: "x8004", readwise_book_id: 7 });
   const copy = new SQL({ url: URL_, max: 1 });
@@ -2771,7 +2829,8 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
     assert(copied.ids === "8001,8002", `run twice, it copies each readwise thought with a numeric highlight id once, and no other source's (${copied.ids})`);
     assert(a?.thought_id === oldA.id && a.note === "kept" && a.location === 3 && a.color === "blue" && JSON.stringify(a.tags) === '["old","copied"]' && at(a.highlighted_at) === "2026-01-01T00:00:00.000Z",
       `…an id on two thoughts copied from the first captured, with what the server kept in its metadata (${JSON.stringify(a)})`);
-    assert(bareCopied?.thought_id === oldBare.id && bareCopied.note === null && JSON.stringify(bareCopied.tags) === "[]" && bareCopied.highlighted_at === null, "…and a thought with nothing beside its ids, copied with none");
+    assert(bareCopied?.thought_id === oldBare.id && bareCopied.note === null && bareCopied.color === null && bareCopied.location_type === null && bareCopied.url === null
+      && JSON.stringify(bareCopied.tags) === "[]" && bareCopied.highlighted_at === null, `…and a thought with nothing beside its ids, copied with none, its empty fields none (${JSON.stringify(bareCopied)})`);
     const resent = await send({ id: 8001, text: "An old highlight, captured by the standalone server." });
     assert(resent.status === 200 && resent.body.duplicate === true && resent.body.id === oldA.id, `…and a copied highlight sent again is answered with its old thought (${JSON.stringify(resent.body)})`);
     // A value the copy cannot read stops it, naming the value, and copies nothing.
