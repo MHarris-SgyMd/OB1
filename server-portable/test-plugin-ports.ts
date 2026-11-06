@@ -115,8 +115,8 @@ async function itemsOf(plugin: string): Promise<Map<string, Item>> {
   const r = await rest("GET", `/v1/items?plugin=${plugin}&status=all&limit=1000`, undefined, KEYS.writer);
   return new Map(((r.body.items ?? []) as Item[]).map((i) => [i.plugin?.row ?? "", i]));
 }
-/** Whether an item is due at the start of `day` in UTC. */
-const dueOn = (i: Item | undefined, day: string) => i?.dueAt !== null && i?.dueAt !== undefined && Date.parse(i.dueAt) === Date.parse(`${day}T00:00:00Z`);
+/** Whether an item is due on `day`: by its end, the next day's start in UTC (SMD-3778). */
+const dueOn = (i: Item | undefined, day: string) => i?.dueAt !== null && i?.dueAt !== undefined && Date.parse(i.dueAt) === Date.parse(`${day}T00:00:00Z`) + 86_400_000;
 
 /** Every tool called below, by plugin — the drift guard's set. */
 const driven = new Map<string, Set<string>>();
@@ -729,7 +729,8 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   let taskItems = await itemsOf(P);
   const hvacItem = taskItems.get(ids.hvac), gutterItem = taskItems.get(ids.gutter);
   const hvacLog = await rest("GET", `/v1/items/${hvacItem?.id}`, undefined, KEYS.writer);
-  const hvacEvents = ((hvacLog.body.events ?? []) as { event: string; dueAt: string | null }[]).map((e) => `${e.event}@${e.dueAt?.slice(0, 10)}`);
+  // Each event's due day: the day a date alone is due by the end of, the instant less a day (SMD-3778).
+  const hvacEvents = ((hvacLog.body.events ?? []) as { event: string; dueAt: string | null }[]).map((e) => `${e.event}@${e.dueAt === null ? null : new Date(Date.parse(e.dueAt) - 86_400_000).toISOString().slice(0, 10)}`);
   assert(hvac.body.item?.status === "proposed" && hvac.body.item?.id === hvacItem?.id && hvacItem?.text === "HVAC filter replacement" && hvacItem?.openedBy.name === "writer"
          && dueOn(hvacItem, await dayFromToday(80)) && hvacItem?.status === "proposed" && gutter.body.item?.status === "proposed" && filter.body.item?.status === "proposed"
          && JSON.stringify(hvacEvents) === JSON.stringify([`opened@${await dayFromToday(20)}`, `updated@${await dayFromToday(80)}`]) && logged.body.item?.id === hvacItem?.id,

@@ -2,8 +2,9 @@
 // Gmail smart pull — sensitivity routing + relationship tier + contact entities.
 //
 // Fetches emails from Gmail, cleans them, groups into threads, and emits a pack
-// file that a downstream importer can ingest through Daemonic Brain's canonical
-// pipeline (fingerprint dedup → sensitivity gate → enrichment → upsert).
+// file that your Daemonic Brain import pipeline can ingest. The pack was shaped for
+// upstream Open Brain's canonical pipeline (fingerprint dedup → sensitivity gate →
+// enrichment → upsert).
 //
 // What makes this "smart":
 //   - Local sensitivity detection routes content to the right tier before

@@ -19410,13 +19410,13 @@ if (want("23d")) {
     // Another key states, on a fourth ticket, exactly what Linear says: board-sync still states its own, the other's being no statement of its.
     const shared = issueOf(90615, "High", "2026-12-01", "2026-11-05T01:00:00.000Z");
     for (const i of [high, low, none, shared]) await sync(i);
-    await watch`SELECT assert_priority('ticket', 'SMD-90615', 3, '2026-12-01T00:00:00Z'::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Linear priority: High', false, ${{ name: "live-23d-other", scope: "write" }}::jsonb)`;
+    await watch`SELECT assert_priority('ticket', 'SMD-90615', 3, '2026-12-02T00:00:00Z'::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Linear priority: High', false, ${{ name: "live-23d-other", scope: "write" }}::jsonb)`;
     const dry = step ? await step.run({ dryRun: true }) : null;
     const afterDry = (await said("ticket", "SMD-90611")).length + (await said("ticket", "SMD-90612")).length;
     const first = step ? await step.run({ dryRun: false }) : null;
     const [h1, l1, n1] = [await said("ticket", "SMD-90611"), await said("ticket", "SMD-90612"), await said("ticket", "SMD-90613")];
     assert((dry?.asserted ?? 0) >= 2 && afterDry === 0 && (first?.refused ?? ["none run"]).length === 0
-           && h1.length === 1 && h1[0].level === 3 && h1[0].due_at === "2026-12-01T00:00:00Z" && h1[0].reason === "Linear priority: High" && h1[0].maker_name === SYNC_ACTOR && h1[0].maker_source === false
+           && h1.length === 1 && h1[0].level === 3 && h1[0].due_at === "2026-12-02T00:00:00Z" && h1[0].reason === "Linear priority: High" && h1[0].maker_name === SYNC_ACTOR && h1[0].maker_source === false
            && l1.length === 1 && l1[0].level === 1 && l1[0].due_at === null && n1.length === 0
            && JSON.stringify((await said("ticket", "SMD-90615")).map((r) => r.maker_name)) === JSON.stringify(["live-23d-other", SYNC_ACTOR]),
       `after a pass the dry run counts and writes nothing; the run states High due 2026-12-01 and Low with no day as board-sync, its reason Linear's word, not yet a source; No priority states nothing, its due day with it; another key's matching statement is not board-sync's own (${JSON.stringify([h1, l1, n1.length])})`);
@@ -19453,8 +19453,8 @@ if (want("23d")) {
     const ticket = await upsertRecord(sql, ticketDoc, "test-live@23d", actor, true);
     const ticketSaid = await said("ticket", "SMD-90614");
     assert(off.priority === undefined && offSaid === 0 && stated.priority === "asserted" && again.priority === "unchanged" && cleared.priority === "cleared"
-           && noteSaid.length === 1 && noteSaid[0].level === 4 && noteSaid[0].due_at === "2026-12-01T00:00:00Z" && noteSaid[0].reason === "frontmatter priority: Urgent" && noteSaid[0].maker_name === "live-23d-ingester"
-           && open(await said("thought", noteDoc.id)).length === 0 && ticket.priority === "asserted" && ticketSaid.length === 1 && ticketSaid[0].level === 2 && ticketSaid[0].due_at === "2026-12-15T00:00:00Z",
+           && noteSaid.length === 1 && noteSaid[0].level === 4 && noteSaid[0].due_at === "2026-12-02T00:00:00Z" && noteSaid[0].reason === "frontmatter priority: Urgent" && noteSaid[0].maker_name === "live-23d-ingester"
+           && open(await said("thought", noteDoc.id)).length === 0 && ticket.priority === "asserted" && ticketSaid.length === 1 && ticketSaid[0].level === 2 && ticketSaid[0].due_at === "2026-12-16T00:00:00Z",
       `the pipeline states a note's priority on its own thought as the run's actor, and nothing when told the brain cannot take it; the same again is unchanged, an unknown word clears it; a ticket's on the ticket (${JSON.stringify([off.priority, stated.priority, again.priority, cleared.priority, ticket.priority])})`);
 
     // A role without the priority group is told what it lacks, not failed at its first write: 116's writers are
@@ -19504,7 +19504,7 @@ if (want("23e")) {
     const of = await read();
     const statements = await said();
     assert(first.code === 0 && /priorities \(SMD-3666, as live-23e-vault\): asserted 1, nothing_to_clear 1/.test(first.out)
-           && of?.level === 3 && of.due !== null && Date.parse(of.due) === Date.parse("2026-12-01T00:00:00Z")
+           && of?.level === 3 && of.due !== null && Date.parse(of.due) === Date.parse("2026-12-02T00:00:00Z")
            && statements.length === 1 && statements[0].reason === "frontmatter priority: high" && statements[0].maker_name === "live-23e-vault",
       `a note saying priority high and due 2026-12-01 reads High due that day through priority_of, stated as the run's actor with its word as the reason; a note saying none states nothing (${first.code} ${first.out.split("\n").find((l) => /priorities/.test(l))?.trim()} | ${JSON.stringify(of)} ${first.err.trim().slice(0, 200)})`);
     const again = ingest();

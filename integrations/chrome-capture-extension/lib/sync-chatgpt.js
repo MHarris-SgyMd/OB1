@@ -1,9 +1,9 @@
 /**
- * Open Brain Capture — ChatGPT sync module.
+ * Daemonic Brain Capture — ChatGPT sync module.
  *
  * Fetches conversations from ChatGPT's internal API using the browser's
  * existing session, formats them as transcripts, and sends each through the
- * capture pipeline on the Open Brain REST API.
+ * capture pipeline on the Daemonic Brain REST API.
  *
  * API details discovered via:
  *   - https://github.com/pionxzh/chatgpt-exporter
@@ -64,7 +64,7 @@
         throw error;
       }
       const delayMs = backoffDelay(i);
-      console.warn(`[Open Brain Capture] ChatGPT API returned ${response.status}, retrying in ${Math.round(delayMs)}ms (attempt ${i + 1}/${attempts})`);
+      console.warn(`[Daemonic Brain Capture] ChatGPT API returned ${response.status}, retrying in ${Math.round(delayMs)}ms (attempt ${i + 1}/${attempts})`);
       await sleep(delayMs);
     }
   }
@@ -135,7 +135,7 @@
       const merged = OBConfig.mergeSettings(stored[OBConfig.STORAGE_KEYS.settings]);
       return merged.enabledPlatforms.chatgpt !== false;
     } catch (err) {
-      console.error('[Open Brain Capture] ChatGPT sync: failed to read settings, assuming enabled', err);
+      console.error('[Daemonic Brain Capture] ChatGPT sync: failed to read settings, assuming enabled', err);
       return true;
     }
   }
@@ -183,7 +183,7 @@
       offset += items.length;
       pages += 1;
       if (pages >= MAX_PAGES) {
-        console.warn(`[Open Brain Capture] ChatGPT pagination stopped at ${pages} pages (${all.length} conversations) — raise MAX_PAGES if this is a real account size`);
+        console.warn(`[Daemonic Brain Capture] ChatGPT pagination stopped at ${pages} pages (${all.length} conversations) — raise MAX_PAGES if this is a real account size`);
         break;
       }
 
@@ -275,7 +275,7 @@
   }
 
   /**
-   * Format a conversation for the Open Brain capture pipeline.
+   * Format a conversation for the Daemonic Brain capture pipeline.
    */
   function formatForIngest(conversation) {
     const title = conversation.title || '(untitled)';
@@ -395,11 +395,11 @@
           }
           updatedTimestamps[conv.id] = String(conv.update_time);
         } else {
-          console.warn(`[Open Brain Capture] ChatGPT sync: not advancing cursor for "${conv.title}" (status=${result?.status || 'none'})`);
+          console.warn(`[Daemonic Brain Capture] ChatGPT sync: not advancing cursor for "${conv.title}" (status=${result?.status || 'none'})`);
           errors++;
         }
       } catch (err) {
-        console.error(`[Open Brain Capture] Failed to sync ChatGPT conversation "${conv.title}":`, err);
+        console.error(`[Daemonic Brain Capture] Failed to sync ChatGPT conversation "${conv.title}":`, err);
         errors++;
         if (isAuthError(err)) {
           await saveSyncTimestamps(updatedTimestamps);

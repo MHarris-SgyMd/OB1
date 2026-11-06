@@ -25,7 +25,7 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` for the `type`, `importance`, `sensitivity_tier`, and `source_type` columns
 - **Knowledge graph schema** applied — install `schemas/knowledge-graph` for the `consolidation_log` table
 - At least one LLM API key: OpenRouter (recommended), OpenAI, or Anthropic
@@ -210,8 +210,8 @@ consolidation-workers/
     index.ts         # Biographical profile synthesis worker
   metadata-norm/
     index.ts         # Metadata quality improvement worker
-  metadata.json      # OB1 contribution metadata
+  metadata.json      # Daemonic Brain contribution metadata
   README.md          # This file
 ```
 
-This is an optional enhancement — it is not required for the core Open Brain alpha path. Install it after the enhanced thoughts and knowledge graph schemas if you want automated thought quality improvement.
+This is an optional enhancement — it is not required for a working brain. Install it after the enhanced thoughts and knowledge graph schemas if you want automated thought quality improvement.

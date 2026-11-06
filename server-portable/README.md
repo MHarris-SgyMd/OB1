@@ -1043,7 +1043,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
 - **`set_priority`** (`POST /v1/priorities/{kind}/{key}`, capture scope): a level, 0
   none to 5 critical, and optionally `due_at`, `not_before`, `due_ref` (another item
   whose due time this one takes), a `reason` and `inferred`. A time is an instant with
-  its offset, or a date, read as the start of that day in UTC. The maker is the key,
+  its offset, or a date: a due time by the end of that day (the next day's start in UTC,
+  SMD-3778), a not_before from its start. The maker is the key,
   its tier the key's (operator, a declared priority source, agent, inferred), never an
   argument's. The caller's new statement on an item replaces its earlier one there; the
   same statement again is `unchanged`, nothing written. The reply names what it
@@ -1125,8 +1126,9 @@ it, each over REST and MCP alike:
   settles the items its rows stand for, and states priorities on them; another plugin's may
   not. A write key changes such an item through the plugin's row (the maintainer,
   2026-11-03).
-- **Times** are ISO 8601: a time with its offset, or a date (the start of that day in
-  UTC), as `set_priority` takes them. `null` in `update_item` clears the owner or the due
+- **Times** are ISO 8601: a time with its offset, or a date (due by the end of that day,
+  the next day's start in UTC: SMD-3778), as `set_priority` takes them. An item is not
+  overdue on its own due day. `null` in `update_item` clears the owner or the due
   time.
 
 **A refusal is an answer**, not an error. An item is named `{kind: "item", key: <id>}`:

@@ -13,7 +13,7 @@
       "triggerName": "mcp_tool",
       "input": {
         "toolName": "brain_search",
-        "toolDescription": "Search the Open Brain for thoughts about a topic; returns the best matches with their text.",
+        "toolDescription": "Search the brain for thoughts about a topic; returns the best matches with their text.",
         "inputSchema": [{ "name": "query", "type": "Text", "required": true, "description": "What to search for" }],
         "returnsResponse": true
       },

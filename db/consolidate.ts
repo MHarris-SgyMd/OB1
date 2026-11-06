@@ -166,7 +166,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeAtStart, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -757,14 +757,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     return null;
   }
+  /** The start's refusal of a probe that answered. */
+  const refusalAtStart = async (p: Probe): Promise<FollowerRefusal | null> => {
+    const line = startRefusal(p);
+    return line ? { kind: probeRefusal(p), line } : null;
+  };
   /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
   let startOut: string | null = null;
   if (FOLLOW && !REVIEW_ONLY && !STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
-    const first = await probe(undefined, opts.signal);
-    const refusal = startRefusal(first);
-    if (refusal) return refused(probeRefusal(first), refusal);
-    if (first.state === "out") startOut = first.why;
+    const first = await probeAtStart({ probe: (wake) => probe(undefined, wake), refusal: refusalAtStart, wake: opts.signal });
+    if ("refused" in first) return refused(first.refused.kind, first.refused.line);
+    startOut = first.out;
   }
 
   // ── Identity ────────────────────────────────────────────────────────────────
@@ -1462,20 +1466,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // ── The run ─────────────────────────────────────────────────────────────────
 
   if (startOut !== null) {
-    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-    const wake = opts.signal ?? new AbortController().signal;
-    const down = Date.now();
-    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said through a caller's stamper while it lasts — the sleep scheduler's,
-    // so heartbeat:sleep and preflight's row say a pass waits at its start for
-    // the provider, not that its passes run (SMD-2752).
-    await opts.stamper?.startWait?.(true);
-    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out").finally(() => opts.stamper?.startWait?.(false));
-    if (answered) {
-      const refusal = startRefusal(answered);
-      if (refusal) return refused(probeRefusal(answered), refusal);
-      out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
-    }
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait. Said through a
+    // caller's stamper while it lasts — the sleep scheduler's, so heartbeat:sleep and preflight's row say a pass waits
+    // at its start for the provider, not that its passes run (SMD-2752).
+    const waited = await waitAtStart({
+      who: "the provider",
+      why: startOut,
+      meanwhile: `claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token`,
+      probe: (wake) => probe(undefined, wake),
+      refusal: refusalAtStart,
+      wake: opts.signal ?? new AbortController().signal,
+      writer: { out, err },
+      stamper: opts.stamper,
+    });
+    if (waited !== null && waited !== "up") return refused(waited.refused.kind, waited.refused.line);
   }
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
@@ -2385,12 +2389,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.onStart?.({ ok: true, provider: "up" });
   opts.onPass?.(stop, inCall.abortInHand);
 
-  /**
-   * Workers whose leases could not be returned as they ended — the database
-   * was not answering — returned at the start of the next pass rather than
-   * left to expire a lease later (SMD-2599). A follower's only.
-   */
-  const unreturned = new Set<string>();
+  /** Workers whose leases could not be returned as they ended, returned at the start of the next pass (SMD-2599). */
+  const unreturned = new Unreturned((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`);
 
   // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
   // pass and re-stamped while one runs. A one-shot run stamps nothing. A
@@ -2430,10 +2430,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       passEnds = new AbortController();
       gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
     }
-    for (const w of unreturned) {
-      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-      unreturned.delete(w);
-    }
+    await unreturned.returnAll();
     // After the leases a worker could not return, a small write and no new
     // work (review pass 6): the admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
     // 1b). A stop while it waits ends the run with no pass: the summary's
@@ -2478,34 +2475,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  /**
-   * A follower's pass, which a database outage does not end (SMD-2599), as
-   * extract-entities.ts's: said once, waited out until a SELECT 1 answers —
-   * and the pass runs again at once, so its counts are read — or a stop wakes
-   * the wait, and the counts are null. Any other error ends the run, as
-   * before; a run without --follow is unchanged.
-   */
-  async function followedPass(): Promise<Counts | null> {
-    for (;;) {
-      try {
-        const c = await stampedPass();
-        // A worker found the provider not answering and ended the pass
-        // (SMD-2599): the heartbeat says so, and stays a running follower's
-        // while it probes, so preflight reads it alive, not stale (SMD-2261).
-        if (outage.reason !== null && !stopping) {
-          await stamper?.stamp("failed");
-          await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
-        }
-        return c;
-      } catch (e) {
-        if (!FOLLOW || !databaseUnavailable(e)) throw e;
-        const down = Date.now();
-        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-        if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
-        out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-      }
-    }
-  }
+  /** A pass a database outage does not end (followedPass, SMD-2599): the counts, or null when a stop ended its wait. */
+  const followed = () => followedPass({
+    pass: stampedPass,
+    // A worker found the provider not answering and ended the pass (SMD-2599): the heartbeat says so, and stays a
+    // running follower's while it probes, so preflight reads it alive, not stale (SMD-2261).
+    afterPass: async () => {
+      if (outage.reason === null || stopping) return;
+      await stamper?.stamp("failed");
+      await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
+    },
+    follow: !!FOLLOW,
+    check: () => sql`SELECT 1`,
+    wake: onStop.signal,
+    writer: { out, err },
+  });
 
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
@@ -2513,7 +2497,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 102 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1) — said
   // beside relations' note too, so fixing the role does not reveal the migration only then (review pass 3).
   if (saidMissing) out(RELATIONS_OFF ? `  distinct: not stored either — ${NO_102}` : `  distinct: not stored this run — ${NO_102}; a pair judged unrelated at the floor now has its edge closed, as before 102, unless that edge is a distinct, and gets no new distinct until its claim is cleared`);
-  let after = await followedPass();
+  let after = await followed();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
@@ -2522,7 +2506,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // A follower sees a migration or a grant applied while it runs — 102's sentinel too (SMD-3117),
       // both read before either is said (review pass 3).
       storesNow(await relationsOff().catch(() => RELATIONS_OFF), await readHas102().catch(() => HAS_102), "from this poll on");
-      after = await followedPass();
+      after = await followed();
       await stamper?.stamp(passOutcome);
     }
     // The follower ends — a signal, its --limit, or the provider refusing the
@@ -2536,10 +2520,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // ends where the database answers; else they expire within --ttl (review pass 3).
   // All at once, and not when the run ended waiting for the database; one
   // line when they could not go (review pass 4).
-  if (after !== null && unreturned.size > 0) {
-    const kept = (await Promise.all([...unreturned].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
-    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${TTL} s`);
-  }
+  if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
     `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller` : ""}, in ${elapsed.toFixed(1)}s ` +

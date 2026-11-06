@@ -24,7 +24,7 @@ const SEED = { email: "admin@windmill.dev", password: "changeme" };
 const SCRIPTS: { path: string; file: string; summary: string; schema: object }[] = [
   { path: "f/ob1/linear_ingest", file: "linear_ingest.ts", summary: "Linear issues into the brain", schema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: {}, required: [] } },
   {
-    path: "f/ob1/brain_search", file: "brain_search.ts", summary: "Search the Open Brain for thoughts about a topic",
+    path: "f/ob1/brain_search", file: "brain_search.ts", summary: "Search the brain for thoughts about a topic",
     schema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { query: { type: "string", description: "What to search for" } }, required: ["query"] },
   },
   {
