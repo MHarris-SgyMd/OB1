@@ -95,7 +95,8 @@
 --   thought_sources (the server group's, which the structure group grants
 --   too; review pass 7: thought_facets is the capture group's). The server's role holds all of them. A role
 --   short of one gets 42501 naming the table: one without thought_sources on
---   any ticket or thought, since a thought is asked whether it is a ticket's
+--   any ticket or thought, and on an open item that inherits through its
+--   origin thought, since a thought is asked whether it is a ticket's
 --   row (review pass 2: this said the reverse). No grant changes.
 --
 -- SAFETY

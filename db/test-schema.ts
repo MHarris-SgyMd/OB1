@@ -17496,6 +17496,12 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const rowOf9410 = (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9410'`)).rows[0].id;
   const asThought = await one("thought", rowOf9410);
   assert(asThought?.unblocks === 3, `a ticket's row asked as a thought blocks what its ticket blocks, its linear source row starting the walk (${asThought?.unblocks})`);
+  // A pre-053 row (no source row, metadata.issue alone) asked as a thought walks from its ticket: SMD-9741 is blocked by
+  // SMD-9740, stated on 9741's side, so the row blocks one.
+  const pre053 = await thoughtAs("[108] SMD-9740, a row from before 053", { source: "linear", issue: "SMD-9740", status: "backlog", status_type: "backlog" });
+  await ticket("SMD-9741", "backlog", [["blocked_by", "SMD-9740"]]);
+  const preRow = await one("thought", pre053);
+  assert(preRow?.unblocks === 1, `a ticket's row with no source row, asked as a thought, blocks what its ticket blocks (${preRow?.unblocks})`);
   // Each blocked item counted once, however many paths reach it: SMD-9600 blocks 9601 and 9602, and 9601 blocks 9602 too.
   await ticket("SMD-9600", "backlog", [["blocks", "SMD-9601"], ["blocks", "SMD-9602"]]); await ticket("SMD-9601", "backlog", [["blocks", "SMD-9602"]]); await ticket("SMD-9602");
   const tri = await one("ticket", "SMD-9600");
@@ -17531,6 +17537,15 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `two hops from Urgent is 2, no higher than unknown, so unknown; a stated Low beats the inherited level; two hops from Critical is 3; a Low parent never lowers a child below unknown (${from(inh[1])}; ${inh[2]?.effective}; ${from(inh[3])}; ${from(inh[8])})`);
   assert(from(inh[4]) === "ticket:SMD-9450/4-1" && from(inh[5]) === "ticket:SMD-9455/5-1" && from(inh[6]) === "ticket:SMD-9455/5-2" && from(inh[7]) === "none" && Number(inh[6]?.effective) === 3,
     `a thought inherits from the ticket it is about, by metadata or by its standing subject; an open item from its origin thought's ticket, two hops (${from(inh[4])}; ${from(inh[5])}; ${from(inh[6])}; ${from(inh[7])})`);
+  // A closed link counts for nothing: a parent link and a blocks link, each withdrawn by the source.
+  const moved = await ticket("SMD-9750", "backlog", [["child_of", "SMD-9450"]]);
+  const freed = await ticket("SMD-9751", "backlog", [["blocks", "SMD-9752"]]); await ticket("SMD-9752");
+  const [movedBefore, freedBefore] = await eff([["ticket", "SMD-9750"], ["ticket", "SMD-9751"]]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[]'::jsonb)`, [moved]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[]'::jsonb)`, [freed]);
+  const [movedAfter, freedAfter] = await eff([["ticket", "SMD-9750"], ["ticket", "SMD-9751"]]);
+  assert(from(movedBefore) === "ticket:SMD-9450/4-1" && from(movedAfter) === "none" && freedBefore?.unblocks === 1 && freedAfter?.unblocks === 0,
+    `a withdrawn parent link passes nothing down, a withdrawn blocks link blocks nothing (${from(movedBefore)} → ${from(movedAfter)}; ${freedBefore?.unblocks} → ${freedAfter?.unblocks})`);
   // A served item's own level is its effective one: a Low parent passes nothing of its Critical parent down. A settled
   // parent passes nothing down, nor is walked through to its own parent.
   await ticket("SMD-9492", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9493", "backlog", [["child_of", "SMD-9492"]]);
