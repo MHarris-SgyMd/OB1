@@ -1175,8 +1175,8 @@ export class SqlStore implements ThoughtStore {
         SELECT item_kind, item_key, effective, level, inherited_from, due_at, due_from, urgency, overdue, unblocks, settled,
                not_before, waiting, terms, winner, passed_over
           FROM effective_priority((${JSON.stringify(items)}::text)::jsonb,
-                                         (${opts.weights === undefined ? null : JSON.stringify(opts.weights)}::text)::jsonb,
-                                         COALESCE(${opts.now ?? null}::timestamptz, now()))` as Record<string, unknown>[];
+                                  (${opts.weights === undefined ? null : JSON.stringify(opts.weights)}::text)::jsonb,
+                                  COALESCE(${opts.now ?? null}::timestamptz, now()))` as Record<string, unknown>[];
     } catch (e) {
       // A clock Postgres can't read is the clock's, not a due time's (review pass 1: it was named due_at or not_before).
       if (opts.now !== undefined && timeCastFailed(e)) throw new PriorityRefused("time", `now is no moment Postgres can read: ${String((e as Error)?.message ?? "")}`);

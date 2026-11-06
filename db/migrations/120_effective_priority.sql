@@ -383,7 +383,7 @@ BEGIN
          AND substr(f.payload->>'key', 8) ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$'
        LIMIT 1;
     END IF;
-    IF v_ticket ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
+    IF v_ticket IS NOT NULL THEN
       kind := 'ticket'; key := upper(v_ticket);
       RETURN NEXT;
     END IF;
@@ -559,7 +559,7 @@ BEGIN
   -- unreachable (review pass 5).
   -- Nested, so the casts run only once both values are known numbers.
   IF v_bad IS NULL THEN
-    IF ((c_defaults || COALESCE(p_weights, '{}'))->>'cap')::numeric < ((c_defaults || COALESCE(p_weights, '{}'))->>'unblocks_many_at')::numeric THEN
+    IF (v_w->>'cap')::numeric < (v_w->>'unblocks_many_at')::numeric THEN
       RAISE EXCEPTION USING MESSAGE = 'a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached',
                             ERRCODE = 'invalid_parameter_value';
     END IF;

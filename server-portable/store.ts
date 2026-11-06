@@ -1389,7 +1389,7 @@ export class PriorityRefused extends Error {
 }
 export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "weight" | "other";
 
-/** Which argument a 22023 from 116 names, by its message's opening words (116's and 115's own wording, one rule each). */
+/** Which argument a 22023 from 116 or 120 names, by its message's opening words (116's, 115's and 120's own wording, one rule each). */
 export function priorityProblemOf(message: string): PriorityProblem {
   if (/^not an item kind\b/.test(message)) return "kind";
   if (/^not a (?:thought|entity|item) id\b|^not a ticket key\b/.test(message)) return "key";
@@ -2193,7 +2193,7 @@ export interface ThoughtStore {
    * asked twice answered once — the counted level, else the inherited one, else unknown's; urgency from the due time
    * in calendar days in UTC; the open items it blocks; every term named. `weights` overrides docs/priority.md's by
    * name, and `now` pins the clock (an eval, a test). Throws PriorityRefused for a malformed item (`kind`, `key`) or
-   * weight (`weight`). A database before 120 throws.
+   * weight (`weight`), or a clock that is no moment (`time`). A database before 120 throws.
    */
   effectivePriority(items: { kind: string; key: string }[], opts?: { weights?: Partial<PriorityWeights>; now?: string }): Promise<EffectivePriority[]>;
   /**

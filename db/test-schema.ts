@@ -17373,7 +17373,7 @@ console.log("\n[107] Migration 119: a due date alone is due by the end of that d
   assert(word === "22023" && (await epochOf("2027-04-01")) === Date.UTC(2027, 3, 2) / 1000, `a relative word is still refused 22023, and a re-apply is a no-op (${word})`);
 }
 
-console.log("\n[108] Migration 120: effective priority — the counted level, else one inherited from what an item serves (a parent ticket, a thought's ticket, an item's origin thought; less one a hop, two hops, only above unknown's 2), else unknown's 2; urgency in calendar days in UTC (+2 by the end of tomorrow, +1 within seven days), overdue +3 in its place, none at level 0 or once settled; the due time stated, by reference one hop, or an open item's own; +0.5 or +1 for the open items it blocks, transitively to depth 3, never through a settled one; inferred statements passed over unless counted; each term named; weights by name, an unknown one refused; a re-apply a no-op (SMD-3667)");
+console.log("\n[108] Migration 120: effective priority — the counted level, else one inherited from what an item serves (a parent ticket, a thought's ticket, an item's origin thought; less one a hop, two hops, only above unknown's 2), else unknown's 2; urgency in calendar days in UTC (+2 by the end of tomorrow, +1 by the end of the seventh day), overdue +3 in its place, none at level 0 or once settled; the due time stated, by reference one hop, or an open item's own; +0.5 or +1 for the open items it blocks, transitively to depth 3, never through a settled one; inferred statements passed over unless counted; each term named; weights by name, an unknown one refused; a re-apply a no-op (SMD-3667)");
 {
   const file = files.find((f) => /^\d{3}_effective_priority\.sql$/.test(f)) ?? "no NNN_effective_priority.sql";
   await reapply(file.slice(0, 4));
@@ -17412,6 +17412,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const one = async (kind: string, key: string, weights: object | null = null) => (await eff([[kind, key]], weights))[0];
   const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}${t.window ? `:${t.window}` : ""}=${t.value}`).join(" ");
   const raisedCode = async (sql: string, params: unknown[]) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const rowOf = async (issue: string) => (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = $1`, [issue])).rows[0].id;
 
   // The shape: ten functions, each STABLE and commented.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
@@ -17440,7 +17441,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   assert(e("SMD-9403") === 4 && ur("SMD-9403")?.overdue === true && named(ur("SMD-9403")) === "level=1 overdue=3" && e("SMD-9409") === 5 && ur("SMD-9409")?.overdue === true,
     `an overdue Low reads 1 + 3 and overdue; due at this very instant is overdue too (${named(ur("SMD-9403"))}; ${named(ur("SMD-9409"))})`);
   assert(e("SMD-9404") === 3 && named(ur("SMD-9404")) === "level=2 urgency:week=1" && e("SMD-9408") === 3 && e("SMD-9405") === 2 && named(ur("SMD-9405")) === "level=2",
-    `within seven calendar days +1, the seventh day's end included; the eighth day nothing (${named(ur("SMD-9404"))}; ${named(ur("SMD-9408"))}; ${named(ur("SMD-9405"))})`);
+    `+1 by the end of the seventh day, that end included; the eighth day nothing (${named(ur("SMD-9404"))}; ${named(ur("SMD-9408"))}; ${named(ur("SMD-9405"))})`);
   assert(e("SMD-9406") === 0 && ur("SMD-9406")?.overdue === false && e("SMD-9407") === 2 && ur("SMD-9407")?.settled === true && ur("SMD-9407")?.overdue === false && ur("SMD-9407")?.due_at !== null,
     `a level-0 item takes no urgency, overdue or not; a completed item keeps its due time but takes no term (${named(ur("SMD-9406"))}; ${named(ur("SMD-9407"))}, settled ${ur("SMD-9407")?.settled})`);
   // Just past each window's end, inside the same count of 24-hour spans (review pass 7: no row told calendar days from
@@ -17454,7 +17455,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const late = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-10T23:30:00Z')`)).rows[0];
   const early = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-09T00:30:00Z')`)).rows[0];
   assert(Number(late?.urgency) === 2 && Number(early?.urgency) === 1,
-    `calendar days in UTC: due 2027-03-11 read at 2027-03-10 23:30 is soon (${late?.urgency}); read at 2027-03-09 00:30, 47.5 hours off, it is a day further and within the week (${early?.urgency})`);
+    `calendar days in UTC: due 2027-03-11 read at 2027-03-10 23:30 is soon (${late?.urgency}); read at 2027-03-09 00:30, 71.5 hours off, it is a day further and within the week (${early?.urgency})`);
 
   // Unblocks, the second Verify: blocking three open items outranks blocking none; a Done blocker blocks nothing.
   await ticket("SMD-9410", "backlog", [["blocks", "SMD-9411"], ["blocks", "SMD-9412"]]);
@@ -17493,7 +17494,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   assert(na?.unblocks === 0 && ja?.unblocks === 1,
     `a link in a system that states no status is not counted; in another gating system a completed blocked item is not counted, an open one is (${na?.unblocks}, ${ja?.unblocks})`);
   // The ticket's own row, asked as a thought, blocks what its ticket blocks.
-  const rowOf9410 = (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9410'`)).rows[0].id;
+  const rowOf9410 = await rowOf("SMD-9410");
   const asThought = await one("thought", rowOf9410);
   assert(asThought?.unblocks === 3, `a ticket's row asked as a thought blocks what its ticket blocks, its linear source row starting the walk (${asThought?.unblocks})`);
   // A pre-053 row (no source row, metadata.issue alone) asked as a thought walks from its ticket: SMD-9741 is blocked by
@@ -17560,8 +17561,8 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   // A stating ticket one hop off stops the walk there: its Critical parent is not a candidate.
   await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
   await put("ticket", "SMD-9490", 4);
-  const tie = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
-  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `the stating ticket one hop off is read (${from(tie)})`);
+  const stopped = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
+  assert(from(stopped) === "ticket:SMD-9490/4-1" && Number(stopped?.effective) === 3, `the stating ticket one hop off is read (${from(stopped)})`);
   // A real tie between hops: SMD-9730's parents are SMD-9731 (no level, under SMD-9455's Critical: 3 at two hops), walked
   // first, and SMD-9732 (Urgent: 3 at one hop); the nearer wins (review pass 7: the row above never reached a two-hop one).
   await ticket("SMD-9731", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9732");
@@ -17570,7 +17571,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const hopTie = await one("ticket", "SMD-9730");
   assert(from(hopTie) === "ticket:SMD-9732/4-1", `a tie between one hop and two, the two-hop one walked first, goes to the nearer (${from(hopTie)})`);
   // Two hops off: an open parent of no level under a completed Critical passes nothing; a tie among three Criticals
-  // two hops off (a ticket whose rows state three parents, walked in key order) goes to the lowest key, which is
+  // two hops off (a ticket whose row states three parents, walked in key order) goes to the lowest key, which is
   // neither the first walked (SMD-9623, through SMD-9621) nor the last (SMD-9625, through SMD-9624).
   await ticket("SMD-9610", "completed"); await ticket("SMD-9611", "backlog", [["child_of", "SMD-9610"]]); await ticket("SMD-9612", "backlog", [["child_of", "SMD-9611"]]);
   await ticket("SMD-9623"); await ticket("SMD-9625");
@@ -17599,7 +17600,6 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `a High taking a release's due time (tomorrow) by reference reads 5; a reference to an item that itself only refers is not followed; an open item's own due tomorrow gives unknown 2 + 2; a not_before ahead is waiting (${d.map((r) => `${r.effective}/${r.due_from}`).join(" ")}, waiting ${d[3]?.waiting})`);
 
   // A ticket's own row, asked as a thought, reads as its ticket, naming it; its own statement and the ticket's are one pool.
-  const rowOf = async (issue: string) => (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = $1`, [issue])).rows[0].id;
   const [row9450, row9401, row9451, row9403] = [await rowOf("SMD-9450"), await rowOf("SMD-9401"), await rowOf("SMD-9451"), await rowOf("SMD-9403")];
   await put("thought", row9403, 5);
   const rows = await eff([["thought", row9450], ["thought", row9401], ["thought", row9451], ["thought", row9403]]);

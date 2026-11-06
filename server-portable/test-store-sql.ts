@@ -2006,7 +2006,7 @@ console.log("\n[22] effectivePriority reads migration 120's composed read (SMD-3
       `a Medium due by the end of tomorrow, on a pinned clock: effective 4, the level and the urgency named, the operator's statement the winner (${JSON.stringify(r)?.slice(0, 200)})`);
     assert(tuned?.effective === 5 && tuned.item.key === t.id && today?.effective === 2 && today.urgency === 0,
       `soon overridden to 3 reads 5, the item normalised as 116 keys it; on a clock ten weeks before, no urgency (${tuned?.effective}, ${today?.effective})`);
-    // The database's clock when none is pinned: a due time an hour off is overdue within the hour, never a pinned day's.
+    // The database's clock when none is pinned: a due time a minute past is overdue, never a pinned day's.
     const soonItem = await store.captureThought({ content: "smd-3667 call back within the hour", payload: { metadata: {} }, embedding: unit(31) });
     await store.assertPriority({ kind: "thought", key: soonItem.id, level: 2, dueAt: new Date(Date.now() - 60_000).toISOString(), actor: { name: "smd-3667-store", via: "test-store-sql" }, scope: "write" });
     const [live] = await store.effectivePriority([{ kind: "thought", key: soonItem.id }]);
