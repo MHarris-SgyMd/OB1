@@ -319,8 +319,44 @@ export type NotesInput = {
   yieldWindow: string;
 };
 
-/** The GitHub release's notes. */
+/**
+ * GitHub's limit on a release's body, in characters (`gh release create` gets
+ * HTTP 422 "body is too long" past it), and the budget the notes keep under it.
+ * A JavaScript string's length counts UTF-16 units, never fewer than GitHub's
+ * characters, so a body within the budget is within the limit. v2.0.0's full
+ * notes were 143,644 and its release was refused at the last step (SMD-4130).
+ */
+export const NOTES_LIMIT = 125_000;
+export const NOTES_BUDGET = 120_000;
+
+/**
+ * The GitHub release's notes, within NOTES_BUDGET. The full notes when they fit;
+ * past it, the yield table becomes a link to its asset; past it still, the list
+ * of change files becomes a link to changes/ at the tag (the release attaches
+ * both, so nothing is lost but the inline copy); past that, the CHANGELOG
+ * section becomes a link to it in CHANGELOG.md at the tag. Throws when even
+ * that is over, which the job's first step meets before anything is built or
+ * pushed.
+ */
 export function renderNotes(n: NotesInput): string {
+  for (const shape of [
+    { changelog: true, changeList: true, yieldTable: true },
+    { changelog: true, changeList: true, yieldTable: false },
+    { changelog: true, changeList: false, yieldTable: false },
+    { changelog: false, changeList: false, yieldTable: false },
+  ]) {
+    const notes = renderNotesShaped(n, shape);
+    if (notes.length <= NOTES_BUDGET) return notes;
+  }
+  throw new Error(`the release notes are over ${NOTES_BUDGET} characters even with the CHANGELOG section, the change files and the yield table linked, not inlined (GitHub's limit is ${NOTES_LIMIT})`);
+}
+
+/** The anchor GitHub gives CHANGELOG.md's `## [X.Y.Z] - date` heading: punctuation but hyphens dropped, spaces to hyphens. */
+export function changelogAnchor(core: string, date: string): string {
+  return `[${core}] - ${date}`.toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/ /g, "-");
+}
+
+function renderNotesShaped(n: NotesInput, shape: { changelog: boolean; changeList: boolean; yieldTable: boolean }): string {
   const f = n.facts;
   const rehearsal = f.mode === "rehearsal";
   const names = { server: f.server_image, migrate: f.migrate_image };
@@ -330,11 +366,17 @@ export function renderNotes(n: NotesInput): string {
   if (rehearsal) lines.push("_A rehearsal of the release job: the images below were built on the runner and never published, the overlay names them by tag alone, and nothing here is a release. The shape is what a tag's run does._", "");
   lines.push(`Migrations \`${f.range_lo}..${f.range_hi}\` · commit \`${f.head}\`${rehearsal ? "" : ` (cut from \`${f.server}\`)`} · upstream pin \`${f.upstream}\`${f.date ? ` · cut ${f.date}` : ""}`, "");
   lines.push("## Changes", "");
-  lines.push(n.changelogSection ?? (rehearsal ? "_Nothing released yet — the fragments under `changes/` are what the next cut assembles._" : "_CHANGELOG.md has no section for this version._"), "");
-  if (f.change_files) {
+  if (n.changelogSection && !shape.changelog) {
+    const at = rehearsal ? f.head : f.tag;
+    lines.push(`This release's changes are too many for GitHub's limit on a release's notes (${NOTES_LIMIT} characters), so they are in [CHANGELOG.md's ${f.core} section](${REPO_URL}/blob/${at}/CHANGELOG.md${f.date ? `#${changelogAnchor(f.core, f.date)}` : ""}), at this ${rehearsal ? "commit" : "tag"}.`, "");
+  } else lines.push(n.changelogSection ?? (rehearsal ? "_Nothing released yet — the fragments under `changes/` are what the next cut assembles._" : "_CHANGELOG.md has no section for this version._"), "");
+  if (f.change_files && shape.changeList) {
     lines.push("The record of each change, as this release numbered it:", "");
     for (const file of f.change_files.split(" ")) lines.push(`- [\`changes/${file}\`](${REPO_URL}/blob/${f.tag}/changes/${file})`);
     lines.push("");
+  } else if (f.change_files) {
+    const files = f.change_files.split(" ");
+    lines.push(`The record of each change, as this release numbered it — ${files.length} files, \`${files[0]}\` to \`${files[files.length - 1]}\` — is in [\`changes/\`](${REPO_URL}/tree/${rehearsal ? f.head : f.tag}/changes) at this ${rehearsal ? "commit" : "tag"}${rehearsal ? "" : " and attached to this release"}.`, "");
   }
   lines.push("## Run it", "");
   lines.push("On a machine with Docker (or Podman) and nothing else:", "");
@@ -360,7 +402,8 @@ export function renderNotes(n: NotesInput): string {
   lines.push(`Both OB1 images are built from this tag's tree (\`${f.server_dockerfile}\`, \`${f.migrate_dockerfile}\`) for linux/amd64 and linux/arm64; the overlay pins each by digest, and Ollama by the digest its tag (\`${f.ollama_image}\`, deploy/compose.yaml) resolved to when the release ran.`, "");
   lines.push(`## What the review passes caught`, "");
   lines.push(`\`scripts/mechanism-yield.ts\`${n.yieldWindow ? ` ${n.yieldWindow}` : ""}: which mechanism — a cold read, running it, a mutant, a walkthrough, a gate — found each finding recorded in this window's review-pass commits.`, "");
-  lines.push("<details><summary>The table</summary>", "", "```", n.yieldText.trimEnd(), "```", "", "</details>", "");
+  if (shape.yieldTable) lines.push("<details><summary>The table</summary>", "", "```", n.yieldText.trimEnd(), "```", "", "</details>", "");
+  else lines.push(`The table is ${rehearsal ? `\`${f.yield_asset}\` in the run's artifact` : `the release's \`${f.yield_asset}\` ([download](${download(f.yield_asset)}))`}, kept out of these notes for GitHub's limit on their length.`, "");
   return lines.join("\n");
 }
 
@@ -501,6 +544,19 @@ function selfCheck(): number {
   const rn = renderNotes({ facts: rehearsal.facts, changelogSection: null, digests: {}, yieldText: "t", yieldWindow: "" });
   ok(!rn.includes("keygen.ts"), "a rehearsal's notes mint no key: they publish no image to mint it with");
   ok(rn.includes("— rehearsal") && rn.includes("_built, not published_") && !rn.includes("releases/download"), "rehearsal notes say what they are and offer no downloads");
+  // SMD-4130: GitHub refuses a release body past NOTES_LIMIT; v2.0.0's was 143,644 characters.
+  ok(NOTES_BUDGET < NOTES_LIMIT && changelogAnchor("2.0.0", "2026-11-06") === "200---2026-11-06", "the budget sits under GitHub's limit, and the anchor is the one GitHub gives `## [2.0.0] - 2026-11-06`");
+  ok(notes.length <= NOTES_BUDGET && notes.includes("<details><summary>The table</summary>") && !notes.includes("too many for GitHub's limit"), "notes that fit keep the CHANGELOG section and the yield table inline");
+  const bigYield = renderNotes({ facts: good.facts, changelogSection: "### Added\n- a thing (SMD-1)", digests: {}, yieldText: "y".repeat(NOTES_LIMIT), yieldWindow: "" });
+  ok(bigYield.length <= NOTES_BUDGET && bigYield.includes("- a thing (SMD-1)") && !bigYield.includes("yyyy") && bigYield.includes("releases/download/v1.0.0/mechanism-yield.txt"), "a yield table past the budget becomes a link to its asset, and the CHANGELOG section stays");
+  const bigLog = renderNotes({ facts: good.facts, changelogSection: `### Added\n- ${"c".repeat(NOTES_LIMIT)}`, digests: {}, yieldText: "== table ==\n", yieldWindow: "" });
+  ok(bigLog.length <= NOTES_BUDGET && !bigLog.includes("cccc") && bigLog.includes(`/blob/v1.0.0/CHANGELOG.md${good.facts.date ? `#${changelogAnchor("1.0.0", good.facts.date)}` : ""}`) && bigLog.includes("releases/download/v1.0.0/mechanism-yield.txt"), "a CHANGELOG section past the budget becomes a link to it in CHANGELOG.md at the tag, the yield table linked too");
+  const manyFiles = Array.from({ length: 2000 }, (_, i) => `${String(i).padStart(4, "0")}-${"x".repeat(60)}.md`).join(" ");
+  const bigList = renderNotes({ facts: { ...good.facts, change_files: manyFiles }, changelogSection: "### Added\n- a thing (SMD-1)", digests: {}, yieldText: "== table ==\n", yieldWindow: "" });
+  ok(bigList.length <= NOTES_BUDGET && bigList.includes("- a thing (SMD-1)") && !bigList.includes("/blob/v1.0.0/changes/0001-") && bigList.includes("2000 files, `0000-") && bigList.includes("/tree/v1.0.0/changes") && bigList.includes("attached to this release"), "a change-file list past the budget becomes a link to changes/ at the tag, before the CHANGELOG section is linked");
+  let threw = false;
+  try { renderNotes({ facts: { ...good.facts, server_image: "x".repeat(NOTES_LIMIT) }, changelogSection: "- a", digests: {}, yieldText: "t", yieldWindow: "" }); } catch { threw = true; }
+  ok(threw, "notes still over the budget with everything linked are refused, not truncated");
 
   ok(githubOutput({ a: "1", b: "x\ny" }) === "a=1\nb<<__OB1_EOF__\nx\ny\n__OB1_EOF__\n", "GITHUB_OUTPUT lines, the delimiter form for a multi-line value");
   ok(ociLabels("server", { version: "1.0.0+upstream.x", head: "h", created: "c" }).split("\n").every((l) => /^org\.opencontainers\.image\.[a-z]+=.+$/.test(l)) && ociLabels("migrate", { version: "v", head: "h", created: "c" }).includes("title=ob1-migrate"), "OCI labels are key=value lines, the title per image");
