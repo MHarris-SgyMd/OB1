@@ -144,8 +144,10 @@ export interface DatabaseFacts {
   proposals: ProposalQueue | null;
   /**
    * The judged relations standing (084, SMD-2680): `relation` facets with no
-   * valid_until, by word, and how many pair two tickets the board does not
-   * link, as `proposals` counts them; since 102 the pairs judged distinct
+   * valid_until and origin judged — a work thread's edges (120, SMD-3306)
+   * are not the judge's, and not counted here — by word, and how many pair
+   * two tickets the board does not link, as `proposals` counts them; since
+   * 102 the pairs judged distinct
    * (SMD-3117) beside them, counted apart — not a relation a reader acts
    * on, and never a board pair. Nothing waits on them, so no row warns.
    * Null when not read or not asked (`stats: false`); zero on a brain without
@@ -1025,7 +1027,8 @@ const RELATIONS_SQL = (sql: SqlTag) => sql`
          count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate,
          count(*) FILTER (WHERE f.payload->>'relation' = 'distinct')::int AS "distinct"
     FROM thought_facets f
-   WHERE f.kind = 'relation' AND f.valid_until IS NULL`;
+   -- The judge's alone: a work thread's edges (origin thread, 120) are the subjects' (SMD-3306).
+   WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'`;
 
 /**
  * The standing relations that pair two tickets the board does not link. The
@@ -1046,7 +1049,8 @@ const RELATIONS_BOARD_SQL = (sql: SqlTag) => sql`
             FROM thought_facets f
             JOIN thoughts h ON h.id = f.thought_id
             JOIN thoughts t ON t.id = CASE WHEN f.kind = 'relation' THEN (f.payload->>'target')::uuid END
-           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x`;
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+             AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x`;
 
 /**
  * What a refusal names: `permission denied for table X` or `for function X`,
@@ -1250,7 +1254,9 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
              max(n.valid_until) FILTER (WHERE EXISTS (SELECT 1 FROM thoughts g WHERE g.id = (n.payload->>'target')::uuid)) AS gone_at
         FROM unnest(b.finding_ids) AS x(id)
         JOIN thought_facets o ON o.id = x.id AND o.kind = 'relation'
+        -- The judge's word on the pair, not a work thread's evolves there (origin thread, 120, SMD-3306).
         JOIN thought_facets n ON n.thought_id = o.thought_id AND n.kind = 'relation' AND n.payload->>'target' = o.payload->>'target'
+                             AND n.payload->>'origin' = 'judged'
        WHERE b.word <> 'outdates' AND n.payload->>'relation' = b.word) r ON b.word <> 'outdates'
    ORDER BY b.posted_at DESC, b.ticket_a, b.ticket_b, b.word`;
 
