@@ -243,7 +243,7 @@ export function renderComposeOverlay(o: OverlayInput): string {
   const rehearsal = o.tag === REHEARSAL_TAG;
   const ollamaRef = `${o.ollamaImage.split(":")[0]}@${o.ollamaDigest}`;
   return [
-    `# Open Brain — release ${o.version}${rehearsal ? " (REHEARSAL: images built here, not published)" : ` (tag ${o.tag})`}, rendered ${o.rendered} by`,
+    `# Daemonic Brain — release ${o.version}${rehearsal ? " (REHEARSAL: images built here, not published)" : ` (tag ${o.tag})`}, rendered ${o.rendered} by`,
     "# .github/workflows/release.yml (SMD-1860). A second -f over compose.yaml from the",
     "# same tag: the images the release published, by tag and digest, and Ollama by",
     "# the digest its pinned tag resolved to at release time. compose.yaml's `build:`",
@@ -326,7 +326,7 @@ export function renderNotes(n: NotesInput): string {
   const names = { server: f.server_image, migrate: f.migrate_image };
   const download = (asset: string) => `${REPO_URL}/releases/download/${f.tag}/${asset}`;
   const lines: string[] = [];
-  lines.push(`# Open Brain ${f.version}${rehearsal ? " — rehearsal" : ""}`, "");
+  lines.push(`# Daemonic Brain ${f.version}${rehearsal ? " — rehearsal" : ""}`, "");
   if (rehearsal) lines.push("_A rehearsal of the release job: the images below were built on the runner and never published, the overlay names them by tag alone, and nothing here is a release. The shape is what a tag's run does._", "");
   lines.push(`Migrations \`${f.range_lo}..${f.range_hi}\` · commit \`${f.head}\`${rehearsal ? "" : ` (cut from \`${f.server}\`)`} · upstream pin \`${f.upstream}\`${f.date ? ` · cut ${f.date}` : ""}`, "");
   lines.push("## Changes", "");
@@ -482,7 +482,7 @@ function selfCheck(): number {
   ok(parsed.services.api?.image === "ghcr.io/x/ob1-server:1.0.0@sha256:aa" && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
   ok(parsed.services.mcp?.image === parsed.services.api.image && parsed.services.mcp?.pull_policy === "missing", "the MCP server built on the REST core runs the release's server image, pullable (SMD-2287)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
-  ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
+  ok(overlay.startsWith("# Daemonic Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
   // What the overlay sets beside the images and their pull policy, on any service but the proxy and its forwarder (SMD-2583), which carry every client's bytes: nothing. The workflows hold the same of a render, each on its own terms (SMD-2685), so a list here cannot widen them.
   const strays = (text: string) => { const d = Bun.YAML.parse(text) as Record<string, unknown> & { services: Record<string, Record<string, unknown>> }; return [...Object.keys(d).filter((k) => !k.startsWith("x-") && k !== "services"), ...Object.entries(d.services).flatMap(([s, v]) => Object.keys(v).filter((k) => s === "proxy" || s === "forwarder" || !["image", "pull_policy"].includes(k)).map((k) => `${s}.${k}`))]; };
 
@@ -495,7 +495,7 @@ function selfCheck(): number {
   ok(changelogSectionFor("## [1.0.0] - 2026-09-30\n- x\n## [1.0.0-rc.1] - 2026-09-01\n- y\n", "1.0.0") === "- x", "1.0.0 does not read 1.0.0-rc.1's section");
 
   const notes = renderNotes({ facts: good.facts, changelogSection: "### Added\n- a thing (SMD-1)", digests: { server: "sha256:aa", migrate: "sha256:bb", ollama: "sha256:cc" }, yieldText: "== table ==\n", yieldWindow: "over the whole log" });
-  ok(notes.includes("# Open Brain 1.0.0+upstream.9543c29\n") && notes.includes("- a thing (SMD-1)") && notes.includes("releases/download/v1.0.0/compose.release.yaml") && notes.includes("`ghcr.io/mharris-sgymd/ob1-server:1.0.0` | `sha256:aa`") && notes.includes("`ollama/ollama:0.34.3` | `sha256:cc`") && notes.includes("/blob/v1.0.0/changes/") && notes.includes("104-x.md") && notes.includes("== table ==") && notes.includes("highest migration 048"), "the notes carry the changelog, the download lines, the digests, the change files, the yield and the preflight row");
+  ok(notes.includes("# Daemonic Brain 1.0.0+upstream.9543c29\n") && notes.includes("- a thing (SMD-1)") && notes.includes("releases/download/v1.0.0/compose.release.yaml") && notes.includes("`ghcr.io/mharris-sgymd/ob1-server:1.0.0` | `sha256:aa`") && notes.includes("`ollama/ollama:0.34.3` | `sha256:cc`") && notes.includes("/blob/v1.0.0/changes/") && notes.includes("104-x.md") && notes.includes("== table ==") && notes.includes("highest migration 048"), "the notes carry the changelog, the download lines, the digests, the change files, the yield and the preflight row");
   ok(["compose.api-public.yaml    # optional: the REST core", "compose.hooks-public.yaml    # optional: the plugins' webhooks", "compose.grafana-public.yaml    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in", "compose.grafana-port.yaml    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD)"].every((line) => notes.includes(line)), "each optional overlay's download line says it is optional, Grafana's two what they need");
   ok(notes.includes("docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:1.0.0 keygen.ts --name laptop --scope write") && notes.includes("docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:1.0.0 keygen.ts --name mcp-forwarder --scope forward") && notes.includes("the key OB1_FORWARDER_KEY"), "the notes mint the keys with the release's own image, the MCP server's forward key among them: a release install has no checkout (SMD-2287)");
   const rn = renderNotes({ facts: rehearsal.facts, changelogSection: null, digests: {}, yieldText: "t", yieldWindow: "" });
