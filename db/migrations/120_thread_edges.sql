@@ -97,6 +97,11 @@
 --     for each at its commit: every re-link after the first finds nothing to
 --     do, at the cost of its read. No writer of the stack writes more than
 --     one subject a transaction.
+--   * Each subject written, closed or deleted with its thought re-reads its
+--     key's whole thread at the commit, about 3 µs a thought in it (some 10 ms
+--     at 3,000), and an owner's delete holds delete_thought's lock (036)
+--     through it, a bulk delete on one key paying it for each row; re-linking
+--     only the moved thought's neighbours is SMD-4096's.
 --   * The reads (PR 7a-2): a thread read, fetch's "continues X" and
 --     "continued by Y", and SMD-2726's relations on search, list and fetch.
 --   * A thought's subjects as a set (PR 7a-3): one standing per thought

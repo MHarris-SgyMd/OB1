@@ -1555,6 +1555,20 @@ else {
   const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
   assert(relinked.added === 1 && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the edge closed, its thread re-linked — the edge stands again with its row, and the check is ok again");
+  // Judged relations and thread edges are each read under a bound of their own: a brain of 20,000 thread edges (raw,
+  // with no lineage) still has a judged relation without its row named, where one bound for both read 10,000 rows of
+  // whichever came first.
+  await ctx.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload)
+    SELECT '${thB}'::uuid, 'relation', jsonb_build_object('relation', 'evolves', 'target', '${thA}', 'judge_key', 'thread:v1',
+                                                          'key', 'phrase:bound ' || translate(g::text, '0123456789', 'abcdefghij'))
+      FROM generate_series(1, 20000) g`);
+  const fpOf = async (id: string) => String((await ctx.unsafe(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = '${id}'::uuid`))[0].f);
+  const judged = ((await ctx.unsafe(`SELECT record_thought_relation('${thB}'::uuid, '${thA}'::uuid, 'related', 0.7, 'consolidate:bound@p1', NULL, '${await fpOf(thA)}', '${await fpOf(thB)}', NULL) AS r`))[0].r as { id: string }).id;
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${judged}'::uuid`);
+  const bounded = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  await ctx.unsafe(`DELETE FROM thought_facets WHERE kind = 'relation' AND (payload->>'key' LIKE 'phrase:bound %' OR id = '${judged}'::uuid)`);
+  assert(bounded.code === 1 && new RegExp(`1 judged relation\\(s\\) \\(${judged}\\)`).test(bounded.out) && /more than 10,000 thread edge\(s\)/.test(bounded.out),
+         `…and beside 20,000 thread edges a judged relation without its row is still named, each read under its own bound (exit ${bounded.code}: ${bounded.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
   await ctx.unsafe(`SELECT delete_thought('${thB}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${thA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
