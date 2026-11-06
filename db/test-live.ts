@@ -11138,9 +11138,11 @@ if (want("10h")) {
       // runner is loaded (review pass 2, cold read: a fixed 1.5 s hold let a slow abort land after it).
       let releaseSeam: () => void = () => {};
       const seamHeld = new Promise<void>((r) => { releaseSeam = r; });
-      const seamHookBefore = setModelCallHook(async (call, run) => {
+      // A hold is a wait, told as the hook starts it (SMD-3379 PR 2b-1's seam: a hook says where it waits).
+      const seamHookBefore = setModelCallHook(async (call, run, waiting) => {
         seamCalls.push(`${call.pass}/${call.purpose}`);
         if (call.purpose !== "extraction") return run();
+        waiting();
         seamHolding = true;
         await seamHeld;
         seamHolding = false;
