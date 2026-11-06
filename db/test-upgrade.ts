@@ -715,7 +715,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // ticket's claims — two functions, one held from PUBLIC — refusing by name
   // without 058, 068 or 115 ([20bj]); 119 redefines 117's ob1_item_due, a
   // bare date due by the end of its day, refusing by name without 117
-  // ([20bk]); 120 adds effective_priority and five helpers, reads alone,
+  // ([20bk]); 120 adds effective_priority and six helpers, reads alone,
   // refusing by name without 053, 058, 068, 071, 116 or 117 ([20bl]) — all
   // recorded by the
   // planted ledger with their

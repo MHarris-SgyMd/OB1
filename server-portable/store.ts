@@ -1399,6 +1399,7 @@ export function priorityProblemOf(message: string): PriorityProblem {
   if (/^a reason is at most\b/.test(message)) return "reason";
   if (/a maker's key name is at most\b|p_actor must be a JSON object/.test(message)) return "key_name";
   if (/^not a weight\b|^a weight out of range\b|^effective_priority's weights\b/.test(message)) return "weight";
+  if (/^effective_priority's clock is a moment\b/.test(message)) return "time";
   return "other";
 }
 

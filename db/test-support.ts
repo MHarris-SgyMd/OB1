@@ -460,6 +460,7 @@ const FUNCTIONS = [
   "ob1_node_settled(text, text)",
   "ob1_item_serves(text, text)",
   "ob1_item_unblocks(text, text, integer, integer)",
+  "ob1_ticket_row_of(uuid)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",

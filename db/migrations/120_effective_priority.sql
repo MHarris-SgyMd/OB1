@@ -29,15 +29,24 @@
 --     tier 4 left out unless the weights say count_inferred (decision 5:
 --     inferred assertions count only once SMD-3670's agreement clears its
 --     bar). NULL is unknown.
---   * inherited_from — with no level of its own: the highest stated level
+--   * A TICKET'S OWN ROW (its linear source row, or a pre-053 row claiming
+--     metadata.issue), asked as a thought with no statement of its own, reads
+--     as its ticket — level, due time, settledness, links, inheritance — and
+--     its first term names the ticket (`as`). The maintainer's call, review
+--     pass 1: search over thoughts must not rank a ticket's row below it.
+--   * inherited_from — with no level of its own: the highest effective level
 --     among the items it serves, less `hop` a hop, at most `hops` hops,
---     counted only above unknown's value, so a link never lowers an item. It
+--     counted only above unknown's value, so a link never lowers an item. A
+--     served item's effective level is its stated one when it states one, so
+--     the walk goes past it only when it states none; a settled served item
+--     passes nothing down and is not walked through (review pass 1). It
 --     serves: a ticket, its parent (an active Linear child_of link); a
 --     thought, the ticket it is about (metadata ticket, else issue, as
 --     node_state reads them; else its standing ticket: subject, 111); an open
 --     item, its origin thought. The spec it names waits for SMD-2683.
---   * due_at — the counted winner's due_at; else its due_ref's counted winner's
---     due_at, one hop; else an open item's own due_at. due_from says which.
+--   * due_at — the counted winner's due_at; else its due_ref's, one hop (the
+--     referenced item's counted winner's due_at, else an open item's own);
+--     else an open item's own due_at. due_from says which.
 --   * urgency — in CALENDAR DAYS in UTC (SMD-3778's review pass 2: a bare
 --     date is due by the end of that day, so "tomorrow" is 24 to 48 hours
 --     away and hours would miss it): `soon` (2) when due by the end of
@@ -66,7 +75,8 @@
 --
 --   Helpers: ob1_priority_counted (the counted winner), ob1_item_settled,
 --   ob1_item_serves (one hop of what an item serves), ob1_node_settled (a
---   source identity's settledness) and ob1_item_unblocks (the walk).
+--   source identity's settledness), ob1_ticket_row_of (the ticket a thought
+--   is the row of) and ob1_item_unblocks (the walk, one frontier a hop).
 --
 -- WHO READS
 --   No actor, as priority_of: any role with EXECUTE reads every item's terms.
@@ -77,7 +87,7 @@
 --   gets 42501 only on an item kind. No grant changes.
 --
 -- SAFETY
---   Six new functions; no table, and nothing existing changed. Every function
+--   Seven new functions; no table, and nothing existing changed. Every function
 --   is STABLE: one snapshot for the whole read. MINOR under FORK.md's version
 --   rules. test-schema [108], test-upgrade [20bl].
 --
@@ -235,62 +245,106 @@ COMMENT ON FUNCTION ob1_item_serves(text, text) IS
   'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its rows hold); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else its standing ticket: subject, 111); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
+-- ob1_ticket_row_of — the ticket a thought is the row of
+-- ---------------------------------------------------------------------------
+-- A ticket's own row: its linear source row (053), else, on a brain board-sync
+-- filled before 053, the row claiming metadata.issue with source linear
+-- (source_thought's fallback). An observation filed under a ticket carries
+-- `ticket`, not `issue`, and is not its row.
+CREATE OR REPLACE FUNCTION ob1_ticket_row_of(p_thought uuid)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  v text;
+BEGIN
+  SELECT s.identity INTO v FROM thought_sources s WHERE s.thought_id = p_thought AND s.system = 'linear';
+  IF v IS NULL THEN
+    SELECT t.metadata->>'issue' INTO v FROM thoughts t WHERE t.id = p_thought AND t.metadata->'source' = '"linear"'::jsonb;
+  END IF;
+  IF v ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
+    RETURN upper(v);
+  END IF;
+  RETURN NULL;
+END;
+$$;
+COMMENT ON FUNCTION ob1_ticket_row_of(uuid) IS
+  'The ticket key a thought is the own row of — its linear source row (053), else metadata.issue on a row whose source is linear — upper-cased; NULL for any other thought (an observation filed under a ticket carries `ticket`, not `issue`). effective_priority reads such a row as its ticket. Migration 120 / SMD-3667.';
+
+-- ---------------------------------------------------------------------------
 -- ob1_item_unblocks — the open items an item blocks, walked
 -- ---------------------------------------------------------------------------
 -- From the item's source identities (a ticket: linear and its key; a thought:
 -- its thought_sources row), along active blocks / blocked_by links in a
 -- gating system (node_dependencies()' reading: a blocks facet names its holder
 -- the blocker, a blocked_by facet its target), to p_depth hops, never through
--- a settled item or back along its own path; distinct blocked identities, at
--- most p_cap. An open item and an entity hold no links.
+-- a settled item; distinct blocked identities, at most p_cap. An open item and
+-- an entity hold no links.
+--
+-- One frontier a hop, every identity seen kept: a node is reached once,
+-- however many paths lead to it. A recursive query carrying each path read
+-- every path instead — a ticket blocking 20 that each block the same 20,
+-- four layers deep, took 120 ms at depth 3 and 2.4 s at depth 4 (review
+-- pass 1). A key is system:identity; a system holds no colon (053's CHECK),
+-- so the first colon splits it.
 CREATE OR REPLACE FUNCTION ob1_item_unblocks(p_kind text, p_key text, p_depth int, p_cap int)
 RETURNS int
 LANGUAGE plpgsql
 STABLE
 AS $$
 DECLARE
-  v_count int;
+  v_count    int := 0;
+  v_seen     text[];
+  v_sys      text[];
+  v_id       text[];
+  v_next_sys text[];
+  v_next_id  text[];
+  d          int;
 BEGIN
   IF p_kind NOT IN ('ticket', 'thought') OR p_depth < 1 OR p_cap < 1 THEN
     RETURN 0;
   END IF;
-  WITH RECURSIVE start AS (
-    SELECT 'linear'::text AS system, p_key AS identity WHERE p_kind = 'ticket'
-    UNION
-    SELECT s.system, s.identity FROM thought_sources s WHERE p_kind = 'thought' AND s.thought_id = p_key::uuid
-  ), walk (system, identity, depth, path) AS (
-    SELECT s.system, s.identity, 0, ARRAY[s.system || ':' || s.identity] FROM start s
-    UNION ALL
-    SELECT b.system, b.blocked, w.depth + 1, w.path || (b.system || ':' || b.blocked)
-      FROM walk w
-      CROSS JOIN LATERAL (
-        -- A blocks link w's own row holds: its target is blocked.
-        SELECT h.system, f.payload->>'target' AS blocked
-          FROM thought_sources h
-          JOIN thought_facets f ON f.thought_id = h.thought_id AND f.kind = 'link' AND f.valid_until IS NULL
-                               AND f.payload->>'system' = h.system AND f.payload->>'relation' = 'blocks'
-         WHERE h.system = w.system AND h.identity = w.identity
-        UNION
-        -- A blocked_by link naming w: its holder is blocked.
-        SELECT s.system, s.identity
-          FROM thought_facets f
-          JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
-         WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' = 'blocked_by'
-           AND f.payload->>'system' = w.system AND f.payload->>'target' = w.identity) b
-     WHERE w.depth < p_depth
-       AND NOT (b.system || ':' || b.blocked) = ANY(w.path)
-       AND ob1_system_gates(b.system)
-       AND NOT ob1_node_settled(b.system, b.blocked)
-  )
-  SELECT count(*) INTO v_count
-    FROM (SELECT DISTINCT w.system, w.identity FROM walk w
-           WHERE w.depth > 0 AND NOT EXISTS (SELECT 1 FROM start s WHERE s.system = w.system AND s.identity = w.identity)
-           LIMIT p_cap) d;
-  RETURN v_count;
+  IF p_kind = 'ticket' THEN
+    v_sys := ARRAY['linear']; v_id := ARRAY[p_key];
+  ELSE
+    SELECT array_agg(s.system), array_agg(s.identity) INTO v_sys, v_id FROM thought_sources s WHERE s.thought_id = p_key::uuid;
+  END IF;
+  IF v_sys IS NULL THEN
+    RETURN 0;
+  END IF;
+  SELECT array_agg(f.system || ':' || f.identity) INTO v_seen FROM unnest(v_sys, v_id) AS f(system, identity);
+  FOR d IN 1 .. p_depth LOOP
+    SELECT array_agg(n.system), array_agg(n.blocked) INTO v_next_sys, v_next_id
+      FROM (SELECT DISTINCT b.system, b.blocked
+              FROM unnest(v_sys, v_id) AS w(system, identity)
+              CROSS JOIN LATERAL (
+                -- A blocks link w's own row holds: its target is blocked.
+                SELECT h.system, f.payload->>'target' AS blocked
+                  FROM thought_sources h
+                  JOIN thought_facets f ON f.thought_id = h.thought_id AND f.kind = 'link' AND f.valid_until IS NULL
+                                       AND f.payload->>'system' = h.system AND f.payload->>'relation' = 'blocks'
+                 WHERE h.system = w.system AND h.identity = w.identity
+                UNION
+                -- A blocked_by link naming w: its holder is blocked.
+                SELECT s.system, s.identity
+                  FROM thought_facets f
+                  JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = f.payload->>'system'
+                 WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' = 'blocked_by'
+                   AND f.payload->>'system' = w.system AND f.payload->>'target' = w.identity) b
+             WHERE NOT (b.system || ':' || b.blocked) = ANY(v_seen)) n
+     WHERE ob1_system_gates(n.system) AND NOT ob1_node_settled(n.system, n.blocked);
+    EXIT WHEN v_next_sys IS NULL;
+    v_count := v_count + cardinality(v_next_sys);
+    EXIT WHEN v_count >= p_cap;
+    SELECT v_seen || array_agg(f.system || ':' || f.identity) INTO v_seen FROM unnest(v_next_sys, v_next_id) AS f(system, identity);
+    v_sys := v_next_sys; v_id := v_next_id;
+  END LOOP;
+  RETURN least(v_count, p_cap);
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_unblocks(text, text, int, int) IS
-  'How many open items a normalised item blocks: from its source identities (a ticket''s linear key, a thought''s thought_sources row), along active blocks / blocked_by links in a gating system (node_dependencies()'' reading), transitively to p_depth hops, never through a settled item (ob1_node_settled) or along its own path; distinct identities, at most p_cap. 0 for an open item or an entity, which hold no links. Migration 120 / SMD-3667.';
+  'How many open items a normalised item blocks: from its source identities (a ticket''s linear key, a thought''s thought_sources row), along active blocks / blocked_by links in a gating system (node_dependencies()'' reading), transitively to p_depth hops, never through a settled item (ob1_node_settled); each identity counted once, however many paths reach it, at most p_cap. 0 for an open item or an entity, which hold no links. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- effective_priority — the composed read
@@ -321,6 +375,9 @@ DECLARE
   h          record;
   v_lvl      smallint;
   v_inh_kind text; v_inh_key text; v_inh_level smallint; v_inh_hops int; v_inh_value numeric;
+  s_kind     text;
+  s_key      text;
+  v_as       text;
   v_term     numeric;
   v_terms    jsonb;
 BEGIN
@@ -360,11 +417,13 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('a weight out of range: %s (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)', v_bad),
                           ERRCODE = 'invalid_parameter_value';
   END IF;
-  w_unknown := (v_w->>'unknown')::numeric;  w_hop := (v_w->>'hop')::numeric;            w_hops := (v_w->>'hops')::int;
-  w_soon := (v_w->>'soon')::numeric;        w_soon_days := (v_w->>'soon_days')::int;    w_week := (v_w->>'week')::numeric;
-  w_week_days := (v_w->>'week_days')::int;  w_overdue := (v_w->>'overdue')::numeric;    w_one := (v_w->>'unblocks_one')::numeric;
-  w_many := (v_w->>'unblocks_many')::numeric; w_many_at := (v_w->>'unblocks_many_at')::int; w_depth := (v_w->>'depth')::int;
-  w_cap := (v_w->>'cap')::int;              w_inferred := (v_w->>'count_inferred')::boolean;
+  -- A whole number read through numeric: JSON's 3.0 passes the check above,
+  -- and '3.0'::int raises 22P02 (review pass 1).
+  w_unknown := (v_w->>'unknown')::numeric;  w_hop := (v_w->>'hop')::numeric;            w_hops := (v_w->>'hops')::numeric::int;
+  w_soon := (v_w->>'soon')::numeric;        w_soon_days := (v_w->>'soon_days')::numeric::int; w_week := (v_w->>'week')::numeric;
+  w_week_days := (v_w->>'week_days')::numeric::int; w_overdue := (v_w->>'overdue')::numeric; w_one := (v_w->>'unblocks_one')::numeric;
+  w_many := (v_w->>'unblocks_many')::numeric; w_many_at := (v_w->>'unblocks_many_at')::numeric::int; w_depth := (v_w->>'depth')::numeric::int;
+  w_cap := (v_w->>'cap')::numeric::int;     w_inferred := (v_w->>'count_inferred')::boolean;
 
   -- Calendar days in UTC (SMD-3778): "by the end of tomorrow" is the start of
   -- the day after it.
@@ -384,11 +443,23 @@ BEGIN
     item_key := q.key;
     v_terms := '[]'::jsonb;
     v_win := ob1_priority_counted(q.kind, q.key, w_inferred);
+    -- A ticket's own row, asked as a thought with no statement of its own,
+    -- reads as its ticket: its level, due time, settledness, structure (the
+    -- maintainer, SMD-3667 review pass 1). The read names the ticket it read.
+    s_kind := q.kind; s_key := q.key; v_as := NULL;
+    IF v_win.id IS NULL AND q.kind = 'thought' THEN
+      v_as := ob1_ticket_row_of(q.key::uuid);
+      IF v_as IS NOT NULL THEN
+        s_kind := 'ticket'; s_key := v_as;
+        v_win := ob1_priority_counted(s_kind, s_key, w_inferred);
+      END IF;
+    END IF;
     winner := CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END;
     SELECT COALESCE(jsonb_agg(ob1_priority_json(a) ORDER BY a.tier, a.seq DESC), '[]'::jsonb) INTO passed_over
       FROM priority_assertions a
-     WHERE a.item_kind = q.kind AND a.item_key = q.key AND a.closed_at IS NULL AND a.id IS DISTINCT FROM v_win.id;
-    settled := ob1_item_settled(q.kind, q.key);
+     WHERE ((a.item_kind = q.kind AND a.item_key = q.key) OR (a.item_kind = s_kind AND a.item_key = s_key))
+       AND a.closed_at IS NULL AND a.id IS DISTINCT FROM v_win.id;
+    settled := ob1_item_settled(s_kind, s_key);
     level := v_win.level;
     inherited_from := NULL;
 
@@ -400,19 +471,33 @@ BEGIN
       -- Walked in loops, one hop at a time: written as one query over the
       -- set-returning helpers, the planner took 200 ms an item (SMD-3667's
       -- timing on a seeded board) for what is a handful of index probes.
-      -- The best: the highest value, then the fewer hops, then kind and key.
+      -- A served item's effective level is its own stated one when it has
+      -- one, so the walk goes on past it only when it states none (review
+      -- pass 1: a Low parent passed its Critical parent's level down). A
+      -- settled item passes nothing down and is not walked through (the
+      -- maintainer, review pass 1). The best: the highest value, then the
+      -- fewer hops, then kind and key.
       v_inh_kind := NULL;
       IF w_hops >= 1 THEN
-        FOR h1 IN SELECT s.kind, s.key FROM ob1_item_serves(q.kind, q.key) s LOOP
-          FOR h IN SELECT h1.kind, h1.key, 1 AS hops
-                   UNION ALL
-                   SELECT s.kind, s.key, 2 FROM ob1_item_serves(h1.kind, h1.key) s WHERE w_hops >= 2 LOOP
-            CONTINUE WHEN h.kind = q.kind AND h.key = q.key;
+        FOR h1 IN SELECT x.kind, x.key FROM ob1_item_serves(s_kind, s_key) x LOOP
+          CONTINUE WHEN (h1.kind = q.kind AND h1.key = q.key) OR (h1.kind = s_kind AND h1.key = s_key) OR ob1_item_settled(h1.kind, h1.key);
+          v_lvl := (ob1_priority_counted(h1.kind, h1.key, w_inferred)).level;
+          IF v_lvl IS NOT NULL THEN
+            IF v_lvl - w_hop > w_unknown
+               AND (v_inh_kind IS NULL OR v_lvl - w_hop > v_inh_value
+                    OR (v_lvl - w_hop = v_inh_value AND (1, h1.kind, h1.key) < (v_inh_hops, v_inh_kind, v_inh_key))) THEN
+              v_inh_kind := h1.kind; v_inh_key := h1.key; v_inh_level := v_lvl; v_inh_hops := 1; v_inh_value := v_lvl - w_hop;
+            END IF;
+            CONTINUE;
+          END IF;
+          CONTINUE WHEN w_hops < 2;
+          FOR h IN SELECT x.kind, x.key FROM ob1_item_serves(h1.kind, h1.key) x LOOP
+            CONTINUE WHEN (h.kind = q.kind AND h.key = q.key) OR (h.kind = s_kind AND h.key = s_key) OR ob1_item_settled(h.kind, h.key);
             v_lvl := (ob1_priority_counted(h.kind, h.key, w_inferred)).level;
-            CONTINUE WHEN v_lvl IS NULL OR v_lvl - h.hops * w_hop <= w_unknown;
-            IF v_inh_kind IS NULL OR v_lvl - h.hops * w_hop > v_inh_value
-               OR (v_lvl - h.hops * w_hop = v_inh_value AND (h.hops, h.kind, h.key) < (v_inh_hops, v_inh_kind, v_inh_key)) THEN
-              v_inh_kind := h.kind; v_inh_key := h.key; v_inh_level := v_lvl; v_inh_hops := h.hops; v_inh_value := v_lvl - h.hops * w_hop;
+            CONTINUE WHEN v_lvl IS NULL OR v_lvl - 2 * w_hop <= w_unknown;
+            IF v_inh_kind IS NULL OR v_lvl - 2 * w_hop > v_inh_value
+               OR (v_lvl - 2 * w_hop = v_inh_value AND (2, h.kind, h.key) < (v_inh_hops, v_inh_kind, v_inh_key)) THEN
+              v_inh_kind := h.kind; v_inh_key := h.key; v_inh_level := v_lvl; v_inh_hops := 2; v_inh_value := v_lvl - 2 * w_hop;
             END IF;
           END LOOP;
         END LOOP;
@@ -426,18 +511,25 @@ BEGIN
         v_terms := v_terms || jsonb_build_object('term', 'unknown', 'value', v_base);
       END IF;
     END IF;
+    IF v_as IS NOT NULL THEN
+      v_terms := jsonb_set(v_terms, '{0,as}', jsonb_build_object('kind', 'ticket', 'key', v_as));
+    END IF;
 
-    -- The due time: the counted winner's, else its due_ref's (one hop), else
-    -- an open item's own.
+    -- The due time: the counted winner's, else its due_ref's (one hop: the
+    -- referenced item's counted winner's, else an open item's own — the
+    -- maintainer, review pass 1), else an open item's own.
     due_at := v_win.due_at;
     due_from := CASE WHEN due_at IS NOT NULL THEN 'stated' END;
     IF due_at IS NULL AND v_win.due_ref_kind IS NOT NULL THEN
       v_ref := ob1_priority_counted(v_win.due_ref_kind, v_win.due_ref_key, w_inferred);
       due_at := v_ref.due_at;
+      IF due_at IS NULL AND v_win.due_ref_kind = 'item' THEN
+        SELECT i.due_at INTO due_at FROM open_items i WHERE i.item_id = v_win.due_ref_key::uuid;
+      END IF;
       due_from := CASE WHEN due_at IS NOT NULL THEN 'due_ref' END;
     END IF;
-    IF due_at IS NULL AND q.kind = 'item' THEN
-      SELECT i.due_at INTO due_at FROM open_items i WHERE i.item_id = q.key::uuid;
+    IF due_at IS NULL AND s_kind = 'item' THEN
+      SELECT i.due_at INTO due_at FROM open_items i WHERE i.item_id = s_key::uuid;
       due_from := CASE WHEN due_at IS NOT NULL THEN 'item' END;
     END IF;
 
@@ -460,7 +552,7 @@ BEGIN
     END IF;
 
     -- Unblocks: none for a settled item.
-    unblocks := CASE WHEN settled THEN 0 ELSE ob1_item_unblocks(q.kind, q.key, w_depth, w_cap) END;
+    unblocks := CASE WHEN settled THEN 0 ELSE ob1_item_unblocks(s_kind, s_key, w_depth, w_cap) END;
     v_term := CASE WHEN unblocks >= w_many_at THEN w_many WHEN unblocks >= 1 THEN w_one ELSE 0 END;
     IF unblocks >= 1 THEN
       v_terms := v_terms || jsonb_build_object('term', 'unblocks', 'value', v_term, 'count', unblocks);

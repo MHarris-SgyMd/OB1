@@ -17413,12 +17413,12 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}${t.window ? `:${t.window}` : ""}=${t.value}`).join(" ");
   const raisedCode = async (sql: string, params: unknown[]) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
 
-  // The shape: six functions, each STABLE and commented.
+  // The shape: seven functions, each STABLE and commented.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-      WHERE s.nspname = 'public' AND p.proname IN ('effective_priority', 'ob1_priority_counted', 'ob1_item_settled', 'ob1_node_settled', 'ob1_item_serves', 'ob1_item_unblocks') ORDER BY 1`)).rows;
-  assert(fns.length === 6 && fns.every((f) => f.v === "s" && /Migration 120 \/ SMD-3667/.test(f.c ?? "")),
-    `six functions, each STABLE (one snapshot for the read) and commented (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+      WHERE s.nspname = 'public' AND p.proname IN ('effective_priority', 'ob1_priority_counted', 'ob1_item_settled', 'ob1_node_settled', 'ob1_item_serves', 'ob1_item_unblocks', 'ob1_ticket_row_of') ORDER BY 1`)).rows;
+  assert(fns.length === 7 && fns.every((f) => f.v === "s" && /Migration 120 \/ SMD-3667/.test(f.c ?? "")),
+    `seven functions, each STABLE (one snapshot for the read) and commented (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
 
   // Urgency, the ticket's first Verify: a Medium due tomorrow passes a High with no date, and says why.
   for (const t of ["SMD-9401", "SMD-9402", "SMD-9403", "SMD-9404", "SMD-9405", "SMD-9406", "SMD-9408", "SMD-9409"]) await ticket(t);
@@ -17474,6 +17474,13 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const rowOf9410 = (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9410'`)).rows[0].id;
   const asThought = await one("thought", rowOf9410);
   assert(asThought?.unblocks === 3, `a ticket's row asked as a thought blocks the ticket's three (${asThought?.unblocks})`);
+  // Each blocked item counted once, however many paths reach it: SMD-9600 blocks 9601 and 9602, and 9601 blocks 9602 too.
+  await ticket("SMD-9600", "backlog", [["blocks", "SMD-9601"], ["blocks", "SMD-9602"]]); await ticket("SMD-9601", "backlog", [["blocks", "SMD-9602"]]); await ticket("SMD-9602");
+  const tri = await one("ticket", "SMD-9600");
+  let wholeDepth: Row | undefined;
+  try { wholeDepth = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9420"}]', '{"depth": 3.0}', $1::timestamptz)`, [NOW])).rows[0]; } catch { wholeDepth = undefined; }
+  assert(tri?.unblocks === 2 && wholeDepth?.unblocks === 3,
+    `an item two paths reach is counted once (${tri?.unblocks}); a whole number written 3.0 reads as 3 (${wholeDepth?.unblocks})`);
 
   // Inheritance, the third Verify: a child with no level of its own under an Urgent parent reads inherited, naming it.
   await ticket("SMD-9450"); await ticket("SMD-9451", "backlog", [["child_of", "SMD-9450"]]); await ticket("SMD-9452", "backlog", [["child_of", "SMD-9451"]]);
@@ -17498,13 +17505,31 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `two hops from Urgent is 2, no higher than unknown, so unknown; a stated Low beats the inherited level; two hops from Critical is 3; a Low parent never lowers a child below unknown (${from(inh[1])}; ${inh[2]?.effective}; ${from(inh[3])}; ${from(inh[8])})`);
   assert(from(inh[4]) === "ticket:SMD-9450/4-1" && from(inh[5]) === "ticket:SMD-9455/5-1" && from(inh[6]) === "ticket:SMD-9455/5-2" && from(inh[7]) === "none" && Number(inh[6]?.effective) === 3,
     `a thought inherits from the ticket it is about, by metadata or by its standing subject; an open item from its origin thought's ticket, two hops (${from(inh[4])}; ${from(inh[5])}; ${from(inh[6])}; ${from(inh[7])})`);
+  // A served item's own level is its effective one: a Low parent passes nothing of its Critical parent down. A settled
+  // parent passes nothing down, nor is walked through to its own parent.
+  await ticket("SMD-9492", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9493", "backlog", [["child_of", "SMD-9492"]]);
+  await ticket("SMD-9494", "completed"); await ticket("SMD-9495", "backlog", [["child_of", "SMD-9494"]]);
+  await ticket("SMD-9496", "completed", [["child_of", "SMD-9455"]]); await ticket("SMD-9497", "backlog", [["child_of", "SMD-9496"]]);
+  await put("ticket", "SMD-9492", 1); await put("ticket", "SMD-9494", 5);
+  const past = await eff([["ticket", "SMD-9493"], ["ticket", "SMD-9495"], ["ticket", "SMD-9497"]]);
+  assert(past.every((r) => from(r) === "none" && Number(r.effective) === 2),
+    `under a Low parent of a Critical, unknown; under a completed Critical, unknown; under a completed parent of a Critical, unknown (${past.map(from).join("; ")})`);
   const noHops = await one("ticket", "SMD-9451", { hops: 0 });
   assert(Number(noHops?.effective) === 2 && from(noHops) === "none", `hops 0 turns inheritance off (${from(noHops)})`);
-  // A tie between hops — an Urgent ticket one hop off and its Critical parent two off, both 3 — goes to the nearer.
+  // An Urgent ticket one hop off is read, and its Critical parent two off, the same 3, not walked to.
   await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
   await put("ticket", "SMD-9490", 4);
   const tie = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
-  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `a tie between one hop and two goes to the nearer (${from(tie)})`);
+  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `the stating ticket one hop off is read, its parent not walked to (${from(tie)})`);
+  // Two hops off: an open parent of no level under a completed Critical passes nothing; a tie between two Criticals
+  // two hops off (a ticket whose rows state two parents) goes to the lower key, whichever is walked last.
+  await ticket("SMD-9610", "completed"); await ticket("SMD-9611", "backlog", [["child_of", "SMD-9610"]]); await ticket("SMD-9612", "backlog", [["child_of", "SMD-9611"]]);
+  await ticket("SMD-9623"); await ticket("SMD-9621", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9622", "backlog", [["child_of", "SMD-9623"]]);
+  await ticket("SMD-9620", "backlog", [["child_of", "SMD-9621"], ["child_of", "SMD-9622"]]);
+  await put("ticket", "SMD-9610", 5); await put("ticket", "SMD-9623", 5);
+  const two = await eff([["ticket", "SMD-9612"], ["ticket", "SMD-9620"]]);
+  assert(from(two[0]) === "none" && Number(two[0]?.effective) === 2 && from(two[1]) === "ticket:SMD-9455/5-2",
+    `under an open parent of a completed Critical, unknown; two Criticals two hops off, the lower key (${from(two[0])}; ${from(two[1])})`);
 
   // The due time by reference, one hop; an open item's own; a waiting item.
   await ticket("SMD-9460"); await ticket("SMD-9461"); await ticket("SMD-9462"); await ticket("SMD-9480");
@@ -17513,10 +17538,27 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   await put("ticket", "SMD-9462", 3, { ref: ["ticket", "SMD-9460"] });
   await put("ticket", "SMD-9480", 2, { notBefore: "2027-03-20T00:00:00Z" });
   const dueItem = await opened("[108] pay the water bill", { due: "2027-03-11" });
+  await ticket("SMD-9463");
+  await put("ticket", "SMD-9463", 2, { ref: ["item", dueItem] });
+  const refItem = await one("ticket", "SMD-9463");
+  assert(Number(refItem?.effective) === 4 && refItem?.due_from === "due_ref" && refItem?.due_at !== null,
+    `a reference to an open item no one dated by a statement takes the item's own due time (${refItem?.effective}, ${refItem?.due_from})`);
   const d = await eff([["ticket", "SMD-9460"], ["ticket", "SMD-9462"], ["item", dueItem], ["ticket", "SMD-9480"]]);
   assert(Number(d[0]?.effective) === 5 && d[0]?.due_from === "due_ref" && Number(d[1]?.effective) === 3 && d[1]?.due_at === null
          && Number(d[2]?.effective) === 4 && d[2]?.due_from === "item" && d[2]?.level === null && d[3]?.waiting === true && d[3]?.not_before !== null,
     `a High taking a release's due time (tomorrow) by reference reads 5; a reference to an item that itself only refers is not followed; an open item's own due tomorrow gives unknown 2 + 2; a not_before ahead is waiting (${d.map((r) => `${r.effective}/${r.due_from}`).join(" ")}, waiting ${d[3]?.waiting})`);
+
+  // A ticket's own row, asked as a thought with no statement of its own, reads as its ticket, naming it; one with its own reads its own.
+  const rowOf = async (issue: string) => (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = $1`, [issue])).rows[0].id;
+  const [row9450, row9401, row9451, row9403] = [await rowOf("SMD-9450"), await rowOf("SMD-9401"), await rowOf("SMD-9451"), await rowOf("SMD-9403")];
+  await put("thought", row9403, 5);
+  const rows = await eff([["thought", row9450], ["thought", row9401], ["thought", row9451], ["thought", row9403]]);
+  const as = (r: Row | undefined) => String((r?.terms[0] as { as?: { key: string } } | undefined)?.as?.key ?? "-");
+  assert(Number(rows[0]?.effective) === 4 && rows[0]?.level === 4 && as(rows[0]) === "SMD-9450" && rows[0]?.item_kind === "thought"
+         && Number(rows[1]?.effective) === 4 && rows[1]?.due_from === "stated" && named(rows[1]) === "level=2 urgency:soon=2"
+         && Number(rows[2]?.effective) === 3 && from(rows[2]) === "ticket:SMD-9450/4-1" && as(rows[2]) === "SMD-9451"
+         && Number(rows[3]?.effective) === 5 && as(rows[3]) === "-" && rows[3]?.overdue === false,
+    `an Urgent ticket's row reads 4 as its ticket, naming it; a Medium-due-tomorrow ticket's row takes its urgency; a child ticket's row inherits as the child does; a row stating its own Critical reads its own, without the ticket's due time (${rows.map((r) => `${r.effective}/${as(r)}`).join(" ")})`);
 
   // Inferred statements pass over unless counted; every other open statement is listed.
   await ticket("SMD-9470");
