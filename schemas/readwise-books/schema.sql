@@ -1,8 +1,8 @@
 -- Readwise Books Cache
 -- Side-table for book-level metadata so highlights stored in `thoughts`
 -- can reference a book_id without denormalising title/author into every
--- highlight row. Populated by the readwise-capture integration and the
--- readwise-import recipe.
+-- highlight row. Populated by the readwise-import recipe (and by the
+-- readwise-capture integration until SMD-2690 made it a plugin).
 --
 -- Safe to run multiple times (fully idempotent).
 
@@ -85,8 +85,8 @@ $$;
 
 -- ============================================================
 -- 3. INCREMENT HIGHLIGHT COUNT
---    Called by the readwise-capture Edge Function on each new
---    highlight insert. Keeps num_highlights and last_highlight_at
+--    For a caller to run on each new highlight insert (the readwise-capture
+--    server did, until SMD-2690). Keeps num_highlights and last_highlight_at
 --    fresh without requiring a COUNT over the thoughts table.
 -- ============================================================
 
