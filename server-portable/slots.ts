@@ -28,16 +28,17 @@
  * poller holds the share's WAITING lock (slot -1) shared, and a call about to
  * make its first try that finds it held elsewhere sits out a poll first, so a
  * process with a backlog, or making calls back to back, does not take every
- * slot let go before another process's poller asks again (review pass 2). A
- * slot the process lets go while no other process waits goes to its own poller
- * at once, woken from its nap; with one waiting, whichever poller asks first
- * takes it (review pass 6: a poll a handoff made 424 embeddings at embed=1 take
- * 36 s against 0.6). A stop ends a wait at once, a connect or a statement in
- * flight included: the call's own signal, or the process's (`stop`, or
- * `uninstall`, which leaves a call already running its slot until it ends).
- * Every statement is bounded, as the connect is, by 5 s: a database that stops
- * answering fails a waiting call open, and a slot's unlock gives up, the call's
- * answer returned.
+ * slot let go before another process's poller asks again (review pass 2). It
+ * sits that poll out unmarked: marked, two processes' calls deferred to each
+ * other in turn (review pass 8). A slot the process lets go while no other
+ * process waits goes to its own poller at once, woken from its nap; with one
+ * waiting, whichever poller asks first takes it (review pass 6: a poll a
+ * handoff made 424 embeddings at embed=1 take 36 s against 0.6). A stop ends a
+ * wait at once, a connect or a statement in flight included: the call's own
+ * signal, or the process's (`stop`, or `uninstall`, which leaves a call already
+ * running its slot until it ends). Every statement is bounded, as the connect
+ * is, by 5 s: a database that stops answering fails a waiting call open, and a
+ * slot's unlock gives up, the call's answer returned.
  *
  * Written as types, with per-model overrides: `chat=1,embed=2,decide=1,
  * chat:qwen3.8:27b=1`. A type left out is unlimited; unset, empty or `off`,
@@ -242,7 +243,9 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     waiting();
     if (l.busy) return;
     l.busy = true;
-    for (const e of l.queue) e.waiting();
+    // A copy: telling an entry can stop it, which takes it out of the queue as this goes (review pass 8: every other
+    // entry skipped, one running its call through a stop).
+    for (const e of [...l.queue]) e.waiting();
   };
   /** The turn handed to the next call queued, or given up. */
   const passTurn = (l: Local) => {
@@ -315,8 +318,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
           l.pid = w.pid;
           if (!w.alone) {
             tellWaiting(l, waiting);
-            // Marked while it defers, so the other process's release does not wake its own poller past it (review pass 7).
-            [{ marked }] = (await ask(session`SELECT pg_try_advisory_lock_shared(hashtext(${l.key}), ${WAITING}) AS marked`)) as { marked: boolean }[];
+            // Unmarked while it defers (review pass 8: pass 7's mark here made two processes' calls defer to each other
+            // in turn, 80 calls in 30 s where 600 took 5 s; on a lock of its own, 15 in 6 s).
             await wait(POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
           }
           for (;;) {
