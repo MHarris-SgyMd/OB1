@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — ChatGPT extractor.
+ * Daemonic Brain Capture — ChatGPT extractor.
  *
  * DOM-only extraction of the most recent user/assistant message pair from the
  * chatgpt.com / chat.openai.com conversation view. Used for manual capture
@@ -146,6 +146,6 @@
   if (self.__OBBridge) {
     self.__OBBridge.registerExtractor('chatgpt', extractVisibleResponse);
   } else {
-    console.error('[Open Brain Capture] Bridge not loaded before extractor-chatgpt.js');
+    console.error('[Daemonic Brain Capture] Bridge not loaded before extractor-chatgpt.js');
   }
 })();

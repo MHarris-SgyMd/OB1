@@ -28,7 +28,7 @@
             regex: new RegExp(entry.pattern, entry.flags || '')
           };
         } catch (error) {
-          console.warn('[Open Brain Capture] Invalid sensitivity pattern skipped', entry, error);
+          console.warn('[Daemonic Brain Capture] Invalid sensitivity pattern skipped', entry, error);
           return null;
         }
       })
@@ -53,7 +53,7 @@
           // otherwise disable the sensitivity gate (fail-open) for the whole
           // service-worker lifetime. Returning EMPTY_PATTERNS covers only
           // this call; the next call retries the load.
-          console.error('[Open Brain Capture] Sensitivity patterns failed to load — gate degraded for this call only, will retry', error);
+          console.error('[Daemonic Brain Capture] Sensitivity patterns failed to load — gate degraded for this call only, will retry', error);
           compiledPatternsPromise = null;
           return EMPTY_PATTERNS;
         });

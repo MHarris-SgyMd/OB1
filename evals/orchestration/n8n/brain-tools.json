@@ -35,7 +35,7 @@
         220
       ],
       "parameters": {
-        "toolDescription": "Search the Open Brain for thoughts about a topic; returns the best matches with their text.",
+        "toolDescription": "Search the brain for thoughts about a topic; returns the best matches with their text.",
         "method": "POST",
         "url": "http://api:8000/v1/search",
         "authentication": "genericCredentialType",
