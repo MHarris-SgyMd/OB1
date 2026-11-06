@@ -3,7 +3,8 @@
 # `changes.sh EVENT BASE_REF DEFAULT_BRANCH` writes code=true|false, skip= and
 # why= to $GITHUB_OUTPUT (and says them); `changes.sh --self-check` runs its
 # cases; `changes.sh --not-code` prints which of the paths on stdin skip (check
-# 47); `changes.sh --blocks FILE` prints how it cuts a workflow (check 51).
+# 47); `changes.sh --blocks FILE` prints how it cuts a workflow (check 51);
+# `changes.sh --charges` prints CHARGES (check 53).
 # The changes job runs the BASE branch's copy of this file (review pass 1), so
 # a pull request that edits it is judged by the copy already on its base.
 #
@@ -27,10 +28,10 @@
 # brain-checks.yml is read by job (PR 2): a pull request whose only change off
 # the list is an edit of that file runs the jobs whose block it changed, and
 # skip= names the gated jobs whose block is the same byte for byte. The file
-# is cut at its job keys (cut_blocks); an edit above `jobs:` or to the changes
-# job, or a file the cut cannot read, runs every job. Check 51 holds the cut
-# to Bun's reading of the file: each block parses alone to its job as the
-# whole file does, so no anchor, alias or flow style crosses a block.
+# is cut at its job keys (cut_blocks); an edit above `jobs:` or to a job
+# RUN_ALL_JOBS names, or a file the cut cannot read, runs every job. Check 51
+# holds the cut to Bun's reading of the file: each block parses alone to its
+# job as the whole file does, so no anchor, alias or flow style crosses a block.
 #
 # A path off the list that CHARGES names (PR 3a) charges the gated jobs it
 # gives, none for a path no gated job reads; a pull request whose every path
@@ -43,17 +44,15 @@ WORKFLOW=.github/workflows/brain-checks.yml
 # gates read, and the job that runs the checker, whose check 51 is what makes
 # an unchanged block a safe skip (review pass 2). Check 51 holds this list.
 RUN_ALL_JOBS="changes repo-consistency"
-# The paths off the list a gated job is known to read (PR 3a): each pattern,
-# a tab, then the gated jobs it can affect, one space between, or none for a
-# path no gated job reads. A pull request whose every path off the list is
-# here (or a workflow edit read by job) skips the gated jobs nothing charged;
-# a path not here runs every job. Check 53 holds each entry to the files whose
-# code names it and the jobs whose steps do. Kept by hand until PR 3b derives
-# it from what each job runs.
 # Beside a workflow edit these run every job: the checker, whose check 51
 # holds the cut, and this file, whose cut the base's copy applies to the
 # head's workflow, unheld by check 51 when the two cuts differ.
 HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
+# The paths off the list a gated job is known to read (PR 3a): each pattern,
+# a tab, then the gated jobs it can affect, one space between, or none for a
+# path no gated job reads; a path not here runs every job. Check 53 holds
+# each entry to the files whose code names it and the jobs whose steps do.
+# Kept by hand until PR 3b derives it from what each job runs.
 CHARGES="changes/*	deploy-stack db-schema
 scripts/check-consistency.ts	data-layer
 .github/ci/typecheck.sh	portable-server
@@ -77,7 +76,8 @@ not_code() {
   case "$1" in
     # Read by a gated job (SMD-2435's survey): an eval pins this ADR's wording
     # (portable-server); the auth and writes suites assert over these READMEs;
-    # the full-stack job's release rehearsal reads changes/ whole.
+    # the full-stack job's release rehearsal reads changes/ whole, and db-schema
+    # runs ingest-records.ts, which can.
     docs/subject-anchored-claims.md | integrations/telegram-capture/README.md | integrations/slack-capture/README.md | \
       recipes/vercel-neon-telegram/README.md | recipes/schema-aware-routing/README.md | changes/*) return 1 ;;
     # Copied into an image, mounted into the stack, or CI's own: whatever the file.
@@ -245,8 +245,9 @@ answer() {
   result=$(decide "$event" "$changed")
   rm -f "$changed"
   if [ "${result%%$'\t'*}" = partial ]; then
-    local rest=${result#partial$'\t'}
-    by_job "${rest%%$'\t'*}" "$(r=${rest#*$'\t'}; printf '%s' "${r%%$'\t'*}")"; return
+    local rest=${result#partial$'\t'} jobs
+    jobs=${rest#*$'\t'}; jobs=${jobs%%$'\t'*}
+    by_job "${rest%%$'\t'*}" "$jobs"; return
   fi
   printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"
 }
@@ -257,11 +258,10 @@ self_check() {
   # check EXPECT EVENT PATH...: decide on the paths as a pull request's
   # change, each a regular file's edit (OLDMODE=… and MODE=… set its modes).
   check() {
-    local p
+    local p whole jobs
     expect=$1 event=$2; shift 2
     : > "$dir/c"
     for p in "$@"; do printf ':%s %s 0000000 0000000 M\0%s\0' "${OLDMODE:-100644}" "${MODE:-100644}" "$p" >> "$dir/c"; done
-    local whole jobs
     whole=$(decide "$event" "$dir/c"); got=${whole%%$'\t'*}
     if [ "$got" != "$expect" ]; then echo "changes.sh: $event $* is code=$got, not $expect" >&2; fails=$((fails + 1)); fi
     # CHARGED=…: the jobs a partial answer's paths charge (its third field).
@@ -306,8 +306,10 @@ self_check() {
   CHARGED='' check partial pull_request .github/workflows/brain-checks.yml
   CHARGED='' check partial pull_request docs/a.md .github/workflows/brain-checks.yml README.md
   check true pull_request .github/workflows/brain-checks.yml server-portable/api.ts
-  CHARGED='' check partial pull_request .github/workflows/release.yml
-  check true pull_request .github/workflows/other.yml
+  OLDMODE=000000 check true pull_request .github/workflows/brain-checks.yml
+  MODE=000000 check true pull_request .github/workflows/brain-checks.yml
+  MODE=100755 check true pull_request .github/workflows/brain-checks.yml
+  MODE=120000 check true pull_request .github/workflows/brain-checks.yml
   # The CHARGES map (PR 3a): each path charges its jobs, together the union; a path off the map runs every job.
   CHARGED=data-layer check partial pull_request scripts/check-consistency.ts
   CHARGED='deploy-stack deploy-stack-auth deploy-stack-brains deploy-stack-observability' check partial pull_request .github/ci/full-stack-up.sh
@@ -316,10 +318,8 @@ self_check() {
   check true pull_request changes/smd-1.md server-portable/api.ts
   check true pull_request scripts/check-consistency.ts .github/workflows/brain-checks.yml
   check true pull_request .github/ci/changes.sh .github/workflows/brain-checks.yml
-  OLDMODE=000000 check true pull_request .github/workflows/brain-checks.yml
-  MODE=000000 check true pull_request .github/workflows/brain-checks.yml
-  MODE=100755 check true pull_request .github/workflows/brain-checks.yml
-  MODE=120000 check true pull_request .github/workflows/brain-checks.yml
+  CHARGED='' check partial pull_request .github/workflows/release.yml
+  check true pull_request .github/workflows/other.yml
   # Two names where a record and its path should be (--name-only's shape, or a rename's third field): code.
   printf 'docs/a.md\0docs/b.md\0' > "$dir/c"; got=$(decide pull_request "$dir/c"); got=${got%%$'\t'*}
   if [ "$got" != true ]; then echo "changes.sh: a record not in --raw form is code=$got, not true" >&2; fails=$((fails + 1)); fi
@@ -413,13 +413,6 @@ EOF
     BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'add_gated'
     BASE_OPS=$wfb run true pull_request main 'sub "bun scripts" "bun  scripts"'
     BASE_OPS=$wfb SKIP='data-layer g' run true pull_request main "sub \"h's heading\" \"h's heading, reworded\""
-    # The CHARGES map (PR 3a): a record charges deploy-stack (not here), the checker data-layer; off the map, every job.
-    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
-    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts'
-    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p .github/workflows && echo x > .github/workflows/release.yml'
-    BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo g" "echo g2"'
-    BASE_OPS=$wfb run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; echo x >> server-portable/api.ts'
-    BASE_OPS=$wfb run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts; sub "echo g" "echo g2"'
     BASE_OPS=$wfb run true pull_request main 'sub "name: f" "name: f2"'
     BASE_OPS=$wfb run true pull_request main 'sub "runs-on: x" "runs-on: y"'
     BASE_OPS=$wfb run true pull_request main "sub \"changes' heading\" \"changes' heading, reworded\""
@@ -427,6 +420,13 @@ EOF
     BASE_OPS=$wfb run true pull_request main 'sub "  r:" "  - r:"'
     BASE_OPS=$wfb run true pull_request feature 'sub "echo g" "echo g2"'
     BASE_OPS=$wfb run true push main 'sub "echo g" "echo g2"'
+    # The CHARGES map (PR 3a): a record charges deploy-stack and db-schema (neither here), the checker data-layer; off the map, every job.
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$wfb SKIP='g h' run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts'
+    BASE_OPS=$wfb SKIP='data-layer g h' run true pull_request main 'mkdir -p .github/workflows && echo x > .github/workflows/release.yml'
+    BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo g" "echo g2"'
+    BASE_OPS=$wfb run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; echo x >> server-portable/api.ts'
+    BASE_OPS=$wfb run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts; sub "echo g" "echo g2"'
     # A HEAD with no second parent: the pull request's head itself.
     rm -rf "$repo"; mkdir -p "$repo"; : > "$out"
     (cd "$repo" && g init -q && mkdir docs && echo b > docs/a.md && g add -A && g commit -qm base && echo x >> docs/a.md && g add -A && g commit -qm docs \

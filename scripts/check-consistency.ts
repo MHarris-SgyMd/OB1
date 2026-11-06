@@ -625,9 +625,10 @@
  *      a code line is one it charges; the files whose code names it, as an
  *      anchored path token with comments blanked, are exactly
  *      JOB_MAP_READERS's, each with why; a gated job whose steps run such a
- *      reader that opens the path is charged, with no exceptions; a code
- *      file compat-shim reads by content charges it; a stale entry, a row
- *      naming no tracked path, or a HOLDS_THE_CUT other than the checker and
+ *      reader that opens the path (the checker and changes.sh count as
+ *      opening every path) is charged, with no exceptions; a code file
+ *      compat-shim reads by content charges it; a stale entry, a row naming
+ *      no tracked path, or a HOLDS_THE_CUT other than the checker and
  *      changes.sh fails (SMD-2435 PR 3a). Lexical and one hop deep, as
  *      PR 3b's derived map is not. Its probe pins what it refuses and passes
  *
@@ -11350,9 +11351,9 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
 };
 /**
  * Not listed as namers: the map's own home, which names every pattern in
- * CHARGES, and this checker, which checks them. Both read every path (the
- * checker reads the records, runs typecheck.sh and changes.sh), so a gated job
- * whose steps run either must be charged by every row (review pass 7).
+ * CHARGES, and this checker, which checks them. Both count as reading every
+ * path (the checker reads the records and runs typecheck.sh and changes.sh),
+ * so a gated job running either must be charged by every row (review pass 7).
  */
 const JOB_MAP_HOMES = [CHANGES_SCRIPT, SELF];
 /** A CHARGES row: its pattern and the jobs it charges. */
@@ -11366,8 +11367,7 @@ function chargesTable(): ChargesRow[] | string {
     return { pattern, jobs: jobs.split(" ").filter(Boolean) };
   });
 }
-const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips and the files it reads. */
+/** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips, the files it reads, and the marked files its parse step builds (CODEMOD_MARKER; checkJobMap fills them). */
 type CodemodWalk = { skip: string[]; code: RegExp; marked: Set<string> };
 /**
  * compat-shim's "Migrated files parse" step builds every code file holding
@@ -11386,11 +11386,12 @@ function codemodWalk(): CodemodWalk | string {
   if (!skip || !code) return `${CODEMOD} declares no SKIP_DIRS = new Set([…]) or CODE = /…/ check 53 can read`;
   return { skip: [...skip[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]), code: new RegExp(code[1]), marked: new Set() };
 }
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * How code names a CHARGES pattern: for a directory ("changes/*"), its name
- * then a slash, or its name alone as a quoted string (join(ROOT, "changes"),
- * a constant); for a file, its file name. Anchored, so thought_changes/ or a
- * URL's /changes/ is not it.
+ * then a slash, or its name alone in the forms the comment below lists; for
+ * a file, its file name, or its stem as an import's specifier. Anchored, so
+ * thought_changes/ or a URL's /changes/ is not it.
  */
 function chargesToken(pattern: string): RegExp {
   if (pattern.endsWith("/*")) {
