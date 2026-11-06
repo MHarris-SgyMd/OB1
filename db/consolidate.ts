@@ -166,7 +166,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -250,6 +250,13 @@ export function pendingByPassLine(byPass: { judge_key: string; n: number }[]): s
 export const MAX_STALE_DAYS = 2_000_000;
 
 /**
+ * A judge call's limit when --timeout says none, in seconds: started before the request, so a call queued on a model
+ * server of one slot waits in it. sleep.ts adds one of the subject sweep's calls to it, read at each call, while the
+ * sweep asks the judge model beside it (`timeoutNow`, SMD-3306 PR 6b-2).
+ */
+export const JUDGE_TIMEOUT_S = 120;
+
+/**
  * What one consolidation run is asked to do — the CLI's flags, typed
  * (SMD-2304). A number left out takes the CLI's default, and one given is
  * held to its flag's rule and refused in the CLI's words; `follow` is
@@ -294,6 +301,13 @@ export interface ConsolidateOptions {
   ttl?: number;
   heartbeat?: number;
   timeout?: number;
+  /**
+   * A judge call's limit in seconds, read as each pair's call starts, in place of `timeout`, which stays the run's
+   * own: sleep.ts's, one of the subject sweep's calls longer while the sweep asks the judge model beside it (SMD-3306
+   * PR 6b-2's review pass 3). The window in which a thought that hangs the provider is its own grows with what it
+   * adds. Unused by --status, --dry-run and a decision.
+   */
+  timeoutNow?: () => number;
   k?: number;
   minSim?: number;
   minConfidence?: number;
@@ -398,7 +412,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   if (typeof ttl === "string") return ttl;
   const heartbeat = read("--heartbeat", opts.heartbeat, heartbeatFor(ttl));
   if (typeof heartbeat === "string") return heartbeat;
-  const timeout = read("--timeout", opts.timeout, 120, { min: 1, max: MAX_CALL_TIMEOUT_S });
+  const timeout = read("--timeout", opts.timeout, JUDGE_TIMEOUT_S, { min: 1, max: MAX_CALL_TIMEOUT_S });
   if (typeof timeout === "string") return timeout;
   const k = read("--k", opts.k, DEFAULT_CANDIDATES, { min: 1, max: 50 });
   if (typeof k === "string") return k;
@@ -701,7 +715,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const chat = await probeChat(cfg.chat, cfg.judgeModel, ms, wake);
     return jev && chat.state === "up" ? probeTier(jev, cfg.decider, ms, wake) : chat;
   };
-  const outage = new ProviderOutage();
+  /** A judge call's limit as it starts: `timeoutNow`'s, sleep.ts's beside the subject sweep, or the run's own (SMD-3306 PR 6b-2). */
+  const limitNow = (): number => opts.timeoutNow?.() ?? TIMEOUT_S;
+  // A thought that hangs the provider is its own when it does so again within the window after the probe answered
+  // (worker-bootstrap.ts's SUSPECT_WINDOW), read at its error: longer by five times what a caller adds to the run's
+  // limit — the suspect's next streak at its longest, three calls paused for, a fourth timed out and its probe — so
+  // beside the sweep, a call up to 1,020 s, such a thought is still failed, not looped at the pool's head for ever
+  // (SMD-3306 PR 6b-2's review pass 3, the definitions reviewer's: hang after hang, an outage each).
+  const outage = new ProviderOutage(undefined, () => SUSPECT_WINDOW.ms + 5 * Math.max(0, limitNow() - TIMEOUT_S) * 1000);
   /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
@@ -1723,6 +1744,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       reachedOlders.add(c.older_id);
       const staleRow = staleByOlder.get(c.older_id);
       const t0 = Date.now();
+      // The limit as this call starts (SMD-3306 PR 6b-2's review pass 3): longer while the subject sweep asks the judge
+      // model beside it, its own once the sweep stops asking — and the probe after its timeout gets the same.
+      const limitS = limitNow();
       let j: Judgement;
       try {
         // SMD-1726: the judge hears who wrote each side — the database's mark
@@ -1730,7 +1754,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
-        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
+        const callSignal = AbortSignal.any([AbortSignal.timeout(limitS * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
         // deadline for all three calls, as for the judge's one.
@@ -1753,8 +1777,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.
-          if (FOLLOW && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))) throw new ProviderDown(`the judge call timed out after ${TIMEOUT_S} s, and a one-token call got no answer either`);
-          problems.push(`pair with ${c.older_id}: timed out after ${TIMEOUT_S} s`);
+          if (FOLLOW && !stopping && (outage.reason !== null || isOut(await probe(limitS * 1000, halt.signal)))) throw new ProviderDown(`the judge call timed out after ${limitS} s, and a one-token call got no answer either`);
+          problems.push(`pair with ${c.older_id}: timed out after ${limitS} s`);
           continue;
         }
         // The egress gate refused a side of this pair (SMD-1903): a fact about
@@ -2632,7 +2656,7 @@ if (import.meta.main) {
   const batch = cli.int("batch", { absent: 1, min: 1, max: MAX_BATCH });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
   const heartbeat = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : undefined;
-  const timeout = cli.int("timeout", { absent: 120, min: 1, max: MAX_CALL_TIMEOUT_S });
+  const timeout = cli.int("timeout", { absent: JUDGE_TIMEOUT_S, min: 1, max: MAX_CALL_TIMEOUT_S });
   const k = cli.int("k", { absent: DEFAULT_CANDIDATES, min: 1, max: 50 });
   const minSim = cli.number("min-sim", { absent: DEFAULT_MIN_SIMILARITY, min: -1, max: 1, fraction: true });
   const minConfidence = cli.number("min-confidence", { absent: DEFAULT_MIN_CONFIDENCE, min: 0, max: 1, fraction: true });
