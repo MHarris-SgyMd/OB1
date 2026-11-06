@@ -627,6 +627,14 @@
  *      no tracked path, or a HOLDS_THE_CUT other than the checker and
  *      changes.sh fails (SMD-2435 PR 3a). Lexical and one hop deep, as
  *      PR 3b's derived map is not. Its probe pins what it refuses and passes
+ *  54. "Open Brain" as the product's name and "fork" as a word stay out of
+ *      the live text: every file git lists outside changes/, CHANGELOG.md,
+ *      db/migrations/ and FORK.md is read line by line, after cutting the
+ *      shapes that make no claim (a URL, a link to upstream with its text,
+ *      the origin sentence, upstream's badge, FORK.md, `ob1-fork`, CI's old
+ *      name, `[fork]`, a quoted `fork`, `fork()`, the fork network), each
+ *      held by a probe; a line kept on purpose is counted per file in
+ *      NAME_EXCEPTIONS with why, more or fewer failing (SMD-3773)
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
@@ -11547,6 +11555,314 @@ function checkJobMap() {
   for (const msg of jobMapProblems(table, JOB_MAP_READERS, AGGREGATE_GATED, files, cut.regions, typeof walk === "string" ? null : walk)) fail(CHANGES_SCRIPT, msg);
 }
 checkJobMap();
+
+// ── 54: the product's name and "fork" stay out of the live text (SMD-3773) ──
+//
+// SMD-3765, SMD-3769 and SMD-3770 retired "fork" as what the project is, and
+// "Open Brain" as the product's name, on every live surface (decided
+// 2026-11-04). Nothing held them: a doc saying "this fork", a recipe saying
+// "your Open Brain" or a tool titled "Search Open Brain" passed every check,
+// and such lines arrive by copying older text. This reads every text file git
+// lists (tracked, and untracked but not ignored) outside the archive —
+// changes/, CHANGELOG.md, db/migrations/ and FORK.md, the fork era's record —
+// line by line with plain word boundaries (JSC gives up silently at its
+// backtrack limit, so no pattern here can backtrack far), for "Open Brain" in
+// any case and "fork", "forks" or "forked" as a word.
+//
+// Shapes that say nothing about what the project is are cut from a line before
+// it is read, each held by a probe: a URL, and a markdown link to upstream's
+// repository with its text (the origin's links); the origin sentence ("grew
+// out of Open Brain", "began as a fork of"); upstream's maintainer-team badge
+// (attribution); FORK.md named as a file, the `ob1-fork` code marker, CI's
+// name before SMD-3765 (`fork-checks`, "Fork Checks"), the `[fork]` commit type
+// commitlint keeps for old commits, and `fork` quoted as a token (the ingest
+// pipeline's source type), as identifiers; a process `fork()` and GitHub's
+// "fork network", as other senses. What is left is a new line, which fails
+// naming its file and line, or one SMD-3770's records keep on purpose —
+// upstream's own contributions kept whole, eval data and test fixtures,
+// credits and quotes, what another ticket owns — counted per file in
+// NAME_EXCEPTIONS with why. A file with more matches fails as a new line, with
+// fewer as a stale count. This file names the words to look for them, and is
+// not read.
+const NAME_ARCHIVE = /^(?:changes\/|CHANGELOG\.md$|db\/migrations\/|FORK\.md$)/;
+const PRODUCT_NAME = /\bopen brain\b/i;
+const FORK_WORD = /\bfork(?:s|ed)?\b/i;
+/** Cut from a line before it is read: shapes that make no claim about what the project is (check 54). */
+const NOT_A_NAME: RegExp[] = [
+  /\[[^\]\n]*\]\(https?:\/\/github\.com\/NateBJones-Projects\/[^)\s]*\)/gi,
+  /https?:\/\/[^\s)>\]"'`]+/gi,
+  /\bgrew out of \[?open brain\b/gi,
+  /\bbegan as a fork of\b/gi,
+  /\bopen brain maintainer team\b/gi,
+  /\bFORK\.md\b/gi,
+  /\bob1-fork\b/gi,
+  /\bfork-checks\b/gi,
+  /\bFork Checks\b/g,
+  /\[fork\]/gi,
+  /(["'`])fork\1/gi,
+  /\bfork\(/gi,
+  /\bfork network\b/gi,
+];
+type NameKind = "name" | "fork";
+/** Which of the two words a line still says once NOT_A_NAME's shapes are cut. */
+function nameHitsIn(line: string): NameKind[] {
+  const left = NOT_A_NAME.reduce((s, re) => s.replace(re, " "), line);
+  return [...(PRODUCT_NAME.test(left) ? ["name" as const] : []), ...(FORK_WORD.test(left) ? ["fork" as const] : [])];
+}
+/** Lines check 54 must flag, and the word each says: a doc, a comment, a tool description, a prerequisite. */
+const NAME_PROBES: [string, NameKind][] = [
+  ["This fork keeps its own CI.", "fork"],
+  ["// the fork's own copy of the handler", "fork"],
+  ['    title: "Search Open Brain",', "name"],
+  ["- Working Open Brain setup ([guide](../../docs/01-getting-started.md))", "name"],
+  ["Contributors forked it in 2025.", "fork"],
+  ["CAPTURE TO YOUR OPEN BRAIN", "name"],
+];
+/** Lines it must not: each shape NOT_A_NAME cuts. */
+const NAME_NON_PROBES = [
+  "Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1), created by Nate B. Jones.",
+  "It began as a fork of that tree at `9543c29` (2026-08-30).",
+  "*Built by Nate B. Jones — part of the [Open Brain project](https://github.com/NateBJones-Projects/OB1)*",
+  "*Reviewed and merged by the Open Brain maintainer team — thank you!*",
+  "See FORK.md, change 71.",
+  "// ob1-fork (SMD-1524): the raw insert, by design",
+  "Brain Checks (Fork Checks before SMD-3765) ran fork-checks.yml.",
+  "| 9 | `[fork] db: core schema` | the first commit |",
+  'its source is "fork", or `fork` in the table',
+  "child_process.fork(worker) starts a worker",
+  "GitHub's fork network lists it",
+  "https://example.com/forks/open-brain",
+];
+/** Why a file keeps a word on purpose — one line in NAME_EXCEPTIONS names one of these (check 54). */
+const KEPT = {
+  DATA: "data: test fixtures, eval inputs, recorded queries and probes use it as a name or a string",
+  BOARD: "data: the Linear initiative and its projects are named \"Open Brain …\", which board-sync matches",
+  UPSTREAM: "upstream's own product, deployment or claim, kept as upstream's in SMD-3770's record",
+  NBJ: "upstream's NBJ-branded material, SMD-1929's item 1",
+  TRACKER: "a credential tracker asking for upstream's Supabase keys, whose contents SMD-3877 rewrites",
+  DOCS: "the docs' and front-door files' bodies, which SMD-3793 sweeps",
+  RELEASE: "the release notes' title and the overlay's header, SMD-4099's",
+  ORIGIN: "the origin, upstream's licence, or the naming rule itself",
+  CREDIT: "a credit, a quote, an attribution or upstream's channel",
+  GUIDE: "the connector name the getting-started guide gives, so a reader types one name (SMD-3793)",
+  HISTORY: "a pointer to the fork era's record: FORK.md, its numbered changes, its `## FORK` heading",
+  SOURCE: "the ingest pipeline's `fork` source, Daemonic Brain's own change records",
+  SENSE: "another sense: a Postgres relation fork, a forked token chain or state, a process fork, GitHub's forks, or code forked away from upstream",
+  MIGRATION: "an applied plugin migration, whose sha migrate.ts checks",
+  RECORD: "a dated decision record kept as written; SMD-3793 decides the records",
+  IDENT: "an identifier: the fragment record's property",
+} as const;
+/** Files whose lines keep a word on purpose, with how many and why (check 54). */
+const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedException>>>([
+  [".github/workflows/brain-checks.yml", { name: { why: KEPT.DATA, lines: 1 } }],
+  [".github/workflows/ci-shift.yml", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["CONTRIBUTING.md", { name: { why: KEPT.ORIGIN, lines: 1 } }],
+  ["CONTRIBUTORS.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+  ["MAINTAINING.md", { fork: { why: KEPT.HISTORY, lines: 4 }, name: { why: KEPT.ORIGIN, lines: 2 } }],
+  ["README.md", { name: { why: KEPT.DOCS, lines: 7 } }],
+  ["SECURITY.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["SETUP.md", { fork: { why: KEPT.HISTORY, lines: 1 }, name: { why: KEPT.ORIGIN, lines: 3 } }],
+  ["compat/supabase-sql/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["compat/supabase-sql/index.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["dashboard/smoke-oauth.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["db/README.md", { fork: { why: KEPT.SOURCE, lines: 2 }, name: { why: KEPT.DATA, lines: 6 } }],
+  ["db/bench-hnsw.ts", { fork: { why: KEPT.SENSE, lines: 4 } }],
+  ["db/board-findings.ts", { fork: { why: KEPT.SOURCE, lines: 2 } }],
+  ["db/ci-parity.sh", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["db/config.mjs", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["db/graph-centrality.ts", { name: { why: KEPT.DATA, lines: 5 } }],
+  ["db/ingest-items.ts", { fork: { why: KEPT.SOURCE, lines: 2 } }],
+  ["db/ingest-linear.ts", { fork: { why: KEPT.BOARD, lines: 1 }, name: { why: KEPT.BOARD, lines: 1 } }],
+  ["db/ingest-records.ts", { fork: { why: KEPT.SOURCE, lines: 16 } }],
+  ["db/ingest-structure.ts", { fork: { why: KEPT.SOURCE, lines: 1 } }],
+  ["db/sync-linear.ts", { fork: { why: KEPT.BOARD, lines: 1 }, name: { why: KEPT.BOARD, lines: 14 } }],
+  ["db/test-cli.ts", { name: { why: KEPT.DATA, lines: 2 } }],
+  ["db/test-live.ts", { fork: { why: KEPT.SOURCE, lines: 3 }, name: { why: KEPT.DATA, lines: 9 } }],
+  ["db/test-schema.ts", { name: { why: KEPT.DATA, lines: 94 } }],
+  ["db/test-upgrade.ts", { name: { why: KEPT.DATA, lines: 1 } }],
+  ["deploy/.env.example", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["deploy/README.md", { fork: { why: KEPT.SENSE, lines: 2 }, name: { why: KEPT.BOARD, lines: 4 } }],
+  ["deploy/auth/layout.ts", { fork: { why: KEPT.SENSE, lines: 2 } }],
+  ["deploy/auth/server.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["deploy/auth/store.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["docs/01-getting-started.md", { name: { why: KEPT.DOCS, lines: 17 } }],
+  ["docs/02-companion-prompts.md", { name: { why: KEPT.DOCS, lines: 34 } }],
+  ["docs/03-faq.md", { name: { why: KEPT.DOCS, lines: 25 } }],
+  ["docs/04-ai-assisted-setup.md", { name: { why: KEPT.DOCS, lines: 4 } }],
+  ["docs/05-tool-audit.md", { name: { why: KEPT.DOCS, lines: 7 } }],
+  ["docs/agent-memory-portability.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["docs/event-log-as-truth.md", { fork: { why: KEPT.SENSE, lines: 3 } }],
+  ["docs/one-brain-per-stack.md", { name: { why: KEPT.DOCS, lines: 2 } }],
+  ["docs/open-brain-assistant-gpt-context.md", { name: { why: KEPT.DOCS, lines: 21 } }],
+  ["docs/operator-gui-dashboards-analysis.md", { fork: { why: KEPT.RECORD, lines: 7 }, name: { why: KEPT.DATA, lines: 1 } }],
+  ["docs/operator-surface-tiers.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["docs/priority.md", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["docs/workflow-pipeline.html", { fork: { why: KEPT.SENSE, lines: 2 }, name: { why: KEPT.DOCS, lines: 3 } }],
+  ["evals/README.md", { fork: { why: KEPT.SOURCE, lines: 2 }, name: { why: KEPT.DATA, lines: 2 } }],
+  ["evals/auth/better-auth.ts", { name: { why: KEPT.DATA, lines: 2 } }],
+  ["evals/auth/cimd.ts", { name: { why: KEPT.DATA, lines: 1 } }],
+  ["evals/auth/sdk-client.ts", { name: { why: KEPT.DATA, lines: 1 } }],
+  ["evals/decompose-rerank.ts", { fork: { why: KEPT.HISTORY, lines: 1 } }],
+  ["evals/eval-auth.ts", { name: { why: KEPT.DATA, lines: 2 } }],
+  ["evals/eval-calibration.ts", { fork: { why: KEPT.SOURCE, lines: 8 } }],
+  ["evals/eval-entities.ts", { name: { why: KEPT.DATA, lines: 3 } }],
+  ["evals/eval-extract-windows.ts", { name: { why: KEPT.DATA, lines: 4 } }],
+  ["evals/eval-longmemeval.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["evals/eval-thought-kinds.ts", { name: { why: KEPT.DATA, lines: 2 } }],
+  ["evals/eval-transitive-freshness.ts", { fork: { why: KEPT.DATA, lines: 2 }, name: { why: KEPT.DATA, lines: 6 } }],
+  ["evals/fixtures/priority-dogfood.json", { name: { why: KEPT.DATA, lines: 4 } }],
+  ["evals/fixtures/thought-kinds.json", { fork: { why: KEPT.DATA, lines: 1 } }],
+  ["evals/store-composed.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
+  ["evals/store-readmodel.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
+  ["integrations/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["integrations/agent-memory-api/README.md", { name: { why: KEPT.NBJ, lines: 2 } }],
+  ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", { name: { why: KEPT.NBJ, lines: 2 } }],
+  ["integrations/chrome-capture-extension/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/chrome-capture-extension/icons/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/hermes-agent-memory/README.md", { fork: { why: KEPT.NBJ, lines: 1 }, name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/openclaw-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
+  ["jev/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["plugins/family-calendar/migrations/001_family_calendar.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["plugins/home-maintenance/migrations/001_home_maintenance.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["plugins/household-knowledge/migrations/001_household_knowledge.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["plugins/job-hunt/migrations/001_job_hunt.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["plugins/meal-planning/migrations/001_meal_planning.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["plugins/professional-crm/migrations/001_professional_crm.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
+  ["primitives/remote-mcp/README.md", { name: { why: KEPT.GUIDE, lines: 3 } }],
+  ["primitives/rls/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["primitives/troubleshooting/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+  ["recipes/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/adaptive-capture-classification/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["recipes/adaptive-capture-classification/classifier_prompt.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/adaptive-capture-classification/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["recipes/atomizer/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/atomizer/README.md", { name: { why: KEPT.UPSTREAM, lines: 3 } }],
+  ["recipes/atomizer/backfill-gmail-correspondents.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/authorship-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/authorship-edges/backfill-authorship.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/brain-backup/backup-brain.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/chatgpt-conversation-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/chatgpt-conversation-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/editorial-policy/README.md", { fork: { why: KEPT.UPSTREAM, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["recipes/email-history-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/email-history-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 3 } }],
+  ["recipes/entity-wiki/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/fingerprint-dedup-backfill/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/fingerprint-dedup-backfill/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/gmail-smart-pull/README.md", { fork: { why: KEPT.SENSE, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 3 } }],
+  ["recipes/gmail-smart-pull/scripts/lib/sensitivity.mjs", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/gmail-smart-pull/sql/001_merge_thought_metadata.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/google-activity-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/google-activity-import/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/life-engine/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
+  ["recipes/life-engine/life-engine-skill.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/provenance-chains/README.md", { fork: { why: KEPT.UPSTREAM, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["recipes/provenance-chains/backfill.mjs", { fork: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["recipes/readwise-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
+  ["recipes/research-to-decision-workflow/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/schema-aware-routing/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+  ["recipes/session-capture-hook/session-capture.mjs", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["recipes/session-capture-hook/test-session-capture.mjs", { fork: { why: KEPT.DATA, lines: 14 }, name: { why: KEPT.DATA, lines: 2 } }],
+  ["recipes/source-filtering/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/typed-edge-classifier/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/vercel-neon-telegram/README.md", { name: { why: KEPT.UPSTREAM, lines: 7 } }],
+  ["recipes/vercel-neon-telegram/metadata.json", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/vercel-neon-telegram/src/app/api/mcp/route.ts", { name: { why: KEPT.UPSTREAM, lines: 3 } }],
+  ["recipes/vercel-neon-telegram/src/app/api/telegram/route.ts", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["recipes/wiki-compiler/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+  ["recipes/wiki-synthesis/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["resources/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
+  ["schemas/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 4 } }],
+  ["schemas/brain-stats-daily/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/crm-person-tiers/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/enhanced-thoughts/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["schemas/enhanced-thoughts/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["schemas/entity-extraction/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["schemas/per-agent-identity/README.md", { name: { why: KEPT.UPSTREAM, lines: 5 } }],
+  ["schemas/per-agent-identity/metadata.json", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["schemas/per-agent-identity/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["schemas/provenance-chains/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
+  ["schemas/provenance-chains/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["schemas/readwise-books/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/smart-ingest/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/thought-audit/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["schemas/typed-reasoning-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
+  ["schemas/typed-reasoning-edges/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
+  ["schemas/workflow-status/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["scripts/assemble-release.ts", { fork: { why: KEPT.IDENT, lines: 7 } }],
+  ["scripts/changes-index.ts", { fork: { why: KEPT.HISTORY, lines: 1 } }],
+  ["scripts/ci-step-times.ts", { fork: { why: KEPT.SENSE, lines: 2 } }],
+  ["scripts/fragments.ts", { fork: { why: KEPT.HISTORY, lines: 11 } }],
+  ["scripts/mechanism-yield.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
+  ["scripts/migrate-to-sql-shim.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["scripts/release-artifacts.ts", { name: { why: KEPT.RELEASE, lines: 4 } }],
+  ["server-portable/README.md", { fork: { why: KEPT.HISTORY, lines: 1 } }],
+  ["server-portable/propose.ts", { name: { why: KEPT.BOARD, lines: 2 } }],
+  ["server-portable/test-preflight.ts", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["server-portable/test-thoughts.ts", { fork: { why: KEPT.DATA, lines: 1 } }],
+  ["skills/auto-capture-claude-code/README.md", { name: { why: KEPT.UPSTREAM, lines: 6 } }],
+  ["skills/auto-capture-claude-code/SKILL.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
+  ["skills/auto-capture-claude-code/session-end-capture.mjs", { name: { why: KEPT.UPSTREAM, lines: 3 } }],
+  ["skills/deleting-thoughts/SKILL.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+]);
+
+function checkProductName() {
+  for (const [line, kind] of NAME_PROBES) {
+    if (!nameHitsIn(line).includes(kind)) fail(SELF, `check 54 no longer flags its probe for "${kind}": ${line}`);
+  }
+  for (const line of NAME_NON_PROBES) {
+    const hits = nameHitsIn(line);
+    if (hits.length) fail(SELF, `check 54 flags "${hits.join(", ")}" in a shape it must cut: ${line}`);
+  }
+  for (const rel of ["changes/smd-3773.md", "CHANGELOG.md", "db/migrations/001_core_schema.sql", "FORK.md"]) {
+    if (!NAME_ARCHIVE.test(rel)) fail(SELF, `check 54 reads ${rel}, which is the archive`);
+  }
+  for (const rel of ["README.md", "docs/FORK-notes.md", "changes.md", "db/migrate.ts"]) {
+    if (NAME_ARCHIVE.test(rel)) fail(SELF, `check 54 leaves ${rel} unread, which is live text`);
+  }
+  let names: string[];
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
+      .split("\0").filter(Boolean);
+  } catch (e) {
+    return fail(SELF, `git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 54 cannot list the live text`);
+  }
+  const counts = new Map<string, number>();
+  for (const rel of names.sort()) {
+    if (NAME_ARCHIVE.test(rel) || rel === SELF || BINARY_FILES.test(rel)) continue;
+    let text: string;
+    try {
+      if (!lstatSync(join(ROOT, rel)).isFile()) continue;
+      text = readFileSync(join(ROOT, rel), "utf8");
+    } catch { continue; } // deleted but still indexed
+    if (text.includes("\0")) continue;
+    const listed = NAME_EXCEPTIONS.get(rel);
+    text.split("\n").forEach((line, i) => {
+      for (const kind of nameHitsIn(line)) {
+        const key = `${rel} ${kind}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (listed?.[kind]) continue;
+        fail(`${rel}:${i + 1}`, kind === "name"
+          ? `"Open Brain" names the product, which is Daemonic Brain, and one install is "a brain" (CONTRIBUTING, "Naming the product"). Open Brain stays only for the origin, upstream's own products, credits and quotes: if this line is one, list the file in NAME_EXCEPTIONS with its count and why (check 54, SMD-3773)`
+          : `"fork" calls the project a fork; it is Daemonic Brain, a project in its own right, and FORK.md is the fork era's record (SMD-3765). If the word means something else here, list the file in NAME_EXCEPTIONS with its count and why (check 54, SMD-3773)`);
+      }
+    });
+  }
+  for (const [rel, byKind] of NAME_EXCEPTIONS) {
+    for (const [kind, { why, lines }] of Object.entries(byKind)) {
+      const seen = counts.get(`${rel} ${kind}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed in NAME_EXCEPTIONS for "${kind}" (${why}) but says it nowhere — remove the entry (check 54)`
+          : `NAME_EXCEPTIONS covers ${lines} line(s) saying "${kind}" here (${why}) but ${seen} do — a new line beside the kept ones, or a stale count (check 54)`);
+      }
+    }
+  }
+}
+checkProductName();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
