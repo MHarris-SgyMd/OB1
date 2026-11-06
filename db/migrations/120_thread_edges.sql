@@ -112,12 +112,20 @@
 --     the transaction holds the deleted row); a re-link closing stray edges a
 --     raw write left both on and naming a thought another transaction is
 --     deleting. No writer of the stack does any of them.
+--   * A raw write that moves a thought's created_at, or that deletes a subject
+--     facet alone while another transaction holds its key's lock, leaves the
+--     thread as it stood until the key's next re-link (db/threads.ts --status
+--     names the key). No writer of the stack does either.
+--   * A re-link keeps a standing edge under its key on a pair it wants whatever
+--     the version its judge key names: thread:<version> is not read, and a
+--     thread:v2 would have to compare it.
 --
 -- SAFETY
 --   Two functions redefined, the validator and record_thought_relation, each
 --   a body verbatim but the edit above; 084's index made again with the
 --   judge's clause, and two made; one new function, one trigger function and
---   three constraint triggers; one comment restated (close_thought_subject's).
+--   three constraint triggers; three comments restated (close_thought_subject's,
+--   thought_facets.payload's and the table's).
 --   No existing row changes: every relation standing names no key, so each
 --   keeps origin judged and stays under the judge's index, which holds the
 --   same pairs 084's did. Dropping 084's index holds thought_facets (ACCESS
