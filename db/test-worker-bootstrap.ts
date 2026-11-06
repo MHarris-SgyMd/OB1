@@ -507,8 +507,10 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // waitAtStart: said, the stamper's startWait on then off, probed until anything but out, held to the refusals.
   const stamps: boolean[] = [];
   lines.length = 0;
-  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: scripted([{ state: "out", why: "503" }, { state: "up" }]), refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
-  ok(up === "up" && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after \d+ s$/.test(lines[1] ?? ""),
+  const startStates: Probe[] = [{ state: "out", why: "503" }, { state: "up" }];
+  const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: scripted(startStates), refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
+  // Both probes asked: an out probe is waited past, not taken for the answer (review pass 3).
+  ok(up === "up" && startStates.length === 0 && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after \d+ s$/.test(lines[1] ?? ""),
     `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
   lines.length = 0;
   const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing, wake, writer, sleep: instant });
@@ -530,9 +532,13 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   await waitForDatabase(pgDown(), { check: async () => {}, wake, writer, sleep: instant });
   ok(/^err {3}the database is not answering \(Connection closed\nsecond line\) — /.test(lines[0] ?? ""), "waitForDatabase: without firstLine the whole message, as extract and consolidate say it (review pass 1)");
+  lines.length = 0;
+  ok((await waitForDatabase(pgDown(), { check: async () => {}, wake: stop.signal, writer, sleep: instant })) === false && !lines.some((l) => / answers again/.test(l)),
+    "waitForDatabase: a stop ends the wait, false, nothing said to answer (review pass 3)");
   let afterThrows = 0;
-  const throughAfter = await followedPass({ pass: async () => 7, afterPass: async () => { if (afterThrows++ === 0) throw pgDown(); }, follow: true, check: async () => {}, wake, writer, sleep: instant });
-  ok(throughAfter === 7 && afterThrows === 2, `followedPass: the database going away during the provider wait after a pass is waited out too, the pass run again (review pass 1; ${throughAfter}, ${afterThrows})`);
+  let afterPasses = 0;
+  const throughAfter = await followedPass({ pass: async () => { afterPasses++; return 7; }, afterPass: async () => { if (afterThrows++ === 0) throw pgDown(); }, follow: true, check: async () => {}, wake, writer, sleep: instant });
+  ok(throughAfter === 7 && afterThrows === 2 && afterPasses === 2, `followedPass: the database going away during the provider wait after a pass is waited out too, the pass run again (review passes 1 and 3; ${throughAfter}, ${afterThrows} waits, ${afterPasses} passes)`);
   let passes = 0;
   let afters = 0;
   const twice = await followedPass({ pass: async () => { if (passes++ === 0) throw pgDown(); return passes; }, afterPass: async () => { afters++; }, follow: true, check: async () => {}, wake, writer, sleep: instant });
@@ -541,9 +547,13 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   await followedPass({ pass: async () => { throw new Error("a writer threw"); }, afterPass: async () => {}, follow: true, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.message; });
   ok(threw === "a writer threw", "followedPass: any other error ends the run");
   threw = "";
-  await followedPass({ pass: async () => { throw pgDown(); }, afterPass: async () => {}, follow: false, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.name; });
-  ok(threw === "PostgresError", "followedPass: without --follow a database outage ends the run, as before");
-  ok((await followedPass({ pass: async () => { throw pgDown(); }, afterPass: async () => {}, follow: true, check: async () => {}, wake: stop.signal, writer, sleep: instant })) === null, "followedPass: a stop during the wait is null, the counts unread");
+  // Passes that throw once, so a broken helper returns and is reported here rather than looping (review pass 3).
+  let oneShotPasses = 0;
+  await followedPass({ pass: async () => { if (oneShotPasses++ === 0) throw pgDown(); return 1; }, afterPass: async () => {}, follow: false, check: async () => {}, wake, writer, sleep: instant }).catch((e: Error) => { threw = e.name; });
+  ok(threw === "PostgresError" && oneShotPasses === 1, `followedPass: without --follow a database outage ends the run (${threw}, ${oneShotPasses} pass(es))`);
+  let stoppedPasses = 0;
+  ok((await followedPass({ pass: async () => { if (stoppedPasses++ === 0) throw pgDown(); return 1; }, afterPass: async () => {}, follow: true, check: async () => {}, wake: stop.signal, writer, sleep: instant })) === null && stoppedPasses === 1,
+    `followedPass: a stop during the wait is null, the counts unread (${stoppedPasses} pass(es))`);
 
   // Unreturned: returned in turn before a pass (the first refused throws), quietly before a gate, all at once at the end.
   const released: string[] = [];
