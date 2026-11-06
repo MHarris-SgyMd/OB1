@@ -3663,7 +3663,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     && printed.PostToolUseFailure?.[0]?.matcher === "*" && printed.PostToolUseFailure[0].hooks[0].async === true && / --claims$/.test(printed.PostToolUseFailure[0].hooks[0].command)
     && printed.UserPromptSubmit[0].hooks[0].async === true && !ph.out.includes("claim-key") && JSON.stringify(claimsHookJson({ runtime: "/b/bun" })).includes("/b/bun"),
     "--print-hook --claims prints async PostToolUse and PostToolUseFailure (every tool, SMD-3874) and UserPromptSubmit hooks running --claims, no key");
-  assert(/replaces a claims hook pasted before 1\.7\.3/.test(ph.err), "…its banner says it replaces a claims hook pasted before 1.7.3");
+  assert(/A claims hook pasted before 1\.7\.3 has no PostToolUseFailure entry.*add that entry, or replace all three if the printed command differs from yours/.test(ph.err), "…its banner tells a claims hook pasted before 1.7.3 to add the PostToolUseFailure entry, or replace all three");
   const phCodex = await spawnScript(["--print-hook", "codex", "--claims"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   const phMixed = await spawnScript(["--print-hook", "claude-code", "--claims", "--event", "Stop"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(phCodex.code === 2 && /renews with renew_claim itself/.test(phCodex.err) && phMixed.code === 2, "Codex, and --claims beside a session hook's flag, are refused");
@@ -4091,6 +4091,16 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   age(113, 0);
   await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(113), token: tok(113) }, error: [{ type: "text", text: `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.` }] });
   assert(revivedMarker(113)?.blocked?.code === "WORK_CLAIMED", "…an `error` handed as content blocks is read as a result's text");
+  // …and a failure with no `error`, its text left in tool_response (review pass 2: the fallback was untested).
+  putClaim(114);
+  age(114, 0);
+  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(114), token: tok(114) }, tool_response: [{ type: "text", text: `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.` }] });
+  assert(revivedMarker(114)?.blocked?.code === "WORK_CLAIMED", "…and a failure with no `error`, its text in tool_response, is read from there");
+  // …its facts too: a CLAIM_UNATTRIBUTED whose words carry no lapse, the lapse in the facts alone.
+  putClaim(115, {}, "unattributed");
+  age(115, 0);
+  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(115), token: tok(115) }, tool_response: { content: [{ type: "text", text: unattributedText(C(115), "registry_away") }], structuredContent: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: C(115), forced: false, lapsedAt: past } } });
+  assert(stateOf(115)?.expiresAt === past, "…and a failure's facts, handed in tool_response, give the lapse the words don't");
   // Another tool's failure, or a claim call's failure that is no refusal (an interrupt, a transport fault): nothing marked, and what is due still renewed.
   await agentFailure("renew_claim", { id: C(112), token: tok(112) }, "MCP error -32001: Request timed out");
   await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "false" }, error: "Exit code 1", is_interrupt: false });

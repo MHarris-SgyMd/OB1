@@ -2858,8 +2858,8 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 // the hook is the backstop. What the agent must hear, it leaves beside the token
 // file: `<id>.ended.json` when the claim ended, `<id>.blocked.json` when another
 // claim covered its work, at a renewal of the hook's or the agent's own (read
-// from the claims hook's PostToolUse and PostToolUseFailure), or while it lapsed — checked before the
-// hook revives a claim it knows lapsed (lapseCheck).
+// from the claims hook's PostToolUse and PostToolUseFailure), or while it
+// lapsed — checked before the hook revives a claim it knows lapsed (lapseCheck).
 
 export const CLAIMS_DIRNAME = ".work-claims";
 const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
@@ -3258,7 +3258,7 @@ function noteAgentClaimCall(hook, brains) {
   }
   // CLAIM_UNATTRIBUTED on its own lapsed claim (SMD-3807): the lapse recorded, and the claim made due, so this run's
   // renewal checks the claims made since at once, as the hook's own renewal does (review pass 1).
-  const lapsedAt = unattributedLapse(resultFacts(hook.tool_response), text, f.claim.id);
+  const lapsedAt = unattributedLapse(resultFacts(event === "PostToolUseFailure" ? hook.error ?? hook.tool_response : hook.tool_response), text, f.claim.id);
   if (lapsedAt) {
     const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "made due, so the hook's renewal checks the claims made or renewed on its work since" : "its token file names no ticket, so the claims made since are not checked"}`;
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: 0, expiresAt: lapsedAt, last: line });
@@ -3502,7 +3502,7 @@ export async function main(argv) {
     if (has(args, "--claims")) {
       if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
       for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }
-      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key. It replaces a claims hook pasted before 1.7.3, which took no PostToolUseFailure and so never saw the agent's own refused claim calls (SMD-3874).`);
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key. A claims hook pasted before 1.7.3 has no PostToolUseFailure entry, so it never saw the agent's own refused claim calls (SMD-3874): add that entry, or replace all three if the printed command differs from yours.`);
       console.log(JSON.stringify(claimsHookJson(), null, 2));
       return 0;
     }
