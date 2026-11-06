@@ -726,8 +726,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /**
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps: the sleep
    * scheduler's, which also sets extraction to the newer work while the judge waits (SMD-3008), or this follower's own
-   * (SMD-2905). The schedule carries on as extract's does; an answer polls again at once; a refusal ends the
-   * follower, exit 2.
+   * (SMD-2905). The schedule carries on waitOutProvider's rules, counting pairs answered and thoughts recorded failed
+   * (a thought with no candidate finishes without a call); an answer polls again at once; a refusal ends the
+   * follower, exit 2, its remedy naming the tier when the tier's probe was refused.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const back = await waitOutProvider({

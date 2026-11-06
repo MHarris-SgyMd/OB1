@@ -2555,9 +2555,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const waitForProvider = async (): Promise<void> => {
     if (!FOLLOW || outage.reason === null || stopping || configError !== null) return;
     await stamper?.stamp("failed");
-    // The probe's schedule carried across outages that come back at once, nothing settled between (waitOutProvider:
-    // review pass 2, every 5 s for as long as it lasted; pass 3, a limit some rows get past starts over; pass 4, a
-    // row recorded failed is settled too); a refusal — a key revoked while it was away — the request's (pass 3).
+    // The carry, the refusal and the poll at once are waitOutProvider's (SMD-2679 PR 4a-2b's rules): this wait counts
+    // thoughts finished or recorded failed, one call each.
     const subject = probeGate.allowed ? probeSubject : outageSubject ?? probeSubject;
     const waited = waitOutProvider({
       who: "the embedding provider",

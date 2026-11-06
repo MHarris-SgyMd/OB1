@@ -4913,6 +4913,8 @@ if (want("10")) {
   let probeRefuses = false;
   /** The thoughts of the calls an outage turned away (SMD-2636 PR 2, review pass 2): whose call met it. */
   const downPrompts: string[] = [];
+  /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
+  let probeHangs = false;
   /** While above zero, the next calls answer 400 naming the answer budget, as an endpoint that refuses `max_tokens` does (extract's maxTokensFatal). */
   let refuseBudget = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
@@ -4931,6 +4933,8 @@ if (want("10")) {
       modelsNamed.push(body.model ?? "");
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
       if (isProbe) probesAsked++;
+      // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
+      if (isProbe && probeHangs) return neverAnswers();
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (!isProbe) downPrompts.push(body.messages?.find((m) => m.role === "user")?.content ?? "");
         if (down === "hang") return neverAnswers();
@@ -5718,7 +5722,7 @@ if (want("10")) {
       // Its second outage came back within the window, nothing settled between: the probe's schedule carried on from
       // the first's, as re-embed's does (SMD-2636 PR 2).
       const run429Waits = lines.slice(outagesBefore).filter((l) => /^ {2}the provider is not answering \(/.test(l));
-      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
+      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
              `…its second outage carries the first's probe schedule on, nothing settled between (SMD-2636 PR 2; ${run429Waits.map((l) => l.slice(-140)).join(" | ")})`);
 
       // The streak decides the suspect, not its last error (review pass 5, walkthrough; the subject sweep's streakPoison):
@@ -5789,8 +5793,9 @@ if (want("10")) {
   }
 
   // SMD-2636 PR 2: after the provider answers a wait the follower polls again at once, not after its interval
-  // (re-embed's rule): one thought whose call and three pauses meet a 429, the interval 10 s — extracted within 3 s of
-  // the answer, where an interval first took 10. Stopped at 60 s if it runs on.
+  // (re-embed's rule): one thought whose call and three pauses meet a 429 in a pass after an idle one, the interval 8 s
+  // — extracted within 3 s of the answer, where an interval first took 8 (review pass 4, mutant: an outage in the
+  // first pass held nothing of the loop's reset). Stopped at 60 s if it runs on.
   {
     const restorePauses = shortenPauses();
     const restoreOutage = shortenOutage();
@@ -5803,13 +5808,16 @@ if (want("10")) {
     let answeredAt = 0;
     let doneAt = 0;
     try {
+      const startProbes = probes;
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 8, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
+      await pollUntil(async () => probes > startProbes, 10_000);
+      await Bun.sleep(500);
       answer429 = 4;
       soon = await seed("Ulla timed the poll after the provider came back.");
-      const running = runExtract({ url: URL_!, env, workers: 1, follow: 10, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soon}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
       // Once: the interval comes back after the poll at once — a thought seeded a second later, the at-once pass over,
-      // waits for the next pass, 10 s on
+      // waits for the next pass, 8 s on
       // (review pass 2, mutant: a reset dropped polled without end).
       await Bun.sleep(1_000);
       later = await seed("Ulla checked the interval came back after the poll.");
@@ -5824,8 +5832,49 @@ if (want("10")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus === "pending",
-           `a follower polls again at once after the provider answers a wait, not after its 10 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a follower polls again at once after the provider answers a wait, not after its 8 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of [soon, later]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 2, review pass 4: a stop while the wait's probe hangs ends the follower at once — the caller's stop
+  // reaches the wait's probe through extract's wrapper — not after the probe's own timeout (30 s here). Stopped at
+  // 60 s if it runs on.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 60_000);
+    let hungNote = "";
+    let waited = false;
+    let code = -1;
+    let stoppedInMs = -1;
+    try {
+      const startProbes = probes;
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 30, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      await pollUntil(async () => probes > startProbes, 10_000);
+      await Bun.sleep(500);
+      down = "503";
+      outage.arm(1);
+      probeHangs = true;
+      hungNote = await seed("Rosa watched the probe hang while the provider was down.");
+      waited = await pollUntil(async () => lines.some((l) => /^ {2}the provider is not answering \(/.test(l)), 20_000);
+      // The wait's first probe goes at 1 s and hangs from then.
+      await Bun.sleep(2_500);
+      const stopAt = Date.now();
+      ac.abort();
+      code = await running;
+      stoppedInMs = Date.now() - stopAt;
+    } finally {
+      clearTimeout(backstop);
+      probeHangs = false;
+      outage.clear();
+      restoreOutage();
+      restorePauses();
+    }
+    assert(waited && code === 0 && stoppedInMs >= 0 && stoppedInMs < 3_000,
+           `a stop while the wait's probe hangs ends the follower at once, not at the probe's 30 s timeout (SMD-2636 PR 2, review pass 4; waited ${waited}, exit ${code} ${stoppedInMs} ms after the stop)`);
+    if (hungNote) await sql`SELECT delete_thought(${hungNote}::uuid, NULL::jsonb)`;
   }
 
   // A follower whose provider stays down (SMD-2261's heartbeat under
@@ -15090,6 +15139,8 @@ if (want("16")) {
   let judgeProbeRefuses = false;
   /** The prompts of the calls an outage turned away (SMD-2636 PR 2, review pass 3): whose call met it. */
   const judgeDownPrompts: string[] = [];
+  /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
+  let judgeProbeHangs = false;
   /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
   let judge400TimedOut = 0;
   /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
@@ -15112,6 +15163,8 @@ if (want("16")) {
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
+      if (isProbe && judgeProbeHangs) return neverAnswers();
       // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599); a call's thoughts are kept, whose call met it (SMD-2636 PR 2, review pass 3).
       if (judgeOutage.down(isProbe)) {
         if (!isProbe) judgeDownPrompts.push((body.messages ?? []).map((m) => m.content).join("\n"));
@@ -16551,7 +16604,7 @@ if (want("16")) {
       assert(run429Status === "succeeded" && run429Outages >= 2 && judge429 === 0,
              `one pair meeting a 429 past the pauses twice in a row, its second right after the probe answered, is judged, not failed as its own (${run429Status}, ${run429Outages} outage(s), ${judge429} 429s left)`);
       const run429Waits = lines.slice(outagesBefore).filter((l) => /^ {2}the provider is not answering \(/.test(l));
-      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
+      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
              `…its second outage carries the first's probe schedule on, nothing settled between (SMD-2636 PR 2; ${run429Waits.map((l) => l.slice(-140)).join(" | ")})`);
 
       // A 400 whose words say "timed out" is no outage followerFault reads: under --follow it stays the pair's, probed
@@ -16635,7 +16688,8 @@ if (want("16")) {
   }
 
   // SMD-2636 PR 2: as [10]'s — after the judge answers a wait the follower polls again at once: one pair whose call
-  // and three pauses meet a 429, the interval 10 s, judged within 3 s of the answer. Stopped at 60 s if it runs on.
+  // and three pauses meet a 429 in a pass after an idle one, the interval 8 s, judged within 3 s of the answer (review
+  // pass 4). Stopped at 60 s if it runs on.
   {
     const restorePauses = shortenPauses();
     const restoreOutage = shortenOutage();
@@ -16647,10 +16701,13 @@ if (want("16")) {
     let answeredAt = 0;
     let doneAt = 0;
     try {
+      const startJudgeProbes = judgeProbes;
+      const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 8, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      await Bun.sleep(500);
       soonSeeds.push(await seed("The poll log names the judge's old interval.", 72, 3, ["poll-log"]));
       judge429 = 4;
       soonSeeds.push(await seed("The poll log names the judge's new interval.", 72, 0, ["poll-log"]));
-      const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 10, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soonSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
       // Once, as [10]'s: a pair seeded now waits for the next pass (review pass 2, mutant).
@@ -16667,8 +16724,48 @@ if (want("16")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus !== "succeeded" && laterStatus !== "failed",
-           `a consolidate follower polls again at once after the judge answers a wait, not after its 10 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a consolidate follower polls again at once after the judge answers a wait, not after its 8 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of soonSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 2, review pass 4: as [10]'s — a stop while the wait's probe hangs ends the consolidate follower at once,
+  // not after the probe's own timeout (30 s here). Stopped at 60 s if it runs on.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 60_000);
+    const hungSeeds: string[] = [];
+    let waited = false;
+    let code = -1;
+    let stoppedInMs = -1;
+    try {
+      const startJudgeProbes = judgeProbes;
+      const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 30, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      await Bun.sleep(500);
+      judgeDown = "503";
+      judgeOutage.arm(1);
+      judgeProbeHangs = true;
+      hungSeeds.push(await seed("The hang log names the judge's old probe.", 73, 3, ["hang-log"]));
+      hungSeeds.push(await seed("The hang log names the judge's hung probe.", 73, 0, ["hang-log"]));
+      waited = await pollUntil(async () => lines.some((l) => /^ {2}the provider is not answering \(/.test(l)), 20_000);
+      await Bun.sleep(2_500);
+      const stopAt = Date.now();
+      ac.abort();
+      code = await running;
+      stoppedInMs = Date.now() - stopAt;
+    } finally {
+      clearTimeout(backstop);
+      judgeProbeHangs = false;
+      judgeOutage.clear();
+      restoreOutage();
+      restorePauses();
+    }
+    assert(waited && code === 0 && stoppedInMs >= 0 && stoppedInMs < 3_000,
+           `a stop while the wait's probe hangs ends the consolidate follower at once, not at the probe's 30 s timeout (SMD-2636 PR 2, review pass 4; waited ${waited}, exit ${code} ${stoppedInMs} ms after the stop)`);
+    for (const id of hungSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —

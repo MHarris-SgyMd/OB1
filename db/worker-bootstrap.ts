@@ -702,11 +702,11 @@ export class ProviderOutage {
     return "outage";
   }
 
-  /** Where the last outage's probe schedule ended, and the caller's count of work got past the provider when it did: resumeFrom's. */
+  /** Where the last outage's probe schedule ended, and the caller's count of work that got past the provider when it did: resumeFrom's. */
   private reached = 0;
   private settledAtEnd = -1;
 
-  /** A probe answered — at step `reached` of its schedule, the caller's count of work got past the provider at `settled` (resumeFrom's; waitOutProvider passes both). */
+  /** A probe answered — at step `reached` of its schedule, the caller's count of work that got past the provider at `settled` (resumeFrom's; waitOutProvider passes both). */
   end(reached = 0, settled = -1): void {
     this.reason = null;
     this.endedAt = this.now();
@@ -921,11 +921,11 @@ export async function followedPass<C>(o: {
 /** The parenthesis an outage's line adds when its schedule carries on from the last one's. */
 const CARRIED_NOTE = " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)";
 /** The same for a follower that pauses before an outage (extract's, consolidate's): its window takes in the pauses. */
-const CARRIED_NOTE_PAUSED = " (back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on)";
+const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on)";
 
 /**
  * A follower's wait for its provider after a pass a worker halted on the provider's outage (SMD-2599; one copy for
- * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, said through a
+ * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, stamped through the
  * caller's stamper's providerWait while it lasts (SMD-2905), and probed on outageWait's schedule until a probe
  * settles — anything but out or missing.
  * - **The schedule carries** (ProviderOutage.resumeFrom): a wait beginning within a minute and a poll of the last
@@ -942,15 +942,15 @@ const CARRIED_NOTE_PAUSED = " (back within a minute, a poll and its pauses of it
  *   provider back: said, in the tier's name when its probe met it, and returned with whether it did, for the
  *   caller's follower to stop on, exit 2, nothing marked failed.
  * - **Stopped:** null, a stop ending the wait.
- * `calls` is what each probe calls, as the line says it: "m at b for one token".
  */
 export async function waitOutProvider(o: {
   /** The provider in the lines: "the provider", "the embedding provider". */
   who: string;
+  /** What each probe calls, as the line says it: "m at b for one token". */
   calls: string;
   outage: ProviderOutage;
   probe: (wake: AbortSignal) => Promise<Probe>;
-  /** The work that got past the provider so far, counted only up: thoughts finished or recorded failed (re-embed's, one call each), extract's windows of a long thought answered and kept too, consolidate's pairs answered (a malformed answer among them) and thoughts recorded failed. A carry needs it unmoved since the last answer. */
+  /** The caller's count of work that got past the provider, counted only up (each worker's docblock says what it counts). */
   settled: () => number;
   /** The follower's poll, in seconds: the carry's window is a minute and one of these. */
   pollS: number;

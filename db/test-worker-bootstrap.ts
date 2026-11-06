@@ -669,7 +669,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     o.begin("429 limited", "t3");
     lines.length = 0;
     const carried = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's carried") }));
-    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(lines[0] ?? "")
+    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on\)$/.test(lines[0] ?? "")
       && /^out {3}the provider answers again after 20 s; polling resumes$/.test(lines[1] ?? ""),
       `waitOutProvider: an outage back within the window, nothing settled, carries the last schedule on, said and slept (${lines.join(" | ").slice(-200)})`);
     // A third, nothing settled still: on from the carried wait's step, not the first one's (review pass 1, mutant).
@@ -704,6 +704,19 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     ok(byTier !== null && byTier !== "answered" && byTier.tier === true && byTier.refused === "not an ob1-jev/1 tier"
       && /^err {3}the decision tier answers now, refusing the request itself \(not an ob1-jev\/1 tier\)/.test(lines[1] ?? ""),
       `waitOutProvider: a refusal the tier's probe met says so, in the tier's name (${JSON.stringify(byTier)}; ${lines[1]})`);
+    // The count recorded at the answer, not at the wait's start: work another worker settled while it waited moves it,
+    // and the next outage with it unmoved since carries (review pass 4, mutant).
+    {
+      const a = new ProviderOutage(() => clock);
+      let n = 0;
+      a.begin("429 limited");
+      await onTheClock(() => waitOutProvider({ ...base, settled: () => n, outage: a, probe: async () => { n = 5; return { state: "up" }; } }));
+      a.begin("429 limited");
+      lines.length = 0;
+      await onTheClock(() => waitOutProvider({ ...base, settled: () => n, outage: a, probe: scripted([{ state: "up" }], "waitOutProvider's count at the answer") }));
+      ok(/for one token after 10 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
+        `waitOutProvider: the count is recorded at the answer, so work settled during the wait does not start the next one over (${lines[0]})`);
+    }
     // A probe finding the model missing is still the outage: waited past, not an answer; the lines in the caller's
     // words (review pass 1, mutant: re-embed's "embedding provider" unheld).
     {
@@ -723,7 +736,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
         c.begin("429 limited");
         return waitOutProvider({ ...base, settled: () => 0, outage: c, probe: scripted([{ state: "up" }], "waitOutProvider's cap") });
       });
-      ok(/for one token every 5 min \(back within a minute, a poll and its pauses/.test(lines[0] ?? ""), `waitOutProvider: a carry at the cap says every 5 min (${lines[0]})`);
+      ok(/for one token every 5 min \(back within a minute and a poll of its last answer, its pauses aside/.test(lines[0] ?? ""), `waitOutProvider: a carry at the cap says every 5 min (${lines[0]})`);
     }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
@@ -740,7 +753,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       return lines[0] ?? "";
     };
     const edges = [await carriesAfter(65_000 + pausesMs - 1, true), await carriesAfter(65_000 + pausesMs, true), await carriesAfter(64_999, false), await carriesAfter(65_000, false)];
-    ok(/for one token after 10 s and then .*its pauses of its last answer/.test(edges[0]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[1])
+    ok(/for one token after 10 s and then .*of its last answer, its pauses aside/.test(edges[0]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[1])
       && /for one token after 10 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(edges[2]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[3]),
       `waitOutProvider: the carry's window is a minute and the poll, and the pauses for a follower that spends them first, strictly within (${edges.map((l) => l.slice(-110)).join(" | ")})`);
     // A stop ends the wait: null, the stamp off.
