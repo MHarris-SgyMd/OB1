@@ -2496,7 +2496,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // ends where the database answers; else they expire within --ttl (review pass 3).
   // All at once, and not when the run ended waiting for the database; one
   // line when they could not go (review pass 4).
-  if (after !== null) await unreturned.returnAtEnd(TTL, err);
+  if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
     `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller` : ""}, in ${elapsed.toFixed(1)}s ` +

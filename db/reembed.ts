@@ -1799,7 +1799,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const msg = (e as Error).message ?? "";
     return /Embedding width mismatch|returned no embedding/.test(msg);
   }
-  /** One embedding call of the probe's text, as a follower's start and its outage waits ask (worker-bootstrap.ts's Probe): up, out (no answer, a timeout, a 5xx or 429), missing (the model not served), or refused. */
+  /** One embedding call of the probe's text, as a follower's start and its outage waits ask (worker-bootstrap.ts's Probe): up, out (no answer, a timeout, a 408, a 429 or a 5xx), missing (the model not served), or refused. */
   const embedProbe = async (wake: AbortSignal, subject: EgressSubject = probeSubject): Promise<Probe> => {
     try {
       await embedder.getEmbedding("reembed.ts provider probe", subject, "document", wake);
@@ -2662,7 +2662,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   }
   // Leases a worker could not return, returned before the run ends — every end, a refusal's too (review pass 3) — where the database answers; else they expire (Unreturned.returnAtEnd).
-  await unreturned.returnAtEnd(TTL, err);
+  await unreturned.returnAtEnd(TTL, { err });
   // The record moved under the follower: it ends, refused — its row names the
   // kind, and preflight gives the remedy (SMD-2679).
   if (switchedTo !== null) {

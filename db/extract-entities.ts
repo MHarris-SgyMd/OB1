@@ -2154,7 +2154,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // ends where the database answers; else they expire within --ttl (review pass 3).
   // All at once, and not when the run ended waiting for the database; one
   // line when they could not go (review pass 4).
-  if (after !== null) await unreturned.returnAtEnd(TTL, err);
+  if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   // How the runaways were handled: a penalised same-model retry, an escalation to
   // the larger model (SMD-2000), or both. A count is named only when it happened,

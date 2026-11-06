@@ -14,7 +14,9 @@
  * least one call would go through — and never call process.exit or touch the
  * sql client. extract-entities.ts's, consolidate.ts's and reembed.ts's
  * importable run() turn the result into a return code (SMD-2304). Banners are
- * returned as strings for the caller to print with its own label and spacing.
+ * returned as strings for the caller to print with its own label and spacing;
+ * a follower's waits (SMD-2636) and throughOutage say their lines through the
+ * caller's writer, and run the statements the caller hands them.
  */
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
@@ -949,9 +951,9 @@ export class Unreturned {
   }
 
   /** All at once as the run ends; one line when any could not go, which expire within `ttlS` (review passes 3 and 4). */
-  async returnAtEnd(ttlS: number, err: (line: string) => void): Promise<void> {
+  async returnAtEnd(ttlS: number, writer: Pick<FollowerWriter, "err">): Promise<void> {
     if (this.workers.size === 0) return;
     const kept = (await Promise.all([...this.workers].map((w) => this.release(w).then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
-    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${ttlS} s`);
+    if (kept > 0) writer.err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${ttlS} s`);
   }
 }
