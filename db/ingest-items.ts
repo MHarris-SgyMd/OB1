@@ -325,7 +325,7 @@ export function parseItem(value: unknown, line: number, label: string = "--items
     for (const k of Object.keys(pr)) if (k !== "scale" && k !== "value" && k !== "due") return refuse(`priority.${k}`, k === "on" ? "a line states a priority on its own item; a ticket's is board-sync's" : "not a key of a priority — {scale, value, due?}");
     if (!isPriorityScale(pr.scale)) return refuse("priority.scale", `one of ${PRIORITY_SCALES.join(", ")} — the table the value is read by (server-portable/priority-scale.ts)`);
     if (pr.value !== null && pr.value !== undefined && (!isString(pr.value) || pr.value.length > 100)) return refuse("priority.value", "the source's own word, at most 100 characters, or null for none; a word the scale does not hold states nothing");
-    if (pr.due != null && (!isString(pr.due) || dueInstant(pr.due) === null)) return refuse("priority.due", "a date (2026-12-01, the start of that day in UTC) or a time with its offset, a calendar day that exists; omit it (or write null) when the item has none");
+    if (pr.due != null && (!isString(pr.due) || dueInstant(pr.due) === null)) return refuse("priority.due", "a date (2026-12-01, due by the end of that day: the next day's start in UTC) or a time with its offset, a calendar day that exists; omit it (or write null) when the item has none");
     priority = { scale: pr.scale, value: isString(pr.value) ? pr.value : null, ...(isString(pr.due) ? { due: pr.due } : {}) };
   }
 
