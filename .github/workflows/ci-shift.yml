@@ -14,10 +14,10 @@
 # could move a shift off the run that makes it (an older one is a warning). The
 # list, and those runs not read, get a late try, three more tries 60 s on, when
 # gh fails all three (SMD-3690): GitHub's 502s have come ~12 s apiece and
-# outlasted the three. A wide outage of such 502s, stubbed, ended in 566 s (40
-# runs read, 26 late tries), 670 s with the list's late try too; a run named
-# further back lists twice, ~2.5 min more. So the limit is 20 min, not 10: a
-# run cut off there would say nothing of why.
+# outlasted the three. A wide outage of such 502s, stubbed, ended in 566 s
+# (40 runs read, 26 late tries), 670 s with the list's late try too; a run
+# named further back lists twice, ~2.5 min more. So the limit is 20 min, not
+# 10: a run cut off there would say nothing of why.
 #
 # workflow_run reads this file from the default branch, so it runs from main's
 # copy, never a pull request's, and it is asked of main's push runs alone (a
