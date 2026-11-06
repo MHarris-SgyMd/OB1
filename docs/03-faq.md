@@ -16,11 +16,11 @@ https://your-host/mcp?key=your-access-key
 
 When adding the connector in Claude Desktop (Settings → Connectors) or ChatGPT (Settings → Apps & Connectors), paste that full URL. Set authentication to "none" — the key is already in the URL.
 
-### "ChatGPT disabled my memory when I added your brain"
+### "ChatGPT disabled my memory when I added my brain"
 
 This is an OpenAI requirement, not a bug. Enabling Developer Mode (required to add custom MCP connectors) disables ChatGPT's built-in Memory feature. Your brain replaces that functionality — and unlike ChatGPT's memory, it works across every AI client you connect, not just one.
 
-### "How do I migrate my ChatGPT memories/conversations into your brain?"
+### "How do I migrate my ChatGPT memories/conversations into my brain?"
 
 The Memory Migration prompt in the [companion prompts](02-companion-prompts.md) handles pulling out what your current AI already knows about you. But if you want your full ChatGPT conversation history, you'll need the data export: Settings → Data controls → Export data. You'll get JSON files of every conversation you've had.
 
@@ -40,7 +40,7 @@ As of May 2026, OpenAI's ChatGPT developer-mode docs are in beta and the plan/mo
 
 After updating your MCP server, rebuild and restart it, then refresh or recreate the ChatGPT app so ChatGPT pulls the new tool metadata. Expected behavior:
 
-- Full MCP-capable chats should expose the four core tools, plus ChatGPT compatibility aliases (`search` and `fetch`).
+- Full MCP-capable chats should expose every tool the key's scope allows, plus ChatGPT compatibility aliases (`search` and `fetch`).
 - Restricted Pro/read-only sessions may expose only read tools and hide or block `capture_thought`.
 - If a Pro chat exposes none of the tools, switch that chat to a thinking model, start a fresh chat, and make sure the Daemonic Brain app is selected in Developer Mode.
 
@@ -62,7 +62,7 @@ Quickest diagnosis: the server's log, then `bun preflight.ts` in `server-portabl
 
 ## Importing Data
 
-### "Can I import my Gmail into your brain?"
+### "Can I import my Gmail into my brain?"
 
 Yes. The [Email History Import](../recipes/email-history-import/) recipe connects to Gmail via OAuth, pulls emails by label and time window, strips noise (signatures, quoted replies, auto-generated messages), and loads each email as a thought with sender, subject, and date metadata. Takes about 30 minutes to set up. You need a Google Cloud project with Gmail API enabled.
 
@@ -108,7 +108,7 @@ For now, if that visual editing experience is how you think and work best, keep 
 
 ## Storage, Retrieval, and Architecture
 
-### "How do I store long-form content in your brain?"
+### "How do I store long-form content in my brain?"
 
 Two separate questions that keep getting mixed together.
 
@@ -170,7 +170,7 @@ A few years ago that's a junior backend engineer's first month. If you did it in
 
 That's the whole point of your brain. It's a foundation, not a finished product. The fact that you're looking at your own needs and extending the primitive means you get it.
 
-### "The agent's experience of pulling from your brain felt like 'remembering' vs 'reading someone else's notes'"
+### "The agent's experience of pulling from my brain felt like 'remembering' vs 'reading someone else's notes'"
 
 This is a precise description of what vector retrieval does differently from file reads. When an agent reads a file, it's processing someone else's organized structure. When it pulls from vector search, the retrieval is associative — finding what's relevant to the current context by meaning, not by where it was filed. That IS closer to how recall works.
 
@@ -213,7 +213,7 @@ If you get a JSON list of models back, the key is valid. If you get a 401, the k
 
 ### "My suite of agents keeps hitting per-minute rate limits"
 
-If you've built custom agents on top of your brain (or alongside it), rate limit issues with your AI provider are outside the scope of this guide. Your brain is a single MCP server, not a multi-agent system.
+If you've built custom agents on top of your brain (or alongside it), rate limit issues with your AI provider are outside the scope of this guide. Your brain is a memory service your agents call, not a multi-agent system.
 
 That said: check your usage tier in your provider's console, make sure your agents aren't all using Opus/Sonnet for tasks that Haiku could handle, and stagger requests rather than firing everything simultaneously.
 

@@ -2,7 +2,7 @@
 
 Your brain is built. Now make it work for you. These five prompts cover the full lifecycle: migrate your existing AI memories into the system, bring over your existing second brain, discover how it fits your specific workflow, build the daily capture habit, and run a weekly review that surfaces patterns you'd never catch on your own.
 
-**If you hit a wall:** We built a [FAQ](03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, we created dedicated AI assistants that know this system inside and out: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
+**If you hit a wall:** We built a [FAQ](03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, Open Brain's author created dedicated AI assistants that know its system inside and out — they answer for Open Brain's Supabase deployment, so where they say "Edge Function" or "Supabase secrets", read "the server" and `deploy/.env`: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
 
 **What's included:**
 
@@ -40,7 +40,7 @@ You are a memory migration assistant. Your job is to extract everything you know
 </role>
 
 <context-gathering>
-1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 12 for how to connect it to this AI client."
+1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 7 for how to connect it to this AI client."
 
 2. Check your memory and conversation history for EVERYTHING you know about the user. Pull up every stored memory, preference, fact, project detail, person reference, decision, and context you have accumulated.
 
@@ -108,7 +108,7 @@ You are a second brain migration assistant. Your job is to help the user move th
 </role>
 
 <context-gathering>
-1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 12 for how to connect it to this AI client."
+1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 7 for how to connect it to this AI client."
 
 2. Ask: "What system are you migrating from? Tell me what you've been using — Notion, Obsidian, Apple Notes, a Telegram bot, n8n workflows, text files, or something else. If it's a combination, list them all."
 
@@ -184,7 +184,7 @@ After all content from one system is migrated:
 <guardrails>
 - Never invent content. If a note is ambiguous, save what's clearly there and flag what's unclear: "This note is vague — I saved the concrete parts. Want me to skip the rest or save it as-is?"
 - Preserve dates when present. They matter for retrieval ("what was I thinking about in January?").
-- Preserve people's names. They're high-value metadata for the Daemonic Brain's extraction pipeline.
+- Preserve people's names. They're high-value metadata for your brain's extraction pipeline.
 - If the user pastes a huge amount of content (50+ notes), warn them about API costs: "This is a lot of content — roughly [X] thoughts to save. Each one costs a fraction of a cent for embedding + metadata extraction. The total migration will cost approximately $[estimate]. Want to proceed, or should we prioritize the most important notes?"
 - Don't save empty, structural, or template content. If a Notion page is just headers with no content, skip it.
 - If capture_thought returns errors, stop and report. Don't silently skip thoughts.
@@ -309,7 +309,7 @@ Format:
 
 **What you'll get:** Five starter patterns with explanations of why each one works.
 
-> **Why does formatting matter?** Your Daemonic Brain's MCP server uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
+> **Why does formatting matter?** Your brain's MCP server uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
 
 **Output feeds into:** N/A — reference tool.
 
@@ -465,4 +465,4 @@ Start with whichever source has the most signal for you. For most people, that's
 
 ---
 
-*Built by [Nate B. Jones](https://natesnewsletter.substack.com/) — companion to [Build Your Open Brain](01-getting-started.md).*
+*Built by [Nate B. Jones](https://natesnewsletter.substack.com/) — for Open Brain's guide; adapted for [Build Your Daemonic Brain](01-getting-started.md).*
