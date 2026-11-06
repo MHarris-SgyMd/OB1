@@ -330,6 +330,20 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   long.end();
   longClock += SUSPECT_WINDOW_MS * 4 + 1;
   ok(long.begin("500", "M") === "outage", "…and only to its own edge");
+  // A window read at each error, a caller's limit changing as it runs (consolidation's beside the sweep, SMD-3306 PR 6b-2's review pass 3).
+  let readClock = 0;
+  let windowNow = SUSPECT_WINDOW_MS;
+  const read = new ProviderOutage(() => readClock, () => windowNow);
+  read.begin("500", "R");
+  read.end();
+  windowNow = SUSPECT_WINDOW_MS * 4;
+  readClock = SUSPECT_WINDOW_MS * 4;
+  ok(read.begin("500", "R") === "thought", "a window read at the error holds a suspect past the window it had when the outage was made");
+  read.begin("500", "S");
+  read.end();
+  windowNow = SUSPECT_WINDOW_MS;
+  readClock += SUSPECT_WINDOW_MS + 1;
+  ok(read.begin("500", "S") === "outage", "…and its shorter window, read at the next error, ends at its own edge");
 
   // The schedule carried across outages that come back at once (SMD-2679 PR 4a-2b): from where the last ended, inside the window and nothing settled since.
   let resumeClock = 0;
