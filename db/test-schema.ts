@@ -202,17 +202,21 @@ function definedIn(file: string): string[] {
  * twelve restores lost 073, and [51]-[55] ran on 055's stamp bodies). 099 is
  * 088's update_thought with the review lock for an unlink (SMD-3045) and
  * carries 073 for the same reason; 088, no longer a last definer, needs no
- * entry.
+ * entry. 120 is 102's record_thought_relation and 111's validator, each with
+ * a thread's edge (SMD-3306), and carries both: 102 last states the comment
+ * on supersession_proposals [74] reads, and 111 last defines
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]).
  */
-const CARRIES: Record<string, string> = { "099": "073" };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
     grew = false;
     for (const f of [...latest]) {
-      const carried = CARRIES[f.slice(0, 3)];
-      const base = carried ? readdirSync(MIGRATIONS).find((m) => m.startsWith(`${carried}_`)) : undefined;
-      if (base && !latest.has(base)) { latest.add(base); grew = true; }
+      for (const carried of CARRIES[f.slice(0, 3)] ?? []) {
+        const base = readdirSync(MIGRATIONS).find((m) => m.startsWith(`${carried}_`));
+        if (base && !latest.has(base)) { latest.add(base); grew = true; }
+      }
       for (const g of definedIn(f)) { const d = lastDefinerOf(g); if (!latest.has(d)) { latest.add(d); grew = true; } }
     }
   }
@@ -7067,7 +7071,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("111") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102 and 111, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111 and 120, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -12569,7 +12573,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
   const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
   // What this section reads, as shipped: an earlier section's restore of rebuild_derived re-applies 067, whose
   // comment on supersession_proposals predates 084's. Until 110 a later restore of the validator re-applied 102 and
-  // put its comment back by chance; restoring the door re-applies 102, and its closure 110 for the validator.
+  // put its comment back by chance; restoring the door re-applies its last definer, 120, and the 102 it carries.
   await restoreShipped("record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
   const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
@@ -12584,8 +12588,9 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_target_idx') AS tgt`);
   assert(shape.fn && /AFTER DELETE ON (public\.)?thoughts FOR EACH ROW EXECUTE FUNCTION ob1_close_relations_to_deleted\(\)/.test(shape.close ?? "")
          && /AFTER DELETE ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(old\.kind = 'relation'::text\)\) EXECUTE FUNCTION ob1_drop_relation_derivation\(\)/.test(shape.drop ?? "")
-         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'relation'::text\) AND \(valid_until IS NULL\)\)/.test(shape.uniq ?? "") && /payload ->> 'target'/.test(shape.tgt ?? ""),
-    `084's write, the close after a target's delete, the lineage drop after a relation's, one active per pair, the target probe (${shape.close}; ${shape.drop}; ${shape.uniq})`);
+         // Since 120 the judge's alone: a thread's edge stands beside it under its own index ([108]).
+         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'relation'::text\) AND \(valid_until IS NULL\) AND \(NOT \(payload \? 'key'::text\)\)\)/.test(shape.uniq ?? "") && /payload ->> 'target'/.test(shape.tgt ?? ""),
+    `084's write, the close after a target's delete, the lineage drop after a relation's, one active per pair (the judge's since 120), the target probe (${shape.close}; ${shape.drop}; ${shape.uniq})`);
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
   const writeSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   assert(/ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:relation-lineage-with-its-artifact/.test(writeSrc),
@@ -12723,12 +12728,15 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
   const a1 = await thought("084: re-apply older"), b1 = await thought("084: re-apply newer");
   await db.query(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.6, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
   await reapply("084");
-  const [ra] = await q<{ trg: number; edges: number; chk: number }>(`SELECT
+  const [ra] = await q<{ trg: number; edges: number; chk: number; uniq: string | null }>(`SELECT
       (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('thoughts_close_relations', 'thought_facets_drop_relation_derivation')) AS trg,
       (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL) AS edges,
-      (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%') AS chk`);
-  assert(ra.trg === 2 && ra.edges === 1 && ra.chk === 1, `084 re-applied: one of each trigger, the edge standing, one CHECK on artifact_kind (${JSON.stringify(ra)})`);
-  // 084 re-applied holds 084's validator and door; 102 is their last definer, so the sections after run on its bodies.
+      (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%') AS chk,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq') AS uniq`);
+  // The index 120 made again with the judge's clause stays, IF NOT EXISTS ([108]).
+  assert(ra.trg === 2 && ra.edges === 1 && ra.chk === 1 && /NOT \(payload \? 'key'::text\)/.test(ra.uniq ?? ""),
+    `084 re-applied: one of each trigger, the edge standing, one CHECK on artifact_kind, 120's index kept (${JSON.stringify(ra)})`);
+  // 084 re-applied holds 084's validator and door; 120 is their last definer, so the sections after run on its bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15073,12 +15081,12 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   await db.exec(`DELETE FROM thoughts`);
   const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
 
-  // The shape: 102 the last definer of the door and, until 111 added the subject kind ([99]), of the validator; the
-  // sentinels, the comments.
+  // The shape: 102 the door's and the validator's until 111 added the subject kind ([99]) and 120 a thread's edge to
+  // both ([108]); the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("111") && lastDefinerOf("record_thought_relation").startsWith("102"),
-    `102 is the last definer of the door, 111 of the validator, which carries 102's relation branch (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && lastDefinerOf("record_thought_relation").startsWith("120"),
+    `120 is the last definer of the door and of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15143,6 +15151,8 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
   assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
     `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
+  // 102 re-applied holds 102's validator and door; 120 is their last definer, so the sections after run on its bodies.
+  await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -15760,10 +15770,10 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const KEY = "subject:qwen3.8:27b@p1";
 
   // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
-  // with a check of the ticket a thought is filed under ([101]); the sentinels; the trigger; the indexes; the CHECK; the
-  // comments.
+  // with a check of the ticket a thought is filed under ([101]), and the validator, which 120 carries with a thread's
+  // edge ([108]); the sentinels; the trigger; the indexes; the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "113" : "111";
+    const by = fn === "record_thought_subject" ? "113" : fn === "thought_facets_validate" ? "120" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
@@ -15884,8 +15894,9 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
-  // 111 re-applied alone put its door back: the shipped one is 113's, which the sections after read.
-  await restoreShipped("record_thought_subject");
+  // 111 re-applied alone put its door and its validator back: the shipped ones are 113's and 120's, which the sections
+  // after read.
+  await restoreShipped("record_thought_subject", "thought_facets_validate");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
@@ -16066,7 +16077,7 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   }
   assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
   const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
-  assert(/Migration 113 \/ SMD-3306/.test(comment), `close_thought_subject's comment names the migration (${comment.slice(0, 60)})`);
+  assert(/Migrations 113, 120 \/ SMD-3306/.test(comment), `close_thought_subject's comment names its migrations, 113 and 120, which restates it as a close re-links its thread ([108]) (${comment.slice(-60)})`);
 
   // Re-applied, nothing moves.
   let again: string;
@@ -17373,7 +17384,305 @@ console.log("\n[107] Migration 119: a due date alone is due by the end of that d
   assert(word === "22023" && (await epochOf("2027-04-01")) === Date.UTC(2027, 3, 2) / 1000, `a relative word is still refused 22023, and a re-apply is a no-op (${word})`);
 }
 
-console.log("\n[108] Migration 120: effective priority — the counted level, else one inherited from what an item serves (a parent ticket, a thought's ticket, an item's origin thought; less one a hop, two hops, only above unknown's 2), else unknown's 2; urgency in calendar days in UTC (+2 by the end of tomorrow, +1 by the end of the seventh day), overdue +3 in its place, none at level 0 or once settled; the due time stated, by reference one hop, or an open item's own; +0.5 or +1 for the open items it blocks, transitively to depth 3, never through a settled one; inferred statements passed over unless counted; each term named; weights by name, an unknown one refused; a re-apply a no-op (SMD-3667)");
+console.log("\n[108] Migration 120: a work thread's edges — the thoughts holding one subject key, in created_at order (ties by id), each linked to the one before it by a standing `evolves` relation of origin thread (the key named, judge key thread:v1, no confidence, its lineage at both fingerprints), kept by constraint triggers at the writer's commit as subjects land, close and go with their thought, a replace that keeps the key moving no edge; thread_relink closing what the thread no longer has and writing what it lacks, a dry run counting; the validator taking a thread's edge, refusing a malformed one, and saying the origin; the judge's edges under their own index, record_thought_relation reading them alone; a delete by a role that cannot make a re-link's writes leaving the gap a re-link heals; READ COMMITTED alone — a subject written above it refused at its commit, a delete above it committing, its gap left; a re-apply a no-op, an index of 084's shape made again (SMD-3306)");
+{
+  type Relink = { ok: boolean; key: string; thoughts: number; closed: number; added: number; dry: boolean };
+  type Edge = { id: string; newer: string; older: string; origin: string; relation: string; judge: string; key: string; conf: unknown };
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return { code: null as string | null, message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const file = files.find((f) => /^\d{3}_thread_edges\.sql$/.test(f)) ?? "no NNN_thread_edges.sql";
+  const RTR = "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)";
+  const RELINK = "thread_relink(text, boolean)";
+  await restoreShipped("thought_facets_validate", "record_thought_relation", "thread_relink", "record_thought_subject");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[108]%'`);
+
+  // Thoughts at a capture time of the section's choosing, and a name for each, so an edge reads as newer→older.
+  const name: Record<string, string> = {};
+  const thought = async (label: string, created: string) => {
+    const id = (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, created_at) VALUES ($1, '{}'::jsonb, $2::timestamptz) RETURNING id::text AS id`,
+      [`[108] ${label}, a note on its ticket`, created])).id;
+    name[id] = label;
+    return id;
+  };
+  const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
+  const JUDGE = "subject:qwen3.8:27b@p2";
+  const subject = async (id: string, key: string | null, judge = JUDGE) => (await one<{ r: { action: string; id?: string } }>(
+    `SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb) AS r`, [id, key, key === null ? null : "model", judge, await fp(id)])).r;
+  const edges = async (key: string) => q<Edge>(`SELECT id::text, thought_id::text AS newer, payload->>'target' AS older, payload->>'origin' AS origin, payload->>'relation' AS relation,
+      payload->>'judge_key' AS judge, payload->>'key' AS key, payload->'confidence' AS conf
+      FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1 ORDER BY created_at, id`, [key]);
+  const pairs = async (key: string) => (await edges(key)).map((e) => `${name[e.newer] ?? e.newer}→${name[e.older] ?? e.older}`).sort().join(" ");
+  const relink = async (key: string | null, dry = false) => (await one<{ r: Relink }>(`SELECT thread_relink($1, $2) AS r`, [key, dry])).r;
+  const lineage = async (facet: string) => q<{ inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown> }>(
+    `SELECT input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = $1::uuid`, [facet]);
+  const facet = async (id: string) => (await q<{ open: boolean }>(`SELECT valid_until IS NULL AS open FROM thought_facets WHERE id = $1::uuid`, [id]))[0] as { open: boolean } | undefined;
+  const K = "ticket:SMD-9108", K2 = "ticket:SMD-9109";
+
+  // The shape: 120 the last definer of its four functions, two of them 102's door and 111's validator carried; the
+  // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
+  // comments.
+  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink", "ob1_thread_relink_subject"]) {
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
+  }
+  const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_closed' AND tgrelid = 'thought_facets'::regclass) AS closed,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_deleted' AND tgrelid = 'thought_facets'::regclass) AS deleted,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq') AS judged,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_thread_uniq') AS thread,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_thread_key_idx') AS bykey`);
+  assert(/^CREATE CONSTRAINT TRIGGER thought_facets_thread_written AFTER INSERT ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(new\.kind = 'subject'::text\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.written ?? "")
+         && /^CREATE CONSTRAINT TRIGGER thought_facets_thread_closed AFTER UPDATE OF valid_until ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(\(new\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\) AND \(new\.valid_until IS NOT NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.closed ?? "")
+         && /^CREATE CONSTRAINT TRIGGER thought_facets_thread_deleted AFTER DELETE ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(\(old\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.deleted ?? ""),
+    `three constraint triggers, deferred to the writer's commit, keep the threads: a subject written, a standing subject closed, a standing subject deleted (${shape.written}; ${shape.closed}; ${shape.deleted})`);
+  assert(/UNIQUE INDEX/.test(shape.judged ?? "") && /AND \(NOT \(payload \? 'key'::text\)\)\)$/.test(shape.judged ?? "")
+         && /UNIQUE INDEX/.test(shape.thread ?? "") && /\(thought_id, \(\(payload ->> 'target'::text\)\), \(\(payload ->> 'key'::text\)\)\)/.test(shape.thread ?? "") && /AND \(payload \? 'key'::text\)\)$/.test(shape.thread ?? "")
+         && !/UNIQUE/.test(shape.bykey ?? "") && /\(\(payload ->> 'key'::text\)\)/.test(shape.bykey ?? "") && /AND \(payload \? 'key'::text\)\)$/.test(shape.bykey ?? ""),
+    `084's index keeps to the judge's edges; one standing thread's edge per pair and key; a thread's edges by key (${shape.judged}; ${shape.thread}; ${shape.bykey})`);
+  const validatorSrc = await src("thought_facets_validate()");
+  assert(/ob1:thread-edge/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:subject-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc)
+         && /ob1:thread-lineage-with-its-artifact/.test(await src(RELINK)) && /ob1:relation-distinct/.test(await src(RTR)) && /ob1:relation-lineage-with-its-artifact/.test(await src(RTR)),
+    "the sentinels: a thread's edge beside the relation's, the subject's and the link's in the validator, its lineage with it in the re-link, the door's two kept");
+  // The close's set difference is read once, materialized: left inline, under a misestimate of a key's rows the planner
+  // walks it again for every standing edge (372 ms a re-link at 8,000 thoughts, against 30 ms).
+  assert(/\bunwanted AS MATERIALIZED\b/.test(await src(RELINK)), "the re-link's close reads its set difference once, materialized");
+  const definers = await q<{ fn: string }>(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p WHERE p.prosecdef AND p.oid = ANY (ARRAY[$1::regprocedure, $2::regprocedure, 'ob1_thread_relink_subject()'::regprocedure, 'thought_facets_validate()'::regprocedure])`, [RELINK, RTR]);
+  assert(definers.length === 0, `SECURITY INVOKER throughout: the re-link runs as its caller, the triggers as the writer (${definers.map((d) => d.fn).join() || "none a definer"})`);
+  for (const sig of [RELINK, "ob1_thread_relink_subject()", RTR]) {
+    const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+    assert(/120/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 120 and the ticket`);
+  }
+  const validatorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? "";
+  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120\.$/.test(validatorComment),
+    `the validator's comment says what a thread's edge is and names its migrations, 120 the last (${validatorComment.slice(-60)})`);
+  const closeComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["close_thought_subject(uuid, uuid, text)"])).c ?? "";
+  const indexComments = await q<{ c: string | null }>(`SELECT obj_description(to_regclass(n), 'pg_class') AS c FROM unnest(ARRAY['thought_facets_relation_active_uniq', 'thought_facets_relation_thread_uniq', 'thought_facets_thread_key_idx']) n`);
+  const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
+  const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
+  assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (${closeComment.slice(-200)})`);
+
+  // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
+  const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
+  await subject(a, K);
+  await subject(c, K);
+  const [ca] = await edges(K);
+  const [caLineage] = await lineage(ca?.id ?? "");
+  assert((await pairs(K)) === "c→a" && ca?.origin === "thread" && ca?.relation === "evolves" && ca?.judge === "thread:v1" && ca?.key === K && ca?.conf === null
+         && caLineage?.inputs.join() === `${a},${c}` && caLineage?.fps.join() === `${await fp(a)},${await fp(c)}` && caLineage?.by === "thread:v1"
+         && caLineage?.recipe.deterministic === true && caLineage?.recipe.key === K && !("declared" in (caLineage?.recipe ?? {})),
+    `two thoughts on one key: the newer evolves the older — origin thread, judge key thread:v1, the key, no confidence — its lineage the older and the newer at their fingerprints, thread:v1, its recipe declared: deterministic, the key (${JSON.stringify(ca)}, ${JSON.stringify(caLineage)})`);
+  await subject(b, K);
+  const caAfter = await facet(ca?.id ?? "");
+  assert((await pairs(K)) === "b→a c→b" && caAfter?.open === false && (await lineage(ca?.id ?? "")).length === 1,
+    `a thought come between, by capture time, takes its place: b→a and c→b written, c→a closed and kept as history with its lineage (${await pairs(K)})`);
+  // A replace that keeps the key moves no edge: the close and the insert re-link at the commit, both reading the final
+  // subjects (between the two a re-link would bridge b, then un-bridge it: three closed edges and their lineage).
+  const everyEdge = async () => (await q<{ id: string }>(`SELECT id::text FROM thought_facets WHERE kind = 'relation' AND payload->>'key' = $1 ORDER BY id`, [K])).map((r) => r.id).join();
+  const relationRows = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'relation'`)).n;
+  const edgesBefore = await everyEdge(), rowsBefore = await relationRows();
+  const kept = await subject(b, K, "subject:qwen3.8:27b@p3");
+  assert(kept.action === "replaced" && (await everyEdge()) === edgesBefore && (await relationRows()) === rowsBefore && (await pairs(K)) === "b→a c→b",
+    `b's subject recorded again under another pass, the key the same: replaced, and the thread's edges — standing and closed — and their lineage as they were (${kept.action}, ${await pairs(K)})`);
+  const rekeyed = await subject(b, K2);
+  const [caAgain] = await edges(K);
+  assert(rekeyed.action === "replaced" && (await pairs(K)) === "c→a" && caAgain?.id !== ca?.id && (await facet(ca?.id ?? ""))?.open === false && (await pairs(K2)) === "",
+    `re-keyed away, b leaves the thread: c→a stands again as a new edge, the closed one never re-opened; b alone on its new key has none (${await pairs(K)}, ${caAgain?.id === ca?.id ? "re-opened" : "new"})`);
+  await subject(d, K2);
+  assert((await pairs(K2)) === "d→b", `a second thought on the new key links to b (${await pairs(K2)})`);
+  const bSubject = (await one<{ id: string }>(`SELECT id::text FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL`, [b])).id;
+  const closedB = (await one<{ r: { action: string } }>(`SELECT close_thought_subject($1::uuid, $2::uuid, $3) AS r`, [b, bSubject, await fp(b)])).r;
+  assert(closedB.action === "closed" && (await pairs(K2)) === "", `close_thought_subject closes b's subject, and its thread re-links: d alone, no edge (${closedB.action}, ${await pairs(K2)})`);
+  const closedD = await subject(d, null);
+  assert(closedD.action === "closed" && (await edges(K2)).length === 0, "the door's close of the last subject on the key leaves nothing standing under it");
+
+  // Capture time ties break by id.
+  const e = await thought("e", "2026-11-05T00:00:00Z"), f = await thought("f", "2026-11-05T00:00:00Z");
+  const K3 = "pr:9108";
+  await subject(f, K3);
+  await subject(e, K3);
+  const [lo, hi] = [e, f].sort();
+  const tie = await edges(K3);
+  assert(tie.length === 1 && tie[0].newer === hi && tie[0].older === lo, `two thoughts captured at one instant: the greater id is the newer (${name[tie[0]?.newer ?? ""]}→${name[tie[0]?.older ?? ""]})`);
+
+  // thread_relink by hand: a consistent thread, a gap healed (the dry run counting first), a stray closed, an orphan's
+  // edges closed, the key refused by name.
+  const steady = await relink(K, true);
+  const nullDry = (await one<{ r: Relink }>(`SELECT thread_relink($1, NULL) AS r`, [K])).r;
+  assert(steady.ok && steady.key === K && steady.thoughts === 2 && steady.closed === 0 && steady.added === 0 && steady.dry === true && nullDry.dry === false,
+    `a dry run on a linked thread: two thoughts, nothing to close or write; a NULL dry is a run, and says so (${JSON.stringify([steady, nullDry])})`);
+  await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [caAgain?.id]);
+  const gapDry = await relink(K, true);
+  const gapLeft = await pairs(K);
+  const healed = await relink(K);
+  const [healedEdge] = await edges(K);
+  const settled = await relink(K);
+  assert(gapDry.added === 1 && gapDry.closed === 0 && gapLeft === "" && healed.added === 1 && healed.dry === false && (await pairs(K)) === "c→a"
+         && (await lineage(healedEdge?.id ?? "")).length === 1 && settled.added === 0 && settled.closed === 0,
+    `an edge gone: the dry run counts one to write and writes nothing; the re-link writes it with its lineage; again, nothing (${JSON.stringify([gapDry, gapLeft, healed, settled])})`);
+  // A thread's edge written around the re-link: its origin the validator's word, whatever the payload said.
+  const stray = await one<{ id: string; origin: string }>(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb) RETURNING id::text, payload->>'origin' AS origin`,
+    [d, JSON.stringify({ relation: "evolves", target: a, judge_key: "thread:v1", key: K, origin: "judged" })]);
+  const judgedRaw = await one<{ id: string; origin: string }>(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb) RETURNING id::text, payload->>'origin' AS origin`,
+    [d, JSON.stringify({ relation: "related", target: c, judge_key: "consolidate:raw", confidence: 0.4, origin: "thread" })]);
+  const strayGone = await relink(K);
+  assert(stray.origin === "thread" && judgedRaw.origin === "judged" && strayGone.closed === 1 && strayGone.added === 0 && (await facet(stray.id))?.open === false
+         && (await facet(judgedRaw.id))?.open === true && (await pairs(K)) === "c→a",
+    `origin is the validator's word (a key: thread; none: judged); a thread's edge from a thought off the thread is closed by the re-link, and a judged edge is never its to touch (${JSON.stringify([stray.origin, judgedRaw.origin, strayGone])})`);
+  const K4 = "ticket:SMD-9110";
+  const orphan = await one<{ id: string }>(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb) RETURNING id::text`,
+    [c, JSON.stringify({ relation: "evolves", target: a, judge_key: "thread:v1", key: K4 })]);
+  const orphanGone = await relink(K4);
+  assert(orphanGone.thoughts === 0 && orphanGone.closed === 1 && (await facet(orphan.id))?.open === false && (await pairs(K)) === "c→a",
+    `the same pair under another key stands beside K's edge; a key no subject holds has its edges closed (${JSON.stringify(orphanGone)})`);
+  const badKey = await failure(`SELECT thread_relink('SMD-9108')`), noKey = await failure(`SELECT thread_relink(NULL)`);
+  assert(badKey.code === "22023" && /thread_relink: the key is ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words>, got 'SMD-9108'/.test(badKey.message) && noKey.code === "22023",
+    `a key outside the namespaces, or none, is refused by name as invalid_parameter_value (${badKey.code}: ${badKey.message.slice(0, 90)}; ${noKey.code})`);
+
+  // The validator: a thread's edge malformed, or a judge's naming a thread's judge key, refused as check violations.
+  const insert = (p: Record<string, unknown>) => failure(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb)`, [d, JSON.stringify(p)]);
+  const okEdge = { relation: "evolves", target: b, judge_key: "thread:v1", key: K };
+  const refusals = {
+    related: await insert({ ...okEdge, relation: "related" }), keyShape: await insert({ ...okEdge, key: "SMD-9108" }), keyType: await insert({ ...okEdge, key: 7 }),
+    judge: await insert({ ...okEdge, judge_key: "consolidate:x" }), conf: await insert({ ...okEdge, confidence: 0.5 }),
+    judgeOnly: await insert({ relation: "related", target: b, judge_key: "thread:v1", confidence: 0.5 }),
+  };
+  assert(Object.values(refusals).every((r) => r.code === "23514")
+         && /a thread's edge is evolves, the next thought on the thread going on from the one before it, got 'related'/.test(refusals.related.message)
+         && /a thread's edge names its thread by a subject key, ticket:<ID>/.test(refusals.keyShape.message) && /names its thread by a subject key/.test(refusals.keyType.message)
+         && /a thread's edge names the threads' version as its judge key, thread:<version>, got 'consolidate:x'/.test(refusals.judge.message)
+         && /a thread's edge carries no confidence/.test(refusals.conf.message) && /a judge key thread:<version> is a thread's edge's/.test(refusals.judgeOnly.message),
+    `the validator refuses a thread's edge that is not evolves, names no subject key, names another judge key or carries a confidence, and a judge's edge naming a thread's judge key (${Object.entries(refusals).map(([k, r]) => `${k} ${r.code}`).join(", ")})`);
+  const twice = await failure(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb)`, [c, JSON.stringify({ relation: "evolves", target: a, judge_key: "thread:v2", key: K })]);
+  const rewrite = await failure(`UPDATE thought_facets SET payload = payload || '{"key": "ticket:SMD-1"}'::jsonb WHERE id = $1::uuid`, [healedEdge?.id]);
+  assert(twice.code === "23505" && /thought_facets_relation_thread_uniq/.test(twice.message) && rewrite.code === "23514" && /written once and only closed/.test(rewrite.message),
+    `a second standing edge on one pair and key breaks the thread's index, whatever its version; a thread's edge is never rewritten (${twice.message.slice(0, 80)} | ${rewrite.message.slice(0, 60)})`);
+
+  // record_thought_relation reads the judge's edge alone: on c→a, where the thread's stands, it adds, keeps, replaces
+  // (to evolves, the thread's own word, under its own index) and closes its own, and refuses a thread's judge key.
+  const judge = async (relation: string | null, key = "consolidate:qwen@d4") => (await one<{ r: { action: string; id?: string } }>(
+    `SELECT record_thought_relation($1::uuid, $2::uuid, $3::text, $4::numeric, $5::text, NULL::uuid, 'fa', 'fc', NULL::jsonb) AS r`, [c, a, relation, relation === null ? null : 0.8, key])).r;
+  const onPair = async () => (await q<{ w: string }>(`SELECT (payload->>'relation') || '/' || (payload->>'origin') AS w FROM thought_facets
+      WHERE thought_id = $1::uuid AND kind = 'relation' AND valid_until IS NULL AND payload->>'target' = $2 ORDER BY 1`, [c, a])).map((r) => r.w).join(" ");
+  const said = [await judge("related"), await judge("related")];
+  const besideRelated = await onPair();
+  said.push(await judge("evolves"));
+  const besideEvolves = await onPair();
+  said.push(await judge(null), await judge(null));
+  const threadKept = healedEdge !== undefined && (await edges(K))[0]?.id === healedEdge.id;
+  const threadKey = await failure(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.8, 'thread:v1', NULL, 'fa', 'fc', NULL)`, [c, a]);
+  assert(JSON.stringify(said.map((r) => r.action)) === JSON.stringify(["added", "kept", "replaced", "closed", "none"])
+         && besideRelated === "evolves/thread related/judged" && besideEvolves === "evolves/judged evolves/thread" && threadKept && (await onPair()) === "evolves/thread"
+         && threadKey.code === "23514" && /a judge key thread:<version> is a thread's edge's/.test(threadKey.message),
+    `the judge's door on a pair the thread links: added, kept, replaced, closed, none — its own edge alone, the thread's standing beside it throughout, even as an evolves; a thread's judge key refused (${JSON.stringify([said.map((r) => r.action), besideRelated, besideEvolves, threadKept])})`);
+
+  // Deletes. As the owner: the middle thought goes, its neighbours link. As a role that cannot make a re-link's writes
+  // (capture and server, the server's): the delete stands, its edges closed, the gap the next re-link's to heal. Given
+  // the structure group too, the delete links them itself.
+  const trio = async (label: string, key: string, day: number) => {
+    const ids = [await thought(`${label}1`, `2026-11-${day}T01:00:00Z`), await thought(`${label}2`, `2026-11-${day}T02:00:00Z`), await thought(`${label}3`, `2026-11-${day}T03:00:00Z`)];
+    for (const id of ids) await subject(id, key);
+    return ids;
+  };
+  const K5 = "ticket:SMD-9111", K6 = "ticket:SMD-9112", K7 = "ticket:SMD-9113";
+  const [, g2] = await trio("g", K5, 10);
+  const g2Edge = (await edges(K5)).find((x) => x.newer === g2)?.id ?? "";
+  await db.query(`SELECT delete_thought($1::uuid)`, [g2]);
+  const toG2 = await q(`SELECT 1 FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'target' = $1`, [g2]);
+  assert((await pairs(K5)) === "g3→g1" && toG2.length === 0 && (await lineage(g2Edge)).length === 0,
+    `the middle thought deleted: its neighbours link, no edge stands to it, its own edge and lineage go with it (${await pairs(K5)})`);
+  const ROLE = "ob1_test_threads";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server"] })]) await db.exec(st);
+  const asRole = async (id: string) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); await tx.query(`SELECT delete_thought($1::uuid)`, [id]); });
+      return { code: null as string | null, message: "" };
+    } catch (err) { return { code: String((err as { code?: string }).code ?? "?"), message: (err as Error).message.split("\n")[0] }; }
+  };
+  const [, h2] = await trio("h", K6, 11);
+  const asServer = await asRole(h2);
+  const gap = await pairs(K6);
+  const gapGone = (await q(`SELECT 1 FROM thoughts WHERE id = $1::uuid`, [h2])).length === 0;
+  const heal = await relink(K6);
+  assert(asServer.code === null && gapGone && gap === "" && heal.added === 1 && heal.closed === 0 && (await pairs(K6)) === "h3→h1",
+    `deleted by a role without INSERT on thought_facets: the delete stands, its edges closed, its neighbours unlinked until the key's next re-link writes h3→h1 (${asServer.code ?? "deleted"}: ${asServer.message.slice(0, 80)}; ${gap || "no edge"}; ${JSON.stringify(heal)})`);
+  for (const st of grantStatements(ROLE, { groups: ["structure"] })) await db.exec(st);
+  const [, i2] = await trio("i", K7, 12);
+  const asStructure = await asRole(i2);
+  assert(asStructure.code === null && (await pairs(K7)) === "i3→i1",
+    `granted the structure group, the same role's delete links the neighbours itself (${asStructure.code ?? "deleted"}: ${asStructure.message.slice(0, 80)}; ${await pairs(K7)})`);
+  // INSERT and UPDATE on derivations, a re-link's lineage writes, taken from that role in turn: its delete stands,
+  // never refused for a thread, the neighbours left to the next re-link. The delete path's other terms no delete can
+  // tell apart, each one a delete needs itself: without UPDATE on thoughts or SELECT on derivations even a raw DELETE
+  // is refused, and without UPDATE on thought_facets 084's close of the edges naming the thought.
+  const lackedRefused: string[] = [];
+  for (const [n, [priv, table]] of ([["INSERT", "derivations"], ["UPDATE", "derivations"]] as const).entries()) {
+    const key = `ticket:SMD-912${n}`;
+    const [, m2] = await trio(`m${n}-`, key, 14 + n);
+    await db.exec(`REVOKE ${priv} ON ${table} FROM ${ROLE}`);
+    const r = await asRole(m2);
+    for (const st of grantStatements(ROLE, { groups: ["capture", "server", "structure"] })) await db.exec(st);
+    const left = (await q(`SELECT 1 FROM thoughts WHERE id = $1::uuid`, [m2])).length;
+    const gapped = await pairs(key);
+    if (r.code !== null || left !== 0 || gapped !== "") lackedRefused.push(`${priv} on ${table}: ${r.code ?? "deleted"} ${r.message.slice(0, 80)} (${gapped || "no edge"})`);
+  }
+  assert(lackedRefused.length === 0,
+    `without INSERT or UPDATE on derivations, the role's delete stands and leaves its neighbours to the next re-link, never refused for a thread (${lackedRefused.join("; ") || "each"})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // READ COMMITTED alone (115's rule): above it the re-link's reads would see a snapshot taken before the key's lock.
+  // A subject written under REPEATABLE READ is refused at its commit, written nowhere; a delete under it commits, its
+  // re-link skipped (a delete is never refused for a thread), the gap the next re-link's; a direct call is refused.
+  const K8 = "ticket:SMD-9114";
+  const [, k2] = await trio("k", K8, 13);
+  const k4 = await thought("k4", "2026-11-13T04:00:00Z");
+  const underRepeatable = async (sql: string, params: unknown[]) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return { code: null as string | null, message: "" };
+    } catch (err) { return { code: String((err as { code?: string }).code ?? "?"), message: (err as Error).message.split("\n")[0] }; }
+  };
+  const rrWrite = await underRepeatable(`SELECT record_thought_subject($1::uuid, $2::text, 'model', $3::text, NULL::uuid, $4::text, NULL::jsonb)`, [k4, K8, JUDGE, await fp(k4)]);
+  const k4Subject = await q(`SELECT 1 FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject'`, [k4]);
+  assert(rrWrite.code === "0A000" && /thread_relink must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(rrWrite.message) && k4Subject.length === 0
+         && (await pairs(K8)) === "k2→k1 k3→k2",
+    `a subject written under REPEATABLE READ is refused at its commit, by name, and written nowhere (${rrWrite.code}: ${rrWrite.message.slice(0, 90)})`);
+  const rrDelete = await underRepeatable(`SELECT delete_thought($1::uuid)`, [k2]);
+  const rrGap = await pairs(K8);
+  const rrHealed = await relink(K8);
+  assert(rrDelete.code === null && rrGap === "" && rrHealed.added === 1 && (await pairs(K8)) === "k3→k1",
+    `a delete under REPEATABLE READ commits, its re-link skipped, its neighbours unlinked until the next re-link writes k3→k1 (${rrDelete.code ?? "deleted"}; ${rrGap || "no edge"}; ${JSON.stringify(rrHealed)})`);
+  const rrDirect = await underRepeatable(`SELECT thread_relink($1, true)`, [K8]);
+  assert(rrDirect.code === "0A000" && /thread_relink must run under READ COMMITTED/.test(rrDirect.message), `thread_relink called under REPEATABLE READ is refused, a dry run too (${rrDirect.code})`);
+
+  // Re-applied, 120 changes nothing; on a brain whose index is 084's still, 120 makes it again with the judge's clause.
+  // (084 re-applied keeps 120's index: [74], before any subject's lineage row, which 084's CHECK would refuse.)
+  const census = async () => one<{ edges: number; all: number; fns: number; trg: number }>(`SELECT
+      (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key') AS edges,
+      (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation') AS all,
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('thread_relink', 'ob1_thread_relink_subject')) AS fns,
+      (SELECT count(*)::int FROM pg_trigger WHERE tgname LIKE 'thought_facets_thread_%') AS trg`);
+  const before = await census();
+  await reapply(file);
+  const after = await census();
+  assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 2 && after.trg === 3, `120 applied again moves nothing: ${JSON.stringify(after)}`);
+  await db.exec(`DROP INDEX thought_facets_relation_active_uniq`);
+  await db.exec(`CREATE UNIQUE INDEX thought_facets_relation_active_uniq ON thought_facets (thought_id, (payload->>'target')) WHERE kind = 'relation' AND valid_until IS NULL`);
+  await reapply(file);
+  const remade = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq'`)).d;
+  assert(/NOT \(payload \? 'key'::text\)/.test(remade) && JSON.stringify(await census()) === JSON.stringify(before),
+    `an index of 084's shape is made again with the judge's clause, the edges standing (${remade})`);
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[108]%'`);
+}
+
+console.log("\n[109] Migration 122: effective priority — the counted level, else one inherited from what an item serves (a parent ticket, a thought's ticket, an item's origin thought; less one a hop, two hops, only above unknown's 2), else unknown's 2; urgency in calendar days in UTC (+2 by the end of tomorrow, +1 by the end of the seventh day), overdue +3 in its place, none at level 0 or once settled; the due time stated, by reference one hop, or an open item's own; +0.5 or +1 for the open items it blocks, transitively to depth 3, never through a settled one; inferred statements passed over unless counted; each term named; weights by name, an unknown one refused; a re-apply a no-op (SMD-3667)");
 {
   const file = files.find((f) => /^\d{3}_effective_priority\.sql$/.test(f)) ?? "no NNN_effective_priority.sql";
   await reapply(file.slice(0, 4));
@@ -17395,7 +17704,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   };
   // A ticket as board-sync writes it (053's source row and links), open unless a status type is given.
   const ticket = async (issue: string, status_type = "backlog", links: [string, string][] = []) => {
-    const content = `[108] ${issue}`;
+    const content = `[109] ${issue}`;
     const id = await thoughtAs(content, { source: "linear", issue, status: status_type, status_type, linear_updated_at: "2027-03-01T00:00:00Z" });
     await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
     if (links.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
@@ -17404,7 +17713,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const put = async (kind: string, key: string, level: number, o: { due?: string; notBefore?: string; ref?: [string, string]; inferred?: boolean; actor?: object } = {}) => {
     const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7, NULL, $8, $9::jsonb) AS r`,
       [kind, key, level, o.due ?? null, o.notBefore ?? null, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.inferred ?? false, JSON.stringify(o.actor ?? OP)])).rows[0].r;
-    if (r.outcome !== "asserted") throw new Error(`[108] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    if (r.outcome !== "asserted") throw new Error(`[109] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
   };
   const eff = async (items: [string, string][], weights: object | null = null) =>
     (await db.query<Row>(`SELECT * FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
@@ -17418,7 +17727,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
       WHERE s.nspname = 'public' AND p.proname IN ('effective_priority', 'ob1_priority_counted', 'ob1_item_settled', 'ob1_node_settled', 'ob1_item_serves', 'ob1_item_unblocks', 'ob1_ticket_row_of', 'ob1_ticket_rows', 'ob1_priority_subject', 'ob1_priority_open') ORDER BY 1`)).rows;
-  assert(fns.length === 10 && fns.every((f) => f.v === "s" && /Migration 120 \/ SMD-3667/.test(f.c ?? "")),
+  assert(fns.length === 10 && fns.every((f) => f.v === "s" && /Migration 122 \/ SMD-3667/.test(f.c ?? "")),
     `ten functions, each STABLE (one snapshot for the read) and commented (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
 
   // Urgency, the ticket's first Verify: a Medium due tomorrow passes a High with no date, and says why.
@@ -17481,7 +17790,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   // A link in a system that states no status (it does not gate) counts for nothing; in a gating system other than
   // Linear, a blocked item settled by its own status is not counted (ob1_node_settled through source_thought).
   const sourced = async (system: string, identity: string, meta: object, links: [string, string][] = []) => {
-    const id = await thoughtAs(`[108] ${system} ${identity}`, meta);
+    const id = await thoughtAs(`[109] ${system} ${identity}`, meta);
     await db.query(`SELECT record_thought_source($1::uuid, $2, $3, 'x', 'text/markdown')`, [id, system, identity]);
     if (links.length) await db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
     return id;
@@ -17499,7 +17808,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   assert(asThought?.unblocks === 3, `a ticket's row asked as a thought blocks what its ticket blocks, its linear source row starting the walk (${asThought?.unblocks})`);
   // A pre-053 row (no source row, metadata.issue alone) asked as a thought walks from its ticket: SMD-9741 is blocked by
   // SMD-9740, stated on 9741's side, so the row blocks one.
-  const pre053 = await thoughtAs("[108] SMD-9740, a row from before 053", { source: "linear", issue: "SMD-9740", status: "backlog", status_type: "backlog" });
+  const pre053 = await thoughtAs("[109] SMD-9740, a row from before 053", { source: "linear", issue: "SMD-9740", status: "backlog", status_type: "backlog" });
   await ticket("SMD-9741", "backlog", [["blocked_by", "SMD-9740"]]);
   const preRow = await one("thought", pre053);
   assert(preRow?.unblocks === 1, `a ticket's row with no source row, asked as a thought, blocks what its ticket blocks (${preRow?.unblocks})`);
@@ -17521,14 +17830,14 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   await ticket("SMD-9455"); await ticket("SMD-9456", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9457", "backlog", [["child_of", "SMD-9456"]]);
   await ticket("SMD-9458", "backlog", [["child_of", "SMD-9459"]]); await ticket("SMD-9459");
   await put("ticket", "SMD-9450", 4); await put("ticket", "SMD-9453", 1); await put("ticket", "SMD-9455", 5); await put("ticket", "SMD-9459", 1);
-  const about = await thoughtAs("[108] a note about SMD-9450", { ticket: "SMD-9450" });
-  const subjectOnly = await thoughtAs("[108] a note whose subject alone names SMD-9455");
-  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [108]"}'::jsonb)`, [subjectOnly]);
-  const aboutCritical = await thoughtAs("[108] a note about SMD-9455", { ticket: "SMD-9455" });
+  const about = await thoughtAs("[109] a note about SMD-9450", { ticket: "SMD-9450" });
+  const subjectOnly = await thoughtAs("[109] a note whose subject alone names SMD-9455");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [109]"}'::jsonb)`, [subjectOnly]);
+  const aboutCritical = await thoughtAs("[109] a note about SMD-9455", { ticket: "SMD-9455" });
   const opened = async (text: string, o: { thought?: string; due?: string } = {}) =>
     (await db.query<{ r: { outcome: string; item: { id: string } } }>(`SELECT open_item($1, NULL, $2, $3::uuid, NULL, false, $4::jsonb) AS r`, [text, o.due ?? null, o.thought ?? null, JSON.stringify(OP)])).rows[0].r.item.id;
-  const itemUnder = await opened("[108] a to-do from the note about SMD-9455", { thought: aboutCritical });
-  const itemUnderUrgent = await opened("[108] a to-do from the note about SMD-9450", { thought: about });
+  const itemUnder = await opened("[109] a to-do from the note about SMD-9455", { thought: aboutCritical });
+  const itemUnderUrgent = await opened("[109] a to-do from the note about SMD-9450", { thought: about });
   const inh = await eff([["ticket", "SMD-9451"], ["ticket", "SMD-9452"], ["ticket", "SMD-9453"], ["ticket", "SMD-9457"], ["thought", about], ["thought", subjectOnly], ["item", itemUnder], ["item", itemUnderUrgent], ["ticket", "SMD-9458"]]);
   const from = (r: Row | undefined) => r?.inherited_from ? `${r.inherited_from.kind}:${r.inherited_from.key}/${r.inherited_from.level}-${r.inherited_from.hops}` : "none";
   assert(Number(inh[0]?.effective) === 3 && inh[0]?.level === null && from(inh[0]) === "ticket:SMD-9450/4-1" && named(inh[0]) === "inherited=3",
@@ -17561,7 +17870,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   // A stating ticket one hop off stops the walk there: its Critical parent is not a candidate.
   await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
   await put("ticket", "SMD-9490", 4);
-  const stopped = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
+  const stopped = await one("thought", await thoughtAs("[109] a note about SMD-9490", { ticket: "SMD-9490" }));
   assert(from(stopped) === "ticket:SMD-9490/4-1" && Number(stopped?.effective) === 3, `the stating ticket one hop off is read (${from(stopped)})`);
   // A real tie between hops: SMD-9730's parents are SMD-9731 (no level, under SMD-9455's Critical: 3 at two hops), walked
   // first, and SMD-9732 (Urgent: 3 at one hop); the nearer wins (review pass 7: the row above never reached a two-hop one).
@@ -17588,7 +17897,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   await put("ticket", "SMD-9460", 3, { ref: ["ticket", "SMD-9461"] });
   await put("ticket", "SMD-9462", 3, { ref: ["ticket", "SMD-9460"] });
   await put("ticket", "SMD-9480", 2, { notBefore: "2027-03-20T00:00:00Z" });
-  const dueItem = await opened("[108] pay the water bill", { due: "2027-03-11" });
+  const dueItem = await opened("[109] pay the water bill", { due: "2027-03-11" });
   await ticket("SMD-9463");
   await put("ticket", "SMD-9463", 2, { ref: ["item", dueItem] });
   const refItem = await one("ticket", "SMD-9463");
@@ -17617,8 +17926,8 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   await put("thought", row9469, 2);
   await put("ticket", "SMD-9464", 2, { ref: ["thought", row9401] });
   await put("ticket", "SMD-9466", 2, { due: "2027-03-01T00:00:00Z" }); await put("ticket", "SMD-9467", 2, { ref: ["ticket", "SMD-9466"] });
-  const fromRow = await opened("[108] a to-do on the critical ticket's own row", { thought: row9455 });
-  const fromChildRow = await opened("[108] a to-do on a child ticket's own row", { thought: row9456 });
+  const fromRow = await opened("[109] a to-do on the critical ticket's own row", { thought: row9455 });
+  const fromChildRow = await opened("[109] a to-do on a child ticket's own row", { thought: row9456 });
   const pool = await eff([["thought", row9468], ["ticket", "SMD-9469"], ["item", fromRow], ["item", fromChildRow], ["ticket", "SMD-9464"], ["ticket", "SMD-9467"]], { count_inferred: true });
   assert(pool[0]?.level === 4 && pool[0]?.passed_over.some((a) => a.level === 1) && pool[1]?.level === 2 && Number(pool[1]?.effective) === 2
          && from(pool[2]) === "ticket:SMD-9455/5-1" && Number(pool[2]?.effective) === 4 && from(pool[3]) === "ticket:SMD-9455/5-2" && Number(pool[3]?.effective) === 3
@@ -17626,10 +17935,10 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `the operator's Urgent on a ticket beats an agent's inferred Low on its row, counted; a ticket reads its row's Medium; an item from a Critical ticket's row inherits 4 at one hop, from a child's row 3 at two; a reference to a ticket's row takes the ticket's due time; a reference to a completed release keeps its date, overdue (${pool.map((r) => `${r.effective}/${from(r)}/${r.due_from}`).join(" ")})`);
   // A row is mapped only in 115's upper-case form, so it is always found in its ticket's pool: a lower-case one reads
   // as itself, its statement kept. A linear source row whose identity is no ticket key falls through to metadata.issue.
-  const lower = await thoughtAs("[108] a hand-written row, lower-case", { source: "linear", issue: "smd-9700" });
+  const lower = await thoughtAs("[109] a hand-written row, lower-case", { source: "linear", issue: "smd-9700" });
   await put("thought", lower, 4);
   await ticket("SMD-9701");
-  const odd = await thoughtAs("[108] a linear row whose identity is no key", { source: "linear", issue: "SMD-9701" });
+  const odd = await thoughtAs("[109] a linear row whose identity is no key", { source: "linear", issue: "SMD-9701" });
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'not-a-key', 'x', 'text/markdown')`, [odd]);
   await put("ticket", "SMD-9701", 5);
   const [lw, od] = await eff([["thought", lower], ["thought", odd]]);
@@ -17638,7 +17947,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   // A row of one ticket is never a row of another: a thought whose linear identity is SMD-9703 but whose metadata names
   // SMD-9702 is SMD-9703's alone.
   await ticket("SMD-9702");
-  const twoNames = await thoughtAs("[108] a row whose identity and metadata name two tickets", { source: "linear", issue: "SMD-9702" });
+  const twoNames = await thoughtAs("[109] a row whose identity and metadata name two tickets", { source: "linear", issue: "SMD-9702" });
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9703', 'x', 'text/markdown')`, [twoNames]);
   await put("thought", twoNames, 5);
   const [t9702, tn] = await eff([["ticket", "SMD-9702"], ["thought", twoNames]]);
@@ -17653,8 +17962,8 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   assert(newest?.level === null && newest?.passed_over.length === 2 && newestCounted?.level === 2,
     `one maker's two statements across a ticket and its row: its newest is its stance (${newest?.level}, ${newest?.passed_over.length} passed over; counted ${newestCounted?.level})`);
   // A malformed metadata.ticket hides neither a valid issue nor a standing subject.
-  const badTicket = await thoughtAs("[108] a note with a ticket field that is no key", { ticket: "not a key" });
-  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [108]"}'::jsonb)`, [badTicket]);
+  const badTicket = await thoughtAs("[109] a note with a ticket field that is no key", { ticket: "not a key" });
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [109]"}'::jsonb)`, [badTicket]);
   const bad = await one("thought", badTicket);
   assert(from(bad) === "ticket:SMD-9455/5-1", `a malformed metadata.ticket falls through to the standing subject (${from(bad)})`);
 

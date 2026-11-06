@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini durable history capture via chrome.debugger
+ * Daemonic Brain Capture — Gemini durable history capture via chrome.debugger
  *
  * Phase B: attach chrome.debugger to https://gemini.google.com/* tabs, watch
  * for the batchexecute `rpcids=hNvQHb` request/response (Gemini's internal
@@ -71,8 +71,8 @@
   let geminiEnabled = true;
   let initialized = false;
 
-  const LOG = (msg, ...rest) => console.log(`[OB Gemini] ${msg}`, ...rest);
-  const ERR = (msg, ...rest) => console.error(`[OB Gemini] ${msg}`, ...rest);
+  const LOG = (msg, ...rest) => console.log(`[Daemonic Brain Gemini] ${msg}`, ...rest);
+  const ERR = (msg, ...rest) => console.error(`[Daemonic Brain Gemini] ${msg}`, ...rest);
 
   function isHistoryUrl(url) {
     return typeof url === 'string'

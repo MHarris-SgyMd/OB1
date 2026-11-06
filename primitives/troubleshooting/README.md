@@ -1,6 +1,6 @@
 # Common Troubleshooting
 
-Solutions for issues that come up across Open Brain's extensions, recipes and integrations. If your problem is specific to one (e.g., a particular table or tool), check its README instead. The extensions are plugins since SMD-2311, served by the brain's own servers; a recipe or integration server runs under `bun` beside them. Every server logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core (and every plugin's tools), the terminal the `bun` command runs in for a recipe or integration.
+Solutions for issues that come up across Daemonic Brain's extensions, recipes and integrations. If your problem is specific to one (e.g., a particular table or tool), check its README instead. The extensions are plugins since SMD-2311, served by the brain's own servers; a recipe or integration server runs under `bun` beside them. Every server logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core (and every plugin's tools), the terminal the `bun` command runs in for a recipe or integration.
 
 ## Connection Issues
 

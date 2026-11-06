@@ -1340,7 +1340,7 @@ export type PriorityAnswer = {
 export type PriorityRecord = { item: PriorityItem; exists: boolean; level: number | null; winner: PriorityAssertion | null; history: PriorityAssertion[] };
 
 /**
- * docs/priority.md's weights, as migration 120's effective_priority names them (SMD-3667). A read passes the ones it
+ * docs/priority.md's weights, as migration 122's effective_priority names them (SMD-3667). A read passes the ones it
  * overrides; the read's defaults stand for the rest (unknown 2, hop 1, hops 2, soon 2 by the end of soon_days 1, week 1
  * by the end of week_days 7, overdue 3, unblocks_one 0.5, unblocks_many 1 from unblocks_many_at 3, depth 3, cap 50,
  * count_inferred false).
@@ -1352,7 +1352,7 @@ export type PriorityWeights = {
 /** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from). */
 export type PriorityTerm = { term: "level" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
 /**
- * One item's effective priority (migration 120, SMD-3667): the order a ranking read uses and every term that made
+ * One item's effective priority (migration 122, SMD-3667): the order a ranking read uses and every term that made
  * it. `level` is the counted statement's (null: unknown, or inherited); `inheritedFrom` the item it inherits from, its
  * level and how many hops; `dueFrom` where the due time came from; `waiting`, a not_before still ahead; `passedOver`
  * every other open statement, inferred ones among them when they are not counted.
@@ -1389,7 +1389,7 @@ export class PriorityRefused extends Error {
 }
 export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "weight" | "other";
 
-/** Which argument a 22023 from 116 or 120 names, by its message's opening words (116's, 115's and 120's own wording, one rule each). */
+/** Which argument a 22023 from 116 or 122 names, by its message's opening words (116's, 115's and 122's own wording, one rule each). */
 export function priorityProblemOf(message: string): PriorityProblem {
   if (/^not an item kind\b/.test(message)) return "kind";
   if (/^not a (?:thought|entity|item) id\b|^not a ticket key\b/.test(message)) return "key";
@@ -1441,7 +1441,7 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
 const TERM_NAMES = new Set(["level", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
 const DUE_FROM = new Set(["stated", "due_ref", "item"]);
 
-/** One row of 120's effective_priority; a row that is not one throws, naming the call and nothing of the row. */
+/** One row of 122's effective_priority; a row that is not one throws, naming the call and nothing of the row. */
 export function normaliseEffectivePriority(r: unknown, what: string): EffectivePriority {
   const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
   const item = o ? priorityItemOf({ kind: o.item_kind, key: o.item_key }) : null;
@@ -2189,11 +2189,11 @@ export interface ThoughtStore {
   /** An item as 116 keys it (ob1_priority_item) and whether the brain holds it (ob1_priority_item_exists): what a refusal names. Throws PriorityRefused for a malformed item. */
   priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }>;
   /**
-   * Effective priority (migration 120, SMD-3667): effective_priority's rows for the items, in the order asked, an item
+   * Effective priority (migration 122, SMD-3667): effective_priority's rows for the items, in the order asked, an item
    * asked twice answered once — the counted level, else the inherited one, else unknown's; urgency from the due time
    * in calendar days in UTC; the open items it blocks; every term named. `weights` overrides docs/priority.md's by
    * name, and `now` pins the clock (an eval, a test). Throws PriorityRefused for a malformed item (`kind`, `key`) or
-   * weight (`weight`), or a clock that is no moment (`time`). A database before 120 throws.
+   * weight (`weight`), or a clock that is no moment (`time`). A database before 122 throws.
    */
   effectivePriority(items: { kind: string; key: string }[], opts?: { weights?: Partial<PriorityWeights>; now?: string }): Promise<EffectivePriority[]>;
   /**

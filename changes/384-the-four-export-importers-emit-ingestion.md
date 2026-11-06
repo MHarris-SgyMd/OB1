@@ -1,0 +1,134 @@
+# 384. The four export importers emit ingestion-contract items, so their rows carry a vector, the export's date and their source record (SMD-2493)
+
+**What changed.**
+- **The four importers are emitters.** `recipes/grok-export-import/import-grok.mjs`, `instagram-import/import-instagram.mjs`, `journals-blogger-import/import-blogger.mjs` and `x-twitter-import/import-x-twitter.mjs` keep their parsers and print one item per thought they made before, one JSON object per line. They hold no client (`compat/supabase-sql`), make no embedding call, read no environment, and print their progress on stderr.
+- **Identity.** Each item is `{system, key}` under the scope `<system>:export`. The systems are `grok`, `instagram`, `blogger` and `x`. The key is the export's own id where the thought is one record:
+  - a Grok conversation's id, from grok.com's nested shape (`conversation` and `responses[].response`) as from the flat one;
+  - a Blogger entry's Atom `<id>`;
+  - an Instagram DM's thread id, the digits its inbox folder ends in, which a rename of the other person does not move (the folder's name where it has none);
+  - an X DM's `conversationId`, or a Grok chat's `chatId`.
+
+  Each id is cleaned and trimmed, and one that is empty or too long gives way to a hash of the record as exported, as a record with no id does. An identity met twice is emitted once (the first file in name order wins), since two lines of one identity refuse the file.
+- **Tweets, comments and captions are one thought per calendar day (UTC).** The importers used to batch them twenty, fifty and thirty at a time. Each key tried (a hash of the members, then the first member) left re-exports duplicating rows: a member added or deleted before a batch shifted every batch after it, and each shifted batch landed as a new row beside the old, since the pipeline adds and updates and never removes. Two review passes measured it: one deleted tweet put 25 of 44 tweets, and one deleted comment 70 of 119 comments, into two rows. Now the key is the day of the members' dates (`tweets:2019-03-05`, `comments:2023-07-22`, `captions:2023-03-28`, and `…:undated` for members with no usable date). A record added or deleted changes only its day's row, which updates in place. A day every one of whose members was deleted emits nothing, so its row keeps its last text. Within a day the members are ordered by date, then by id (or the member as exported), so the bytes are the same however the export lists them. (A third pass measured a calendar month as too big: a 3,000-tweet month was one 650 KB row, which a search hit returned whole and a re-export re-embedded whole, 160 provider calls to change 100 tweets. The maintainer chose the day.)
+- **A thought's text holds at most 100,000 characters, plus its short header.** A longer conversation (a Grok conversation, an X or Instagram DM thread, an X Grok chat), or a day past it, continues in parts packed in order.
+  - **Keys and labels.** The first part is keyed as the conversation; the k-th is `<key>#k`, labelled "(part k)" in its header and title. The label starts at part 2, so a conversation that grows a second part leaves the first one's header as it was.
+  - **Stable when a thread grows.** A conversation that grows only extends its last part or adds one. Each title counts its own part's messages, not the thread's, so the earlier parts keep their text, title, key and canonical byte for byte. (A title with the thread's count patched every part at every re-export.) Measured: a 300-message thread grown to 1,300 left its first five parts' lines identical. The one exception is the first crossing, one part to two: the first part's canonical changes from the whole record to its own messages.
+  - **Dates.** A part is dated by its own first message; a Grok part by its conversation, whose header it repeats.
+  - **When a thread or day shrinks.** A message deleted from the middle moves the boundaries of the parts after it, which update in place. If the thread or day then needs a part fewer, its old last part is no longer emitted. The pipeline never removes, so that row keeps its last text, and its messages are in two thoughts. Measured: 40 messages after 50 were deleted from a three-part thread, and 116 tweets after 117 were deleted from a five-part day. An Instagram export narrowed to a date range does the same. The emitter cannot know which parts the brain already holds, so it cannot retire one; that takes a pipeline that replaces a group's parts (SMD-3253). The READMEs say so and name the row to delete.
+  - **Oversized members.** One message (or Blogger post) longer than the bound alone is cut, and says so; the source record keeps it whole. A conversation's title is bounded at 500 characters, since it is in every part's header.
+  - **No text lost.** Instagram's DM text kept the first 200 messages and nothing after; every message is in the text now. The old importers cut every text at 30,000 characters and lost the rest. The bound keeps a search hit to about 100 KB, and a re-embed to that part's windows, while losing no text.
+  - **Canonicals.** A part's canonical is its messages as exported; the conversation's own fields (title, participants, id) are in the first part's header and title, not in the parts' canonicals.
+
+  (The maintainer chose parts over a cut text.)
+- **Ids cannot read as part keys.** `%` and `#` in an export's id are escaped (`777#2` is `777%232`). Unescaped, a conversation `abc#2` beside a two-part `abc` took one key twice, and the file was refused or a conversation dropped. An X archive listing one DM conversation twice is taken from its first copy alone, rather than mixing the two copies' parts. The short-text skip applies to a whole conversation, not to each part.
+- **Nothing one record holds refuses the whole file.** The pipeline refuses a whole file for one bad line, where the old importers lost only that record. So each emitter takes NUL characters and lone surrogates out of the text, and cleans and trims every key. It leaves out a `createdAt` the pipeline would refuse (before year 1, past 9999, more than a day ahead, or a day the calendar lacks, which `Date.parse` rolls into the next month), and epoch 0. The brain dates such a row when it writes it, and the run names how many dates it left out on stderr. A date with no offset is read as UTC, not the machine's local time, and Grok reads a bare number below 10^11 as epoch seconds. Instagram's Meta encoding repair runs only on text that is all latin1 and decodes cleanly, so an emoji already whole is no longer turned into a NUL. Grok skips, naming it, a conversation its parser cannot read, and refuses a file holding neither a list of conversations nor one conversation.
+- **The rest of each item.**
+  - `canonical`: the source records as exported. That is the JSON of the conversation, the thread's message files or the day's members; for a part, that part's messages; for Blogger, the `<entry>` element byte for byte.
+  - `text`: the thought the importer wrote before, within the bound above. Blogger now undoes the export's escaping before stripping tags, so no `<p>` reaches the text, and reads a category `term` in single quotes too.
+  - `facets`: the title, the kind, and the enhanced fields the payload used to carry (`type`, `source_type`, `importance`, `quality_score`, `sensitivity_tier`). They are not copied into `schemas/enhanced-thoughts`' columns. Outside `schemas/` (whose `brain-stats-daily` counts the column), the one reader whose answer turns on them is `db/weekly-digest.ts`: it leaves `restricted` rows (always) and `personal` ones (unless `--include-personal`) out of what it sends to its model, and it now reads the facet as well as the column. Without that, Instagram's DMs, `personal` in metadata under a column at its default `standard`, would have reached the digest. `importance` still ranks the digest by the column where it exists.
+  - `createdAt`: the export's date, or absent where the export gives none or the pipeline would refuse it (before, the import's time).
+- **X's Grok chats are the `x` system's**, not `grok`'s. They come from the X archive, and the import runner refuses a pipeline that emits two systems. `docs/connector-registry.json`'s notes say so.
+- **Trust.** SMD-1724's `event: { trust: "ingested" }` went with the client. Each README now classifies the ingester first, `SELECT set_agent_kind('ingest-records', 'ingested')`, since the kind is stamped at the write. It names `SELECT backfill_thought_actors();` for rows written before.
+- **The recipes' files.** Each `.env.example` is removed, along with `package.json`'s `dotenv` dependency and `metadata.json`'s OpenRouter and Supabase services. Each README runs these steps:
+  - the classification, with the command;
+  - how to reach the brain from a checkout (`compose.host-ports.yaml`, and `deploy/.env`'s `OB1_*` values so `reembed.ts` embeds at the brain's model, with a warning against `--switch-model`);
+  - emit into a `mktemp` file, which only its owner can read, since the items hold the export's content (a fixed `/tmp` name was world-readable, and another user could create it first);
+  - the pipeline's dry run, the ingest, `reembed.ts`, and `rm`.
+
+  The pipe (`--items -`) is offered without the file: the emitters parse the whole export before printing a line, so a failure prints nothing. Grok's Step 1 pointed at the X archive, whose Grok chats the X recipe already imports; it points at grok.com's export now. X's progress names each file it did not find, as its Troubleshooting now quotes. `--dry-run` on an emitter is refused, naming the pipeline's own. A file that does not parse is refused, not taken for absent: an Instagram message file skipped would have shrunk its conversation's thought on a re-run. X reads `tweet.js` only when `tweets.js` is missing, and likewise for its DM and Grok files, where it read both. An Instagram export with no `your_instagram_activity` folder prints nothing, as the other three do for an empty folder.
+- **Docs.** `docs/vendored-disposition.md`'s four rows name the port. `db/README.md`'s "Items from a file" names the four as the JavaScript emitter shape.
+
+**Tests.** `test-live.ts` [19b] writes a fixture export for each importer, with two records of each kind it reads and the shapes a real export brings:
+- grok.com's nested conversation, one conversation in two files, one the parser cannot read;
+- tweets, comments and captions listed newest first, as the exports list them, two of each on one day;
+- a group past the bound in each importer that splits (a Grok conversation, an X DM thread, a 400-tweet day, an Instagram DM thread), a Grok message past the bound alone, an X conversation id holding a `#`;
+- a DM of 205 messages, an emoji left whole, NUL characters, a conversation id with a trailing space;
+- a date with no offset, a date in the year 2999 and a February the 30th;
+- a Blogger category in single quotes, an entry in two `.atom` files, and an Instagram file cut short.
+
+On a database of its own, migrated forward, with the ingester classified first, it checks:
+- the emitter, run with nothing but `PATH` and a zone that is not UTC (`America/Los_Angeles`), prints one line per thought;
+- each line's key, `createdAt` and canonical are the ones the fixture says: the export's own id, the day, or the part, the export's date or none where the pipeline would refuse it, and the records as written, in date order;
+- a second run prints the same bytes;
+- `ingest-records.ts --dry-run` counts the lines (a NUL left in would refuse the file here), and the live ingest writes them;
+- grok names the conversation it skipped, the duplicate and the date it left out;
+- each group past the bound is two parts, and no third:
+  - each body (the text after its header) within 100,000 characters;
+  - the first keyed as the group and unlabelled, the second `#2` and "(part 2)" in its header and title;
+  - each dated by its own first member (a Grok part by its conversation);
+  - their canonicals joining to the group's members as exported, in order.
+
+  The Grok message past the bound is cut, saying so, its canonical whole. The `#` id is escaped. The DM keeps all 205 messages in its text and its canonical. The emoji stays whole, a Blogger post's text has no tags or entities, and the Instagram file cut short is refused;
+- after `reembed.ts` against a stub embedder, every row has its text, its source record byte for byte under `thought_sources.system`, its date (the export's, or the brain's where the emitter left it out), the stub's vector for its text under the model's label, the enhanced fields as facets and `trust: ingested`;
+- the same file again writes nothing;
+- a later X archive with one tweet deleted and one added emits the same keys and ingests as two days updated in place, with no row added and the deleted tweet in no row;
+- `weekly-digest.ts`'s read, with a `sensitivity_tier` column at `standard`, leaves the Instagram rows out, and keeps them with `--include-personal`.
+
+**Tidied while the files were open.**
+- [19b]'s header and fixture docblock name days and parts, where they still spoke of a 200-message cap.
+- Instagram's dropped-date set sits above the function that fills it, and its dedupe comment no longer says "batch".
+- The connector registry's conversation notes say "in parts", where they said "one thought" or "capped at 200 messages".
+
+**Not here, beyond the importers.** Pass 3 found two limits that any large thought meets, a capture included, and the bound above only keeps these importers clear of them:
+- the search and list renderers print a thought whole (`fenceText` "is not cut");
+- `embedCapture` sends every window of a thought at once, each on its own timeout, so a slow local model can time out the last windows of a long text every time.
+
+Both are follow-ups, not this change: SMD-3251 bounds the renderers, SMD-3252 the windows in flight.
+
+**PR 2: the import runner's lines.** The import runner (SMD-2212) now runs the four emitters as pipelines.
+- **The lines.** `deploy/orchestration/pipelines.json` holds four: `grok`, `instagram`, `blogger` and `x-twitter`. Each owns its system (`grok`, `instagram`, `blogger`, `x`) and scope (`<system>:export`), and reads `imports/<name>/`.
+- **The image.** `runner.Dockerfile` copies the four `.mjs` files, and the repo root's `.dockerignore` lets them back into a context that keeps `recipes/` out. They are JavaScript on node's built-ins, so no packages. The image's build runs `--check-emitters` over the lines.
+- **An empty folder.** Each line passes `--if-present`, a flag the emitters gained: a path that is not there is no export yet, so nothing is emitted and the run succeeds. Without the flag, a mistyped path at a prompt still exits 2. Every brain running the profile gets the four scheduled imports, so a folder still waiting for its export must not fail a run on every schedule.
+- **The schedule.** `everyHours` is 168, weekly. An export is a file put in a folder by hand, a rerun writes nothing, and the import's on-demand workflow runs one at once.
+- **Where an export may sit.**
+  - X finds an archive's `data/` at the top or one folder down (`imports/x-twitter/twitter-2024-…/data/`).
+  - Grok finds its JSON at the top, in one file or several, or one folder down.
+  - Instagram finds `your_instagram_activity/` within three levels.
+  - Blogger reads every `.atom` or `.xml` backup within six levels, so a Google Takeout is reached as unzipped, or one backup file given as the path.
+  - Instagram given its `your_instagram_activity/` folder itself reads it as from the download's root.
+
+  Every walk passes over dot-names, `__MACOSX/` and the `._*` files a zip made on a Mac carries. A symlinked folder is not walked into, but a link is followed where an importer opens a path by name (`deploy/imports/README.md` says which, and that only its ACL setup keeps one pipeline out of another's export).
+- **Two exports side by side are refused, naming them.** Read as one import, the older copy of a record would win wherever its file sorts first, so these are refused:
+  - two X archives (or an archive's files loose beside one);
+  - two Grok exports;
+  - two Instagram downloads;
+  - one blog's entry in two backups;
+  - one Grok conversation in two files.
+
+  The message says to keep the newest, or merge the parts of one export into one folder. Several blogs side by side are one import, and a record one file lists twice is emitted once. Grok reads every conversation for these checks whatever `--skip` and `--limit` emit, so a window emits what the whole run emits in it: a copy whose first sits before the window is not emitted again.
+- **Never "no export yet" for what was not read.**
+  - `--if-present` takes only a path that is not there (ENOENT) as no export.
+  - A folder or file there but unreadable is refused at any depth, exit 2, naming it and the error. The runner probes only `imports/<name>/` itself.
+  - A folder holding something but nothing the importer reads is refused, naming the likely cause: an Instagram download in HTML, a zip still to extract, an export nested deeper than the importer looks.
+  - An export found with no record of the importer's kind in it is refused too, by one rule at the end of each emitter: another product's file of the name an importer reads, or a vendor shape it does not know, would otherwise be a green run that writes nothing every week. It counts records parsed, before the importer's own filters, and only records of the importer's kind: one with the text the importer reads (a tweet's `full_text`, a DM's message, an Instagram message's sender, a Blogger post or comment entry, a Grok conversation with a message). So `[1,2,3]` or a vendor's new shape counts none, while an export whose records are all retweets, short notes or short conversations is a correct read, and exits 0 with nothing emitted. Each run's last stderr line says how many records it read. Under `--skip`, `--limit` or `--types` the window is the request's, and is not refused; a repeated `--types` entry counts once.
+  - A folder that exists with nothing in it, or only Mac debris, is no export in every importer (X's lookup once fell through to the folder itself, which the end rule then refused).
+  - A `tweets.js` cut short before its array is refused as not parsing, not read as empty, and an Instagram message that is not an object is passed over rather than stopping the run unnamed.
+  - A file that does not parse is named without the parser's words: Bun's JSON errors quote the input, which put a DM's text into the run report n8n keeps.
+  - `imports/<name>` itself as a symlink whose target is not in the container is refused by the runner, saying so. It read as absent, so every run was green.
+  - Each emitter prints its items once, at the end, so a refusal mid-run prints nothing and a pipe never ingests half an export.
+  - An unforeseen failure is one named line, not a stack trace in the run report.
+- **Memory binds before the 256 MiB output cap.** The runner holds an emitter's output about nine times over, and the emitter holds its own, so in the container's 2 GB a run past about 100 MiB of items can be killed. The run-it review measured it in the built image: an X archive of 50,000 tweets peaked at 635 MiB in the emitter, and one of 200,000 was killed (exit 137). The runner now says an exit of 137 it did not cause is most likely the container's memory, and each README says an export that large is imported from a checkout. The runner holding its output whole is SMD-3293's to change.
+- **Trust.** Rows the runner writes carry its name, `orchestration-runner`. Each README and `deploy/README.md` say to classify it `ingested` as `postgres`, as the first step, before the first export goes in, and to backfill rows written before; `SETUP.md` and `deploy/imports/README.md` point there. The run-it review measured it: rows stayed without trust after a late `set_agent_kind` until `backfill_thought_actors()` restamped them.
+- **Docs.** `SETUP.md`, `deploy/README.md`, `docs/orchestration-tool.md`, `runner.ts`, `evals/README.md` and the eval kit's `compose.n8n.yaml` said the allowlist was empty. `deploy/imports/README.md` lists the four folders and what goes in each, in place of examples from recipes not yet converted, and says what replacing an export does: it updates in place and removes nothing, so an older one is never put back. Each recipe's section gives the steps in order (classify, rebuild on a brain that ran the profile before, put the export in, the on-demand command). The `deploy/compose.yaml` memory comment says what was measured. `db/README.md`'s test-live counts follow [19b]'s.
+- **Tests.** `test-live.ts` [19b] checks:
+  - `--if-present` against a prompt's exit 2, for all four;
+  - both one-folder-down lookups;
+  - each two-export refusal;
+  - an unreadable folder or file in each walk, as one named line (skipped when run as root, which file modes do not bind);
+  - a folder holding something but nothing read, in each importer;
+  - an export found with no record of its kind, refused in each importer, and one whose records are all filtered, exit 0;
+  - a folder that exists with no export in it, exit 0, in each importer;
+  - a file that does not parse, refused without quoting it (Grok, X and Instagram; Blogger's reader has no parse step), and a `tweets.js` cut short;
+  - records of no kind (`[1,2]`, a vendor's new shape, null messages, a settings-only feed) refused, and a DM conversation or Instagram thread under three messages read and skipped;
+  - X's `--types`: a subset exempt from the end rule, every type with one repeated not;
+  - Instagram given its `your_instagram_activity/` folder;
+  - a Grok conversation in two files refused under `--limit 1` and `--skip 4`, each holding one file's copy alone in the window;
+  - a Blogger entry its backup lists twice, emitted once;
+  - a Blogger Takeout and a `.xml` backup read as the `.atom` at the top is;
+  - Mac zip debris that changes no importer's output.
+
+  The runner's self-check holds a dangling link where the folder should be, and the exit-137 wording.
+
+  Review pass 1's run-it reviewer ran the runner image end to end against a scratch Postgres and a stub embedder. All four pipelines wrote their rows with vectors and the export's dates, a rerun wrote nothing, and an absent or empty folder was a green run that wrote nothing. Run inside the built image, as each pipeline's own uid with no network and `HOME=/`, every emitter emitted its fixture's items over its mounted folder, and nothing, with exit 0, over an empty one.
+
+**Tidied while the files were open.** The end rule's comment names each importer's own filters, the parse-error comments fit the file's width, and the runner says a step past the run's deadline in one phrase for the emitter, the ingester and reembed.

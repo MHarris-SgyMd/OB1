@@ -206,7 +206,7 @@ diluting model makes that thought unfindable by its decision.
 ### Prefixes did not help
 
 `nomic-embed-text` is documented as wanting `search_document:` / `search_query:`
-prefixes, which OB1 does not send. Adding them made retrieval slightly *worse*
+prefixes, which Daemonic Brain does not send. Adding them made retrieval slightly *worse*
 (MRR 0.950 → 0.929 on the v1 set). At this sample size that is noise, but it is
 not the improvement the docs imply.
 
@@ -5106,7 +5106,7 @@ Batched propagation erases the append path, but payload *edits* do not stay chea
 | read-model append (batched) | 0.17 ms/row | 0.02 ms/row |
 | mutable content edit — `update` by ref | 3.34 ms/ref | 11.65 ms/ref |
 
-An outbox/CDC drain is the right shape and the one OB1 already runs — embeddings
+An outbox/CDC drain is the right shape and the one Daemonic Brain already runs — embeddings
 are *already* eventually consistent with content (the re-embed worker lags writes),
 so a read model is that same consistency model relocated, not a new one. A batched
 append is one Lance fragment write amortised over the batch, so it is cheap and does
@@ -7163,7 +7163,7 @@ inherits every capture's latency, and only n8n let the workflow say so.
   is refused on the other's path (SMD-2210, below). The MCP Client node is a normal workflow step
   (Streamable HTTP, a header credential); the MCP Server Trigger exposes exactly
   the tool nodes wired to it, behind a static header the operator chooses — so
-  an AI client connects with a URL and a header, the OB1 pattern. A toolkit's
+  an AI client connects with a URL and a header, the Daemonic Brain pattern. A toolkit's
   tools are prefixed with the node's name (`brain_search_thoughts`). The Linear
   node lists issues with no filter, only a limit, so the fetch is the HTTP
   Request node with n8n's stored `linearApi` credential — the tool still holds
@@ -7226,7 +7226,7 @@ the clients and the OpenAPI spec Apache 2.0, and the published CE image carries
 proprietary code under "a right to distribute the community edition as is but
 not to sell, resell, serve as a managed service, modify or wrap under any form
 without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
-licenses mean for a profile OB1 ships is the ADR's to decide.
+licenses mean for a profile Daemonic Brain ships is the ADR's to decide.
 
 **The live AI-client check (n8n).** The verifier is the MCP SDK's client; the
 ticket asked for the AI client itself. A headless Claude Code session (Opus

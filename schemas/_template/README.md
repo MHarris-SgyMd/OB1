@@ -1,6 +1,6 @@
 # Schema Name
 
-> One-line description of what this schema adds to Open Brain.
+> One-line description of what this schema adds to Daemonic Brain.
 
 ## What It Does
 
@@ -8,7 +8,7 @@
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - List any additional requirements
 
 ## Credential Tracker

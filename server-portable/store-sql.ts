@@ -1165,7 +1165,7 @@ export class SqlStore implements ThoughtStore {
     return { item: { kind: r.kind as PriorityItem["kind"], key: r.key }, exists: r.exists === true };
   }
 
-  // SMD-3667: 120's composed read, one statement (every function it calls STABLE: one snapshot). The items and the
+  // SMD-3667: 122's composed read, one statement (every function it calls STABLE: one snapshot). The items and the
   // weights ride as JSON text, cast in SQL (Bun binds a JS object as no jsonb); the clock is the database's unless pinned.
   // Its columns named, never `*`, so a migration adding one re-plans a prepared read rather than failing it (SMD-3302).
   async effectivePriority(items: { kind: string; key: string }[], opts: { weights?: Partial<PriorityWeights>; now?: string } = {}): Promise<EffectivePriority[]> {

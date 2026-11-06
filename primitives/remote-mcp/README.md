@@ -30,7 +30,7 @@ A plugin's tools follow the same rule: a read key sees its reads. Mint a key per
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
-3. Name: `Open Brain`
+3. Name: `Daemonic Brain`
 4. Remote MCP server URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Click **Add**
 
@@ -48,18 +48,18 @@ Requires a paid ChatGPT plan (Plus, Pro, Business, Enterprise, or Edu). Works on
 2. Navigate to **Apps & Connectors** → **Advanced settings**
 3. Toggle **Developer mode** ON
 
-> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Your Open Brain replaces that functionality, and it works across every AI, not just ChatGPT.
+> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Your brain replaces that functionality, and it works across every AI, not just ChatGPT.
 
 **Add the connector:**
 
 1. In Settings → **Apps & Connectors**, click **Create**
-2. Name: `Open Brain`
+2. Name: `Daemonic Brain`
 3. Description: brief description of what it does (for your reference only)
 4. MCP endpoint URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Authentication: select **No Authentication** (your access key is embedded in the URL)
 6. Click **Create**
 
-**Using it:** Start a new conversation and make sure the connector is enabled in the tools/apps panel. ChatGPT sometimes needs explicit tool references: "Use the Open Brain search_thoughts tool to find my notes about project planning."
+**Using it:** Start a new conversation and make sure the connector is enabled in the tools/apps panel. ChatGPT sometimes needs explicit tool references: "Use the Daemonic Brain search_thoughts tool to find my notes about project planning."
 
 ## Claude Code
 

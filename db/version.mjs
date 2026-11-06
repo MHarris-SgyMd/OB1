@@ -49,15 +49,17 @@ export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
  * `1.7.0` the eighth (082..083, a minor: one additive migration);
  * `1.8.0` the ninth (084..089, a minor: five additive migrations);
  * `1.9.0` the tenth (090..103, a minor: thirteen additive migrations);
+ * `2.0.0` the eleventh (104..121, a major: seventeen additive migrations, and
+ * the cutover with the root URL's window closed);
  * before any, 044 wrote the pre-first-release baseline `0.0.0`.
- * Those carry `+upstream.9543c29`; from 2.0.0 the cut writes the plain version
- * here (SMD-3317), so this is the last cut's string as it was written, not one
- * built from UPSTREAM_PIN.
+ * The 1.x releases carry `+upstream.9543c29`; from 2.0.0 the cut writes the
+ * plain version here (SMD-3317), so this is the last cut's string as it was
+ * written, not one built from UPSTREAM_PIN.
  * The highest migration that upserts ob1_config.schema_version writes this
- * exact string (103 today); check-consistency's 17d holds the two equal, and
+ * exact string (121 today); check-consistency's 17d holds the two equal, and
  * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const BRAIN_VERSION = "1.9.0+upstream.9543c29";
+export const BRAIN_VERSION = "2.0.0";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -210,7 +212,8 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0+upstream.9543c29", "1.0.0+upstream.deadbee")), 0, "build metadata ignored");
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
-  bad += eq(sign(semverCompare("1.9.0", BRAIN_VERSION)), 0, "BRAIN_VERSION core is 1.9.0 (the tenth release)");
+  bad += eq(sign(semverCompare("2.0.0", BRAIN_VERSION)), 0, "BRAIN_VERSION core is 2.0.0 (the eleventh release)");
+  bad += eq(BRAIN_VERSION, "2.0.0", "BRAIN_VERSION is plain from 2.0.0, no +upstream suffix (SMD-3317)");
   // SMD-3317: from 2.0.0 the version is plain; a brain stamped in the old form orders by its core.
   bad += eq(sign(semverCompare("1.9.0+upstream.9543c29", "2.0.0")), -1, "a 1.x stamp with the pin is behind a plain 2.0.0");
   bad += eq(sign(semverCompare("2.0.0", "2.0.0+upstream.9543c29")), 0, "a plain version and the same core with the pin are equal");

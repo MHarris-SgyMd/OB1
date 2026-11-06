@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Claude.ai extractor.
+ * Daemonic Brain Capture — Claude.ai extractor.
  *
  * DOM-only extraction of the most recent user/assistant message pair
  * from the Claude.ai conversation view. Used for manual capture
@@ -257,6 +257,6 @@
   if (self.__OBBridge) {
     self.__OBBridge.registerExtractor('claude', extractVisibleResponse);
   } else {
-    console.error('[Open Brain Capture] Bridge not loaded before extractor-claude.js');
+    console.error('[Daemonic Brain Capture] Bridge not loaded before extractor-claude.js');
   }
 })();

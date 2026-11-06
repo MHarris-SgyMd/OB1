@@ -1,0 +1,21 @@
+{
+  "name": "Readwise Plugin",
+  "description": "Readwise's highlights as thoughts: a webhook Readwise posts each new highlight to, its echoed secret checked, each highlight captured once by its id as outside text through the brain, what Readwise sent beside the text kept in the plugin's own table, and an operation that lists them by book. Ported from the Readwise Capture integration's standalone server (SMD-2690).",
+  "category": "plugins",
+  "author": {
+    "name": "Mark Lavercombe",
+    "github": "mlava"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": ["Readwise"],
+    "tools": []
+  },
+  "tags": ["plugin", "readwise", "highlights", "capture", "webhook"],
+  "connectors": ["readwise"],
+  "difficulty": "beginner",
+  "estimated_time": "20 minutes",
+  "created": "2026-11-05",
+  "updated": "2026-11-05"
+}

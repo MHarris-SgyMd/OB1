@@ -22,8 +22,9 @@
  * auditor's report, a recipe's example capture, two Python recipes and two
  * README samples — and so left 003's fingerprint NULL (016's trigger does not
  * fill it; the row invisible to dedup, a later capture of the text a twin) and
- * 021's label NULL (a vector of unknown model). The receiver and the auditor
- * are driven here; the rest are read. Three more deployments write a raw row
+ * 021's label NULL (a vector of unknown model). The auditor is driven here
+ * (the receiver, readwise-capture, is the readwise plugin's hook since
+ * SMD-2690, which captures through the core); the rest are read. Three more deployments write a raw row
  * into a database of their own, where the functions are not, and say so in
  * their headers and READMEs — they are check 10's counted exceptions, read here.
  * The text guards below are spelling-sensitive by design: a rewrite of a
@@ -98,16 +99,15 @@
  * imports compat/supabase-sql itself since SMD-1798, and resolves its packages
  * through the install in integrations/ and the committed recipes/node_modules
  * link (SMD-1991). The model provider is stubbed — a unit vector keyed off the
- * text, so the vector a writer stored is recognisable — as are Readwise's book
- * lookup and the extraction worker smart-ingest triggers (SMD-2110), and
+ * text, so the vector a writer stored is recognisable — as is the extraction
+ * worker smart-ingest triggers (SMD-2110), and
  * everything below the tool or route boundary is real; test-auth.ts is where
  * the servers start under bun for real.
  *
- * The database is Daemonic Brain's migrations plus four vendored sidecars the
+ * The database is Daemonic Brain's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …),
- * schemas/agent-memory (the write-back's own tables), schemas/readwise-books
- * (the receiver's book cache and its counter) and schemas/smart-ingest (the
+ * schemas/agent-memory (the write-back's own tables) and schemas/smart-ingest (the
  * ingest server's job tables, SMD-2110) — and the bio worker's log
  * table, `consolidation_log`, from `schemas/entity-extraction/schema.sql`'s
  * definition alone (that sidecar's other tables include a `thought_entities`
@@ -157,7 +157,7 @@ const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
-const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql", "schemas/smart-ingest/schema.sql"];
+const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/smart-ingest/schema.sql"];
 // The sidecars grant to no Supabase role since change 93 (SMD-1796), so none is created first — until SMD-1810 this
 // suite still created the three, and since CI ran it before test-tools.ts on one Postgres (until SMD-2311 retired
 // that suite), test-tools' "no Supabase role" probe met them on every run.
@@ -258,8 +258,6 @@ const nearOf = new Map<string, string>();
 const near = (base: string, text: string) => { const own = unit(text); return unit(base).map((x, i) => 0.88 * x + 0.475 * own[i]); };
 /** The user message of each bio prompt the stub answered — what the worker's filters gathered. */
 const bioPrompts: string[] = [];
-/** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
-const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
 /** The extraction worker's address smart-ingest triggers: the knob SMD-2110 gave the server, set below before the module
  * loads, where it built the URL on the Postgres DSN before. */
 const WORKER = "http://extraction-worker.test";
@@ -270,13 +268,12 @@ const workerKeys: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   reached.push(url);
-  if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
   // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
   if (url.startsWith(`${WORKER}/`)) {
     workerKeys.push(new Headers(init?.headers).get("x-brain-key"));
     return Response.json({ processed: 0, succeeded: 0, failed: 0, entities_created: 0, edges_created: 0, dry_run: false, stub: true });
   }
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider, Readwise's book lookup and the extraction worker are stubbed`);
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider and the extraction worker are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     const input = String(body.input);
@@ -328,10 +325,7 @@ process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-ch
 // smart-ingest's upstream address (SMD-2110), read at import: the stub answers at it, and refuses the DSN's paths.
 process.env.ENTITY_EXTRACTION_WORKER_URL = WORKER;
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
-// The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
-const READWISE_SECRET = "a-secret-readwise-minted";
-process.env.READWISE_WEBHOOK_SECRET = READWISE_SECRET;
-process.env.READWISE_ACCESS_TOKEN = "stub-readwise-token";
+// The auditor's key and Slack settings (read at import; Slack is never reached).
 process.env.AUDITOR_ACCESS_KEY = KEY;
 delete process.env.AUDITOR_ACCESS_KEYS;
 process.env.SLACK_BOT_TOKEN = "stub";
@@ -715,60 +709,6 @@ try {
     `a postgres:// ENTITY_EXTRACTION_WORKER_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
 }
 
-// ── integrations/readwise-capture (SMD-1524) ─────────────────────────────────
-
-{
-  const F = "integrations/readwise-capture/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const text = "The happiness of your life depends upon the quality of your thoughts.";
-  const note = "Book II, on attention";
-  const content = `${text}\n\n— ${note}`;
-  const event = (id: number) => ({ secret: READWISE_SECRET, event_type: "readwise.highlight.created", id, text, note, location: 12, location_type: "page",
-    highlighted_at: "2026-09-01T00:00:00Z", url: null, color: "yellow", updated: "2026-09-01T00:00:00Z", book_id: BOOK.id, tags: [{ id: 1, name: "stoicism" }] });
-  const r = await send(h, "POST", "/", event(9001));
-  assert(r.status === 200 && r.text === "ok", `a highlight webhook answers ok (${r.status} ${r.text.slice(0, 60)})`);
-  const id = await idOf(content);
-  assert(id !== null, "…and the highlight, with its note, is a thought");
-  if (id) {
-    judgeCapture("readwise-capture", await row(id, content), content);
-    const [side] = await sql`SELECT type, source_type, metadata FROM thoughts WHERE id = ${id}`;
-    assert(side.type === "reference" && side.source_type === "readwise", "the enhanced-thoughts columns follow the capture, by the raw update that carries neither content nor vector");
-    assert(side.metadata.readwise_highlight_id === 9001 && side.metadata.book_title === BOOK.title && side.metadata.tags?.[0] === "stoicism", "the highlight's metadata carries the book the receiver resolved");
-    const [book] = await sql`SELECT title, num_highlights FROM readwise_books WHERE book_id = ${BOOK.id}`;
-    assert(book?.title === BOOK.title && Number(book?.num_highlights) === BOOK.num_highlights + 1, `the book is cached and its count incremented (${book?.num_highlights})`);
-    // Readwise retries the same event: the receiver's own dedupe answers before any write.
-    const again = await send(h, "POST", "/", event(9001));
-    assert(again.status === 200 && again.text === "duplicate", `a retried event is answered duplicate (${again.text})`);
-    // A second highlight of the same passage: the function's dedup — one row, metadata merged, the hand-set columns kept.
-    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${id}`;
-    const twin = await send(h, "POST", "/", event(9002));
-    const rows = await sql`SELECT id, sensitivity_tier, metadata FROM thoughts WHERE content = ${content}`;
-    assert(twin.status === 200 && twin.text === "ok" && rows.length === 1 && rows[0].id === id && rows[0].metadata.readwise_highlight_id === 9002 && rows[0].sensitivity_tier === "personal",
-      `the same passage highlighted again is one row, its metadata merged, its hand-set tier kept (${rows.length} row(s), ${rows[0]?.sensitivity_tier})`);
-    assert((await row(id, content)).at_axis === true && (await row(id, content)).embedding_model === MODEL, "…its vector and label as the function leaves them");
-    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'capture' ORDER BY created_at LIMIT 1`;
-    assert(audit?.actor_name === null && audit?.source === "readwise", `008's audit row names no actor for a receiver without a key, and the source from metadata (${audit?.actor_name} ${audit?.source})`);
-    // A first write interrupted between the function and the sidecar: the row lacks source_type, the
-    // receiver's dedupe cannot see it, the function answers existed — and the sidecar heals it now.
-    await sql`UPDATE thoughts SET source_type = NULL, type = NULL WHERE id = ${id}`;
-    const healed = await send(h, "POST", "/", event(9004));
-    const [shape] = await sql`SELECT source_type, type FROM thoughts WHERE id = ${id}`;
-    assert(healed.status === 200 && healed.text === "ok" && shape.source_type === "readwise" && shape.type === "reference",
-      `a re-capture of a row whose first write was interrupted completes its columns (${shape.source_type} ${shape.type})`);
-    // A row another path captured first, typed by hand, with no source_type: the heal is per column.
-    await sql`UPDATE thoughts SET source_type = NULL, type = 'idea' WHERE id = ${id}`;
-    await send(h, "POST", "/", event(9005));
-    const [kept] = await sql`SELECT source_type, type FROM thoughts WHERE id = ${id}`;
-    assert(kept.source_type === "readwise" && kept.type === "idea", `…filling source_type while a hand-set type stays (${kept.source_type} ${kept.type})`);
-  }
-  // An event whose secret is wrong writes nothing: test-auth.ts holds the refusals; here, the row count.
-  const [{ n: before }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
-  await send(h, "POST", "/", { ...event(9003), secret: "not-the-secret" });
-  const [{ n: after }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
-  assert(before === after, "a request with the wrong secret writes no row");
-}
-
 // ── recipes/editorial-policy/auditor (SMD-1524) ──────────────────────────────
 
 {
@@ -969,7 +909,6 @@ spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
 // SMD-1524: the example capture, the Python recipe and the two README samples capture through the function (the second
 // Python recipe, local-ollama-embeddings' embed-local.py, retired with SMD-2138).
-spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
 spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
 spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*(?:#[^\n]*\s*)*"event": \{"trust": "ingested"\},\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
@@ -992,7 +931,7 @@ const BIO = "integrations/consolidation-workers/bio/index.ts";
 const DRIVEN = ["integrations/agent-memory-api/index.ts", BIO, // repo-learning-coach's brain.ts retired (SMD-2923)
   "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
-const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
+const DRIVEN_1524 = ["recipes/editorial-policy/auditor/index.ts", BIO]; // readwise-capture is the readwise plugin since SMD-2690
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];

@@ -70,7 +70,7 @@ The plugin's [README](../../plugins/extension-name/README.md) gives each one's i
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Any earlier extensions this one builds on
 
 ## Steps

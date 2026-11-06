@@ -1,0 +1,48 @@
+# 477. test-live's [38] ~9 s shorter locally: the nine one-shot runs from SMD-3379 PR 1c-4b at `ONE_SHOT` (SMD-3783)
+
+**What changed** in `db/test-live.ts`'s [38]: nine one-shot runs take `...ONE_SHOT`, the scaffold's 300 ms capture and poll (SMD-3733's, shared with [38r] since SMD-3734), not its 1 s. They are:
+- **four drains** that clear the pools for the case after them: before the limit case, the cut case, the deep one-shot, and the baseline's orphan. Since review pass 1 each asserts its exit 0, where a drain that ran out `bounded()`'s 20 s passed silently with work left;
+- **the deep one-shot**: an orphan past the first lineage window swept, exit 0;
+- **the whole drain and the no-work exit**: exit 0, "idle: no work", no period begun, and since review pass 1 no live read made, and since pass 2 under 5 s, where it asked for under 10 s alone — which a run waiting 12 more polls of 300 ms passed;
+- **the held one-shot**: exit 1, the held line, its work left — its hold comes from a 1 s `statement_timeout` against a 3 s `pg_sleep`, not from a poll;
+- **the restart**: exit 0, the work taken.
+
+Each asserted one checks an end state; none reads a line mid-run or needs a capture to hold a write back. `drained()` counts unpooled, pending and claimed rows, so a faster poll ends no period early. [38] now runs fifteen one-shots at `ONE_SHOT`; the scaffold's docblock says so.
+
+**Kept:** three one-shots set their own timers, which their cases read: the gone-finishing run and the baseline (`capture: 4`, the gate held past a slow runner's start) and the end run (`passFollowS: 5`). The end run also needs the scaffold's 1 s poll, its window to plant a note between consolidation's judgement and the period's end read.
+
+**Held.**
+- **Beside main 8289b25d**, run at the same time: [38] 264.0 s → 255.0 s, 110 of 110 each. The moved cases 0.7–2.8 s shorter each; the rest within ±0.4 s.
+- **Under load** (one `yes` per CPU): [38] 259.4 s, 110 of 110.
+- **After review pass 1**: 114 of 114, the drains' four rows new, [38] 252.9 s; the no-work run made no live read, in 41 ms. After pass 2, 114 of 114 again, the no-work run in 38 ms.
+- **Four mutants** of `db/sleep.ts`, each run against the sleep shard in a scratch tree, all killed:
+
+  | mutant | the row that failed |
+  | -- | -- |
+  | `drained()` reads pending alone | 20 rows, the dry run's and the once case's first |
+  | `drained()` ignores unpooled rows | 19 rows, the same first |
+  | a one-shot walks no census | the deep one-shot: 1 left; the baseline; the rescan |
+  | a one-shot's exit ignores a held pass | the held one-shot: exit 0 |
+
+  The two `drained()` mutants fail cases before the moved ones, so they hold `drained()` across the section, not one moved drain alone.
+- **Review pass 1's mutants**, in a scratch tree, all killed with the pass's fixes: a statement hold carried into the restart; a no-work one-shot waiting 12 more polls, its counter per read loop (it passed this change's first form under 10 s, and main's file failed it at 12.1 s; a counter shared across the section's runs fires on whichever run reaches 12); the work read whole forgotten after the baseline, or after a limit-cut or live-write-cut sweep; the deep census's place not moved. The drains hold the last four: each fails a row after its drain because the drain left no claim to begin a period from. A one-shot sweeping without waiting is caught by SMD-3733's locked row alone; one ending on the claims alone by the end run alone.
+- **Review pass 1's runs**, on this change's first form (110 rows): eleven sleep shards in a scratch tree, under two `yes` per CPU, four shards at once, and background QoS, each 110 of 110 — and the nine runs cut to a 1 ms capture and poll, sleep.ts's floor, passing too. The slowest of the nine took 2.4 s of `bounded()`'s 20.
+
+**After merging main e2ab5cc4.** SMD-3379 PR 1d's vector marks read thought_audit's created_at too, one before every whole read, a one-shot's first among them. `isLiveRead` matched that text, so the merge failed the no-work row with nothing wrong (1 live read counted) and moved the gone case's hook to a mark (3 reads, not 2). It matches `newestLive`'s `max(created_at)` alone now, a query no other shares: 114 of 114, the no-work run 0 reads, the gone case 2.
+
+**Tidied while the files were open.** [38]'s no-work and gone cases name the live read they count once, `isLiveRead`.
+
+**The run's length.** On [OB1 PR 649](https://github.com/MHarris-SgyMd/OB1/pull/649)'s run (41882014719) the db-live jobs were sleep 282 s, extract 265, rest 259 and long 255: sleep set the run's length. ~9 s off [38] takes it to ~273 s, extract's 265 next.
+
+**Follow-ups.** None filed.
+
+**Review passes.**
+
+| pass | finding | caught | fix |
+| -- | -- | -- | -- |
+| 1 | the no-work row's under-10-s bound let a run waiting 12 more polls of 300 ms by: it asks for no live read now | mutant | 9abb63f9 |
+| 1 | the four drains threw `bounded()`'s exit away, so a drain that ran out its bound left work silently: each asserts 0 | run-it | 9abb63f9 |
+| 1 | the record: a drain's leftover work makes the next row pass, not fail; the end run needs the scaffold's poll too; the docblock names the drains | cold-read | 9abb63f9 |
+| 2 | "33 polls" was 10 s over 300 ms, not the mutant's 12; the counter's sentence said per read loop plainly | cold-read | 65edf8e0 |
+| 2 | the no-work row lost the time bound that caught a wait before the reads begin: under 5 s beside no live read | cold-read | 65edf8e0 |
+| 3 | the record dated the 5 s bound to pass 1, and set pass 1's 110-row runs under the 114-row line unnamed; the comment's ~0.1 s had no run behind it | cold-read | adfe04b6 |

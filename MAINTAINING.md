@@ -187,6 +187,15 @@ shipped. The maintainer tags the merge commit `v<MAJOR.MINOR.PATCH>` and pushes
 the tag, and `.github/workflows/release.yml` publishes the images and the release
 from it (`scripts/release-artifacts.ts`).
 
+**A tag whose release failed after its push** (SMD-4130). A tag's run is the
+workflow and scripts at the tagged commit, so re-running it fails the same way.
+If its images are on GHCR but no release names them (v2.0.0's notes were over
+GitHub's 125,000-character limit on a release's body), fix the cause on `main`,
+then run `gh workflow run release.yml --ref main -f publish_tag=v<X.Y.Z>`. It
+publishes that tag's release with main's release script on the tag's tree,
+building and pushing nothing, and refuses a tag that already has a release or
+whose images aren't on GHCR. The tag stays where it is.
+
 **The soak.** Before a cut is tagged, the canary runs it as the canary is: an
 in-place writer fed stable's inputs (`deploy/canary.sh up`, which keeps its
 database since SMD-3155), not a refreshed copy of stable's data (decided
@@ -503,7 +512,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   which this bullet used to prescribe, put an unauthenticated model API on the
   LAN for nothing).
 - **The codemod-migrated files are not individually tested.** Most need live
-  credentials (Gmail, Slack, Readwise). The shim itself is tested against
+  credentials (Gmail, Slack). The shim itself is tested against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them. The hand ports (`recipes/brain-backup` and

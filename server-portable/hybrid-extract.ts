@@ -56,7 +56,7 @@ function identifierVerdict(name: string): { drop: boolean; type: EntityType | nu
 export type HybridStats = { in: number; carved: number; decided: number; droppedRefused: number; droppedByDecider: number; noContext: number; deciderError: boolean; out: number; ms: number };
 
 /** The decider call, injectable so a unit test can stub it without a network. */
-export type DecideFn = (cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject) => Promise<{ results: JevResult[]; ms: number }>;
+export type DecideFn = (cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject, opts?: { signal?: AbortSignal }) => Promise<{ results: JevResult[]; ms: number }>;
 
 /**
  * Re-decide the generative extraction's entities. Identifier shapes (SMD-2300)
@@ -78,6 +78,7 @@ export async function decideEntities(
   cfg: JevConfig,
   subject: EgressSubject,
   decide: DecideFn = jevDecideMany,
+  signal?: AbortSignal,
 ): Promise<{ entities: ExtractedEntity[]; stats: HybridStats }> {
   const kept: ExtractedEntity[] = [];
   const toDecide: { e: ExtractedEntity; ctx: string }[] = [];
@@ -101,7 +102,7 @@ export async function decideEntities(
       decisions.push({ id: `t${j}`, kind: "choice", question: `What type of entity is "${e.name}"?`, options: TYPE_OPTIONS, context: ctx });
     });
     try {
-      const answer = await decide(cfg, decisions, subject);
+      const answer = await decide(cfg, decisions, subject, signal ? { signal } : {});
       ms = answer.ms;
       const byId = new Map(answer.results.map((r) => [r.id, r] as const));
       toDecide.forEach(({ e }, j) => {
@@ -110,7 +111,9 @@ export async function decideEntities(
         const type = tr && (ENTITY_TYPES as readonly string[]).includes(tr.selected) ? (tr.selected as EntityType) : e.type;
         kept.push({ ...e, type, confidence: typeof vr.p_true === "number" ? vr.p_true : e.confidence });
       });
-    } catch {
+    } catch (e) {
+      // A stop is the caller's, not an outage: no undecided entities written for it (SMD-3379 PR 2b-1, review pass 6).
+      if (signal?.aborted) throw e;
       deciderError = true; // the decider is unreachable: keep the model's entities rather than fail the thought
       for (const { e } of toDecide) kept.push({ ...e });
     }

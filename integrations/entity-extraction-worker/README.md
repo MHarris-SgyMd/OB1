@@ -21,7 +21,7 @@ The knowledge graph enables queries like "what projects does Sarah work on?" or 
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts`
 - **Knowledge graph schema** applied — install `schemas/knowledge-graph` to create the `entities`, `edges`, `thought_entities`, and `entity_extraction_queue` tables
 - At least one LLM API key: OpenRouter (recommended), OpenAI, or Anthropic

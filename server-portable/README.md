@@ -13,7 +13,7 @@ SMD-3152 — no brain ran them.
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+ (used for tests and the container image)
-- A Postgres with pgvector and the core Open Brain schema — `db/migrations/`
+- A Postgres with pgvector and the core Daemonic Brain schema — `db/migrations/`
   applies it; [`SETUP.md`](../SETUP.md) brings up the whole stack
 
 ## What differs from upstream's Edge Function build

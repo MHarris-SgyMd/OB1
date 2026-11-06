@@ -43,7 +43,7 @@ Copy this block into a text editor and fill it in as you go.
 LINT SWEEP -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   Connection string:          ____________   (SUPABASE_URL, postgres://…)
   (Legacy OPEN_BRAIN_URL is accepted as a fallback. SUPABASE_SERVICE_ROLE_KEY and
    OPEN_BRAIN_SERVICE_KEY are accepted and ignored — the credentials live in the URL.)

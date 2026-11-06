@@ -1988,7 +1988,7 @@ console.log("\n[21] claimLease reads the lease a renewal starts from by its toke
   }
 }
 
-console.log("\n[22] effectivePriority reads migration 120's composed read (SMD-3667): the counted level and the urgency of a due time, each term named with what it read, the winner and its maker; weights overridden by name; the clock pinned or the database's; a misspelt weight refused as weight, a malformed item as key");
+console.log("\n[22] effectivePriority reads migration 122's composed read (SMD-3667): the counted level and the urgency of a due time, each term named with what it read, the winner and its maker; weights overridden by name; the clock pinned or the database's; a misspelt weight refused as weight, a malformed item as key");
 {
   const admin = new SQL({ url: URL_, max: 1 });
   try {

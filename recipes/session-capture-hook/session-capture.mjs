@@ -2858,8 +2858,8 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 // the hook is the backstop. What the agent must hear, it leaves beside the token
 // file: `<id>.ended.json` when the claim ended, `<id>.blocked.json` when another
 // claim covered its work, at a renewal of the hook's or the agent's own (read
-// from the claims hook's PostToolUse), or while it lapsed — checked before the
-// hook revives a claim it knows lapsed (lapseCheck).
+// from the claims hook's PostToolUse and PostToolUseFailure), or while it
+// lapsed — checked before the hook revives a claim it knows lapsed (lapseCheck).
 
 export const CLAIMS_DIRNAME = ".work-claims";
 const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
@@ -3223,12 +3223,15 @@ async function renewOne(b, path, claim) {
  * reads a lapse the agent's renewal prevented. Refused CLAIM_UNATTRIBUTED
  * saying it had lapsed, the hook records the lapse and makes the claim due, so
  * the renewal after this checks the claims made since (SMD-3807). Nothing is
- * sent to a brain here. Claude Code hands an MCP error result to
- * PostToolUseFailure, which the claims hook does not take, so a refusal
- * reaches this only from a harness that sends it to PostToolUse (SMD-3874).
+ * sent to a brain here. A refusal is an MCP error result, which Claude Code
+ * hands to PostToolUseFailure: its `error` is the reply's text, and there is
+ * no `tool_response` (SMD-3874, probed on the canary). A success reaches
+ * PostToolUse, its `tool_response` the reply's text as a string, never its
+ * structuredContent: the facts are read where another harness hands them over.
  */
 function noteAgentClaimCall(hook, brains) {
-  if (String(hook.hook_event_name ?? "") !== "PostToolUse") return;
+  const event = String(hook.hook_event_name ?? "");
+  if (event !== "PostToolUse" && event !== "PostToolUseFailure") return;
   const m = /^mcp__([A-Za-z0-9_-]+)__(renew_claim|claim_work)$/.exec(String(hook.tool_name ?? ""));
   const token = String(hook.tool_input?.token ?? "").toLowerCase();
   if (!m || !CLAIM_TOKEN_RE.test(token)) return;
@@ -3238,7 +3241,10 @@ function noteAgentClaimCall(hook, brains) {
   if (!f) return;
   const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
   useStateRoot(brain.root);
-  const text = resultText(hook.tool_response);
+  // What the call answered: a failure's is its `error`, a string in Claude Code; any other shape, or none with the
+  // answer left in tool_response, is read as a result is, its words and its facts alike (review passes 1 and 2).
+  const answer = event === "PostToolUseFailure" ? hook.error ?? hook.tool_response : hook.tool_response;
+  const text = event === "PostToolUseFailure" && typeof answer === "string" ? answer : resultText(answer);
   // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
@@ -3254,7 +3260,7 @@ function noteAgentClaimCall(hook, brains) {
   }
   // CLAIM_UNATTRIBUTED on its own lapsed claim (SMD-3807): the lapse recorded, and the claim made due, so this run's
   // renewal checks the claims made since at once, as the hook's own renewal does (review pass 1).
-  const lapsedAt = unattributedLapse(resultFacts(hook.tool_response), text, f.claim.id);
+  const lapsedAt = unattributedLapse(resultFacts(answer), text, f.claim.id);
   if (lapsedAt) {
     const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "made due, so the hook's renewal checks the claims made or renewed on its work since" : "its token file names no ticket, so the claims made since are not checked"}`;
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: 0, expiresAt: lapsedAt, last: line });
@@ -3401,13 +3407,15 @@ export function fanOutHookJson({ connector = "open-brain", runtime } = {}) {
 
 /**
  * The claims hook's settings JSON (SMD-3602): `--claims` on every tool's
- * PostToolUse and on each prompt, async, so a renewal never holds the session.
- * The flag keeps it apart from the fan-out's PostToolUse, which would
- * otherwise copy a write twice, and from the capture.
+ * PostToolUse and PostToolUseFailure and on each prompt, async, so a renewal
+ * never holds the session. PostToolUseFailure is where Claude Code hands the
+ * agent's own refused claim calls (SMD-3874). The flag keeps it apart from the
+ * fan-out's PostToolUse, which would otherwise copy a write twice, and from
+ * the capture.
  */
 export function claimsHookJson({ runtime } = {}) {
   const hook = { type: "command", command: [shellWord(runtime || process.execPath), shellWord(SELF), "--claims"].join(" "), async: true };
-  return { hooks: { PostToolUse: [{ matcher: "*", hooks: [hook] }], UserPromptSubmit: [{ hooks: [hook] }] } };
+  return { hooks: { PostToolUse: [{ matcher: "*", hooks: [hook] }], PostToolUseFailure: [{ matcher: "*", hooks: [hook] }], UserPromptSubmit: [{ hooks: [hook] }] } };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -3491,12 +3499,13 @@ export async function main(argv) {
     if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
-    // The claims hook (SMD-3602): Claude Code's async PostToolUse and
-    // UserPromptSubmit, renewing the claims a session's worktree holds tokens for.
+    // The claims hook (SMD-3602): Claude Code's async PostToolUse,
+    // PostToolUseFailure (SMD-3874) and UserPromptSubmit, renewing the claims a
+    // session's worktree holds tokens for.
     if (has(args, "--claims")) {
       if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
       for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }
-      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key.`);
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key. A claims hook pasted before 1.7.3 has no PostToolUseFailure entry, so it never saw the agent's own refused claim calls (SMD-3874): add that entry, or replace all three if the printed command differs from yours.`);
       console.log(JSON.stringify(claimsHookJson(), null, 2));
       return 0;
     }

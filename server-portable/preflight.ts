@@ -2514,7 +2514,7 @@ if (configFailed) {
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; subjects: number; subject_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; sj_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2540,9 +2540,14 @@ if (configFailed) {
                    lp AS (SELECT s.id FROM lp_s s JOIN public.thoughts n ON n.id = s.newer_id JOIN public.thoughts o ON o.id = s.older_id
                            WHERE COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)),
                    -- 084 (SMD-1873): an active judged relation and its lineage row. A brain before 084 holds no relation facet, so
-                   -- the CTE reads nothing there; a closed relation is history, its row kept or not.
-                   re_s AS (SELECT id FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
+                   -- the CTE reads nothing there; a closed relation is history, its row kept or not. Since 120 a relation naming a
+                   -- subject key is a work thread's edge, its row thread_relink's: counted apart, its remedy its own, and read
+                   -- under a bound of its own, so a brain of 10,000 thread edges still reads its judged relations (SMD-3306).
+                   re_s AS (SELECT id FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND NOT (payload ? 'key') LIMIT ${BOUND}),
                    re AS (SELECT s.id FROM re_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
+                   te_s AS (SELECT id, payload->>'key' AS key FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key' LIMIT ${BOUND}),
+                   te AS (SELECT s.id, s.key FROM te_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
                    -- 111 (SMD-3306): a standing own subject and its lineage row, as a relation's. A brain before 111 holds no
                    -- subject facet, so the CTE reads nothing there.
@@ -2586,6 +2591,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
                      (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
+                     (SELECT count(*)::int FROM te) AS thread_edges, (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM te LIMIT 3) s) AS thread_edge_ids,
                      (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
@@ -2599,7 +2605,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
-                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read,
+                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read, (SELECT count(*)::int FROM te_s) AS te_read,
                      (SELECT count(*)::int FROM sj_s) AS sj_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
@@ -2610,7 +2616,7 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.sj_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.te_read, c.sj_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
@@ -2618,6 +2624,7 @@ if (configFailed) {
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
             if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
             if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
+            if (Number(c.thread_edges)) missing.push(`${n(c.thread_edges)} thread edge(s) (${(c.thread_edge_ids ?? []).join(", ")})`);
             if (Number(c.subjects)) missing.push(`${n(c.subjects)} own subject(s) (${(c.subject_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
@@ -2626,6 +2633,8 @@ if (configFailed) {
             const sectionRemedy = (Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "")
               // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
               + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "")
+              // 120 (SMD-3306): a thread's edge and its row are thread_relink's, written together; a re-link writes a closed one again.
+              + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
               + (Number(c.subjects) ? " An own subject's row is written by 111's record_thought_subject: close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
@@ -3500,11 +3509,14 @@ if (configFailed) {
         // the setting comes from (third review pass: a role-in-database or a
         // connection-string setting outranks the ALTER ROLE it used to name).
         try {
-          const [{ level, projection, gate, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+          const [{ level, projection, gate, relink, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
                                                             to_regprocedure('public.ob1_node_projection_sync()') IS NOT NULL AS projection,
                                                             to_regprocedure('public.ob1_source_gate_status()') IS NOT NULL AS gate,
+                                                            to_regprocedure('public.thread_relink(text, boolean)') IS NOT NULL AS relink,
                                                             (SELECT source FROM pg_settings WHERE name = 'default_transaction_isolation') AS source,
-                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; gate: boolean; source: string; db: string }[];
+                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; gate: boolean; relink: boolean; source: string; db: string }[];
+          // Since 120 a subject's writer is READ COMMITTED alone: thread_relink refuses any other at the commit.
+          const refusedSubjects = relink ? `; and 120's thread_relink refuses ${level}, so every subject written or closed is refused at its commit (the extraction pass records none, the subject sweep's runs fail)` : "";
           const fixIsolation = source === "database" ? `Set it back where it was changed, on the database: ALTER DATABASE ${db} SET default_transaction_isolation = 'read committed';`
             : source === "database user" ? `Set it back where it was changed, on this role in this database: ALTER ROLE ${ident} IN DATABASE ${db} SET default_transaction_isolation = 'read committed';`
             : source === "user" ? `Set it back where it was changed, on the role: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed';`
@@ -3515,11 +3527,11 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""}${refusedSubjects} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 071's gate only if every writer of source rows and statuses is" : ""}` : ""}`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 071's gate only if every writer of source rows and statuses is" : ""}` : ""}${refusedSubjects}`,
                 fixIsolation);
           }
         } catch (e) {

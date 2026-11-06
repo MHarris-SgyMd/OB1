@@ -92,7 +92,7 @@ A source added later states its mapping and its default in SMD-3666's table, wit
 | Inferred | A tier-4 statement (decision 4's inferred tier) isn't counted until SMD-3670's agreement clears its bar: the read lists it as passed over. | off |
 | Not before | Before `not_before` the item isn't startable: the agenda leaves it out, and search doesn't change | – |
 
-SMD-3667 built this table as `effective_priority`'s weights (migration 120), each a setting a read overrides by name (`unknown`, `hop`, `hops`, `soon`, `soon_days`, `week`, `week_days`, `overdue`, `unblocks_one`, `unblocks_many`, `unblocks_many_at`, `depth`, `cap`, `count_inferred`).
+SMD-3667 built this table as `effective_priority`'s weights (migration 122), each a setting a read overrides by name (`unknown`, `hop`, `hops`, `soon`, `soon_days`, `week`, `week_days`, `overdue`, `unblocks_one`, `unblocks_many`, `unblocks_many_at`, `depth`, `cap`, `count_inferred`).
 
 On 2026-11-02's board this puts SMD-2908 first among the four Highs: 3 for High, plus 2 for urgency, if its `due_ref` names the v2.0.0 release and the release's due date is 11-03. A Medium bill due tomorrow (2 + 2) passes a High project with no date (3). An overdue Low (1 + 3) still stays below a Critical with no date (5), and an overdue Medium (2 + 3) ties it.
 
@@ -112,7 +112,7 @@ home-maintenance's `maintenance_tasks` row becomes an open item when it's create
 
 ### A read
 
-`effective_priority(items, weights, now)` (SMD-3667, migration 120) returns, for each item, `effective`, its terms, `urgency`, `overdue`, `unblocks` and `inherited_from`. It is a read of its own beside `priority_of`, not new columns on `node_state` (the maintainer's call of 2026-11-05: `node_state` covers thoughts alone, and reshaping it would drop and recreate it under the reads built on it). Every term is computed when it's read. Search blends it in through `priority_weight` and filters through `min_priority` (SMD-3668). `agenda` orders open, startable, unclaimed items by it (SMD-3669). Each of these names the terms, the winning assertion and the ones it passed over.
+`effective_priority(items, weights, now)` (SMD-3667, migration 122) returns, for each item, `effective`, its terms, `urgency`, `overdue`, `unblocks` and `inherited_from`. It is a read of its own beside `priority_of`, not new columns on `node_state` (the maintainer's call of 2026-11-05: `node_state` covers thoughts alone, and reshaping it would drop and recreate it under the reads built on it). Every term is computed when it's read. Search blends it in through `priority_weight` and filters through `min_priority` (SMD-3668). `agenda` orders open, startable, unclaimed items by it (SMD-3669). Each of these names the terms, the winning assertion and the ones it passed over.
 
 ## What this reverses or amends
 

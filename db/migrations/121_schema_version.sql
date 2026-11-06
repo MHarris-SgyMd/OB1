@@ -1,0 +1,52 @@
+-- =============================================================================
+-- Migration 121: the eleventh release — ob1_config.schema_version = 2.0.0
+--                (the cut MAINTAINING.md's "Cutting a release" orders, SMD-1804/SMD-1860)
+-- =============================================================================
+--
+-- WHY
+--   103 wrote 1.9.0+upstream.9543c29, the tenth release, as the last file of
+--   the range it froze (090..103). Since then seventeen additive migrations
+--   landed — 104 (the lapse locks its own tree, SMD-3046), 105 (Linear's
+--   duplicate status settles, SMD-2935), 106 (the query log's literal arm,
+--   SMD-2891), 107 (the listing caps its walks, SMD-3036), 108 (a keyed
+--   rebuild of 071's gate mirror, SMD-3160), 109 and 110 (the proposal listing
+--   selects a pass and pages, SMD-3248, SMD-3249), 111 and 113 (a thought's own
+--   subject, recorded and found from a pool, SMD-3306), 112 (a thought's
+--   client_key, SMD-3314), 114 (who decided a proposal, SMD-2608), 115 (work
+--   claims, SMD-3597), 116 (priority assertions, SMD-3663), 117 (open items,
+--   SMD-3665), 118 (a closed ticket's claims released, SMD-3600), 119 (a due
+--   date alone is the end of that day, SMD-3778) and 120 (a work thread's
+--   edges, SMD-3306) — and main carries nine `bump: major` fragments (the
+--   root URL's window closing, SMD-2532, and stable's tier routes removed,
+--   SMD-3101, among them; the cutover itself, SMD-2287, ships beside them),
+--   so the release rule makes this cut a major: 2.0.0, the range 104..121 frozen by
+--   releases.json, and this file its last on purpose: a brain at 121 is
+--   exactly the release, preflight's schema-version row says so beside the
+--   ledger's highest migration, and a brain migrated past 121 is "past the
+--   range its version names" until the next cut.
+--
+--   From 2.0.0 the version is plain MAJOR.MINOR.PATCH (SMD-3317): the frozen
+--   upstream pin is kept as data (releases.json's `upstream` key), not as a
+--   +upstream.<sha> suffix.
+--
+--   The literal below is held equal to db/version.mjs's BRAIN_VERSION by
+--   check-consistency's 17d (the highest schema_version writer is the current
+--   version), and scripts/assemble-release.ts refuses --write until both say
+--   the version it is about to record.
+--
+-- WHAT
+--   * Upsert ob1_config.schema_version, as 044, 048, 051, 057, 062, 072, 076,
+--     081, 083, 089 and 103 do. A plain constant — not an OB1_* env value — so
+--     there is no shell-vs-record disagreement for --reapply to refuse; under
+--     --reapply every file re-runs in order and this later write wins.
+--
+-- SAFETY
+--   Idempotent (ON CONFLICT DO UPDATE). No schema change — one config row — so a
+--   brain at 120 applies it in milliseconds; the release job's stack proves the
+--   range on the published images before the release exists.
+-- =============================================================================
+
+INSERT INTO ob1_config (key, value) VALUES
+  ('schema_version', '2.0.0')
+ON CONFLICT (key) DO UPDATE
+  SET value = EXCLUDED.value, updated_at = now();

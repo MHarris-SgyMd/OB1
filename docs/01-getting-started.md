@@ -27,7 +27,7 @@ You'll generate a password, an access key, and a few URLs, and you'll need them 
 Copy the block below into that file. It is the whole tracker; there is no spreadsheet version to download.
 
 ```text
-OPEN BRAIN -- CREDENTIAL TRACKER
+DAEMONIC BRAIN -- CREDENTIAL TRACKER
 --------------------------------------
 
 Project folder:             ____________  (where you cloned the code, Step 2)
@@ -300,11 +300,11 @@ Every client below is pointed at a URL: no config file that spawns a process, no
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
-3. Name: `Open Brain`
+3. Name: `Daemonic Brain`
 4. Remote MCP server URL: paste your **Public HTTPS URL** (the one ending in `?key=your-access-key`)
 5. Click **Add**
 
-That's it. Start a new conversation, and Claude will have access to your Open Brain tools. You can enable or disable it per conversation via the "+" button → Connectors. The same connector works at claude.ai.
+That's it. Start a new conversation, and Claude will have access to your Daemonic Brain tools. You can enable or disable it per conversation via the "+" button → Connectors. The same connector works at claude.ai.
 
 </details>
 
@@ -323,21 +323,21 @@ That's it. Start a new conversation, and Claude will have access to your Open Br
 3. Toggle **Developer mode** ON
 
 > [!CAUTION]
-> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Yes, that's ironic for a brain tool. Your Open Brain replaces that functionality anyway — and it works across every AI, not just ChatGPT.
+> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Yes, that's ironic for a brain tool. Your brain replaces that functionality anyway — and it works across every AI, not just ChatGPT.
 
 **Add the connector:**
 
 1. In Settings → **Apps & Connectors**, click **Create**
-2. Name: `Open Brain`
+2. Name: `Daemonic Brain`
 3. Description: `Personal knowledge base with semantic search` (or whatever you want — this is just for your reference)
 4. MCP endpoint URL: paste your **Public HTTPS URL** (the one ending in `?key=your-access-key`)
 5. Authentication: select **No Authentication** (your access key is embedded in the URL)
 6. Click **Create**
 
 > [!TIP]
-> ChatGPT is less intuitive than Claude at picking the right MCP tool automatically. If it doesn't use your brain on its own, be explicit: "Use the Open Brain search_thoughts tool to find my notes about project planning." After it gets the pattern once or twice in a conversation, it usually picks up the habit.
+> ChatGPT is less intuitive than Claude at picking the right MCP tool automatically. If it doesn't use your brain on its own, be explicit: "Use the Daemonic Brain search_thoughts tool to find my notes about project planning." After it gets the pattern once or twice in a conversation, it usually picks up the habit.
 >
-> If ChatGPT says an Open Brain tool is unavailable and the MCP server's log (`podman compose -f deploy/compose.yaml logs mcp api`) shows no request arriving, the connector did not reach your server. Refresh or recreate the ChatGPT app, start a fresh chat, select the Open Brain app in Developer Mode, and try a thinking model. On restricted Pro sessions, expect read tools, especially `search` and `fetch`, to be more reliable than the write tool (`capture_thought`).
+> If ChatGPT says a Daemonic Brain tool is unavailable and the MCP server's log (`podman compose -f deploy/compose.yaml logs mcp api`) shows no request arriving, the connector did not reach your server. Refresh or recreate the ChatGPT app, start a fresh chat, select the Daemonic Brain app in Developer Mode, and try a thinking model. On restricted Pro sessions, expect read tools, especially `search` and `fetch`, to be more reliable than the write tool (`capture_thought`).
 
 </details>
 
@@ -373,7 +373,7 @@ startup_timeout_sec = 30
 > [!CAUTION]
 > The `startup_timeout_sec = 30` line is required. Without it, Codex times out after 10 seconds while `npx` fetches `mcp-remote` on first use. If you see `MCP client for open-brain timed out after 10 seconds`, add or increase this value.
 
-Restart Codex and the Open Brain tools should be available immediately.
+Restart Codex and the Daemonic Brain tools should be available immediately.
 
 </details>
 
@@ -424,7 +424,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 
 </details>
 
-✅ **Done when:** You can start a conversation in your AI client and it has access to Open Brain tools — twenty-one for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), fourteen for a read key (`server-portable/tools.ts` lists them). Two of them, `search` and `fetch`, are ChatGPT-shaped compatibility tools every client sees.
+✅ **Done when:** You can start a conversation in your AI client and it has access to Daemonic Brain tools — twenty-one for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), fourteen for a read key (`server-portable/tools.ts` lists them). Two of them, `search` and `fetch`, are ChatGPT-shaped compatibility tools every client sees.
 
 ---
 
@@ -486,13 +486,13 @@ Something on your machine holds it. Set `SERVER_PORT=8001` (any free port) in `d
 
 **❌ Claude Desktop or ChatGPT tools don't appear**
 
-Those connectors dial from the vendor's side: they need the Public HTTPS URL from Step 6.1, and the tunnel must be running. With the URL right, make sure the connector is enabled for your conversation — click the "+" button at the bottom of the chat, then Connectors, and check that Open Brain is toggled on. If it was added but tools still don't show, remove and re-add it with the same URL.
+Those connectors dial from the vendor's side: they need the Public HTTPS URL from Step 6.1, and the tunnel must be running. With the URL right, make sure the connector is enabled for your conversation — click the "+" button at the bottom of the chat, then Connectors, and check that Daemonic Brain is toggled on. If it was added but tools still don't show, remove and re-add it with the same URL.
 
-**❌ ChatGPT doesn't use the Open Brain tools**
+**❌ ChatGPT doesn't use the Daemonic Brain tools**
 
-First, confirm Developer Mode is enabled (Settings → Apps & Connectors → Advanced settings). Without it, ChatGPT only exposes limited MCP functionality that won't cover Open Brain's full toolset. Next, check that the connector is active for your current conversation — look for it in the tools/apps panel. If it's connected but ChatGPT ignores it, be direct: "Use the Open Brain search_thoughts tool to search for [topic]."
+First, confirm Developer Mode is enabled (Settings → Apps & Connectors → Advanced settings). Without it, ChatGPT only exposes limited MCP functionality that won't cover Daemonic Brain's full toolset. Next, check that the connector is active for your current conversation — look for it in the tools/apps panel. If it's connected but ChatGPT ignores it, be direct: "Use the Daemonic Brain search_thoughts tool to search for [topic]."
 
-**❌ ChatGPT says an Open Brain tool is unavailable**
+**❌ ChatGPT says a Daemonic Brain tool is unavailable**
 
 Check the MCP server's log (`podman compose -f deploy/compose.yaml logs mcp api`). If no request appears when ChatGPT fails, your server is not the problem — ChatGPT did not expose that tool to the current chat. Refresh or recreate the ChatGPT app so it pulls updated tool metadata, start a fresh chat, and try a thinking model. On Pro, the read-only `search`/`fetch` compatibility tools may work where `capture_thought` is hidden or blocked because full MCP/write access is plan-dependent.
 
@@ -567,11 +567,11 @@ Got stuck or want to share what you've built? Join the [Open Brain Discord](http
 
 ## ➡️ Your Next Step
 
-Your Open Brain is live. Now make it work for you. The **[Companion Prompts](02-companion-prompts.md)** cover the full lifecycle from here:
+Your brain is live. Now make it work for you. The **[Companion Prompts](02-companion-prompts.md)** cover the full lifecycle from here:
 
 - ✅ **Memory Migration** — Pull everything your AI already knows about you into your brain so every tool starts with context instead of zero
-- ✅ **Second Brain Migration** — Bring your existing notes from Notion, Obsidian, or any other system into your Open Brain without starting over
-- ✅ **Open Brain Spark** — Personalized use case discovery based on your actual workflow, not generic examples
+- ✅ **Second Brain Migration** — Bring your existing notes from Notion, Obsidian, or any other system into your brain without starting over
+- ✅ **Daemonic Brain Spark** — Personalized use case discovery based on your actual workflow, not generic examples
 - ✅ **Quick Capture Templates** — Five patterns optimized for clean metadata extraction so your brain tags and retrieves accurately
 - ✅ **The Weekly Review** — A Friday ritual that surfaces themes, forgotten action items, and connections you missed
 

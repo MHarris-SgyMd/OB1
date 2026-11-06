@@ -6,7 +6,7 @@
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.7.2",
+  "version": "1.7.3",
   "requires": {
     "open_brain": true,
     "services": [],
@@ -20,5 +20,5 @@
   "difficulty": "beginner",
   "estimated_time": "10 minutes",
   "created": "2026-09-22",
-  "updated": "2026-11-05"
+  "updated": "2026-11-06"
 }
