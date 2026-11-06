@@ -2697,6 +2697,21 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
         && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — acceptance 100% \(1 of 1: accepted over accepted, rejected and unanswered\), median 3 d to an answer$/.test(fRow ?? ""),
       `the finding posted before the link reads accepted in keyed /health and the tool's table (${JSON.stringify(found.findings)} / ${fRow})`);
+    // 120 (SMD-3306): a posted evolves finding the judge took back reads withdrawn, though a work thread's evolves stands
+    // on its pair: the thread's edge is no word of the judge's. Put back after, as the fixture was.
+    const judgedEvolves = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${t[2]}::uuid
+                                     AND payload->>'target' = ${t[1]} AND payload->>'origin' = 'judged'`)[0].id as string;
+    await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
+              VALUES ('SMD-7002', 'SMD-7003', 'evolves', 'SMD-7003', 'posted', 'c-e2e-thread', ARRAY[${judgedEvolves}::uuid], now() - interval '1 day')`;
+    await sql`SELECT record_thought_relation(${t[2]}::uuid, ${t[1]}::uuid, NULL, NULL, 'consolidate:e2e@p4', NULL, 'a', 'b', NULL)`;
+    const [{ id: threadsEvolves }] = (await sql`INSERT INTO thought_facets (thought_id, kind, payload)
+        VALUES (${t[2]}::uuid, 'relation', ${{ relation: "evolves", target: t[1], judge_key: "thread:v1", key: "ticket:SMD-7002" }}::jsonb) RETURNING id::text AS id`) as { id: string }[];
+    const takenBack = ((await health("e2e-key")) as Record<string, any>).database?.findings ?? {};
+    assert(takenBack.posted === 2 && takenBack.withdrawn === 1 && takenBack.open === 0,
+      `a posted evolves finding the judge took back reads withdrawn, a work thread's evolves standing on its pair none of the judge's (${JSON.stringify(takenBack)})`);
+    await sql`DELETE FROM thought_facets WHERE id = ${threadsEvolves}::uuid`;
+    await sql`DELETE FROM board_findings_posted WHERE comment_id = 'c-e2e-thread'`;
+    await relate(t[2], t[1], "evolves");
 
     // A server role granted capture and server — no worker group — reads the
     // queue: the server group's SELECT on supersession_proposals (SMD-2680).

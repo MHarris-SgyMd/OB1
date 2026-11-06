@@ -17361,7 +17361,7 @@ console.log("\n[106] Migration 118: a closed ticket's claims released — every 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
 }
 
-console.log("\n[108] Migration 120: a work thread's edges — the thoughts holding one subject key, in capture order (created_at, then id), each linked to the one before it by a standing `evolves` relation of origin thread (the key named, judge key thread:v1, no confidence, its lineage at both fingerprints), kept by triggers as subjects land, close and go with their thought; thread_relink closing what the thread no longer has and writing what it lacks, a dry run counting; the validator taking a thread's edge, refusing a malformed one, and saying the origin; the judge's edges under their own index, record_thought_relation reading them alone; a delete by a role that cannot make a re-link's writes leaving the gap a re-link heals; a re-apply a no-op, an index of 084's shape made again (SMD-3306)");
+console.log("\n[108] Migration 120: a work thread's edges — the thoughts holding one subject key, in capture order (created_at, then id), each linked to the one before it by a standing `evolves` relation of origin thread (the key named, judge key thread:v1, no confidence, its lineage at both fingerprints), kept by constraint triggers at the writer's commit as subjects land, close and go with their thought, a replace that keeps the key moving no edge; thread_relink closing what the thread no longer has and writing what it lacks, a dry run counting; the validator taking a thread's edge, refusing a malformed one, and saying the origin; the judge's edges under their own index, record_thought_relation reading them alone; a delete by a role that cannot make a re-link's writes leaving the gap a re-link heals; a re-apply a no-op, an index of 084's shape made again (SMD-3306)");
 {
   type Relink = { ok: boolean; key: string; thoughts: number; closed: number; added: number; dry: boolean };
   type Edge = { id: string; newer: string; older: string; origin: string; relation: string; judge: string; key: string; conf: unknown };
@@ -17387,8 +17387,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   };
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const JUDGE = "subject:qwen3.8:27b@p2";
-  const subject = async (id: string, key: string | null) => (await one<{ r: { action: string; id?: string } }>(
-    `SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb) AS r`, [id, key, key === null ? null : "model", JUDGE, await fp(id)])).r;
+  const subject = async (id: string, key: string | null, judge = JUDGE) => (await one<{ r: { action: string; id?: string } }>(
+    `SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb) AS r`, [id, key, key === null ? null : "model", judge, await fp(id)])).r;
   const edges = async (key: string) => q<Edge>(`SELECT id::text, thought_id::text AS newer, payload->>'target' AS older, payload->>'origin' AS origin, payload->>'relation' AS relation,
       payload->>'judge_key' AS judge, payload->>'key' AS key, payload->'confidence' AS conf
       FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1 ORDER BY created_at, id`, [key]);
@@ -17400,7 +17400,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const K = "ticket:SMD-9108", K2 = "ticket:SMD-9109";
 
   // The shape: 120 the last definer of its four functions, two of them 102's door and 111's validator carried; the
-  // triggers, the indexes, the sentinels, SECURITY INVOKER throughout, the comments.
+  // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
+  // comments.
   for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink", "ob1_thread_relink_subject"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
@@ -17411,10 +17412,10 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq') AS judged,
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_thread_uniq') AS thread,
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_thread_key_idx') AS bykey`);
-  assert(/AFTER INSERT ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(new\.kind = 'subject'::text\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)/.test(shape.written ?? "")
-         && /AFTER UPDATE OF valid_until ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(\(new\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\) AND \(new\.valid_until IS NOT NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)/.test(shape.closed ?? "")
-         && /AFTER DELETE ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(\(old\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)/.test(shape.deleted ?? ""),
-    `three triggers keep the threads: a subject written, a standing subject closed, a standing subject deleted (${shape.written}; ${shape.closed}; ${shape.deleted})`);
+  assert(/^CREATE CONSTRAINT TRIGGER thought_facets_thread_written AFTER INSERT ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(new\.kind = 'subject'::text\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.written ?? "")
+         && /^CREATE CONSTRAINT TRIGGER thought_facets_thread_closed AFTER UPDATE OF valid_until ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(\(new\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\) AND \(new\.valid_until IS NOT NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.closed ?? "")
+         && /^CREATE CONSTRAINT TRIGGER thought_facets_thread_deleted AFTER DELETE ON (public\.)?thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN \(\(\(old\.kind = 'subject'::text\) AND \(old\.valid_until IS NULL\)\)\) EXECUTE FUNCTION ob1_thread_relink_subject\(\)$/.test(shape.deleted ?? ""),
+    `three constraint triggers, deferred to the writer's commit, keep the threads: a subject written, a standing subject closed, a standing subject deleted (${shape.written}; ${shape.closed}; ${shape.deleted})`);
   assert(/UNIQUE INDEX/.test(shape.judged ?? "") && /AND \(NOT \(payload \? 'key'::text\)\)\)$/.test(shape.judged ?? "")
          && /UNIQUE INDEX/.test(shape.thread ?? "") && /\(thought_id, \(\(payload ->> 'target'::text\)\), \(\(payload ->> 'key'::text\)\)\)/.test(shape.thread ?? "") && /AND \(payload \? 'key'::text\)\)$/.test(shape.thread ?? "")
          && !/UNIQUE/.test(shape.bykey ?? "") && /\(\(payload ->> 'key'::text\)\)/.test(shape.bykey ?? "") && /AND \(payload \? 'key'::text\)\)$/.test(shape.bykey ?? ""),
@@ -17454,6 +17455,14 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const caAfter = await facet(ca?.id ?? "");
   assert((await pairs(K)) === "b→a c→b" && caAfter?.open === false && (await lineage(ca?.id ?? "")).length === 1,
     `a thought come between, by capture time, takes its place: b→a and c→b written, c→a closed and kept as history with its lineage (${await pairs(K)})`);
+  // A replace that keeps the key moves no edge: the close and the insert re-link at the commit, both reading the final
+  // subjects (between the two a re-link would bridge b, then un-bridge it: three closed edges and their lineage).
+  const everyEdge = async () => (await q<{ id: string }>(`SELECT id::text FROM thought_facets WHERE kind = 'relation' AND payload->>'key' = $1 ORDER BY id`, [K])).map((r) => r.id).join();
+  const relationRows = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'relation'`)).n;
+  const edgesBefore = await everyEdge(), rowsBefore = await relationRows();
+  const kept = await subject(b, K, "subject:qwen3.8:27b@p3");
+  assert(kept.action === "replaced" && (await everyEdge()) === edgesBefore && (await relationRows()) === rowsBefore && (await pairs(K)) === "b→a c→b",
+    `b's subject recorded again under another pass, the key the same: replaced, and the thread's edges — standing and closed — and their lineage as they were (${kept.action}, ${await pairs(K)})`);
   const rekeyed = await subject(b, K2);
   const [caAgain] = await edges(K);
   assert(rekeyed.action === "replaced" && (await pairs(K)) === "c→a" && caAgain?.id !== ca?.id && (await facet(ca?.id ?? ""))?.open === false && (await pairs(K2)) === "",

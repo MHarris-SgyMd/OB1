@@ -2541,15 +2541,19 @@ on it: relation `evolves`, its target the thought before it, judge key
 `thread:v1`, the thread's `key`, no confidence, origin `thread`, with its
 lineage row (the older and the newer thought at their fingerprints, produced by
 `thread:v1`). `thread_relink(key, dry)` makes one thread stand as its subjects
-say, under a lock on the key: it closes each edge the thread no longer has (a
-closed edge is history, never re-opened) and writes each it lacks; dry, it
-counts and writes nothing. Three triggers on `thought_facets` call it as a
-subject is written, closed (`close_thought_subject` included, which since 120
-needs the door's writes), or deleted with its thought, the last only when the
-deleting role can make a re-link's writes (INSERT and UPDATE on
-`thought_facets` and on `derivations`): a server role cannot, so a thought it
-deletes leaves its neighbours unlinked until their key's next re-link. The
-validator says a relation's origin: one naming a subject key is a thread's edge,
+say, under a lock on the key: it writes each edge the thread lacks, the edge's
+two thoughts locked first, so a delete in flight is waited out and the thread
+read again past the thought it took, then closes each edge the thread no longer
+has (a closed edge is history, never re-opened); dry, it counts and writes
+nothing. Three constraint triggers on `thought_facets`, deferred to the
+writer's commit, call it as a subject is written, closed (`close_thought_subject`
+included, which since 120 needs the door's writes), or deleted with its
+thought, so a subject recorded again under the same key moves no edge. The last
+re-links only when the deleting role can make a re-link's writes (INSERT and
+UPDATE on `thought_facets` and on `derivations`) and no other transaction holds
+the key's lock, since a delete never waits on a re-link: a server role cannot,
+so a thought it deletes leaves its neighbours unlinked until their key's next
+re-link. The validator says a relation's origin: one naming a subject key is a thread's edge,
 `evolves` under a `thread:` judge key with no confidence; any other is the
 judge's, `judged`, under 084's index, which now keeps to the judge's edges, so
 a judged `related` and a thread's `evolves` stand side by side on one pair.
@@ -2569,8 +2573,9 @@ A thought stands in one thread until its subjects are a set (PR 7a-3); the
 thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084,
 111 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the
 re-link, the validator, the judge's door beside a thread, the deletes with and
-without the writes, the re-apply), test-upgrade [20bl] (onto a populated brain
-at the file before it), test-live [47] (`threads.ts`).
+without the writes, a replace that keeps its key, the re-apply), test-upgrade
+[20bl] (onto a populated brain at the file before it), test-live [47]
+(`threads.ts`) and [48] (beside a delete in flight, a held key and a deadlock).
 
 ## What changed relative to the guide
 

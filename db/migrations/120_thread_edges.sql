@@ -33,19 +33,26 @@
 --     keeps, replaces and closes the judge's edge alone: a re-judge never
 --     touches a thread's.
 --   * thread_relink(key, dry) — re-links one key's thread under an advisory
---     lock on the key: each standing edge the thread no longer has is closed,
---     and each edge it has that does not stand is written, with its lineage
---     row (artifact_kind relation, the older and the newer thought at their
---     fingerprints now, produced_by thread:v1) in the same transaction
---     (ob1:thread-lineage-with-its-artifact). Dry, it counts and writes
---     nothing. Returns {ok, key, thoughts, closed, added, dry}.
---   * Three triggers on thought_facets keep the threads: a subject written
---     (AFTER INSERT) re-links its key; a subject closed (AFTER UPDATE OF
---     valid_until) re-links its key; a standing subject deleted with its
---     thought (AFTER DELETE) re-links its key when the deleting role may
---     make a re-link's writes: INSERT and UPDATE on thought_facets (the
---     structure and capture groups') and on derivations (the capture
---     group's).
+--     lock on the key: each edge the thread has that does not stand is
+--     written first, with its lineage row (artifact_kind relation, the older
+--     and the newer thought at their fingerprints now, produced_by thread:v1)
+--     in the same transaction (ob1:thread-lineage-with-its-artifact), its two
+--     thoughts locked (KEY SHARE) before the write, so a delete in flight is
+--     waited out and a thought it took away sends the re-link back to read the
+--     thread again; then each standing edge the thread no longer has is
+--     closed. Dry, it counts and writes nothing. Returns {ok, key, thoughts,
+--     closed, added, dry}.
+--   * Three constraint triggers on thought_facets keep the threads, deferred
+--     to the writer's commit, so a replace (a subject closed and another
+--     written in one transaction) re-links once its subjects are final: a
+--     subject written (AFTER INSERT) re-links its key; a subject closed
+--     (AFTER UPDATE OF valid_until) re-links its key; a standing subject
+--     deleted with its thought (AFTER DELETE) re-links its key when the
+--     deleting role may make a re-link's writes — INSERT and UPDATE on
+--     thought_facets (the structure and capture groups'), UPDATE on thoughts
+--     (the row locks) and the writes on derivations (the capture group's) —
+--     and no other transaction holds the key's lock: a delete never waits on
+--     a re-link, which may be waiting on the deleted thought.
 --   * Grants: none issued. The triggers run as the writer, as 016's and
 --     113's do: record_thought_subject already needs every write a re-link
 --     makes; close_thought_subject, which needed UPDATE alone, needs them
@@ -61,10 +68,12 @@
 --     in batches, once at the upgrade — not here, since a brain may hold
 --     millions of thoughts. Until it runs, a thread is linked where a subject
 --     lands or leaves.
---   * A thought deleted by a role that cannot make a re-link's writes — a
+--   * A thought deleted by a role that cannot make a re-link's writes (a
 --     server role holds the capture and server groups alone, no INSERT on
---     thought_facets — closes its edges (084's trigger and the cascade) and
---     links its neighbours at the key's next re-link, or db/threads.ts's.
+--     thought_facets), or deleted while another transaction holds its key's
+--     lock, closes its edges (084's trigger and the cascade) and links its
+--     neighbours at the key's next re-link, or db/threads.ts's; the holder
+--     links past it itself when its own work reaches the deleted thought.
 --   * The reads (PR 7a-2): a thread read, fetch's "continues X" and
 --     "continued by Y", and SMD-2726's relations on search, list and fetch.
 --   * A thought's subjects as a set (PR 7a-3): one standing per thought
@@ -76,16 +85,19 @@
 --     subject keeps the edge, its lineage at the fingerprints it was written
 --     at — so the arm, when it lands, keeps to the judge's edges.
 --   * Two writers re-keying two thoughts across the same two keys at once can
---     deadlock on the keys' locks: Postgres ends one, whose subject is not
---     written, and its thought is taken again as any failed write's is.
+--     deadlock on the keys' locks at their commits: Postgres ends one, whose
+--     subject is not written — the subject sweep's run ends on it, its claim
+--     back in the pool once its lease runs out; extraction leaves the subject
+--     to the sweep; db/threads.ts runs its batch again.
 --
 -- SAFETY
---   One function and two writers redefined, each a body verbatim but the edit
---   above; 084's index made again with the judge's clause, and two made; one
---   new function, one trigger function and three triggers; one comment
---   restated (close_thought_subject's). No existing row changes: every
---   relation standing names no key, so each keeps origin judged and stays
---   under the judge's index, which holds the same pairs 084's did. Dropping
+--   Two functions redefined, the validator and record_thought_relation, each
+--   a body verbatim but the edit above; 084's index made again with the
+--   judge's clause, and two made; one new function, one trigger function and
+--   three constraint triggers; one comment restated (close_thought_subject's).
+--   No existing row changes: every relation standing names no key, so each
+--   keeps origin judged and stays under the judge's index, which holds the
+--   same pairs 084's did. Dropping
 --   084's index holds thought_facets (ACCESS EXCLUSIVE) until the migrator's
 --   transaction commits, so facet reads and writes wait out the judge's
 --   index's build over the standing relations — a moment on a brain of
@@ -572,6 +584,8 @@ DECLARE
   v_closed  integer := 0;
   v_added   integer := 0;
   v_count   integer;
+  v_held    integer;
+  v_reads   integer := 0;
   v_id      uuid;
   r         record;
 BEGIN
@@ -585,9 +599,66 @@ BEGIN
   -- so it counts what a re-link now would do.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:thread:' || p_key, 0));
 
-  -- The edges standing that the thread no longer has — a thought gone from it,
-  -- or one come between — are closed. A closed edge is history, as a judged
-  -- one is: a later re-link writes a new one, never re-opens it.
+  -- The edges the thread has that do not stand are written first, each with
+  -- its lineage: the older and the newer thought at their fingerprints now.
+  -- Each edge's two thoughts are locked (KEY SHARE) before its write, so a
+  -- delete in flight is waited out, and one it took away sends the re-link
+  -- back to read the thread again, its neighbours then linked past it. Before
+  -- any close, so the re-link holds no edge's row while it waits on a thought
+  -- whose delete (084's trigger) closes the edges naming it.
+  <<reads>>
+  LOOP
+    v_reads := v_reads + 1;
+    FOR r IN
+      WITH thread AS (
+        SELECT t.id, t.created_at
+          FROM thought_facets s
+          JOIN thoughts t ON t.id = s.thought_id
+         WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = p_key
+      ), want AS (
+        SELECT id AS newer, lag(id) OVER (ORDER BY created_at, id) AS older FROM thread
+      )
+      SELECT w.newer, w.older,
+             COALESCE(n.content_fingerprint, content_fingerprint_of(n.content)) AS newer_fp,
+             COALESCE(o.content_fingerprint, content_fingerprint_of(o.content)) AS older_fp
+        FROM want w
+        JOIN thoughts n ON n.id = w.newer
+        JOIN thoughts o ON o.id = w.older
+       WHERE w.older IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM thought_facets e
+                          WHERE e.thought_id = w.newer AND e.kind = 'relation' AND e.valid_until IS NULL
+                            AND e.payload ? 'key' AND e.payload->>'key' = p_key AND e.payload->>'target' = w.older::text)
+       ORDER BY w.newer
+    LOOP
+      IF p_dry THEN
+        v_added := v_added + 1;
+        CONTINUE;
+      END IF;
+      PERFORM 1 FROM thoughts WHERE id IN (r.older, r.newer) FOR KEY SHARE;
+      GET DIAGNOSTICS v_held = ROW_COUNT;
+      IF v_held < 2 THEN
+        -- A thought of the pair went while the re-link read: read the thread again.
+        IF v_reads >= 10 THEN
+          RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
+            MESSAGE = format('thread_relink: the thread of %L lost a thought under each of ten reads; run it again', p_key);
+        END IF;
+        CONTINUE reads;
+      END IF;
+      INSERT INTO thought_facets (thought_id, kind, payload)
+      VALUES (r.newer, 'relation', jsonb_build_object('relation', 'evolves', 'target', r.older, 'judge_key', 'thread:v1', 'key', p_key))
+      RETURNING id INTO v_id;
+      -- ob1:thread-lineage-with-its-artifact — a CONTRACT SENTINEL, not prose:
+      -- the edge and its lineage are one transaction (061's rule).
+      PERFORM ob1_record_derivation('relation', v_id, ARRAY[r.older, r.newer], ARRAY[r.older_fp, r.newer_fp], 'thread:v1',
+                                    jsonb_build_object('deterministic', true, 'declared', false), NULL);
+      v_added := v_added + 1;
+    END LOOP;
+    EXIT reads;
+  END LOOP;
+
+  -- Then the edges standing that the thread no longer has — a thought gone
+  -- from it, or one come between — are closed. A closed edge is history, as a
+  -- judged one is: a later re-link writes a new one, never re-opens it.
   FOR r IN
     WITH thread AS (
       SELECT t.id, t.created_at
@@ -609,40 +680,6 @@ BEGIN
     UPDATE thought_facets SET valid_until = now() WHERE id = r.id AND valid_until IS NULL;
   END LOOP;
 
-  -- The edges the thread has that do not stand are written, each with its
-  -- lineage: the older and the newer thought at their fingerprints now.
-  FOR r IN
-    WITH thread AS (
-      SELECT t.id, t.created_at
-        FROM thought_facets s
-        JOIN thoughts t ON t.id = s.thought_id
-       WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = p_key
-    ), want AS (
-      SELECT id AS newer, lag(id) OVER (ORDER BY created_at, id) AS older FROM thread
-    )
-    SELECT w.newer, w.older,
-           COALESCE(n.content_fingerprint, content_fingerprint_of(n.content)) AS newer_fp,
-           COALESCE(o.content_fingerprint, content_fingerprint_of(o.content)) AS older_fp
-      FROM want w
-      JOIN thoughts n ON n.id = w.newer
-      JOIN thoughts o ON o.id = w.older
-     WHERE w.older IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM thought_facets e
-                        WHERE e.thought_id = w.newer AND e.kind = 'relation' AND e.valid_until IS NULL
-                          AND e.payload ? 'key' AND e.payload->>'key' = p_key AND e.payload->>'target' = w.older::text)
-     ORDER BY w.newer
-  LOOP
-    v_added := v_added + 1;
-    CONTINUE WHEN p_dry;
-    INSERT INTO thought_facets (thought_id, kind, payload)
-    VALUES (r.newer, 'relation', jsonb_build_object('relation', 'evolves', 'target', r.older, 'judge_key', 'thread:v1', 'key', p_key))
-    RETURNING id INTO v_id;
-    -- ob1:thread-lineage-with-its-artifact — a CONTRACT SENTINEL, not prose:
-    -- the edge and its lineage are one transaction (061's rule).
-    PERFORM ob1_record_derivation('relation', v_id, ARRAY[r.older, r.newer], ARRAY[r.older_fp, r.newer_fp], 'thread:v1',
-                                  jsonb_build_object('deterministic', true, 'declared', false), NULL);
-  END LOOP;
-
   SELECT count(*) INTO v_count
     FROM thought_facets s
    WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = p_key;
@@ -652,7 +689,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thread_relink(text, boolean) IS
-  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in capture order (created_at, then id), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each standing edge of the key''s that the thread no longer has is closed and each edge it has that does not stand is written, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1) in the same transaction. p_dry counts and writes nothing. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT on thoughts, and the writes on derivations (the capture group). Called by the triggers on subjects and by db/threads.ts. Migration 120 / SMD-3306.';
+  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in capture order (created_at, then id), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each edge the thread has that does not stand is written first, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1) in the same transaction, its two thoughts locked FOR KEY SHARE before the write — a delete in flight is waited out, and a thought it took away sends the re-link back to read the thread again (serialization_failure after ten reads) — then each standing edge of the key''s that the thread no longer has is closed. p_dry counts and writes nothing. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT and UPDATE on thoughts (the row locks), and the writes on derivations (the capture group). Called by the triggers on subjects, at their writer''s commit, and by db/threads.ts. Migration 120 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The triggers that keep the threads
@@ -668,31 +705,45 @@ BEGIN
     PERFORM thread_relink(OLD.payload->>'key');
   -- A standing subject deleted with its thought: its edges are closed by 084's
   -- trigger and the cascade, and its neighbours linked here when the deleting
-  -- role may make a re-link's writes; otherwise at the key's next re-link
-  -- (NOT HERE). A delete is never refused for them: the server deletes.
+  -- role may make a re-link's writes and the key's lock is free; otherwise at
+  -- the key's next re-link (NOT HERE). A delete never waits on the key: a
+  -- re-link holding it may be waiting on the deleted thought's row, and a
+  -- delete is never refused for a thread — the server deletes.
   ELSIF has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
-        AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') THEN
-    PERFORM thread_relink(OLD.payload->>'key');
+        AND has_any_column_privilege('thoughts', 'UPDATE')
+        AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE')
+        AND has_table_privilege('derivations', 'SELECT') THEN
+    IF pg_try_advisory_xact_lock(hashtextextended('ob1:thread:' || (OLD.payload->>'key'), 0)) THEN
+      PERFORM thread_relink(OLD.payload->>'key');
+    END IF;
   END IF;
   RETURN NULL;
 END;
 $$;
 
 COMMENT ON FUNCTION ob1_thread_relink_subject() IS
-  'AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120): re-links the subject''s key''s thread (thread_relink). A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets and on derivations); otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migration 120 / SMD-3306.';
+  'Constraint triggers AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120), deferred to the writer''s commit: re-links the subject''s key''s thread (thread_relink) once the transaction''s subjects are final, so a replace (a close and an insert on one key) moves no edge. A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets, UPDATE on thoughts for the row locks, and INSERT, UPDATE and SELECT on derivations) and no other transaction holds the key''s lock (pg_try_advisory_xact_lock): a delete never waits on a re-link; otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migration 120 / SMD-3306.';
 
+-- Constraint triggers, deferred to the writer's commit: a replace closes a
+-- subject and writes another in one transaction, and a re-link between the
+-- two would bridge the thought and then un-bridge it (three closed edges and
+-- their lineage for nothing). At the commit both re-links read the final
+-- subjects, the second a no-op; the key's lock is held from then alone.
 DROP TRIGGER IF EXISTS thought_facets_thread_written ON thought_facets;
-CREATE TRIGGER thought_facets_thread_written
+CREATE CONSTRAINT TRIGGER thought_facets_thread_written
   AFTER INSERT ON thought_facets
+  DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW WHEN (NEW.kind = 'subject') EXECUTE FUNCTION ob1_thread_relink_subject();
 DROP TRIGGER IF EXISTS thought_facets_thread_closed ON thought_facets;
-CREATE TRIGGER thought_facets_thread_closed
+CREATE CONSTRAINT TRIGGER thought_facets_thread_closed
   AFTER UPDATE OF valid_until ON thought_facets
+  DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW WHEN (NEW.kind = 'subject' AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL)
   EXECUTE FUNCTION ob1_thread_relink_subject();
 DROP TRIGGER IF EXISTS thought_facets_thread_deleted ON thought_facets;
-CREATE TRIGGER thought_facets_thread_deleted
+CREATE CONSTRAINT TRIGGER thought_facets_thread_deleted
   AFTER DELETE ON thought_facets
+  DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW WHEN (OLD.kind = 'subject' AND OLD.valid_until IS NULL) EXECUTE FUNCTION ob1_thread_relink_subject();
 
 -- A close re-links its thread now: close_thought_subject's comment (113's)
