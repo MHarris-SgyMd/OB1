@@ -629,12 +629,13 @@
  *      PR 3b's derived map is not. Its probe pins what it refuses and passes
  *  54. "Open Brain" as the product's name and "fork" as a word stay out of
  *      the live text: every file git lists outside changes/, CHANGELOG.md,
- *      db/migrations/ and FORK.md is read line by line, after cutting the
- *      shapes that make no claim (a URL, a link to upstream with its text,
- *      the origin sentence, upstream's badge, FORK.md, `ob1-fork`, CI's old
- *      name, `[fork]`, a quoted `fork`, `fork()`, the fork network), each
- *      held by a probe; a line kept on purpose is counted per file in
- *      NAME_EXCEPTIONS with why, more or fewer failing (SMD-3773)
+ *      FORK.md and the migrations applied by 119 is read line by line (a
+ *      name wrapped onto the next line too), after cutting the shapes that
+ *      make no claim (a URL, the origin sentence, upstream's badge, FORK.md,
+ *      `ob1-fork`, CI's old name, `[fork]`, a `fork` code token, `fork()`,
+ *      the fork network), each held by a probe both ways; a line kept on
+ *      purpose is counted per file in NAME_EXCEPTIONS with its reasons,
+ *      more naming the lines and fewer failing as stale (SMD-3773)
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50 and 51 parse YAML with Bun.YAML,
@@ -11564,32 +11565,38 @@ checkJobMap();
 // "your Open Brain" or a tool titled "Search Open Brain" passed every check,
 // and such lines arrive by copying older text. This reads every text file git
 // lists (tracked, and untracked but not ignored) outside the archive —
-// changes/, CHANGELOG.md, db/migrations/ and FORK.md, the fork era's record —
-// line by line with plain word boundaries (JSC gives up silently at its
-// backtrack limit, so no pattern here can backtrack far), for "Open Brain" in
-// any case and "fork", "forks" or "forked" as a word.
+// changes/, CHANGELOG.md, FORK.md (the fork era's record) and the migrations
+// applied by 119 (a newer migration is read) — line by line with plain word
+// boundaries (JSC gives up silently at its backtrack limit, so no pattern here
+// can backtrack far), for "Open Brain" in any case, also when a line ends
+// "Open" and the next begins "Brain" past its comment leader (the wrap PR 2
+// missed in pull-gmail.mjs), and "fork", "forks" or "forked" as a word. Other
+// spellings ("OpenBrain", "open-brain") are identifiers or upstream's, and are
+// not read. This file is read too, with this section blanked, since it names
+// the words to look for them.
 //
 // Shapes that say nothing about what the project is are cut from a line before
-// it is read, each held by a probe: a URL, and a markdown link to upstream's
-// repository with its text (the origin's links); the origin sentence ("grew
-// out of Open Brain", "began as a fork of"); upstream's maintainer-team badge
-// (attribution); FORK.md named as a file, the `ob1-fork` code marker, CI's
-// name before SMD-3765 (`fork-checks`, "Fork Checks"), the `[fork]` commit type
-// commitlint keeps for old commits, and `fork` quoted as a token (the ingest
-// pipeline's source type), as identifiers; a process `fork()` and GitHub's
-// "fork network", as other senses. What is left is a new line, which fails
-// naming its file and line, or one SMD-3770's records keep on purpose —
-// upstream's own contributions kept whole, eval data and test fixtures,
-// credits and quotes, what another ticket owns — counted per file in
-// NAME_EXCEPTIONS with why. A file with more matches fails as a new line, with
-// fewer as a stale count. This file names the words to look for them, and is
-// not read.
-const NAME_ARCHIVE = /^(?:changes\/|CHANGELOG\.md$|db\/migrations\/|FORK\.md$)/;
+// it is read: a URL (link text stays read, so "[Open Brain](upstream)" in a
+// prerequisite still fails); the origin sentence ("grew out of Open Brain",
+// "began as a fork of"); upstream's maintainer-team badge (attribution);
+// FORK.md named as a file, the `ob1-fork` code marker, CI's name before
+// SMD-3765 (`fork-checks`, "Fork Checks"), the `[fork]` commit type commitlint
+// keeps for old commits, and `fork` quoted as a code token (the ingest
+// pipeline's source), as identifiers; a process `fork()` and GitHub's "fork
+// network", as other senses. Each shape has a probe that must pass it, and one
+// that puts it beside a real hit and must still flag, so a widened cut fails.
+// What is left is a new line, which fails naming its file and line, or one
+// kept on purpose — upstream's own contributions, eval data and fixtures,
+// credits and quotes, what another ticket owns — counted per file and word in
+// NAME_EXCEPTIONS, under one reason or several, each with its lines. More
+// lines fail naming them; fewer fail as a stale count.
+const NAME_ARCHIVE = /^(?:changes\/|CHANGELOG\.md$|FORK\.md$|db\/migrations\/(?:0\d\d|1[01]\d)_)/;
 const PRODUCT_NAME = /\bopen brain\b/i;
 const FORK_WORD = /\bfork(?:s|ed)?\b/i;
+const NAME_LINE_END = /\bopen\s*$/i;
+const NAME_NEXT_START = /^\s*(?:\/\/+|#+|\*+|--+|>+|<!--)?\s*brain\b/i;
 /** Cut from a line before it is read: shapes that make no claim about what the project is (check 54). */
 const NOT_A_NAME: RegExp[] = [
-  /\[[^\]\n]*\]\(https?:\/\/github\.com\/NateBJones-Projects\/[^)\s]*\)/gi,
   /https?:\/\/[^\s)>\]"'`]+/gi,
   /\bgrew out of \[?open brain\b/gi,
   /\bbegan as a fork of\b/gi,
@@ -11598,31 +11605,52 @@ const NOT_A_NAME: RegExp[] = [
   /\bob1-fork\b/gi,
   /\bfork-checks\b/gi,
   /\bFork Checks\b/g,
-  /\[fork\]/gi,
-  /(["'`])fork\1/gi,
+  /\[fork\](?![(\]])/gi,
+  /"fork"|`fork`/g,
   /\bfork\(/gi,
   /\bfork network\b/gi,
 ];
 type NameKind = "name" | "fork";
-/** Which of the two words a line still says once NOT_A_NAME's shapes are cut. */
-function nameHitsIn(line: string): NameKind[] {
-  const left = NOT_A_NAME.reduce((s, re) => s.replace(re, " "), line);
-  return [...(PRODUCT_NAME.test(left) ? ["name" as const] : []), ...(FORK_WORD.test(left) ? ["fork" as const] : [])];
+/** The words each line of a text still says once NOT_A_NAME's shapes are cut, a name wrapped onto the next line counted on its first. */
+function nameHitsByLine(lines: string[]): NameKind[][] {
+  const cut = lines.map((line) => NOT_A_NAME.reduce((s, re) => s.replace(re, " "), line));
+  return cut.map((left, i) => {
+    const hits: NameKind[] = [];
+    if (PRODUCT_NAME.test(left) || (NAME_LINE_END.test(left) && i + 1 < cut.length && NAME_NEXT_START.test(cut[i + 1]))) hits.push("name");
+    if (FORK_WORD.test(left)) hits.push("fork");
+    return hits;
+  });
 }
-/** Lines check 54 must flag, and the word each says: a doc, a comment, a tool description, a prerequisite. */
+/** Texts check 54 must flag, and the word their first line says: the ticket's shapes, and each cut beside a real hit, so a widened cut fails. */
 const NAME_PROBES: [string, NameKind][] = [
   ["This fork keeps its own CI.", "fork"],
   ["// the fork's own copy of the handler", "fork"],
   ['    title: "Search Open Brain",', "name"],
   ["- Working Open Brain setup ([guide](../../docs/01-getting-started.md))", "name"],
+  ["FROM YOUR OPEN BRAIN SETUP", "name"],
   ["Contributors forked it in 2025.", "fork"],
-  ["CAPTURE TO YOUR OPEN BRAIN", "name"],
+  ["Two forks keep their own CI.", "fork"],
+  ["It captures to your Open\n// Brain every day.", "name"],
+  ["- A working [Open Brain](https://github.com/NateBJones-Projects/OB1) setup", "name"],
+  ["This repo is a [fork](https://github.com/NateBJones-Projects/OB1).", "fork"],
+  ["It is a [fork](FORK.md) of upstream.", "fork"],
+  ["See https://example.com/x and this fork's CI.", "fork"],
+  ["It grew out of Open Brain; this fork keeps its CI.", "fork"],
+  ["It began as a fork of upstream, and your Open Brain grows.", "name"],
+  ["Reviewed by the Open Brain maintainer team; your Open Brain grows.", "name"],
+  ["See FORK.md: this fork keeps its CI.", "fork"],
+  ["// ob1-fork (SMD-1): this fork's raw insert", "fork"],
+  ["Brain Checks (Fork Checks, fork-checks.yml) runs on this fork.", "fork"],
+  ["`[fork]` was the type; this fork keeps its CI.", "fork"],
+  ['its source is "fork", and this fork keeps it', "fork"],
+  ["we call it a 'fork' of upstream", "fork"],
+  ["child_process.fork(w) runs in this fork", "fork"],
+  ["GitHub's fork network lists this fork", "fork"],
 ];
-/** Lines it must not: each shape NOT_A_NAME cuts. */
+/** Texts it must not flag: each shape NOT_A_NAME cuts, alone. */
 const NAME_NON_PROBES = [
   "Daemonic Brain grew out of [Open Brain](https://github.com/NateBJones-Projects/OB1), created by Nate B. Jones.",
   "It began as a fork of that tree at `9543c29` (2026-08-30).",
-  "*Built by Nate B. Jones — part of the [Open Brain project](https://github.com/NateBJones-Projects/OB1)*",
   "*Reviewed and merged by the Open Brain maintainer team — thank you!*",
   "See FORK.md, change 71.",
   "// ob1-fork (SMD-1524): the raw insert, by design",
@@ -11632,12 +11660,13 @@ const NAME_NON_PROBES = [
   "child_process.fork(worker) starts a worker",
   "GitHub's fork network lists it",
   "https://example.com/forks/open-brain",
+  "Keep the door open\nBrains of their own stay apart.",
 ];
-/** Why a file keeps a word on purpose — one line in NAME_EXCEPTIONS names one of these (check 54). */
+/** Why a file keeps a word on purpose — one entry in NAME_EXCEPTIONS names one or more of these (check 54). */
 const KEPT = {
   DATA: "data: test fixtures, eval inputs, recorded queries and probes use it as a name or a string",
   BOARD: "data: the Linear initiative and its projects are named \"Open Brain …\", which board-sync matches",
-  UPSTREAM: "upstream's own product, deployment or claim, kept as upstream's in SMD-3770's record",
+  UPSTREAM: "upstream's own product, deployment or claim, its credential trackers among them (SMD-3877 rewrites those), kept as upstream's in SMD-3770's record",
   NBJ: "upstream's NBJ-branded material, SMD-1929's item 1",
   TRACKER: "a credential tracker asking for upstream's Supabase keys, whose contents SMD-3877 rewrites",
   DOCS: "the docs' and front-door files' bodies, which SMD-3793 sweeps",
@@ -11645,15 +11674,16 @@ const KEPT = {
   ORIGIN: "the origin, upstream's licence, or the naming rule itself",
   CREDIT: "a credit, a quote, an attribution or upstream's channel",
   GUIDE: "the connector name the getting-started guide gives, so a reader types one name (SMD-3793)",
-  HISTORY: "a pointer to the fork era's record: FORK.md, its numbered changes, its `## FORK` heading",
-  SOURCE: "the ingest pipeline's `fork` source, Daemonic Brain's own change records",
+  HISTORY: "a pointer to the fork era's record: FORK.md, its numbered changes, its `## FORK` heading, CI's old names, the Grafana folder's old name",
+  SOURCE: "the ingest pipeline's `fork` source and the change records it reads",
   SENSE: "another sense: a Postgres relation fork, a forked token chain or state, a process fork, GitHub's forks, or code forked away from upstream",
   MIGRATION: "an applied plugin migration, whose sha migrate.ts checks",
   RECORD: "a dated decision record kept as written; SMD-3793 decides the records",
-  IDENT: "an identifier: the fragment record's property",
+  IDENT: "an identifier: the variable or property that holds a fragment's record",
+  SELF: "this checker's other checks: their history, probes and messages",
 } as const;
-/** Files whose lines keep a word on purpose, with how many and why (check 54). */
-const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedException>>>([
+/** Files whose lines keep a word on purpose: per word, a reason and its line count, or several (check 54). */
+const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedException | CountedException[]>>>([
   [".github/workflows/brain-checks.yml", { name: { why: KEPT.DATA, lines: 1 } }],
   [".github/workflows/ci-shift.yml", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["CONTRIBUTING.md", { name: { why: KEPT.ORIGIN, lines: 1 } }],
@@ -11665,7 +11695,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["compat/supabase-sql/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["compat/supabase-sql/index.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["dashboard/smoke-oauth.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
-  ["db/README.md", { fork: { why: KEPT.SOURCE, lines: 2 }, name: { why: KEPT.DATA, lines: 6 } }],
+  ["db/README.md", { fork: [{ why: KEPT.SOURCE, lines: 1 }, { why: KEPT.HISTORY, lines: 1 }], name: [{ why: KEPT.DATA, lines: 5 }, { why: KEPT.BOARD, lines: 1 }] }],
   ["db/bench-hnsw.ts", { fork: { why: KEPT.SENSE, lines: 4 } }],
   ["db/board-findings.ts", { fork: { why: KEPT.SOURCE, lines: 2 } }],
   ["db/ci-parity.sh", { fork: { why: KEPT.SENSE, lines: 1 } }],
@@ -11673,15 +11703,15 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["db/graph-centrality.ts", { name: { why: KEPT.DATA, lines: 5 } }],
   ["db/ingest-items.ts", { fork: { why: KEPT.SOURCE, lines: 2 } }],
   ["db/ingest-linear.ts", { fork: { why: KEPT.BOARD, lines: 1 }, name: { why: KEPT.BOARD, lines: 1 } }],
-  ["db/ingest-records.ts", { fork: { why: KEPT.SOURCE, lines: 16 } }],
+  ["db/ingest-records.ts", { fork: [{ why: KEPT.SOURCE, lines: 12 }, { why: KEPT.HISTORY, lines: 3 }, { why: KEPT.IDENT, lines: 1 }] }],
   ["db/ingest-structure.ts", { fork: { why: KEPT.SOURCE, lines: 1 } }],
   ["db/sync-linear.ts", { fork: { why: KEPT.BOARD, lines: 1 }, name: { why: KEPT.BOARD, lines: 14 } }],
   ["db/test-cli.ts", { name: { why: KEPT.DATA, lines: 2 } }],
-  ["db/test-live.ts", { fork: { why: KEPT.SOURCE, lines: 3 }, name: { why: KEPT.DATA, lines: 9 } }],
+  ["db/test-live.ts", { fork: [{ why: KEPT.SOURCE, lines: 2 }, { why: KEPT.HISTORY, lines: 1 }], name: { why: KEPT.DATA, lines: 9 } }],
   ["db/test-schema.ts", { name: { why: KEPT.DATA, lines: 94 } }],
   ["db/test-upgrade.ts", { name: { why: KEPT.DATA, lines: 1 } }],
   ["deploy/.env.example", { name: { why: KEPT.BOARD, lines: 1 } }],
-  ["deploy/README.md", { fork: { why: KEPT.SENSE, lines: 2 }, name: { why: KEPT.BOARD, lines: 4 } }],
+  ["deploy/README.md", { fork: [{ why: KEPT.SENSE, lines: 1 }, { why: KEPT.HISTORY, lines: 1 }], name: [{ why: KEPT.HISTORY, lines: 2 }, { why: KEPT.BOARD, lines: 2 }] }],
   ["deploy/auth/layout.ts", { fork: { why: KEPT.SENSE, lines: 2 } }],
   ["deploy/auth/server.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["deploy/auth/store.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
@@ -11697,6 +11727,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["docs/operator-gui-dashboards-analysis.md", { fork: { why: KEPT.RECORD, lines: 7 }, name: { why: KEPT.DATA, lines: 1 } }],
   ["docs/operator-surface-tiers.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["docs/priority.md", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["docs/vendored-disposition.md", { name: { why: KEPT.DOCS, lines: 1 } }],
   ["docs/workflow-pipeline.html", { fork: { why: KEPT.SENSE, lines: 2 }, name: { why: KEPT.DOCS, lines: 3 } }],
   ["evals/README.md", { fork: { why: KEPT.SOURCE, lines: 2 }, name: { why: KEPT.DATA, lines: 2 } }],
   ["evals/auth/better-auth.ts", { name: { why: KEPT.DATA, lines: 2 } }],
@@ -11721,6 +11752,8 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["integrations/chrome-capture-extension/icons/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/hermes-agent-memory/README.md", { fork: { why: KEPT.NBJ, lines: 1 }, name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/openclaw-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/readwise-capture/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
+  ["integrations/slack-capture/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["jev/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["plugins/family-calendar/migrations/001_family_calendar.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
   ["plugins/home-maintenance/migrations/001_home_maintenance.sql", { fork: { why: KEPT.MIGRATION, lines: 1 } }],
@@ -11756,11 +11789,12 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["recipes/gmail-smart-pull/sql/001_merge_thought_metadata.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/google-activity-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/google-activity-import/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["recipes/infographic-generator/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["recipes/life-engine/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
   ["recipes/life-engine/life-engine-skill.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/provenance-chains/README.md", { fork: { why: KEPT.UPSTREAM, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 2 } }],
   ["recipes/provenance-chains/backfill.mjs", { fork: { why: KEPT.UPSTREAM, lines: 2 } }],
-  ["recipes/readwise-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
+  ["recipes/readwise-import/README.md", { name: [{ why: KEPT.UPSTREAM, lines: 4 }, { why: KEPT.CREDIT, lines: 1 }] }],
   ["recipes/research-to-decision-workflow/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["recipes/schema-aware-routing/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["recipes/session-capture-hook/session-capture.mjs", { fork: { why: KEPT.SENSE, lines: 1 } }],
@@ -11792,10 +11826,11 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["schemas/typed-reasoning-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
   ["schemas/typed-reasoning-edges/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["schemas/workflow-status/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
-  ["scripts/assemble-release.ts", { fork: { why: KEPT.IDENT, lines: 7 } }],
+  ["scripts/assemble-release.ts", { fork: [{ why: KEPT.IDENT, lines: 3 }, { why: KEPT.HISTORY, lines: 4 }] }],
   ["scripts/changes-index.ts", { fork: { why: KEPT.HISTORY, lines: 1 } }],
+  ["scripts/check-consistency.ts", { fork: { why: KEPT.SELF, lines: 64 }, name: { why: KEPT.SELF, lines: 2 } }],
   ["scripts/ci-step-times.ts", { fork: { why: KEPT.SENSE, lines: 2 } }],
-  ["scripts/fragments.ts", { fork: { why: KEPT.HISTORY, lines: 11 } }],
+  ["scripts/fragments.ts", { fork: [{ why: KEPT.HISTORY, lines: 8 }, { why: KEPT.IDENT, lines: 5 }] }],
   ["scripts/mechanism-yield.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
   ["scripts/migrate-to-sql-shim.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
   ["scripts/release-artifacts.ts", { name: { why: KEPT.RELEASE, lines: 4 } }],
@@ -11810,17 +11845,17 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
 ]);
 
 function checkProductName() {
-  for (const [line, kind] of NAME_PROBES) {
-    if (!nameHitsIn(line).includes(kind)) fail(SELF, `check 54 no longer flags its probe for "${kind}": ${line}`);
+  for (const [text, kind] of NAME_PROBES) {
+    if (!nameHitsByLine(text.split("\n"))[0].includes(kind)) fail(SELF, `check 54 no longer flags its probe for "${kind}": ${JSON.stringify(text)}`);
   }
-  for (const line of NAME_NON_PROBES) {
-    const hits = nameHitsIn(line);
-    if (hits.length) fail(SELF, `check 54 flags "${hits.join(", ")}" in a shape it must cut: ${line}`);
+  for (const text of NAME_NON_PROBES) {
+    const hits = nameHitsByLine(text.split("\n")).flat();
+    if (hits.length) fail(SELF, `check 54 flags "${hits.join(", ")}" in a shape it must cut: ${JSON.stringify(text)}`);
   }
-  for (const rel of ["changes/smd-3773.md", "CHANGELOG.md", "db/migrations/001_core_schema.sql", "FORK.md"]) {
+  for (const rel of ["changes/smd-3773.md", "CHANGELOG.md", "db/migrations/001_core_schema.sql", "db/migrations/119_due_date_end_of_day.sql", "FORK.md"]) {
     if (!NAME_ARCHIVE.test(rel)) fail(SELF, `check 54 reads ${rel}, which is the archive`);
   }
-  for (const rel of ["README.md", "docs/FORK-notes.md", "changes.md", "db/migrate.ts"]) {
+  for (const rel of ["README.md", "docs/FORK-notes.md", "changes.md", "db/migrate.ts", "db/migrations/120_next.sql"]) {
     if (NAME_ARCHIVE.test(rel)) fail(SELF, `check 54 leaves ${rel} unread, which is live text`);
   }
   let names: string[];
@@ -11830,35 +11865,50 @@ function checkProductName() {
   } catch (e) {
     return fail(SELF, `git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 54 cannot list the live text`);
   }
-  const counts = new Map<string, number>();
+  const seenOn = new Map<string, number[]>();
+  let unlisted = 0;
   for (const rel of names.sort()) {
-    if (NAME_ARCHIVE.test(rel) || rel === SELF || BINARY_FILES.test(rel)) continue;
+    if (NAME_ARCHIVE.test(rel) || (BINARY_FILES.test(rel) && !rel.endsWith(".svg"))) continue;
     let text: string;
     try {
       if (!lstatSync(join(ROOT, rel)).isFile()) continue;
       text = readFileSync(join(ROOT, rel), "utf8");
     } catch { continue; } // deleted but still indexed
     if (text.includes("\0")) continue;
+    let lines = text.split("\n");
+    if (rel === SELF) {
+      // This section names the words to look for them: blank it, keeping the line numbers.
+      const start = lines.findIndex((l) => l.startsWith("// ── 54:"));
+      const end = lines.indexOf("checkProductName();");
+      if (start < 0 || end < start) fail(SELF, "check 54 cannot find its own section to blank (its header or its call moved)");
+      else lines = lines.map((l, i) => (i >= start && i <= end ? "" : l));
+    }
     const listed = NAME_EXCEPTIONS.get(rel);
-    text.split("\n").forEach((line, i) => {
-      for (const kind of nameHitsIn(line)) {
+    nameHitsByLine(lines).forEach((kinds, i) => {
+      for (const kind of kinds) {
         const key = `${rel} ${kind}`;
-        counts.set(key, (counts.get(key) ?? 0) + 1);
+        seenOn.set(key, [...(seenOn.get(key) ?? []), i + 1]);
         if (listed?.[kind]) continue;
-        fail(`${rel}:${i + 1}`, kind === "name"
-          ? `"Open Brain" names the product, which is Daemonic Brain, and one install is "a brain" (CONTRIBUTING, "Naming the product"). Open Brain stays only for the origin, upstream's own products, credits and quotes: if this line is one, list the file in NAME_EXCEPTIONS with its count and why (check 54, SMD-3773)`
-          : `"fork" calls the project a fork; it is Daemonic Brain, a project in its own right, and FORK.md is the fork era's record (SMD-3765). If the word means something else here, list the file in NAME_EXCEPTIONS with its count and why (check 54, SMD-3773)`);
+        unlisted++;
+        fail(`${rel}:${i + 1}`, `says ${kind === "name" ? "\"Open Brain\"" : "\"fork\""} (check 54)`);
       }
     });
   }
+  if (unlisted) {
+    fail("check 54", "\"Open Brain\" names the product, which is Daemonic Brain, and one install is \"a brain\" (CONTRIBUTING, \"Naming the product\"); \"fork\" calls the project a fork, which it is not since SMD-3765 (FORK.md is the fork era's record). Reword the lines above. If one keeps the word on purpose — the origin, upstream's own product, a credit or a quote, data — list its file in NAME_EXCEPTIONS with its count and a KEPT reason (SMD-3773)");
+  }
   for (const [rel, byKind] of NAME_EXCEPTIONS) {
-    for (const [kind, { why, lines }] of Object.entries(byKind)) {
-      const seen = counts.get(`${rel} ${kind}`) ?? 0;
-      if (seen !== lines) {
-        fail(rel, seen === 0
-          ? `listed in NAME_EXCEPTIONS for "${kind}" (${why}) but says it nowhere — remove the entry (check 54)`
-          : `NAME_EXCEPTIONS covers ${lines} line(s) saying "${kind}" here (${why}) but ${seen} do — a new line beside the kept ones, or a stale count (check 54)`);
-      }
+    for (const [kind, entry] of Object.entries(byKind)) {
+      const parts = Array.isArray(entry) ? entry : [entry];
+      const lines = parts.reduce((n, p) => n + p.lines, 0);
+      const why = parts.map((p) => p.why).join("; ");
+      const on = seenOn.get(`${rel} ${kind}`) ?? [];
+      if (on.length === lines) continue;
+      fail(rel, on.length === 0
+        ? `listed in NAME_EXCEPTIONS for "${kind}" (${why}) but says it nowhere — remove the entry (check 54)`
+        : on.length < lines
+          ? `NAME_EXCEPTIONS counts ${lines} line(s) saying "${kind}" here (${why}) but ${on.length} do — lower the count (check 54)`
+          : `NAME_EXCEPTIONS counts ${lines} line(s) saying "${kind}" here (${why}) but ${on.length} do, on lines ${on.join(", ")} — one is new: reword it, or count it with its reason (check 54)`);
     }
   }
 }
