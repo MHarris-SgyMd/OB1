@@ -493,9 +493,10 @@ export type InHandAbort = (olderThanMs?: number) => number;
  * decider's call); whether it was aborted; whether a wait for a slot aborts
  * it (`abortWaiting`: the pass stopping); and whether its call waits for a
  * slot now — on the hook alone, where `waiting` covers the gate, a pause and
- * the decider's whole call too (review pass 6).
+ * the decider's whole call too (review pass 6); and whether it is inside
+ * idleWhile, which a slot wait's end leaves idle (review pass 7).
  */
-export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean; slotWait?: boolean };
+export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean; slotWait?: boolean; idle?: boolean };
 
 /**
  * The calls a pass's workers hold, behind its InHandAbort (SMD-3379 PR 1b-2):
@@ -563,10 +564,15 @@ function waitAborted(c: InHandCall): boolean {
  */
 export async function idleWhile<T>(call: InHandCall | undefined, pending: Promise<T>): Promise<T> {
   if (!call) return pending;
+  // Marked, so a wait on the seam's hook that began as `pending` was made — before this line, its argument evaluated
+  // first — does not end the idle when it ends (review pass 7: N12 could abort the decider's running call). A worker
+  // holds one idleWhile at a time: none nests.
+  call.idle = true;
   call.waiting = true;
   try {
     return await pending;
   } finally {
+    call.idle = false;
     call.waiting = false;
     call.since = Date.now();
   }
@@ -600,7 +606,8 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
       if (waiting === 0 || --waiting > 0) return;
       const c = get();
       if (c) c.slotWait = false;
-      if (c && before === false) {
+      // Inside an idleWhile the entry stays idle, whichever began first.
+      if (c && before === false && !c.idle) {
         c.waiting = false;
         c.since = Date.now();
       }

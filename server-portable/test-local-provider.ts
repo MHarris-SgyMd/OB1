@@ -1845,6 +1845,20 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await Promise.all(Array.from({ length: 2 }, async () => { for (let i = 0; i < 5; i++) await modelCall(call(), () => Bun.sleep(10)); }));
       const wokeMs = Date.now() - tw;
       assert(wokeMs < 1500, `ten 10 ms calls two at a time under chat=1, no other process waiting, run in ${wokeMs} ms — each slot let go handed to this process's poller at once`);
+      // …and 1 ms calls, a slot let go between a poller's try and its nap tried again at once, not lost to a poll's
+      // nap (review pass 7: 424 such calls took 13 s against 0.6 off). A lost wake is a handoff of a nap, 250 ms at
+      // least: counted, one allowed for a loaded runner. Without the count of slots let go, 1 to 6 in 424 calls.
+      const starts: number[] = [], ends: number[] = [];
+      const tq = Date.now();
+      await Promise.all(Array.from({ length: 2 }, async () => {
+        // Cut at 10 s, so wakes lost on every handoff fail the row rather than run it for minutes.
+        for (let i = 0; i < 400 && Date.now() - tq < 10_000; i++) await modelCall(call(), async () => { starts.push(Date.now()); await Bun.sleep(1); ends.push(Date.now()); });
+      }));
+      const quickMs = Date.now() - tq;
+      starts.sort((a, b) => a - b);
+      ends.sort((a, b) => a - b);
+      const slow = starts.slice(1).filter((s, k) => s - ends[k] > 200).length;
+      assert(slow <= 1 && starts.length === 800, `eight hundred 1 ms calls two at a time run in ${quickMs} ms, ${slow} handoff(s) over 200 ms — no wake lost between a poller's try and its nap`);
     }
     // Another process waiting — here a session holding the share's WAITING lock — a slot this process lets go is not
     // handed to its own napping poller: it takes it at its next poll, not at once. Five handoffs, one gap at least past
@@ -1853,8 +1867,16 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       const waiter = new SQL({ url: URL_, max: 1 });
       const gaps: number[] = [];
+      let deferMarks = 0;
       try {
         await waiter`SELECT pg_advisory_lock_shared(hashtext(${key}), -1)`;
+        // A call that finds the lock held sits out a poll, holding its own waiting lock meanwhile (review pass 7): two
+        // holders while it defers, its slot free.
+        const marks = async () => Number((await waiter`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND classid::bigint = (hashtext(${key})::bigint & 4294967295) AND granted`)[0].c);
+        const deferring = modelCall(call(), async () => undefined);
+        await Bun.sleep(150);
+        deferMarks = await marks();
+        await deferring;
         for (let i = 0; i < 5; i++) {
           let polling = 0;
           const holder = modelCall(call(), () => Bun.sleep(900)).then(() => Date.now());
@@ -1865,8 +1887,12 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
           gaps.push(polling - releasedAt);
         }
       } finally {
+        // Let go before the close: a closed backend's locks go a moment after, and the next row's free call, seeing
+        // the WAITING lock still held, would sit out a poll and tell a wait (review pass 7: one idle run in five).
+        await waiter`SELECT pg_advisory_unlock_shared(hashtext(${key}), -1)`.catch(() => {});
         await waiter.close();
       }
+      assert(deferMarks === 2, `a call sitting out a poll for another process's waiter holds its own waiting lock meanwhile (${deferMarks} holders)`);
       assert(gaps.length === 5 && Math.max(...gaps) > 100,
         `another process waiting, a slot this process lets go waits for its own poller's next poll rather than waking it (${JSON.stringify(gaps)} ms after each release)`);
     }
@@ -1879,15 +1905,17 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const observer = { waiting: () => { told.waiting++; }, running: () => { told.running++; } };
       await withCallWaits(observer, () => modelCall(call(), async () => undefined));
       const free = { ...told };
-      // Queued: a holder, a poller, and the call behind it — told as it queues, while the holder still holds.
+      // Queued: a holder, a poller, and two calls behind it — one queued with the poller, before it finds no slot free,
+      // told when it does; one after, told as it queues — both while the holder still holds.
       const holder = modelCall(call(), () => Bun.sleep(300));
       await Bun.sleep(30);
       const poller = modelCall(call(), async () => undefined);
+      const early = withCallWaits(observer, () => modelCall(call(), async () => undefined));
       await Bun.sleep(30);
       const behind = withCallWaits(observer, () => modelCall(call(), async () => undefined));
       await Bun.sleep(30);
       const toldWhileQueued = told.waiting;
-      await Promise.all([holder, poller, behind]);
+      await Promise.all([holder, poller, early, behind]);
       const queued = { ...told };
       // …and one whose slot another process holds, told once too.
       const elsewhere = new SQL({ url: URL_, max: 1 });
@@ -1899,8 +1927,8 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       } finally {
         await elsewhere.close();
       }
-      assert(free.waiting === 0 && free.running === 0 && toldWhileQueued === 1 && queued.waiting === 1 && queued.running === 1 && told.waiting === 2 && told.running === 2,
-        `a call whose slot is free tells its observer nothing (${JSON.stringify(free)}); one queued behind this process's poller tells it as it queues (${toldWhileQueued}) and once each way (${JSON.stringify(queued)}), and one whose slot another process holds (${JSON.stringify(told)})`);
+      assert(free.waiting === 0 && free.running === 0 && toldWhileQueued === 2 && queued.waiting === 2 && queued.running === 2 && told.waiting === 3 && told.running === 3,
+        `a call whose slot is free tells its observer nothing (${JSON.stringify(free)}); two queued behind this process's poller, before and after it finds no slot free, tell it while queued (${toldWhileQueued}) and once each way (${JSON.stringify(queued)}), and one whose slot another process holds (${JSON.stringify(told)})`);
     }
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
@@ -1941,6 +1969,21 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       `a call's stop ends its wait for a slot, rejecting with its reason, nothing said: queued behind this process's call (${stopped}) and contending with another process's (${contended})`);
   } finally {
     await on.uninstall();
+  }
+  // Calls fanned out with every slot free tell their observers of no wait — not for queueing behind the poller's own
+  // statements — so a stopping pass gives none of them back (review pass 7: seven of eight told, seven answered
+  // blurbs thrown away at a stop).
+  {
+    const { withCallWaits } = await import("./model-call.ts");
+    const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
+    try {
+      let toldFan = 0;
+      const observer = { waiting: () => { toldFan++; }, running: () => {} };
+      await Promise.all(Array.from({ length: 8 }, () => withCallWaits(observer, () => modelCall(call(), () => Bun.sleep(50)))));
+      assert(toldFan === 0, `eight calls fanned out under chat=8, every slot free, tell their observers of no wait (${toldFan} told)`);
+    } finally {
+      await wide.uninstall();
+    }
   }
   // The process's stop ends a wait for a caller that hands none: the install's `stop`, and `uninstall`, which leaves a
   // call already running its slot until it ends.
@@ -2262,6 +2305,22 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     laterWaits.waiting();
     assert(swept === 1 && !running.aborted && onHook.aborted && onHook.abort.signal.reason instanceof StoppedWaiting && later.aborted && later.abort.signal.reason instanceof StoppedWaiting && afterRun.slotWait === false,
       `a first stop aborts the call waiting on the hook (${swept} swept), not the one idle around a running call, and a call that starts to wait after it; a call's slot wait ends when it runs`);
+  }
+  // A wait on the hook begun before idleWhile — its argument evaluated first, the decider's call queued — ends inside
+  // it with the entry still idle: no call N12 aborts (review pass 7: running() set it running again).
+  {
+    const { inHandCalls, callWaitsFor: waitsFor, idleWhile } = await import("../db/lease.ts");
+    const ih = inHandCalls(() => false);
+    const c = ih.begin("w");
+    c.since = Date.now() - 10_000;
+    const obs = waitsFor(() => ih.get("w"));
+    obs.waiting();
+    let inside = { waiting: false, aborted: -1 };
+    const pending = new Promise<void>((resolve) => setTimeout(resolve, 50));
+    const idling = idleWhile(c, pending.then(() => { obs.running(); inside = { waiting: c.waiting, aborted: ih.abortInHand(0) }; }));
+    await idling;
+    assert(inside.waiting && inside.aborted === 0 && !c.waiting && !c.idle,
+      `a wait begun before idleWhile ends inside it with the entry idle, N12 aborting nothing (${JSON.stringify(inside)}), and idle once it returns`);
   }
   // The pair's bound pauses while its calls wait: 600 ms, paused from about 400 to 900, fires about 200 ms after the
   // resume. Bounded tight on its early side, with room on its late one for a loaded runner's timer (review pass 4):
