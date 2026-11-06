@@ -1537,6 +1537,40 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 120's edge (SMD-3306): a work thread's standing edge without its lineage
+  // row is refused the same way, counted apart from a judged relation, and the
+  // remedy is the thread's own: close the edge and re-link its key, which
+  // writes it again with its row. The thoughts are removed after.
+  const thA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the first note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const thB = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the second note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  for (const id of [thA, thB])
+    await ctx.unsafe(`SELECT record_thought_subject('${id}'::uuid, 'ticket:SMD-9120', 'first_line', 'subject:t@p1', NULL, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = '${id}'::uuid), NULL)`);
+  const edge120 = String((await ctx.unsafe(`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9120'`))[0].id);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${edge120}'::uuid`);
+  const noEdge = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noEdge.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 thread edge\\(s\\) \\(${edge120} under ticket:SMD-9120\\)`).test(noEdge.out) && !/judged relation\(s\)/.test(noEdge.out)
+         && /A thread edge's row is written with it by 120's thread_relink: close the edge/.test(noEdge.out) && /bun db\/threads\.ts --url … --key '<the key each edge is named under above>'/.test(noEdge.out),
+         `a thread's edge without its lineage row does not start, counted as a thread edge, not a judged relation, and the remedy is the thread's own (exit ${noEdge.code}: ${noEdge.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${edge120}'::uuid`);
+  const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
+  assert(relinked.added === 1 && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
+         "…and following the remedy — the edge closed, its thread re-linked — the edge stands again with its row, and the check is ok again");
+  // Judged relations and thread edges are each read under a bound of their own: a brain of 20,000 thread edges (raw,
+  // with no lineage) still has a judged relation without its row named, where one bound for both read 10,000 rows of
+  // whichever came first.
+  await ctx.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload)
+    SELECT '${thB}'::uuid, 'relation', jsonb_build_object('relation', 'evolves', 'target', '${thA}', 'judge_key', 'thread:v1',
+                                                          'key', 'phrase:bound ' || translate(g::text, '0123456789', 'abcdefghij'))
+      FROM generate_series(1, 20000) g`);
+  const fpOf = async (id: string) => String((await ctx.unsafe(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = '${id}'::uuid`))[0].f);
+  const judged = ((await ctx.unsafe(`SELECT record_thought_relation('${thB}'::uuid, '${thA}'::uuid, 'related', 0.7, 'consolidate:bound@p1', NULL, '${await fpOf(thA)}', '${await fpOf(thB)}', NULL) AS r`))[0].r as { id: string }).id;
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${judged}'::uuid`);
+  const bounded = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  await ctx.unsafe(`DELETE FROM thought_facets WHERE kind = 'relation' AND (payload->>'key' LIKE 'phrase:bound %' OR id = '${judged}'::uuid)`);
+  assert(bounded.code === 1 && new RegExp(`1 judged relation\\(s\\) \\(${judged}\\)`).test(bounded.out) && /more than 10,000 thread edge\(s\)/.test(bounded.out),
+         `…and beside 20,000 thread edges a judged relation without its row is still named, each read under its own bound (exit ${bounded.code}: ${bounded.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`SELECT delete_thought('${thB}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${thA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger
@@ -2644,17 +2678,21 @@ else {
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
+    // 120's thread_relink stands here, so each names the subject writes refused too.
+    const [{ relinkHere }] = (await claims`SELECT to_regprocedure('public.thread_relink(text, boolean)') IS NOT NULL AS "relinkHere"`) as { relinkHere: boolean }[];
     const rr = await run(SQL_ENV);
     // Since 068 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
     assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
              && /and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type/.test(rr.out)
-             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 068's and 071's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out)
+             && relinkHere && /; and 120's thread_relink refuses repeatable read, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\) — and the writers' lock order/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 068's, 071's and 120's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out)
+             && /; and 120's thread_relink refuses serializable, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\)/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions and 120's refused subject writes (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
@@ -3743,9 +3781,12 @@ else {
   // than from the generated module preflight reads it from.
   {
     const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`\\b${name}\\b`).test(l))?.trim();
-    const treeLast = Math.max(...readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+    const treeNumbers = readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+    const treeLast = Math.max(...treeNumbers);
     const last = String(treeLast).padStart(3, "0");
-    const prev = String(treeLast - 1).padStart(3, "0");
+    // The file before the last, read from the tree: a number may be skipped while a branch in review holds it
+    // (SMD-3306's 120 was numbered past SMD-3778's 119, in review then).
+    const prev = String(Math.max(...treeNumbers.filter((n) => n < treeLast))).padStart(3, "0");
     const [{ v: extversion }] = await claims`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`;
     const bare = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
