@@ -48,7 +48,7 @@ It reaches nothing of the core's: no thought is read or written.
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add recipes, plan meals and make lists.
 
 ## Turn it on
