@@ -483,6 +483,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
 import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -2038,6 +2039,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let abortedInHand = 0;
   /** Each worker's embedding call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   let beats = 0;
   /** Worker ids with leases possibly outstanding, for a forced exit. */
   const activeWorkers = new Set<string>();
@@ -2696,7 +2700,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return hardStopped ? 130 : 0;
   }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
   if (SUMMARY) {
     printCounts(after, "after");
     await printDuplicateGroups();
@@ -2741,6 +2745,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 if (import.meta.main) {
   const cli = commandLine("reembed.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const workers = cli.int("workers", { absent: 2, min: 1, max: MAX_WORKERS });
   const batch = cli.int("batch", { absent: 8, min: 1, max: MAX_BATCH });
   const modes = {

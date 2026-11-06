@@ -6653,9 +6653,10 @@ if (want("10")) {
   const waitNote = await seed("Kenji's note whose call waits on the seam.");
   const passes: string[] = [];
   let holding = false;
-  const hookBefore = setModelCallHook(async (call, run) => {
+  const hookBefore = setModelCallHook(async (call, run, waiting) => {
     passes.push(`${call.pass}/${call.purpose}`);
     if (call.purpose !== "extraction") return run();
+    waiting();
     holding = true;
     await Bun.sleep(1500);
     holding = false;
@@ -11137,9 +11138,11 @@ if (want("10h")) {
       // runner is loaded (review pass 2, cold read: a fixed 1.5 s hold let a slow abort land after it).
       let releaseSeam: () => void = () => {};
       const seamHeld = new Promise<void>((r) => { releaseSeam = r; });
-      const seamHookBefore = setModelCallHook(async (call, run) => {
+      // A hold is a wait, told as the hook starts it (SMD-3379 PR 2b-1's seam: a hook says where it waits).
+      const seamHookBefore = setModelCallHook(async (call, run, waiting) => {
         seamCalls.push(`${call.pass}/${call.purpose}`);
         if (call.purpose !== "extraction") return run();
+        waiting();
         seamHolding = true;
         await seamHeld;
         seamHolding = false;
@@ -15280,6 +15283,67 @@ if (want("16")) {
   assert(second.code === 1 && /0 thought\(s\) judged, 0 failed/.test(second.out) && calls === callsAfterFirst, "a second run has nothing to judge, makes no call, and still exits 1 for the failed row");
   const secondC = await consolidateInProcess();
   assert(same(untimed(secondC), untimed(second)) && calls === callsAfterFirst, `…and run() in-process prints what the spawned run printed, stream by stream, its seconds aside (exit ${secondC.code})`);
+
+  // The pair's bound counts its calls' own time (SMD-3379 PR 2b-1): a hook holding each judge call 1.5 s, as a wait for
+  // a slot would, under --timeout 1 — the wait pauses the bound, so the pair is judged, not timed out.
+  const slotOlder = await seed("slotcase: the first note on the shared kettle.", 9, 3, ["slotcase"]);
+  const slotNewer = await seed("slotcase: the second note on the shared kettle.", 9, 0, ["slotcase"]);
+  let heldJudge = 0;
+  const hookBeforeSlot = setModelCallHook(async (call, run, waiting) => {
+    if (call.purpose === "judge") {
+      waiting();
+      heldJudge++;
+      await Bun.sleep(1500);
+    }
+    return run();
+  });
+  let slotRun: { code: number; stdout: string; stderr: string } | null = null;
+  try {
+    slotRun = await consolidateInProcess({ timeout: 1, workers: 1 });
+  } finally {
+    setModelCallHook(hookBeforeSlot);
+  }
+  const slotStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${slotNewer}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+  // Only the run's lines that name this case's pair: the run prints the earlier cases' failed rows too (review pass 4).
+  const slotLines = `${slotRun?.stdout}${slotRun?.stderr}`.split("\n").filter((l) => l.includes(slotNewer.slice(0, 8)) || l.includes(slotOlder.slice(0, 8))).join(" | ");
+  assert(heldJudge >= 1 && slotStatus === "succeeded" && !/timed out/.test(`${slotRun?.stdout}${slotRun?.stderr}`),
+         `a judge call held 1.5 s before it runs, under a 1 s pair bound: the wait pauses the bound, the pair judged, nothing timed out (${heldJudge} held; ${slotStatus}; ${slotLines || "no line names the pair"})`);
+  for (const id of [slotOlder, slotNewer]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+
+  // A first stop while the judge call waits for a slot gives the thought back to the pool, rather than the stop waiting
+  // the slot out (SMD-3379 PR 2b-1, review pass 5: a SIGTERM waited 36 s, past which the coordinator's grace kills).
+  const stopOlder = await seed("stopcase: the first note on the blue kettle.", 9, 3, ["stopcase"]);
+  const stopNewer = await seed("stopcase: the second note on the blue kettle.", 9, 0, ["stopcase"]);
+  const firstStop = new AbortController();
+  let waitedJudge = 0;
+  const hookBeforeStop = setModelCallHook(async (call, run, waiting) => {
+    if (call.purpose === "judge") {
+      waiting();
+      waitedJudge++;
+      // The stop lands while this call waits; a slot that never comes ends only on the call's own signal.
+      firstStop.abort();
+      await new Promise<void>((_, reject) => {
+        const t = setTimeout(() => reject(new Error("the slot never came")), 20_000);
+        const end = () => { clearTimeout(t); reject(call.signal?.reason); };
+        if (call.signal?.aborted) return end();
+        call.signal?.addEventListener("abort", end, { once: true });
+      });
+    }
+    return run();
+  });
+  let stopRun: { code: number; stdout: string; stderr: string } | null = null;
+  const stopT0 = Date.now();
+  try {
+    stopRun = await consolidateInProcess({ workers: 1, signal: firstStop.signal });
+  } finally {
+    setModelCallHook(hookBeforeStop);
+  }
+  const stopMs = Date.now() - stopT0;
+  const stopStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${stopNewer}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+  const stopLines = `${stopRun?.stdout}${stopRun?.stderr}`.split("\n").filter((l) => l.includes(stopNewer.slice(0, 8)) || /stopping|returned/.test(l)).join(" | ");
+  assert(waitedJudge === 1 && stopStatus === "pending" && stopMs < 10_000 && !/the slot never came|timed out/.test(`${stopRun?.stdout}${stopRun?.stderr}`),
+         `a first stop while the judge call waits for a slot gives the thought back to the pool, the run ending in ${stopMs} ms rather than waiting the slot out (${waitedJudge} waited; ${stopStatus}; ${stopLines.slice(0, 300)})`);
+  for (const id of [stopOlder, stopNewer]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
