@@ -196,7 +196,12 @@ BEGIN
     UNION
     SELECT t.id::text FROM thoughts t
      WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(p_issue)::uuid
-       AND t.metadata->'issue' = to_jsonb(p_issue) AND t.metadata->'source' = '"linear"'::jsonb;
+       AND t.metadata->'issue' = to_jsonb(p_issue) AND t.metadata->'source' = '"linear"'::jsonb
+       -- Not the row of another ticket: ob1_ticket_row_of reads a linear
+       -- source identity that is a ticket key first (review pass 4: one
+       -- statement won two tickets' pools).
+       AND NOT EXISTS (SELECT 1 FROM thought_sources o WHERE o.thought_id = t.id AND o.system = 'linear'
+                         AND o.identity ~ '^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$' AND o.identity <> p_issue);
 END;
 $$;
 COMMENT ON FUNCTION ob1_ticket_rows(text) IS
@@ -340,7 +345,8 @@ DECLARE
   v_ticket text;
 BEGIN
   IF p_kind = 'ticket' THEN
-    -- Its parent: an active Linear child_of link its own rows hold.
+    -- Its parent: an active Linear child_of link its linear source row holds
+    -- (links count through thought_sources alone, as 071 reads them).
     RETURN QUERY
       SELECT DISTINCT 'ticket'::text, upper(f.payload->>'target')
         FROM thought_sources h
@@ -377,7 +383,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_serves(text, text) IS
-  'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its rows hold); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else its standing ticket: subject, 111); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migration 120 / SMD-3667.';
+  'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its linear source row holds); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else its standing ticket: subject, 111); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_item_unblocks — the open items an item blocks, walked
@@ -440,7 +446,11 @@ BEGIN
                  WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' = 'blocked_by'
                    AND f.payload->>'system' = w.system AND f.payload->>'target' = w.identity) b
              WHERE NOT (b.system || ':' || b.blocked) = ANY(v_seen)) n
-     WHERE ob1_system_gates(n.system) AND NOT ob1_node_settled(n.system, n.blocked);
+      -- A Linear blocked item's head joined here, not asked a call apiece.
+      LEFT JOIN ob1_ticket_head th ON n.system = 'linear' AND th.issue_key = md5(n.blocked)::uuid AND th.issue = n.blocked
+     WHERE ob1_system_gates(n.system)
+       AND NOT CASE WHEN n.system = 'linear' THEN COALESCE(th.status_type = ANY(node_settled_types()), false)
+                    ELSE ob1_node_settled(n.system, n.blocked) END;
     EXIT WHEN v_next_sys IS NULL;
     v_count := v_count + cardinality(v_next_sys);
     EXIT WHEN v_count >= p_cap;
@@ -466,7 +476,11 @@ AS $$
 DECLARE
   -- docs/priority.md's starting weights.
   c_defaults CONSTANT jsonb := '{"unknown": 2, "hop": 1, "hops": 2, "soon": 2, "soon_days": 1, "week": 1, "week_days": 7, "overdue": 3,
-                                 "unblocks_one": 0.5, "unblocks_many": 1, "unblocks_many_at": 3, "depth": 3, "cap": 1000, "count_inferred": false}';
+                                 "unblocks_one": 0.5, "unblocks_many": 1, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}';
+  -- cap 50: the term is decided at unblocks_many_at, and the count past it is
+  -- only shown; the walk stops at the frontier that reaches the cap (review
+  -- pass 4: a board whose tickets each block ten took 6.5 s for 1,000 items
+  -- counting to a thousand).
   v_w        jsonb;
   v_bad      text;
   w_unknown numeric; w_hop numeric; w_hops int; w_soon numeric; w_soon_days int; w_week numeric; w_week_days int; w_overdue numeric;

@@ -17470,6 +17470,21 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const deep = await one("ticket", "SMD-9420", { depth: 1 });
   assert(tr[0]?.unblocks === 3 && tr[1]?.unblocks === 0 && tr[2]?.unblocks === 1 && Number(tr[2]?.effective) === 2.5 && tr[3]?.unblocks === 1 && deep?.unblocks === 1,
     `a chain counts to depth 3 and no further; a settled link stops the walk; a cycle counts its other end once, +0.5; depth 1 counts the first hop alone (${tr.map((r) => r.unblocks).join(", ")}, ${tr[2]?.effective}; depth 1: ${deep?.unblocks})`);
+  // A link in a system that states no status (it does not gate) counts for nothing; in a gating system other than
+  // Linear, a blocked item settled by its own status is not counted (ob1_node_settled through source_thought).
+  const sourced = async (system: string, identity: string, meta: object, links: [string, string][] = []) => {
+    const id = await thoughtAs(`[108] ${system} ${identity}`, meta);
+    await db.query(`SELECT record_thought_source($1::uuid, $2, $3, 'x', 'text/markdown')`, [id, system, identity]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+    return id;
+  };
+  const noteA = await sourced("notes108", "a", {}, [["blocks", "b"]]);
+  await sourced("notes108", "b", {});
+  const jiraA = await sourced("jira108", "J-1", { status_type: "backlog" }, [["blocks", "J-2"], ["blocks", "J-3"]]);
+  await sourced("jira108", "J-2", { status_type: "completed" }); await sourced("jira108", "J-3", { status_type: "backlog" });
+  const [na, ja] = await eff([["thought", noteA], ["thought", jiraA]]);
+  assert(na?.unblocks === 0 && ja?.unblocks === 1,
+    `a link in a system that states no status is not counted; in another gating system a completed blocked item is not counted, an open one is (${na?.unblocks}, ${ja?.unblocks})`);
   // The ticket's own row, asked as a thought, blocks what its ticket blocks.
   const rowOf9410 = (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9410'`)).rows[0].id;
   const asThought = await one("thought", rowOf9410);
@@ -17587,6 +17602,15 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const [lw, od] = await eff([["thought", lower], ["thought", odd]]);
   assert(lw?.level === 4 && as(lw) === "-" && od?.level === 5 && as(od) === "SMD-9701",
     `a lower-case row reads as itself, its own statement counted; a row whose linear identity is no key reads as the ticket its metadata names (${lw?.level}/${as(lw)}, ${od?.level}/${as(od)})`);
+  // A row of one ticket is never a row of another: a thought whose linear identity is SMD-9703 but whose metadata names
+  // SMD-9702 is SMD-9703's alone.
+  await ticket("SMD-9702");
+  const twoNames = await thoughtAs("[108] a row whose identity and metadata name two tickets", { source: "linear", issue: "SMD-9702" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9703', 'x', 'text/markdown')`, [twoNames]);
+  await put("thought", twoNames, 5);
+  const [t9702, tn] = await eff([["ticket", "SMD-9702"], ["thought", twoNames]]);
+  assert(t9702?.level === null && as(tn) === "SMD-9703" && tn?.level === 5,
+    `a statement on SMD-9703's row does not count for SMD-9702, which its metadata names (${t9702?.level}, ${as(tn)}/${tn?.level})`);
   // A malformed metadata.ticket hides neither a valid issue nor a standing subject.
   const badTicket = await thoughtAs("[108] a note with a ticket field that is no key", { ticket: "not a key" });
   await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [108]"}'::jsonb)`, [badTicket]);
