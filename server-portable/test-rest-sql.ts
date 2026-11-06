@@ -1376,20 +1376,20 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const set = m.sc.assertion as A | undefined;
     const h = await rest("GET", path(item));
     const hist = (h.body.history ?? []) as A[];
-    assert(!m.isError && m.sc.outcome === "asserted" && set?.maker.name === "writer" && set.maker.trust === "operator" && set.tierName === "operator" && set.dueAt === "2027-03-01T00:00:00.000Z"
+    assert(!m.isError && m.sc.outcome === "asserted" && set?.maker.name === "writer" && set.maker.trust === "operator" && set.tierName === "operator" && set.dueAt === "2027-03-02T00:00:00.000Z"
         && h.status === 200 && hist.length === 1 && hist[0].id === set.id && hist[0].maker.name === "writer" && hist[0].maker.trust === "operator" && hist[0].tier === 1
         && (h.body.winner as A | undefined)?.id === set.id && h.body.level === 4 && h.body.exists === true,
-      `a set over MCP and the history over REST name the same assertion, maker and trust: the operator's urgent, due at the start of 2027-03-01 UTC (${m.text.slice(0, 120)} | ${h.status} ${hist.length} ${hist[0]?.maker.name}/${hist[0]?.maker.trust})`);
+      `a set over MCP and the history over REST name the same assertion, maker and trust: the operator's urgent, due by the end of 2027-03-01, the next day's start in UTC (SMD-3778) (${m.text.slice(0, 120)} | ${h.status} ${hist.length} ${hist[0]?.maker.name}/${hist[0]?.maker.trust})`);
     const [row] = await sql`SELECT maker_scope, maker_agent_id IS NOT NULL AS has_id FROM priority_assertions WHERE id = ${set?.id ?? null}::uuid`;
     assert(row?.maker_scope === "write" && row?.has_id === true, `the envelope stated the write key's scope, and its agent id, to 116 (${JSON.stringify(row)})`);
 
     // Verify 3: the same record through both doors — the history as REST answers it is what MCP says, text and value.
     const hm = await mcp("priority_history", { kind: "thought", key: item });
     const out = rendered((v) => say.renderPriorityHistory(ok(v)), h.body);
-    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due 2027-03-01T00:00:00\.000Z by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
+    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due 2027-03-02T00:00:00\.000Z by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
       `priority_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 120)} | ${firstDiff(out.structuredContent, hm.sc)})`);
     // The same statement again, once through each door: unchanged, nothing written, one reply.
-    const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-01T00:00:00Z", reason: "the passport renewal is urgent" });
+    const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-02T00:00:00Z", reason: "the passport renewal is urgent" });
     const againMcp = await mcp("set_priority", { kind: "thought", key: item, level: 4, due_at: "2027-03-01", reason: "the passport renewal is urgent" });
     const againOut = rendered((v) => say.renderSetPriority(ok(v)), againRest.body);
     assert(againRest.status === 200 && againRest.body.outcome === "unchanged" && againOut.content[0].text === againMcp.text && same(againOut.structuredContent, againMcp.sc)
@@ -1728,9 +1728,15 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
   const reopened = await mcp("set_item_status", { id, status: "open", reason: "they cancelled" });
   const listed = await rest("GET", `/v1/items?status=open&overdue=true`);
   const row = ((listed.body.items ?? []) as (I & { overdue: boolean })[]).find((r) => r.id === id);
-  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && (moved.body.item as I).dueAt?.startsWith(yesterday)
+  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && Date.parse(String((moved.body.item as I).dueAt)) === Date.parse(`${yesterday}T00:00:00Z`) + 86_400_000
       && !reopened.isError && (reopened.sc.item as I).status === "open" && listed.status === 200 && row?.overdue === true && listed.body.truncated === false,
-    `a PATCH with owner null clears it and moves the due time to yesterday; reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+    `a PATCH with owner null clears it and moves the due time to yesterday, by its end (SMD-3778); reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+  // Due today, a date alone: by the end of today, so not overdue on its own day (SMD-3778).
+  const today = new Date().toISOString().slice(0, 10);
+  const dueToday = await rest("POST", "/v1/items", { text: "omicron: due today, not yet late", due_at: today });
+  const overdueNow = ((await rest("GET", `/v1/items?overdue=true`)).body.items ?? []) as I[];
+  assert(dueToday.status === 200 && Date.parse(String((dueToday.body.item as I).dueAt)) === Date.parse(`${today}T00:00:00Z`) + 86_400_000 && !overdueNow.some((r) => r.id === (dueToday.body.item as I).id),
+    `an item due today, a date alone, is due by today's end and is not overdue on its own day (SMD-3778) (${(dueToday.body.item as I | undefined)?.dueAt})`);
 
   // A read key may not open, and lists; a capture-only key opens its own, is refused another's alike for one that is not there, and reads nothing.
   const readerOpen = await rest("POST", "/v1/items", { text: "a read key's to-do" }, KEYS.reader);
