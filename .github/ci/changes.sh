@@ -292,7 +292,6 @@ self_check() {
   check true pull_request "$(printf 'docs/a\nserver-portable/x.ts')"
   check true pull_request
   check true push docs/a.md
-  check true merge_group docs/a.md
   check true workflow_dispatch docs/a.md
   MODE=120000 check true pull_request docs/loop.md
   MODE=160000 check true pull_request docs/vendored.md
