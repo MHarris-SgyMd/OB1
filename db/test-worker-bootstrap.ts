@@ -510,11 +510,15 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: scripted([{ state: "out", why: "503" }, { state: "up" }]), refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
   ok(up === "up" && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after \d+ s$/.test(lines[1] ?? ""),
     `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
+  lines.length = 0;
   const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing, wake, writer, sleep: instant });
   ok(unserved !== null && unserved !== "up" && unserved.refused.kind === "model", "waitAtStart: what answers is held to the start's refusals");
+  ok(!lines.some((l) => / answers after /.test(l)), "waitAtStart: a refused answer is not said to answer — the refusal is checked first (review pass 1)");
   const stop = new AbortController();
   stop.abort();
-  ok((await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "out", why: "x" }]), refusal: refuseMissing, wake: stop.signal, writer, sleep: instant })) === null, "waitAtStart: a stop ends the wait, null");
+  stamps.length = 0;
+  ok((await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "out", why: "x" }]), refusal: refuseMissing, wake: stop.signal, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant })) === null && stamps.join() === "true,false",
+    `waitAtStart: a stop ends the wait, null, and the stamper's startWait is turned off still (review pass 1; ${stamps})`);
 
   // waitForDatabase and followedPass: the outage said and waited out, the pass run again at once; anything else thrown.
   const pgDown = () => Object.assign(new Error("Connection closed\nsecond line"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" });
@@ -523,6 +527,12 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   ok((await waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: instant, firstLine: true })) && checks === 2
     && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after/.test(lines[0] ?? "") && /^out {3}the database answers again after \d+ s; polling resumes$/.test(lines[1] ?? ""),
     `waitForDatabase: said with the error's first line, checked until it answers, said again (${checks} checks; ${lines.join(" | ").slice(0, 200)})`);
+  lines.length = 0;
+  await waitForDatabase(pgDown(), { check: async () => {}, wake, writer, sleep: instant });
+  ok(/^err {3}the database is not answering \(Connection closed\nsecond line\) — /.test(lines[0] ?? ""), "waitForDatabase: without firstLine the whole message, as extract and consolidate say it (review pass 1)");
+  let afterThrows = 0;
+  const throughAfter = await followedPass({ pass: async () => 7, afterPass: async () => { if (afterThrows++ === 0) throw pgDown(); }, follow: true, check: async () => {}, wake, writer, sleep: instant });
+  ok(throughAfter === 7 && afterThrows === 2, `followedPass: the database going away during the provider wait after a pass is waited out too, the pass run again (review pass 1; ${throughAfter}, ${afterThrows})`);
   let passes = 0;
   let afters = 0;
   const twice = await followedPass({ pass: async () => { if (passes++ === 0) throw pgDown(); return passes; }, afterPass: async () => { afters++; }, follow: true, check: async () => {}, wake, writer, sleep: instant });
@@ -548,6 +558,12 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   leases.add("w3");
   await leases.returnWhileAnswered();
   ok(released.join() === "w1" && leases.size === 2, "Unreturned.returnWhileAnswered: a refusal ends the returns quietly, the rest kept");
+  // One answered before the refusal, one after it: returned, then the returns end — not a no-op, nor past the refusal (review pass 1).
+  const gated: string[] = [];
+  const beforeGate = new Unreturned(async (w) => { if (w === "g2") throw new Error("refused g2"); gated.push(w); });
+  for (const w of ["g1", "g2", "g3"]) beforeGate.add(w);
+  await beforeGate.returnWhileAnswered();
+  ok(gated.join() === "g1" && beforeGate.size === 2, `Unreturned.returnWhileAnswered: the one before the refusal returned, the refused and the one after kept (${gated}; ${beforeGate.size} kept)`);
   lines.length = 0;
   await leases.returnAtEnd(30, writer.err);
   ok(released.join() === "w1,w3" && /^err {3}1 worker\(s\)' leases could not be returned as the run ended; they expire within 30 s$/.test(lines[0] ?? ""), `Unreturned.returnAtEnd: all at once, one line for those that could not go (${released}; ${lines[0]})`);

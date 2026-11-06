@@ -2661,7 +2661,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       await stamper?.stamp(haltedByProvider || configError !== null ? "failed" : "ok");
     }
   }
-  // Leases a worker could not return, returned before the run ends — every end, a refusal's too (review pass 3) — where the database answers; else they expire (extract-entities.ts's).
+  // Leases a worker could not return, returned before the run ends — every end, a refusal's too (review pass 3) — where the database answers; else they expire (Unreturned.returnAtEnd).
   await unreturned.returnAtEnd(TTL, err);
   // The record moved under the follower: it ends, refused — its row names the
   // kind, and preflight gives the remedy (SMD-2679).
