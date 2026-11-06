@@ -8,7 +8,7 @@
 
 ## What It Does
 
-This schema adds two tables and one RPC function that together support a structured ingestion pipeline for Open Brain:
+This schema adds two tables and one RPC function that together support a structured ingestion pipeline for Daemonic Brain:
 
 - **`ingestion_jobs`** -- Tracks each ingest invocation from submission through extraction, deduplication, and execution. Stores input hash for idempotency, status lifecycle, and per-action counters (added, skipped, appended, revised).
 - **`ingestion_items`** -- Stores individual extracted thoughts within a job. Each item records the reconciliation action chosen during dedup (add, skip, append_evidence, create_revision), the reason for that choice, any matched existing thought, and the execution result.
@@ -16,7 +16,7 @@ This schema adds two tables and one RPC function that together support a structu
 
 ## Prerequisites
 
-- Working Open Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
+- Working Daemonic Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
 - A Postgres with the core `thoughts` table created — Daemonic Brain's stack, or a Supabase project (the SQL only reads and writes `thoughts.id` and `thoughts.metadata`, so no additional schema extensions are required)
 
 ## Credential Tracker

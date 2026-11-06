@@ -19,7 +19,7 @@ The `recipes/ob-graph/` manual graph this README used to compare itself with ret
 
 ## Prerequisites
 
-- Working Open Brain setup (see [`docs/01-getting-started.md`](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup (see [`docs/01-getting-started.md`](../../docs/01-getting-started.md))
 - A Postgres with the `thoughts` table, `match_thoughts` and `upsert_thought` — Daemonic Brain's stack, or a Supabase project
 - The `content_fingerprint` column on `thoughts` (`db/migrations/003`, applied by the core setup)
 - **Optional but recommended:** [`schemas/enhanced-thoughts/`](../enhanced-thoughts/) for the `type` / `sensitivity_tier` / `source_type` columns the extraction worker uses for gating

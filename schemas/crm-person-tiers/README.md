@@ -8,7 +8,7 @@
 
 ## What It Does
 
-This schema adds a lightweight CRM layer to Open Brain without modifying the core `thoughts` table:
+This schema adds a lightweight CRM layer to Daemonic Brain without modifying the core `thoughts` table:
 
 - **`crm_persons`** — one row per person, with a `relationship_tier` column constrained to four values: `connected`, `contact`, `known`, `unknown`
 - **`crm_person_mentions`** — join table that links a person to a `thoughts` row so mention counts can roll up without touching the core table
@@ -29,7 +29,7 @@ The `connected` promotion rule defaults to: `mention_count >= 20 AND last_seen_a
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - A connection that can create tables and functions (`psql` or your SQL console)
 - Core `thoughts` table already created
 

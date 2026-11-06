@@ -48,7 +48,7 @@ Requires a paid ChatGPT plan (Plus, Pro, Business, Enterprise, or Edu). Works on
 2. Navigate to **Apps & Connectors** → **Advanced settings**
 3. Toggle **Developer mode** ON
 
-> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Your Open Brain replaces that functionality, and it works across every AI, not just ChatGPT.
+> Enabling Developer Mode disables ChatGPT's built-in Memory feature. Your brain replaces that functionality, and it works across every AI, not just ChatGPT.
 
 **Add the connector:**
 

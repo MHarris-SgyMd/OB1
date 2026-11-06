@@ -18,7 +18,7 @@ The RPCs read `source_type` and `sensitivity_tier` columns from the [enhanced-th
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md)) with the core `thoughts` table.
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md)) with the core `thoughts` table.
 - The [enhanced-thoughts](../enhanced-thoughts/) schema, which adds the `source_type` and `sensitivity_tier` columns these RPCs read. Install it first — if those columns are missing, the RPCs will error the first time you call them (PL/pgSQL validates column references at execution, not at `CREATE FUNCTION`).
 
 ## Security Model
