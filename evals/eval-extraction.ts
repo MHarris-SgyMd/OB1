@@ -27,8 +27,8 @@
  * on the same corpus as the local ones — otherwise the comparison is a leaderboard
  * citation, not a measurement.
  *
- *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-extraction.ts \
- *     openai/gpt-4o-mini
+ *   OB1_EVAL_TEMP=0 OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… \
+ *     bun eval-extraction.ts openai/gpt-4o-mini
  */
 
 // A module, not a script: this file imports and exports nothing, and without
@@ -174,8 +174,9 @@ type Score = {
 
 /**
  * OB1_EVAL_TEMP lets the same model be scored at different sampling temperatures.
- * The server currently sends none, so extraction runs at the provider default —
- * 0.8 on Ollama — for a task with exactly one right answer.
+ * Unset, the eval sends none, so a run samples at the provider default — 0.8 on
+ * Ollama. The server extracts at OB1_METADATA_TEMPERATURE, 0 unless set
+ * (server-portable/metadata.ts), so set OB1_EVAL_TEMP=0 to score what it does.
  */
 const TEMP = process.env.OB1_EVAL_TEMP === undefined ? undefined : Number(process.env.OB1_EVAL_TEMP);
 
