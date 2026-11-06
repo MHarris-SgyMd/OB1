@@ -1,6 +1,6 @@
 {
   "name": "Chrome Capture Extension",
-  "description": "Chrome MV3 extension that captures Claude, ChatGPT, and Gemini conversations into Open Brain via the REST API",
+  "description": "Chrome MV3 extension that captures Claude, ChatGPT, and Gemini conversations into Daemonic Brain via the REST API",
   "category": "integrations",
   "author": {
     "name": "Alan Shurafa",

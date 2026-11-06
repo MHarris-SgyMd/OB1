@@ -65,11 +65,11 @@
     }
     if (connected) {
       statusDot.classList.add('connected');
-      statusDot.title = 'Open Brain API configured';
+      statusDot.title = 'Daemonic Brain API configured';
       return;
     }
     statusDot.classList.add('disconnected');
-    statusDot.title = 'Open Brain not configured';
+    statusDot.title = 'Daemonic Brain not configured';
   }
 
   function showResult(message, kind) {
@@ -290,7 +290,7 @@
     try {
       const config = await OBConfig.getConfig();
       if (!OBConfig.isConfigured(config)) {
-        throw new Error('Open Brain is not configured. Click "Reconfigure API URL & Key" on the Settings tab.');
+        throw new Error('Daemonic Brain is not configured. Click "Reconfigure API URL & Key" on the Settings tab.');
       }
       const response = await chrome.runtime.sendMessage({
         type: 'TEST_CONNECTION',
@@ -361,7 +361,7 @@
         syncAutoToggle.checked = Boolean(response.syncState.autoSyncEnabled);
       }
     } catch (err) {
-      console.error('[Open Brain Capture] Failed to load Claude sync state', err);
+      console.error('[Daemonic Brain Capture] Failed to load Claude sync state', err);
     }
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_CHATGPT_SYNC_STATE' });
@@ -370,7 +370,7 @@
         chatgptSyncAutoToggle.checked = Boolean(response.syncState.autoSyncEnabled);
       }
     } catch (err) {
-      console.error('[Open Brain Capture] Failed to load ChatGPT sync state', err);
+      console.error('[Daemonic Brain Capture] Failed to load ChatGPT sync state', err);
     }
     await refreshGeminiSyncUI();
   }
@@ -471,7 +471,7 @@
         }
       }
     } catch (err) {
-      console.error('[Open Brain Capture] Failed to load Gemini sync state', err);
+      console.error('[Daemonic Brain Capture] Failed to load Gemini sync state', err);
     }
   }
 
@@ -489,7 +489,7 @@
           }
         }
       } catch (err) {
-        console.error('[Open Brain Capture] Gemini sync poll failed', err);
+        console.error('[Daemonic Brain Capture] Gemini sync poll failed', err);
         stopGeminiSyncPolling();
       }
     }, 2000);
@@ -628,7 +628,7 @@
       // it completes or is canceled. Progress surfaces via GEMINI_SYNC_STATUS
       // polling below.
       chrome.runtime.sendMessage({ type: messageType }).catch((err) => {
-        console.error(`[Open Brain Capture] Gemini sync ${isResume ? 'resume' : 'start'} errored`, err);
+        console.error(`[Daemonic Brain Capture] Gemini sync ${isResume ? 'resume' : 'start'} errored`, err);
       });
       startGeminiSyncPolling();
       refreshGeminiSyncUI();
@@ -642,7 +642,7 @@
         await chrome.runtime.sendMessage({ type: 'GEMINI_SYNC_CANCEL' });
         await refreshGeminiSyncUI();
       } catch (err) {
-        console.error('[Open Brain Capture] Gemini sync cancel failed', err);
+        console.error('[Daemonic Brain Capture] Gemini sync cancel failed', err);
       } finally {
         geminiSyncCancelBtn.disabled = false;
       }
@@ -657,7 +657,7 @@
       geminiSyncProgressBar.style.width = '4%';
       geminiSyncProgressText.textContent = 'Starting incremental sync...';
       chrome.runtime.sendMessage({ type: 'GEMINI_SYNC_INCREMENTAL' }).catch((err) => {
-        console.error('[Open Brain Capture] Gemini sync incremental errored', err);
+        console.error('[Daemonic Brain Capture] Gemini sync incremental errored', err);
       });
       startGeminiSyncPolling();
       refreshGeminiSyncUI();
@@ -684,7 +684,7 @@
           'success'
         );
       } catch (err) {
-        console.error('[Open Brain Capture] Gemini auto-sync toggle failed', err);
+        console.error('[Daemonic Brain Capture] Gemini auto-sync toggle failed', err);
         // Revert the checkbox on failure so the UI matches persisted state.
         geminiSyncAutoToggle.checked = !enabled;
         showSyncResult(err.message, 'error');
@@ -693,7 +693,7 @@
   }
 
   refresh().catch((error) => {
-    console.error('[Open Brain Capture] Popup init failed', error);
+    console.error('[Daemonic Brain Capture] Popup init failed', error);
     showResult(error.message, 'error');
     setStatusDot(false, true);
   });

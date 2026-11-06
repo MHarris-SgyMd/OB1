@@ -2,18 +2,18 @@
 
 ## What It Does
 
-Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
+Adds Slack as a quick-capture interface for your brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
 
 > **In Daemonic Brain (FORK.md change 71, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; Daemonic Brain's default is 1024, where the capture fails whole).
 
 ## Prerequisites
 
-- A working Open Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)), an OpenRouter API key — the sample embeds through OpenRouter at 1536; see the width note above — and [Bun](https://bun.sh) 1.4+ with a checkout of this repository
+- A working Daemonic Brain setup (the [Getting Started guide](../../docs/01-getting-started.md)), an OpenRouter API key — the sample embeds through OpenRouter at 1536; see the width note above — and [Bun](https://bun.sh) 1.4+ with a checkout of this repository
 - A Slack workspace (free tier works)
 
 ## Cost
 
-Slack is free. The server uses the same OpenRouter credits from your main Open Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
+Slack is free. The server uses the same OpenRouter credits from your main Daemonic Brain setup — embeddings cost ~$0.02 per million tokens, metadata extraction ~$0.15 per million input tokens. For 20 thoughts/day, expect roughly $0.10–0.30/month in API costs.
 
 ---
 
@@ -25,7 +25,7 @@ Copy this block into a text editor and fill it in as you go.
 SLACK CAPTURE -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   OpenRouter API key:    ____________
 
 SLACK WORKSPACE INFO
@@ -60,7 +60,7 @@ This is the bridge between Slack and your database.
 ### Create the App
 
 1. Go to api.slack.com/apps → **Create New App** → **From scratch**
-2. App Name: "Open Brain", select your workspace
+2. App Name: "Daemonic Brain", select your workspace
 3. Click **Create App**
 
 ### Set Permissions
@@ -73,7 +73,7 @@ This is the bridge between Slack and your database.
 
 ### Add App to Channel
 
-In Slack, open your capture channel and type: `/invite @Open Brain`
+In Slack, open your capture channel and type: `/invite @Daemonic Brain`
 
 > Don't set up Event Subscriptions yet — you need the Capture URL first (Step 3).
 
@@ -257,7 +257,7 @@ Save this URL — you'll need it in Step 4.
 
 ## Step 4: Connect Slack to the Capture Server
 
-1. Go to api.slack.com/apps → select your Open Brain app
+1. Go to api.slack.com/apps → select your Daemonic Brain app
 2. Left sidebar → **Event Subscriptions** → toggle **Enable Events ON**
 3. Paste your Capture URL in the **Request URL** field
 4. Wait for the green checkmark — Verified
@@ -297,7 +297,7 @@ Every message you post in your Slack capture channel automatically gets:
 - Stored in your `thoughts` table
 - Confirmed with a threaded reply showing the extracted metadata
 
-You can now search for these thoughts using any MCP-connected AI (Claude Desktop, ChatGPT, Claude Code, etc.) via the Open Brain MCP server from the main guide.
+You can now search for these thoughts using any MCP-connected AI (Claude Desktop, ChatGPT, Claude Code, etc.) via the Daemonic Brain MCP server from the main guide.
 
 ---
 
@@ -331,9 +331,9 @@ That's normal — the LLM is making its best guess with limited context. The met
 
 ## What You Just Built
 
-You now have a Slack channel that acts as a direct write path into your Open Brain. Type anything — meeting notes, random ideas, observations, reminders — and it's automatically embedded, classified, and searchable from any AI tool connected to your MCP server.
+You now have a Slack channel that acts as a direct write path into your brain. Type anything — meeting notes, random ideas, observations, reminders — and it's automatically embedded, classified, and searchable from any AI tool connected to your MCP server.
 
-This is one of many possible capture interfaces. Your Open Brain MCP server also includes a `capture_thought` tool, which means any MCP-connected AI (Claude Desktop, ChatGPT, Claude Code, Cursor) can write directly to your brain without switching apps. Slack is just the dedicated inbox.
+This is one of many possible capture interfaces. Your Daemonic Brain MCP server also includes a `capture_thought` tool, which means any MCP-connected AI (Claude Desktop, ChatGPT, Claude Code, Cursor) can write directly to your brain without switching apps. Slack is just the dedicated inbox.
 
 ---
 

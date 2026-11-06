@@ -1,14 +1,14 @@
 # Integration Name
 
-> One-line description of what this integration connects to Open Brain.
+> One-line description of what this integration connects to Daemonic Brain.
 
 ## What It Does
 
-1-2 sentences explaining what external service, platform, or tool this connects and how data flows in or out of Open Brain.
+1-2 sentences explaining what external service, platform, or tool this connects and how data flows in or out of Daemonic Brain.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - List any additional requirements (API keys, bot tokens, service accounts)
 
 ## Credential Tracker
@@ -55,4 +55,4 @@ Solution: [How to fix it]
 
 ## Tool Surface Area
 
-> If this integration exposes MCP tools, it adds to your AI's context weight. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on managing your tool count as your Open Brain grows.
+> If this integration exposes MCP tools, it adds to your AI's context weight. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on managing your tool count as your brain grows.
