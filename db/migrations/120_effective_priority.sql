@@ -92,7 +92,8 @@
 --   It reads priority_assertions and open_items (the priority group grants
 --   both), thoughts and ob1_ticket_head (the capture group's), and
 --   thought_sources and thought_facets (the server group's, which the
---   structure group grants too). The server's role holds all of them. A role
+--   structure group grants too), and ob1_source_gate through
+--   ob1_system_gates (the capture group's). The server's role holds all of them. A role
 --   short of one gets 42501 naming the table: one without thought_sources on
 --   any ticket or thought, since a thought is asked whether it is a ticket's
 --   row (review pass 2: this said the reverse). No grant changes.
@@ -153,28 +154,39 @@ LANGUAGE plpgsql
 STABLE
 AS $$
 DECLARE
+  -- A ticket key as 115 normalises it, upper-case: ob1_ticket_rows matches
+  -- these exactly, so a row is mapped only when it would be found in its
+  -- ticket's pool (review pass 3: a lower-case row mapped to the upper-case
+  -- ticket and lost its own statements).
+  c_key CONSTANT text := '^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$';
   v text;
 BEGIN
   SELECT s.identity INTO v FROM thought_sources s WHERE s.thought_id = p_thought AND s.system = 'linear';
-  IF v IS NULL THEN
+  -- A source identity that is no ticket key falls through to metadata.issue,
+  -- as ob1_ticket_rows reads both (review pass 3).
+  IF v IS NULL OR v !~ c_key THEN
     SELECT t.metadata->>'issue' INTO v FROM thoughts t WHERE t.id = p_thought AND t.metadata->'source' = '"linear"'::jsonb;
   END IF;
-  IF v ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
-    RETURN upper(v);
+  IF v ~ c_key THEN
+    RETURN v;
   END IF;
   RETURN NULL;
 END;
 $$;
 COMMENT ON FUNCTION ob1_ticket_row_of(uuid) IS
-  'The ticket key a thought is the own row of — its linear source row (053), else metadata.issue on a row whose source is linear — upper-cased; NULL for any other thought (an observation filed under a ticket carries `ticket`, not `issue`). effective_priority reads such a row as its ticket. Migration 120 / SMD-3667.';
+  'The ticket key a thought is the own row of — its linear source row''s identity when that is a ticket key, else metadata.issue on a row whose source is linear — only in 115''s upper-case form, as ob1_ticket_rows matches it; NULL for any other thought (an observation filed under a ticket carries `ticket`, not `issue`). effective_priority reads such a row as its ticket. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_ticket_rows — a ticket's own rows
 -- ---------------------------------------------------------------------------
+-- ROWS 2: a ticket has a row or two, and the default estimate of 1000 led
+-- the planner to hash every open thought statement for each ticket read
+-- (review pass 3: 1,000 tickets in 6 s at 20,000 thought statements).
 CREATE OR REPLACE FUNCTION ob1_ticket_rows(p_issue text)
 RETURNS SETOF text
 LANGUAGE plpgsql
 STABLE
+ROWS 2
 AS $$
 BEGIN
   -- Its linear source row (053), and any row claiming metadata.issue with
@@ -233,8 +245,11 @@ BEGIN
       SELECT a.* FROM priority_assertions a
        WHERE a.closed_at IS NULL AND a.item_kind = 'ticket' AND a.item_key = s.key
       UNION ALL
+      -- Probed by key (priority_assertions_item), the rows read first as an
+      -- array; the asked thought itself always counts.
       SELECT a.* FROM priority_assertions a
-       WHERE a.closed_at IS NULL AND a.item_kind = 'thought' AND a.item_key IN (SELECT r FROM ob1_ticket_rows(s.key) r);
+       WHERE a.closed_at IS NULL AND a.item_kind = 'thought'
+         AND a.item_key = ANY(ARRAY(SELECT r FROM ob1_ticket_rows(s.key) r) || CASE WHEN p_kind = 'thought' THEN ARRAY[p_key] ELSE '{}'::text[] END);
   ELSE
     RETURN QUERY
       SELECT a.* FROM priority_assertions a WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = p_key;

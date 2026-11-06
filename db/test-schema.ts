@@ -17576,6 +17576,17 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
          && from(pool[2]) === "ticket:SMD-9455/5-1" && Number(pool[2]?.effective) === 4 && from(pool[3]) === "ticket:SMD-9455/5-2" && Number(pool[3]?.effective) === 3
          && Number(pool[4]?.effective) === 4 && pool[4]?.due_from === "due_ref" && pool[5]?.overdue === true && Number(pool[5]?.effective) === 5,
     `the operator's Urgent on a ticket beats an inferred Low on its row, counted; a ticket reads its row's Medium; an item from a Critical ticket's row inherits 4 at one hop, from a child's row 3 at two; a reference to a ticket's row takes the ticket's due time; a reference to a completed release keeps its date, overdue (${pool.map((r) => `${r.effective}/${from(r)}/${r.due_from}`).join(" ")})`);
+  // A row is mapped only in 115's upper-case form, so it is always found in its ticket's pool: a lower-case one reads
+  // as itself, its statement kept. A linear source row whose identity is no ticket key falls through to metadata.issue.
+  const lower = await thoughtAs("[108] a hand-written row, lower-case", { source: "linear", issue: "smd-9700" });
+  await put("thought", lower, 4);
+  await ticket("SMD-9701");
+  const odd = await thoughtAs("[108] a linear row whose identity is no key", { source: "linear", issue: "SMD-9701" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'not-a-key', 'x', 'text/markdown')`, [odd]);
+  await put("ticket", "SMD-9701", 5);
+  const [lw, od] = await eff([["thought", lower], ["thought", odd]]);
+  assert(lw?.level === 4 && as(lw) === "-" && od?.level === 5 && as(od) === "SMD-9701",
+    `a lower-case row reads as itself, its own statement counted; a row whose linear identity is no key reads as the ticket its metadata names (${lw?.level}/${as(lw)}, ${od?.level}/${as(od)})`);
   // A malformed metadata.ticket hides neither a valid issue nor a standing subject.
   const badTicket = await thoughtAs("[108] a note with a ticket field that is no key", { ticket: "not a key" });
   await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [108]"}'::jsonb)`, [badTicket]);
