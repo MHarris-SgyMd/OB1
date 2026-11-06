@@ -6,7 +6,7 @@
 // Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // supabase/functions/auditor/index.ts
 //
-// Weekly drift + contradiction auditor for Open Brain.
+// Weekly drift + contradiction auditor for Daemonic Brain.
 //
 // What it does (per editorial-policy.md R8.3, R10.5):
 //   1. Fetches last N days of synthesizable thoughts.
@@ -29,13 +29,13 @@
 // ob1-fork (SMD-1524): the audit report is stored through the database's upsert_thought,
 // which writes the content fingerprint (003) and the audit actor (008) with the text; a
 // raw insert left the fingerprint NULL and the row invisible to dedup. The report carries
-// no vector, so the 2-argument form is resolved. FORK.md change 71; extensions/test-writes.ts
+// no vector, so the 2-argument form is resolved. FORK.md change 71; integrations/test-writes.ts
 // drives it against Postgres, and scripts/check-consistency.ts check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 67; extensions/test-auth.ts exercises it.
+// change 67; integrations/test-auth.ts exercises it.
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite, listenOn } from "../_shared/auth.ts";
 
@@ -137,7 +137,7 @@ async function fetchPriorAudits(limit: number): Promise<PriorAudit[]> {
 
 // ── Prompt construction ──────────────────────────────────────────────────
 function buildSystemPrompt(): string {
-  return `Follow Open Brain Editorial Policy v${POLICY_VERSION}. You are the operator's brain auditor.
+  return `Follow Daemonic Brain Editorial Policy v${POLICY_VERSION}. You are the operator's brain auditor.
 
 Your job: scan the supplied corpus of recent thoughts plus the last few audit reports, and produce a STRUCTURED JSON audit report.
 
@@ -292,7 +292,7 @@ async function callAuditor(
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
       "HTTP-Referer": SUPABASE_URL,
-      "X-Title": "Open Brain Auditor",
+      "X-Title": "Daemonic Brain Auditor",
     },
     body: JSON.stringify({
       model: "openai/gpt-4o-mini",

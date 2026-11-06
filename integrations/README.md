@@ -2,7 +2,7 @@
 
 https://github.com/user-attachments/assets/9454662f-2648-4928-8723-f7d52e94e9b8
 
-MCP server extensions, webhook receivers, and capture sources beyond your AI tools.
+Webhook receivers, capture sources and other clients of the brain beyond your AI tools. New operations on the brain itself are a plugin ([`plugins/README.md`](../plugins/README.md)), not a server here.
 
 | Integration | What It Does |
 | ----------- | ------------ |

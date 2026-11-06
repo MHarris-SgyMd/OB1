@@ -713,13 +713,19 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // refusing triggers and twenty-nine functions, and redefines three of 116's
   // — refusing by name without 008, 046, 061, 115 or 116 ([20bi]); 118 adds board-sync's release of a closed
   // ticket's claims — two functions, one held from PUBLIC — refusing by name
-  // without 058, 068 or 115 ([20bj]) — all
+  // without 058, 068 or 115 ([20bj]); 119 redefines 117's ob1_item_due, a
+  // bare date due by the end of its day, refusing by name without 117
+  // ([20bk]); 120 adds a work thread's edges — a
+  // re-link, its trigger function, three triggers on thought_facets and two
+  // indexes, 084's made again — and redefines 111's validator and 102's
+  // record_thought_relation on their own bodies, refusing by name without
+  // 061, 084, 111 or 113 ([20bl]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 89, `030 is among the last eighty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 91, `030 is among the last ninety-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5399,7 +5405,112 @@ console.log("\n[20bj] Migration 118: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
+console.log("\n[20bk] Migration 119: onto a populated brain at the file before it — an open item due on a date stored at that day's start, as 117 read it; refused by name without 117's ob1_item_due, nothing changed; then applied: the stored due time unmoved, a new bare date due by the end of its day (the next day's start in UTC), a date and time with no offset that instant in UTC; a re-apply a no-op (SMD-3778)");
+{
+  const the119 = MIGRATIONS.find((f) => /^\d{3}_due_date_end_of_day\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the119 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  type Opened = { outcome: string; item: { id: string } | null };
+  const open = async (text: string, due: string) => ((await sql`SELECT open_item(${text}, p_due_at => ${due}, p_actor => ${W}::jsonb) AS r`)[0] as { r: Opened }).r.item?.id ?? "";
+  const dueOf = async (id: string) => String((await sql`SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS d FROM open_items WHERE item_id = ${id}::uuid`)[0]?.d ?? "");
+  const before = await open("upgrade 119: renew the passport", "2027-03-01");
+  const storedBefore = await dueOf(before);
+
+  // Without 117's reader: refused by name, the old reader left as it was.
+  await sql`ALTER FUNCTION ob1_item_due(text) RENAME TO ob1_item_due_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_due_away(text) RENAME TO ob1_item_due`;
+  const stillStart = String((await sql`SELECT to_char(ob1_item_due('2027-04-01') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS d`)[0].d);
+  assert(/^migration 119 needs 117 \(ob1_item_due, open_items\); this schema lacks it/.test(without) && storedBefore === "2027-03-01T00:00:00Z" && stillStart === "2027-04-01T00:00:00Z",
+    `before 119 a bare date is its day's start; without 117's reader the file is refused by name and nothing changes (${without.slice(0, 80)} | ${storedBefore} ${stillStart})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 });
+  const after = await open("upgrade 119: book the vet", "2027-03-01");
+  const timed = await open("upgrade 119: call the dentist", "2027-03-01T17:00:00");
+  const endOfYear = await open("upgrade 119: file the return", "2027-12-31");
+  assert((await dueOf(before)) === "2027-03-01T00:00:00Z" && (await dueOf(after)) === "2027-03-02T00:00:00Z" && (await dueOf(timed)) === "2027-03-01T17:00:00Z" && (await dueOf(endOfYear)) === "2028-01-01T00:00:00Z",
+    `applied: the stored due time unmoved; a new bare date due by its day's end, the next day's start in UTC, across a year's end too; a date and time with no offset that instant in UTC (${await dueOf(before)} | ${await dueOf(after)} | ${await dueOf(timed)} | ${await dueOf(endOfYear)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 });
+  const again = await open("upgrade 119: water the ferns", "2027-03-01");
+  assert((await dueOf(again)) === "2027-03-02T00:00:00Z" && (await dueOf(before)) === "2027-03-01T00:00:00Z", `a re-apply is a no-op: the end-of-day reading kept, the stored time unmoved (${await dueOf(again)})`);
+  await sql.close();
+}
+
+console.log("\n[20bl] Migration 120: refused by name without 061, 084, 111 or 113; onto a populated brain at the file before it — thoughts with their subjects, a judged relation and their lineage standing as they were, no edge written (the backfill is db/threads.ts's), the judged relation keeping origin judged under 084's index made again with the judge's clause; after it a subject written links its whole thread beside the judge's edge, the judge's door reads its own edge alone, and thread_relink links a thread the upgrade left; a re-apply a no-op (SMD-3306)");
+{
+  const the120 = MIGRATIONS.find((f) => f.endsWith("_thread_edges.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["061", "migration 120 needs 061 and 064 (ob1_record_derivation); this schema lacks it"],
+    ["084", "migration 120 needs 084 (record_thought_relation); this schema lacks it"],
+    ["111", "migration 120 needs 111 (subject_key_valid); this schema lacks it"],
+    ["113", "migration 120 needs 113 (close_thought_subject); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the120 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `120 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the120 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const capture = async (i: number) =>
+    ((await sql`SELECT upsert_thought(${`upgrade 120: a note on its ticket, the ${i}th`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id;
+  const t: string[] = [];
+  for (let i = 0; i < 4; i++) t.push(await capture(i));
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const subject = async (id: string, key: string) =>
+    (await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'first_line', 'subject:qwen3.8:27b@p1', NULL::uuid, ${await fpOf(id)}::text, NULL::jsonb) AS r`)[0].r as { action: string };
+  // A brain at 119: two threads' subjects written, and the judge's related on the first thread's pair.
+  const K1 = "ticket:SMD-3400", K2 = "ticket:SMD-3401";
+  for (const [i, key] of [[0, K1], [1, K1], [2, K2], [3, K2]] as const) await subject(t[i], key);
+  const judge = () => sql`SELECT record_thought_relation(${t[1]}::uuid, ${t[0]}::uuid, 'related', 0.7, 'consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4', NULL::uuid, ${"fo"}::text, ${"fn"}::text, NULL::jsonb) AS r`;
+  await judge();
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe FROM derivations ORDER BY id`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows(), auditBefore = await audits();
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the120 });
+
+  const index = String((await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_relation_active_uniq')) AS d`)[0].d ?? "");
+  const judged = (await sql`SELECT payload->>'origin' AS o FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`) as { o: string }[];
+  assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore
+         && judged.length === 1 && judged[0].o === "judged" && /NOT \(payload \? 'key'::text\)/.test(index),
+    `the file moves nothing it finds and writes no edge: the subjects, the judged relation (origin judged, under 084's index made again with the judge's clause), their lineage, every thought and audit row as they were (${index})`);
+  // Each thread in capture order, as the database orders it.
+  const order = async (ids: string[]) => ((await sql`SELECT id::text FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[]) ORDER BY created_at, id`) as { id: string }[]).map((r) => r.id);
+  const edges = async (key: string) =>
+    ((await sql`SELECT thought_id::text AS n, payload->>'target' AS o FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key} ORDER BY created_at, id`) as { n: string; o: string }[])
+      .map((e) => `${e.n}>${e.o}`).sort().join(" ");
+  const chain = (ids: string[]) => ids.slice(1).map((id, i) => `${id}>${ids[i]}`).sort().join(" ");
+  t.push(await capture(4));
+  const added = await subject(t[4], K1);
+  const k1 = await order([t[0], t[1], t[4]]);
+  const kept = ((await judge())[0].r as { action: string }).action;
+  const onPair = ((await sql`SELECT (payload->>'relation') || '/' || (payload->>'origin') AS w FROM thought_facets
+      WHERE thought_id = ${t[1]}::uuid AND kind = 'relation' AND valid_until IS NULL AND payload->>'target' = ${t[0]} ORDER BY 1`) as { w: string }[]).map((r) => r.w).join(" ");
+  assert(added.action === "added" && (await edges(K1)) === chain(k1) && kept === "kept" && onPair === "evolves/thread related/judged",
+    `after it a subject written links its whole thread, the thoughts the upgrade found among it; the judge's related stands beside the thread's evolves on one pair, and its door keeps its own (${kept}, ${onPair})`);
+  const backfill = ((await sql`SELECT thread_relink(${K2}, false) AS r`)[0].r as { added: number; closed: number; thoughts: number });
+  assert(backfill.added === 1 && backfill.closed === 0 && backfill.thoughts === 2 && (await edges(K2)) === chain(await order([t[2], t[3]])),
+    `a thread the upgrade left unlinked is linked by thread_relink, as db/threads.ts calls it (${JSON.stringify(backfill)})`);
+  const facetsAfter = await facets(), lineageAfter = await lineage(), rowsAfter = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the120 });
+  assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
+    "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
+  await sql.close();
+}
+
+console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
 {
   // The reset drops a hand-kept list, and a name a migration added without a
   // line there survives every section boundary: 034's table did until [20]
@@ -5414,8 +5525,8 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   //
   // The sweep is asked of itself first: five objects of the kinds the drop
   // lists do not cover — a standalone composite type, a partitioned table, an
-  // enum, a domain, a function — are planted beside the fork's, and after the
-  // reset each must be seen. A third pass found the first sweep blind to
+  // enum, a domain, a function — are planted beside Daemonic Brain's, and after
+  // the reset each must be seen. A third pass found the first sweep blind to
   // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
   // and its type query excluded every composite, a table's row type and a
   // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
@@ -5451,14 +5562,14 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   });
   const planted = await sweep();
   assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
-    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside the fork's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
+    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside Daemonic Brain's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
-  // A survivor is the fork's when some migration names it — then a line is
-  // missing from test-support's lists and this section fails. One no migration
-  // names is another suite's: a run against a kept database meets whatever
-  // the last suite left there (CI's data-layer job gives this suite a fresh
-  // database of its own, SMD-2219). Those are reported in the label and do
-  // not fail the section, which is about the drop lists, not about the
+  // A survivor is Daemonic Brain's when some migration names it — then a line
+  // is missing from test-support's lists and this section fails. One no
+  // migration names is another suite's: a run against a kept database meets
+  // whatever the last suite left there (CI's data-layer job gives this suite a
+  // fresh database of its own, SMD-2219). Those are reported in the label and
+  // do not fail the section, which is about the drop lists, not about the
   // neighbours (fifth review pass).
   const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
   const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));
@@ -5468,9 +5579,9 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   };
   const left = await sweep();
   const rels = split(left.rels, (x) => x), fns = split(left.fns, (x) => x.slice(0, x.indexOf("("))), types = split(left.types, (x) => x);
-  assert(rels.ours.length === 0, `no relation of the fork's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
-  assert(fns.ours.length === 0, `no function of the fork's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
-  assert(types.ours.length === 0, `no type of the fork's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
+  assert(rels.ours.length === 0, `no relation of Daemonic Brain's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
+  assert(fns.ours.length === 0, `no function of Daemonic Brain's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
+  assert(types.ours.length === 0, `no type of Daemonic Brain's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
   await sql.close();
   await applyMigrations(URL_, OPTS);
 }

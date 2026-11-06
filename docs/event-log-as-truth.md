@@ -1,6 +1,6 @@
 # The event log is the source of truth (SMD-1997)
 
-An architecture decision record. **Decided 2026-09-24: the fork designates
+An architecture decision record. **Decided 2026-09-24: Daemonic Brain designates
 `thought_audit` the write-side source of truth for a thought, and the `thoughts`
 row a projection of it — a projection that keeps the table's name, the table's
 DDL surface and the table's write functions, so nothing a vendored contributor
@@ -26,7 +26,7 @@ The thesis the ticket filed under is **understanding is a fold, not a
 column**: what the brain believes is the projection of every event to date,
 so a better model is a replay rather than a migration, and "what did the brain
 hold on that date" is a query rather than archaeology. The finding that made
-this an evolution rather than a rewrite: at 053 the fork had built about
+this an evolution rather than a rewrite: at 053 Daemonic Brain had built about
 two-thirds of an event-sourced system and not named it as one.
 
 ## The decision
@@ -595,7 +595,7 @@ Nothing in this page is enforced by this page. What holds the decision:
 
 ## Prior art
 
-The pattern is converging, not novel; the fork's contribution is this
+The pattern is converging, not novel; Daemonic Brain's contribution is this
 pattern on one Postgres, vector-first, dogfooded against its own board.
 **Zep / Graphiti** (arxiv 2501.13956) is the reference for the temporal
 model: four timestamps in two pairs, a contradiction closing a window rather
@@ -625,6 +625,6 @@ every write and consolidation deciding the row.
 - `docs/safe-agent-memory-provenance.md` — the provenance vocabulary the
   event's `stance` and `trust` carry
 - SMD-1729 — the claim-log program this record is the explicit form of;
-  SMD-2115, SMD-2116, SMD-2117 — the path; SMD-2118 — the fork; SMD-2011,
-  SMD-1725 — valid time; SMD-1723 — forgetting; SMD-1731, SMD-1732 — lineage
-  and the rebuild primitive; SMD-2074 — the first fold
+  SMD-2115, SMD-2116, SMD-2117 — the path; SMD-2118 — the point-in-time fork;
+  SMD-2011, SMD-1725 — valid time; SMD-1723 — forgetting; SMD-1731, SMD-1732 —
+  lineage and the rebuild primitive; SMD-2074 — the first fold

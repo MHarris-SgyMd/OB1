@@ -44,11 +44,11 @@ It reaches nothing of the core's: no thought is read or written.
 
 **The household server is gone.** The standalone extension had a second server, `shared-server.ts`, on keys of its own (`MCP_HOUSEHOLD_ACCESS_KEYS`), with which a household member could view the plan and tick off the list. A plugin's operations take the brain's own scopes (`read`, `capture`, `write`), which cannot express "read, and mark bought", so it was not ported (SMD-2920). `get_shopping_list` and `mark_item_purchased` give the same reading and ticking to the brain's own read and write keys. A key for a household member is one of the brain's keys, with what its scope allows.
 
-**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. The fork is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02).
+**`user_id`.** Each table keeps upstream's multi-user `user_id` column, nullable, and nothing writes or reads it. Daemonic Brain is one operator's brain (SMD-1716), so every key that may read sees every row (decided 2026-11-02).
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add recipes, plan meals and make lists.
 
 ## Turn it on

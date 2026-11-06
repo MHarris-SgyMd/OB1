@@ -1897,9 +1897,14 @@ const noClaim = (r: Extract<Refusal, { code: "CLAIM_NOT_FOUND" }>) =>
   UUID.test(r.id) ? `Refused: no claim ${r.id}.` : "Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims.";
 const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) => {
   const why = r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)";
+  // Its own claim lapsed (SMD-3705): another claim may cover its work by now. Waiting on an operator, it can't be
+  // renewed at all, so the user is told whatever the list shows (review pass 3).
+  const lapsed = !r.lapsedAt ? ""
+    : ` It had lapsed at ${r.lapsedAt}, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: ${lapseCheck(r.lapsedAt, r.id)}`
+      + (r.cause === "registry_away" ? "" : " Either way, tell the user: it can't be renewed until an operator acts.");
   return r.forced
     ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
-    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.`;
+    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.${lapsed}`;
 };
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced
@@ -1919,6 +1924,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
+  : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
@@ -1956,9 +1962,18 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
+/**
+ * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
+ * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
+ * and any other as the instant itself.
+ */
+const dueText = (iso: string) => {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
+};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
-  `${levelText(a.level)}${a.dueAt ? `, due ${a.dueAt}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
+  `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
   + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
   + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
 /** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
@@ -2009,13 +2024,13 @@ export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, Priority
 const quoted = (s: string, max = 200) => JSON.stringify(oneLine(snipText(s, max)));
 /** One item: its status, id, text, owner and due time. */
 const itemLine = (i: OpenItem) =>
-  `${i.status} item ${i.id}: ${quoted(i.text)}${i.owner ? `, owner ${quoted(i.owner, 80)}` : ""}${i.dueAt ? `, due ${i.dueAt}` : ""}${i.plugin ? `, for ${oneLine(snipText(i.plugin.name, 64))}'s row ${quoted(i.plugin.row, 80)}` : ""}`;
+  `${i.status} item ${i.id}: ${quoted(i.text)}${i.owner ? `, owner ${quoted(i.owner, 80)}` : ""}${i.dueAt ? `, due ${dueText(i.dueAt)}` : ""}${i.plugin ? `, for ${oneLine(snipText(i.plugin.name, 64))}'s row ${quoted(i.plugin.row, 80)}` : ""}`;
 const proposalLine = (p: ItemProposal) =>
   `proposal ${p.id} to close it ${p.status}${p.label ? ` (${oneLine(snipText(p.label, 40))})` : ""}${p.evidenceThoughtId ? `, shown by thought ${p.evidenceThoughtId}` : ""} by ${oneLine(snipText(p.proposer.name, 80))}`
   + `${p.reason ? `: ${quoted(p.reason)}` : ""}; ${p.decision === null ? "pending" : p.decision === "moot" ? `moot since ${p.decidedAt}` : `${p.decision} by ${oneLine(snipText(p.decider?.name ?? "", 80))} at ${p.decidedAt}`}`;
 const eventLine = (e: OpenItemEvent) =>
   `- ${e.at} ${e.event === "opened" ? "opened" : e.event === "updated" ? "changed" : `set ${e.status}`} by ${oneLine(snipText(e.maker.name, 80))}`
-  + `${e.proposalId ? ` (accepting proposal ${e.proposalId})` : ""}${e.reason ? `: ${quoted(e.reason)}` : ""} — then ${quoted(e.text, 120)}${e.owner ? `, owner ${quoted(e.owner, 80)}` : ""}${e.dueAt ? `, due ${e.dueAt}` : ""}`;
+  + `${e.proposalId ? ` (accepting proposal ${e.proposalId})` : ""}${e.reason ? `: ${quoted(e.reason)}` : ""} — then ${quoted(e.text, 120)}${e.owner ? `, owner ${quoted(e.owner, 80)}` : ""}${e.dueAt ? `, due ${dueText(e.dueAt)}` : ""}`;
 const itemRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND" ? `Refused: the brain holds no open item ${r.item.key}.`
   : r.code === "ITEM_NOT_YOURS"

@@ -1,21 +1,19 @@
-# Fork-local CI.
+# Daemonic Brain's CI.
 #
 # Upstream runs no tests at all: 11 test files across ~85k lines of code and no
 # workflow invokes any of them. That is how upstream's server/test-stateless.mjs
 # came to assert the opposite of production for three months without anyone
-# noticing (the Edge Function build and its three mirror suites left this fork
-# with SMD-1800; server-portable/ is the server, and its suites import it).
+# noticing (the Edge Function build and its three mirror suites left
+# Daemonic Brain with SMD-1800; server-portable/ is the server, and its
+# suites import it).
 #
-# This workflow exists so the fork's patch series cannot rot the same way. It is
-# additive — it touches no upstream workflow — so it survives a rebase onto
-# upstream/main untouched.
-name: Fork Checks
+# This workflow exists so Daemonic Brain's code cannot rot the same way.
+name: Brain Checks
 
 on:
   push:
-    branches: [main, "siggymd/**"]
+    branches: [main]
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -38,50 +36,63 @@ defaults:
 # (.github/dependabot.yml) moves the pins by PR, and check-consistency
 # check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
 # persist-credentials: false: no step needs the token after it (a job that
-# reads history takes it at checkout, fetch-depth: 0; the changes job's one
-# lazy blob fetch, on a PR that edits its classifier, is anonymous, the
+# reads history takes it at checkout, fetch-depth: 0; the changes job's lazy
+# blob fetches, the base's classifier and this workflow, are anonymous, the
 # repository public), so the token has no reason to stay in the workspace.
 
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
-# lease, deadlock or container wait would otherwise hold the one required
-# check, "Fork Checks passed", pending for six hours. Each is at least three
-# times the job's longest successful run in the newest 400 Fork Checks runs
-# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
-# on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
-# 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
-# them one bun install, and auth-poc 302 s: portable-server's limit is 30,
-# over the rule's 20, so that run is held, if barely, and auth-poc's 10
-# holds its. A job at its limit is cancelled with its step in hand, which
-# names where it hung, and the aggregate fails; the run then reads
-# "cancelled", as a superseded one does, and the job's annotation says it hit
-# its limit. The limits count a job's own run, not its wait for a runner
+# lease, deadlock or container wait would otherwise hold the one required check,
+# "Brain Checks passed", pending for six hours. Each is at least three times the
+# job's longest successful run in the newest 400 Fork Checks runs (this
+# workflow's name then) on any branch as of 2026-11-02 (back to 10-22), outside
+# a registry slowdown on 10-28 15:00-16:30 UTC, rounded up to the next five
+# minutes: deploy-stack's 505 s the longest. In that slowdown portable-server
+# took 29 minutes, 19 of them one bun install, and auth-poc 302 s:
+# portable-server's limit is 30, over the rule's 20, so that run is held, if
+# barely, and auth-poc's 10 holds its. A job at its limit is cancelled with its
+# step in hand, which names where it hung, and the aggregate fails; the run then
+# reads "cancelled", as a superseded one does, and the job's annotation says it
+# hit its limit. The limits count a job's own run, not its wait for a runner
 # (check 48, SMD-2094).
 
+# A newer push to a pull request cancels the run it supersedes: one group per
+# PR. Every other run, a push to main or a dispatched one, is a group of its
+# own, so it never waits behind another run and is never cancelled (SMD-3173).
+# With cancel-in-progress off, a shared group would still queue its runs and
+# drop a waiting one when a third arrived.
 concurrency:
-  group: fork-checks-${{ github.ref }}
-  cancel-in-progress: true
+  group: brain-checks-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── What the change can affect (SMD-2435) ─────────────────────────────────
   # A pull request into the default branch whose every changed path is docs
   # runs none of the jobs that need this one: .github/ci/changes.sh says
-  # code=false only then, and each gated job runs on any other answer. It
-  # fails open: a failed or cancelled run of this job runs them all, and the
-  # aggregate lets them skip only when this job said code=false. Any other
+  # code=false only then. One whose only other change is an edit of this file
+  # runs the jobs whose block it edits, and skip= names the gated jobs whose
+  # block is unchanged (PR 2; an edit outside the jobs, of this job or of
+  # repo-consistency, which runs the checker, runs them all). A path its
+  # CHARGES map names counts against the gated jobs it gives alone (PR 3a).
+  # Each gated job runs on any other answer. It fails open: a failed or
+  # cancelled run of this job runs them all, and the aggregate lets them skip
+  # only when this job succeeded and said code=false or named them. Any other
   # event runs every job, with no checkout. The classifier that decides is the
   # BASE branch's copy (HEAD^1's), so a pull request that edits it is judged by
   # the copy already on its base, which denies .github/ (review pass 1); a base
   # with none, or a fetch that fails, runs every job. The checkout is .github/ci
   # and the root's files (sparse cone mode), blobless otherwise: the diff reads
   # trees, and the base's classifier is the checked-out blob unless the PR
-  # edits it, when it is fetched alone. Its answer is on the run's summary page
-  # too (review pass 2). Check 20 holds this job as written.
+  # edits it, when it is fetched alone. This workflow, outside the cone, is
+  # fetched whenever the answer reads it by job: a PR touching a mapped path,
+  # most of them, or editing it. Its answer is on the run's summary page too
+  # (review pass 2). Check 20 holds this job as written.
   changes:
     name: What the change can affect
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.decide.outputs.code }}
+      skip: ${{ steps.decide.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -115,36 +126,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The landing check below diffs the event's range — a PR's base and
-          # head, or the merge group's — so it needs the history, not one tree.
+          # The landing check below diffs a PR's base and head, so it needs the
+          # history, not one tree.
           fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
 
-      # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
-      # PR of the group, one first-parent merge commit each — whose change
+      # What a landing must carry (SMD-1857): a PR whose change
       # touches db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ beyond tests and docs
-      # ships a changes/smd-NNNN.md fragment. Read from the range the event
-      # gives, so it holds on a merge group's result as on a PR's head. GitHub
-      # refuses a merge queue on this user-owned repository (SMD-1984), so today
-      # the pull_request path is the one that runs; the merge_group path is
-      # ready. The migration-number rule (5b) and the rest of
-      # check-consistency below run on whichever tree is checked out. A PR
-      # into another branch is not a landing yet; it is asked when it reaches
-      # main.
+      # ships a changes/smd-NNNN.md fragment, read from the PR's base and head.
+      # Main merges no other way: it has no merge queue (SMD-3336). The
+      # migration-number rule (5b) and the rest of check-consistency below run
+      # on whichever tree is checked out. A PR into another branch is not a
+      # landing yet; it is asked when it reaches main.
       - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
-        if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
         env:
-          EVENT: ${{ github.event_name }}
           PR_FROM: ${{ github.event.pull_request.base.sha }}
           PR_TO: ${{ github.event.pull_request.head.sha }}
-          MG_FROM: ${{ github.event.merge_group.base_sha }}
-          MG_TO: ${{ github.event.merge_group.head_sha }}
-        run: |
-          if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
-          bun scripts/check-landing.ts --event "$EVENT" --from "$from" --to "$to"
+        run: bun scripts/check-landing.ts --from "$PR_FROM" --to "$PR_TO"
 
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
@@ -152,7 +154,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
       # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, the change files and their index, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, commitlint's categories, and the checker's own check numbers
         run: bun scripts/check-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -230,7 +232,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' portable-server '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -606,24 +608,24 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # extensions (change 64; none since SMD-2311 made the six plugins and retired the seventh) and the recipes' and integrations' MCP
-      # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
-      # _shared/auth.ts beside it, a byte copy. One MCP stack across the
-      # tree's installs — the test fails if server-portable's or mcp-server's
-      # shared pins drift from these.
+      # extensions until SMD-2311 made the six plugins (change 64), and the
+      # recipes' and integrations' HTTP APIs, workers and webhook receiver
+      # (change 67) — through a _shared/auth.ts beside it, a byte copy. Their
+      # suites and install live in integrations/ since SMD-3747. One MCP stack
+      # across the tree's installs — the test fails if server-portable's or
+      # mcp-server's shared pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
-        working-directory: extensions
+        working-directory: integrations
         run: bun install --frozen-lockfile
 
       # Imported as modules — each server's default export's `fetch`, the shape
       # `bun <file>` serves (SMD-1799) — their packages from this install: a
-      # wrong or revoked key is refused, a read-scoped key never sees a tool that
-      # writes, is told so by a route that writes and may only dry-run a worker,
-      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
-      # started under `bun` for real and answered over its port (change 74). No
-      # database.
+      # wrong or revoked key is refused, a read-scoped key is told so by a route
+      # that writes and may only dry-run a worker, every copy is byte for
+      # byte auth.ts. Then every server on the SQL shim is started under `bun`
+      # for real and answered over its port (change 74). No database.
       - name: Scoped access keys reach every vendored server
-        working-directory: extensions
+        working-directory: integrations
         run: bun test-auth.ts
 
       # The two suites the job started after the installs (SMD-3470), waited
@@ -679,7 +681,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' db-schema '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -804,7 +806,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' replay-gate '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -908,22 +910,24 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' db-live '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
       OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
-    # The live suite in four shards, one cell each, on a database of its own
+    # The live suite in five shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
     # SHARDS lists, split by their CI times into cells about equally long
-    # (SMD-3469); rest is [1] and every section SHARDS does not list. One
-    # job, not four copies of it, since the ruleset requires "Fork Checks
-    # passed" alone and not the cells' names (SMD-3168, SMD-3169).
+    # (SMD-3469); sweep is [38s] alone, the subject sweep under sleep, which
+    # no other cell had room for (SMD-3306 PR 6b-2); rest is [1] and every
+    # section SHARDS does not list. One job, not five copies of it, since
+    # the ruleset requires "Brain Checks passed" alone and not the cells'
+    # names (SMD-3168, SMD-3169).
     strategy:
       fail-fast: false
       matrix:
-        shard: [rest, sleep, long, extract]
+        shard: [rest, sleep, long, extract, sweep]
 
     steps:
       # The job's Postgres, started by its first step in the background
@@ -1057,7 +1061,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' data-layer '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1417,16 +1421,16 @@ jobs:
 
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
-      # each is driven as deployed against this database — the fork's schema
+      # each is driven as deployed against this database — Daemonic Brain's schema
       # plus the three sidecars and the log table the writers assume, dropped again at the end —
       # and the row it leaves is compared with the row update_thought leaves
       # for the same edit. Late in the job because it applies those sidecars.
       - name: Install the vendored servers' pinned test dependencies
-        working-directory: extensions
+        working-directory: integrations
         run: bun install --frozen-lockfile
 
       - name: Vendored writers leave what update_thought leaves
-        working-directory: extensions
+        working-directory: integrations
         run: bun test-writes.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
@@ -1586,7 +1590,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' preflight-rest '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1677,7 +1681,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2994,7 +2998,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-brains '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3845,7 +3849,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-auth '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4608,7 +4612,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-observability '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4813,7 +4817,7 @@ jobs:
           # Grafana 13 answers its home with a redirect to the file's
           # dashboard by its title's slug (measured on the pin).
           home=$(in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/home' | jq -r '.redirectUri // .dashboard.title') || said "Grafana's home did not answer"
-          [[ "$home" == */open-brain || "$home" == "Open Brain" ]] || said "Grafana does not open on the dashboard Open Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
+          [[ "$home" == */daemonic-brain || "$home" == "Daemonic Brain" ]] || said "Grafana does not open on the dashboard Daemonic Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           targets='[.panels[] | (., .panels[]?) | select(.type != "row") | .title as $t | (.targets // [])[] | {t: $t, r: .refId, u: .datasource.uid, q: (.expr // .query)}]'
           jq -c ".dashboard | $targets | .[]" /tmp/grafana-dashboard.json > /tmp/grafana-queries.jsonl
@@ -4866,14 +4870,14 @@ jobs:
           in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/v1/provisioning/alert-rules' > /tmp/grafana-alert-rules.json || said "Grafana's alert rules did not answer"
           rules_have=$(jq -r '[.[] | select(.provenance == "file") | .uid] | sort | join(" ")' /tmp/grafana-alert-rules.json)
           rules_want=$({ grep -oP '^      - uid: \K\S+' observability/alert-rules.yaml || true; } | LC_ALL=C sort | paste -sd ' ')
-          # …in the dashboard's folder, not a second "Open Brain" beside it.
+          # …in the dashboard's folder, not a second "Daemonic Brain" beside it.
           jq -e --slurpfile d /tmp/grafana-dashboard.json '. != [] and all(.[]; .folderUID == $d[0].meta.folderUid)' /tmp/grafana-alert-rules.json > /dev/null \
             || said "Grafana's alert rules are not all in the dashboard's folder ($(jq -r '.meta.folderUid' /tmp/grafana-dashboard.json)): $(jq -c '[.[] | {uid, folderUID}]' /tmp/grafana-alert-rules.json)"
           if [ -z "$rules_want" ] || [ "$rules_have" != "$rules_want" ]; then said "Grafana holds the provisioned alert rules '$rules_have' where deploy/observability/alert-rules.yaml has '${rules_want:-none (its uid lines were not read)}'"; fi
           states() {
             # shellcheck disable=SC2016 # as above
             in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/prometheus/grafana/api/v1/rules' \
-              | jq -r '.data.groups[] | select(.name == "Open Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
+              | jq -r '.data.groups[] | select(.name == "Daemonic Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
           }
           prom() { in_lgtm curl -s --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$1" | jq -c '[.data.result[]? | {m: .metric, v: .value[1]}]' || true; }
           # Every rule judged on one read: the provider rule pending or firing
@@ -4977,7 +4981,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' auth-poc '))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5036,7 +5040,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' compat-shim '))) }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -5165,10 +5169,12 @@ jobs:
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
-  # A pull request, the merge queue and a push to another branch publish
-  # nothing. contents: write, on this job alone, is what pushes to the wiki's
-  # repository; the token stays out of the clone's config (an extraheader on
-  # each git call) and out of the checkout.
+  # A pull request and a manual run publish nothing, and nor does a push run
+  # whose commit is no longer main's tip: main's runs no longer cancel one
+  # another (SMD-3173), so an older run ending last would put back older
+  # counts or race the newer run's push. contents: write, on this job alone,
+  # is what pushes to the wiki's repository; the token stays out of the
+  # clone's config (an extraheader on each git call) and out of the checkout.
   publish-test-counts:
     name: Publish the suites' counts to the wiki
     runs-on: ubuntu-24.04
@@ -5203,6 +5209,11 @@ jobs:
           COUNTS_DIR="$RUNNER_TEMP/test-counts" bun .github/ci/test-counts-page.ts > "$RUNNER_TEMP/Test-counts.md"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           echo "::add-mask::${auth#AUTHORIZATION: basic }"
+          tip=$(git -c http.extraheader="$auth" ls-remote "https://github.com/$REPO.git" refs/heads/main | cut -f1)
+          if [ "$tip" != "$SHA" ]; then
+            note="main is at ${tip:0:12} now, not ${SHA:0:12}: these counts are not published, and that commit's run publishes its own if it reaches this step"
+            echo "$note"; echo "$note" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
           wiki="$RUNNER_TEMP/wiki"
           # The wiki's repository exists once its first page does (SMD-3614).
           git -c http.extraheader="$auth" clone --depth 1 "https://github.com/$REPO.wiki.git" "$wiki"
@@ -5218,16 +5229,15 @@ jobs:
           cat Test-counts.md >> "$GITHUB_STEP_SUMMARY"
 
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
-  # Both are required, as every job is, through "Fork Checks passed"
+  # Both are required, as every job is, through "Brain Checks passed"
   # (SMD-3168); commit-lint is the one lint job MAY_SKIP lets skip, beside
   # publish-test-counts.
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
-    # are the range, and commitlint ignores the merge commit the queue creates.
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    # Nothing to lint on a plain push; a PR's own commits are the range.
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5238,15 +5248,11 @@ jobs:
           bun-version: "1.4.3"
       - name: commitlint the pushed range against the house grammar
         env:
-          EVENT: ${{ github.event_name }}
           PR_FROM: ${{ github.event.pull_request.base.sha }}
           PR_TO: ${{ github.event.pull_request.head.sha }}
-          MG_FROM: ${{ github.event.merge_group.base_sha }}
-          MG_TO: ${{ github.event.merge_group.head_sha }}
         run: |
-          if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
-          echo "Linting $from..$to"
-          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$from" --to "$to"
+          echo "Linting $PR_FROM..$PR_TO"
+          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$PR_FROM" --to "$PR_TO"
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
@@ -5283,13 +5289,14 @@ jobs:
   # `if: always()` because a job whose needs failed is otherwise skipped, and
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
-  # own `if:` runs it on pull requests and the merge queue alone, and
-  # publish-test-counts, whose own runs it on a push to main alone; and, only
-  # when the changes job succeeded and said code=false, the jobs it gates
-  # (SMD-2435), so a cancelled run's unstarted jobs never pass. The step is
-  # held verbatim by check 20, which runs it against its own cases.
-  fork-checks-passed:
-    name: Fork Checks passed
+  # own `if:` runs it on pull requests alone, and publish-test-counts, whose
+  # own runs it on a push to main alone; and, only when the changes job
+  # succeeded and said code=false, the jobs it gates, or when it succeeded,
+  # those its skip names (SMD-2435), so a cancelled run's unstarted jobs never
+  # pass. The step is held verbatim by check 20, which runs it against its own
+  # cases.
+  brain-checks-passed:
+    name: Brain Checks passed
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
@@ -5315,7 +5322,7 @@ jobs:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: ${{ needs.changes.result == 'success' && needs.changes.outputs.code == 'false' && 'commit-lint publish-test-counts portable-server db-schema replay-gate db-live data-layer preflight-rest deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || 'commit-lint publish-test-counts' }}
+          MAY_SKIP: ${{ format('commit-lint publish-test-counts {0}', needs.changes.result == 'success' && (needs.changes.outputs.code == 'false' && 'portable-server db-schema replay-gate db-live data-layer preflight-rest deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || needs.changes.outputs.skip) || '') }}
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '

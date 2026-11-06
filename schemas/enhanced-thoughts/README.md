@@ -8,7 +8,7 @@
 
 </div>
 
-> Adds structured columns and utility functions to the Open Brain thoughts table for richer classification, full-text search, statistics, and connection discovery.
+> Adds structured columns and utility functions to the Daemonic Brain thoughts table for richer classification, full-text search, statistics, and connection discovery.
 
 ## What It Does
 
@@ -19,12 +19,12 @@ This schema extension adds six new columns to the `thoughts` table (`type`, `sen
 - **`get_thought_connections`** -- Finds thoughts that share metadata topics or people with a given thought.
 - **`backfill_thought_types(p_allowed_types TEXT[])`** -- Populates the new top-level `type` column from `metadata->>'type'`. The default allowlist covers the canonical eight values (`idea`, `task`, `person_note`, `reference`, `decision`, `lesson`, `meeting`, `journal`). Pass a custom array to accept additional values, or pass `NULL` to backfill whatever `metadata->>'type'` contains.
 
-> **This fork (SMD-1250):** upstream's `schema.sql` ended with a section that redefined `upsert_thought(text, jsonb)` so these columns were mirrored on every write. On a brain built by `db/migrate.ts` that statement replaces the body migration 005 installed, silently, so it is removed here: the columns are filled by `backfill_thought_types()` and the `UPDATE` in the script, and a capture does not update them. Two more things on a migrated brain: the script's backfill moves `updated_at` on every row with a `type` or `source` in its metadata, which on this fork gates the accepted-vector caveat and the edited-since rules — run it between re-embed passes; and its `GRANT`s to Supabase's roles are gone too (SMD-1796) — they failed on plain Postgres (`role "authenticated" does not exist`), and execute is `PUBLIC`'s by default. `scripts/check-consistency.ts` check 7 keeps the upsert out, check 12 the grants.
+> **Daemonic Brain (SMD-1250):** upstream's `schema.sql` ended with a section that redefined `upsert_thought(text, jsonb)` so these columns were mirrored on every write. On a brain built by `db/migrate.ts` that statement replaces the body migration 005 installed, silently, so it is removed here: the columns are filled by `backfill_thought_types()` and the `UPDATE` in the script, and a capture does not update them. Two more things on a migrated brain: the script's backfill moves `updated_at` on every row with a `type` or `source` in its metadata, which in Daemonic Brain gates the accepted-vector caveat and the edited-since rules — run it between re-embed passes; and its `GRANT`s to Supabase's roles are gone too (SMD-1796) — they failed on plain Postgres (`role "authenticated" does not exist`), and execute is `PUBLIC`'s by default. `scripts/check-consistency.ts` check 7 keeps the upsert out, check 12 the grants.
 
 ## Prerequisites
 
-- Working Open Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
-- Supabase project with the `thoughts` table, `match_thoughts` function, and `upsert_thought` function already created
+- Working Daemonic Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
+- A Postgres with the `thoughts` table, `match_thoughts` and `upsert_thought` — Daemonic Brain's stack, or a Supabase project
 
 ## Credential Tracker
 
@@ -44,7 +44,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. Nothing to grant (this fork, SMD-1796): the file adds columns to `thoughts` and four functions executable by any role by default — the two `SECURITY DEFINER` ones read `thoughts` as their owner, see Security below (upstream's `GRANT EXECUTE … TO authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default).
+2. Nothing to grant (Daemonic Brain, SMD-1796): the file adds columns to `thoughts` and four functions executable by any role by default — the two `SECURITY DEFINER` ones read `thoughts` as their owner, see Security below (upstream's `GRANT EXECUTE … TO authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default).
 3. Open **Table Editor** and select the `thoughts` table to confirm the new columns appear: `type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`, `enriched`
 4. Navigate to **Database > Functions** and verify the new functions exist: `search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`, `backfill_thought_types`
 5. If you have existing thoughts with `type` or `source` values stored in the metadata JSONB, the script automatically calls `backfill_thought_types()` with the default canonical allowlist. If your brain uses non-canonical `type` values, re-run `SELECT backfill_thought_types(ARRAY['your','custom','types']);` or `SELECT backfill_thought_types(NULL);` to accept any value
@@ -66,7 +66,7 @@ After running the migration:
 
 ## Security
 
-Upstream's file followed stock Open Brain's "service_role only" posture; on this fork its grants are gone (SMD-1796) and what remains is:
+Upstream's file followed stock Open Brain's "service_role only" posture; in Daemonic Brain its grants are gone (SMD-1796) and what remains is:
 
 - `brain_stats_aggregate` and `get_thought_connections` are `SECURITY DEFINER` with `SET search_path = public` (defense in depth against search-path hijacks). They can read the full `thoughts` table regardless of RLS.
 - `search_thoughts_text` is `SECURITY INVOKER` and respects RLS.

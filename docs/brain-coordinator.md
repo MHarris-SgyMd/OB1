@@ -5,7 +5,7 @@ An architecture decision record. **Accepted by the maintainer on 2026-10-28.** T
 - **Two kinds of coordinator** (from SMD-3379's design). A dedicated coordinator for each brain runs that brain's own tasks. A coordinator for the federated case, shared by the brains on one host or in one federation, holds what no single brain can see, first of all SMD-3379's model-slot service.
 - **Every plugin and extension becomes an implementation the coordinator runs, interactive tools included.** n8n (the `orchestration` profile, `orchestration-tool.md`) is where each workflow is defined, and the integration point with services outside the brain.
 
-The decision table marks which rows are that direction, which the maintainer decided on their own (the open questions, answered on 2026-10-27 and 2026-10-28), and which were this record's proposals, accepted with it. Nothing here is built yet; "Order" lists the steps.
+The decision table marks which rows are that direction, which the maintainer decided on their own (the open questions, answered on 2026-10-27 and 2026-10-28), and which were this record's proposals, accepted with it. Step 1 of "Order" is built (SMD-3476: the stack's `coordinator` service), and so are the per-plugin login roles (SMD-2756, see "Data"). Runs (step 2, SMD-3477) and every step after them are not built yet; "Order" lists the steps.
 
 ## Terms
 
@@ -30,7 +30,7 @@ The decision table marks which rows are that direction, which the maintainer dec
 **The extensions** sit where SMD-2308 left them, with three gaps:
 - **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example and the six extensions use it (SMD-2311). Three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
 - **A plugin runs inside the brain's servers**, so it must be curated, and its SQL needs a role boundary that one plugin cannot step out of (SMD-2756).
-- **A plugin has no way out of the brain.** Check 31 refuses `fetch` in plugin code, so anything that reaches an outside service has no home. n8n was chosen as the fork's integration point for exactly that (SMD-1863), but `orchestration-tool.md`'s decision 7 kept it away from the brain's own tools.
+- **A plugin has no way out of the brain.** Check 31 refuses `fetch` in plugin code, so anything that reaches an outside service has no home. n8n was chosen as Daemonic Brain's integration point for exactly that (SMD-1863), but `orchestration-tool.md`'s decision 7 kept it away from the brain's own tools.
 
 The direction joins the two. One runtime runs every task a brain has, whether a pass, a schedule, a webhook or a tool call: the coordinator admits, schedules and records each one. n8n defines extension workflows and reaches outside services.
 
@@ -102,7 +102,7 @@ Core passes are not plugins. The coordinator runs them as `db/supervise.ts` runs
 | Sleep scheduler and its passes | `sleep` service, through `db/supervise.ts` | A child of the coordinator; SMD-3379's background half |
 | Extract and consolidate followers | `workers` profile, an alternative to `sleep` | Children of the coordinator, exclusive with `sleep` by construction |
 | board-sync | `board-sync` service with its own loop | A child of the coordinator, its interval a coordinator trigger |
-| Migrations | `migrate`, one-shot | Unchanged: it runs before the stack's servers. The coordinator waits it out, as the followers will through SMD-3379's migration lock (its PR 1a, not yet built) |
+| Migrations | `migrate`, one-shot | Unchanged: it runs before the stack's servers. The coordinator waits it out. SMD-3379's migration lock is built (its PR 1a): `migrate.ts` takes it and sleep's scheduler waits on it; the extract and consolidate followers are to do the same |
 | Model pull | `ollama-pull`, one-shot | Unchanged: provisioning, not a task |
 | Import runner (and its role job) | `orchestration-runner`, asked by n8n's import template | Unchanged: a batch write straight to Postgres (`operator-surface-tiers.md`, "Where everything else lives"). Its state joins the status surface through a row of its own, which step 1 adds |
 | Re-embed, rebuild, benches | by hand; SMD-1869's re-embed verbs as `workers` one-offs | Unchanged: an operator's commands, not tasks |
@@ -270,7 +270,7 @@ Applied with this record on 2026-10-28, each in its own text (the tickets' in th
 
 Each step is its own PR. The ports run in parallel with handlers (decided 2026-10-27), so the shim (SMD-3216) does not wait for any of this:
 
-1. **The coordinator, first form.** `db/supervise.ts` grows into one `coordinator` service that runs the core passes the enabled profiles name (`sleep` or the `workers` pair, and `board-sync`; since a `--profile` on compose's command line never reaches the container, the passes `OB1_PASSES` names, the profiles retired: decided 2026-10-28, SMD-3476), each as its own user with only its own settings, and adds a status row for the import runner. The exclusion holds by construction, and one status route reports each child. This closes the exclusion seam and starts the status surface.
+1. **The coordinator, first form.** `db/supervise.ts` grows into one `coordinator` service that runs the core passes the enabled profiles name (`sleep` or the `workers` pair, and `board-sync`; since a `--profile` on compose's command line never reaches the container, the passes `OB1_PASSES` names, the profiles retired: decided 2026-10-28, SMD-3476), each as its own user with only its own settings, and adds a status row for the import runner. The exclusion holds by construction, and one status route reports each child. This closes the exclusion seam and starts the status surface. **Built** (SMD-3476): `db/coordinator.ts`, the stack's `coordinator` service, with its status surface (`task_status`) and the import runner's status row.
 2. **Runs.**
    - `coordinator_runs`, a core migration;
    - the `run` and `coordinate` scopes (`recordedScope` recording them with none), and the dispatch and trigger keys;

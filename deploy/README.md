@@ -247,8 +247,8 @@ OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 
 Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
-ignores (it does not ignore `.env.<name>`); the fork's checks refuse a tracked
-env file.
+ignores (it does not ignore `.env.<name>`); Daemonic Brain's checks refuse a
+tracked env file.
 `--env-file` replaces `deploy/.env` for that command, so give it on every
 compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
 env file names the canary's project, port, address, tier and profiles
@@ -373,12 +373,13 @@ there.
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
-first stack this fork ran on (podman on macOS) offered the database superuser and
-the MCP server to the whole LAN on a password and a key over plain HTTP. Since
-SMD-1844 every published port names its address, the default is loopback, and
-the database and Ollama are not published at all. `compose …` in this section
-stands for `podman compose -f deploy/compose.yaml …` (or `docker compose`) from
-the repo root, with whatever `-f` files the stack was started with.
+first stack Daemonic Brain ran on (podman on macOS) offered the database
+superuser and the MCP server to the whole LAN on a password and a key over plain
+HTTP. Since SMD-1844 every published port names its address, the default is
+loopback, and the database and Ollama are not published at all. `compose …` in
+this section stands for `podman compose -f deploy/compose.yaml …` (or `docker
+compose`) from the repo root, with whatever `-f` files the stack was started
+with.
 
 Inside the stack, each service is on the networks it needs and no other
 (SMD-2583; the ADR's "Two networks", `docs/operator-surface-tiers.md`), and
@@ -1669,9 +1670,9 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   (measured on podman: 37 s from `httpd`'s kill to the new start, 35 s from
   the exporter's; while the exporter is down a scrape is a 502).
 
-Grafana opens on the stack's own dashboard, **Open Brain**, provisioned at
+Grafana opens on the stack's own dashboard, **Daemonic Brain**, provisioned at
 each start as `/grafana/d/ob1` in a folder of that name (its home page is the
-same file, at `/grafana/d/default-home-dashboard/open-brain`; the image's own
+same file, at `/grafana/d/default-home-dashboard/daemonic-brain`; the image's own
 dashboards are under Dashboards) from `deploy/observability/dashboard.json`,
 which compose.yaml carries inline as the `grafana-dashboard` config (check 37
 holds the copy to the file, and every Prometheus name and label its queries
@@ -1724,11 +1725,11 @@ beside stable's and stable alone cannot be picked) and the database (All takes
 every one but Postgres's templates, the brain's being `openbrain`). Grafana
 will not save a change made to it — it is provisioned (measured) — so save a
 copy, in a folder of your own, to keep one (the removal under "Alerts" deletes
-the Open Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
+the Daemonic Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
 sharing externally", which writes `${DS_…}` placeholders) over
-`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
-Brain` and `"editable": false` (a saved copy has its own of each; check 37
-says so), and run `bun scripts/inline-grafana.ts`, which writes
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title
+`Daemonic Brain` and `"editable": false` (a saved copy has its own of each;
+check 37 says so), and run `bun scripts/inline-grafana.ts`, which writes
 compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
 the disk under `lgtm-data` 92% full (measured on a podman machine; its
 write-ahead log's threshold is 90%), answering the collector "Ingester is
@@ -1739,7 +1740,7 @@ so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
 Nothing on the dashboard shows the disk itself.
 
 **Alerts** (SMD-3050): Grafana also loads five alert rules from
-`deploy/observability/alert-rules.yaml` at each start, into the Open Brain
+`deploy/observability/alert-rules.yaml` at each start, into the Daemonic Brain
 folder, each evaluated every 30 s:
 - **A server stopped sending metrics**: a server that sent `process.uptime`
   in the last day and nothing in the last 10 minutes, for 2 more minutes (a
@@ -1826,11 +1827,24 @@ folder, a copy of the dashboard among them, so move those out first. From
 the same:
 
 ```bash
-docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/dashboards/uid/ob1" | grep -o "\"folderUid\":\"[^\"]*\"" | head -1 | cut -d\" -f4); test -n "$u" || { echo "no Open Brain dashboard, so no folder to delete" >&2; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u?forceDeleteRules=true"'
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/dashboards/uid/ob1" | grep -o "\"folderUid\":\"[^\"]*\"" | head -1 | cut -d\" -f4); test -n "$u" || { echo "no Daemonic Brain dashboard, so no folder to delete" >&2; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u?forceDeleteRules=true"'
 ```
 
 The dashboard is back within seconds, its provider reading the file again,
 and the rules still in the file come back at `lgtm`'s next start (measured).
+
+An install upgraded from a release whose dashboard was named Open Brain
+(before SMD-3769) keeps that folder, empty: Grafana provisions the dashboard
+and the rules into a new Daemonic Brain folder and leaves the old one behind
+(measured on the pinned image, on its `lgtm-data`). Once Grafana opens on
+Daemonic Brain after the upgrade's `up -d`, delete the old folder once, from
+`deploy/` as above. The command deletes it only when no dashboard is left in
+it (the rules moved with the dashboard, measured), says so when there is no
+such folder, and fails, deleting nothing, when Grafana does not answer:
+
+```bash
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; f=$(curl -fsS -u "$a" "$g/api/folders") || { echo "Grafana did not list its folders: wait until it opens, and check its admin password"; exit 1; }; u=$(printf "%s" "$f" | tr "{" "\n" | grep "\"title\":\"Open Brain\"" | grep -o "\"uid\":\"[^\"]*\"" | cut -d\" -f4); test -n "$u" || { echo "no Open Brain folder"; exit 0; }; s=$(curl -fsS -u "$a" "$g/api/search?folderUIDs=$u") || { echo "Grafana did not list the Open Brain folder"; exit 1; }; test "$s" = "[]" || { echo "the Open Brain folder still holds a dashboard: run this once Grafana opens on Daemonic Brain, and move out any dashboard of your own first"; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u" > /dev/null && echo "deleted the empty Open Brain folder"'
+```
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1869,7 +1883,7 @@ too, through the port's network — on Docker Desktop and a podman machine by
 `host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
 port with the host-ports file); on Linux the host's other listeners, by the
 network's gateway. The image's own sample dashboards (RED metrics, JVM) read
-other names; this stack's is Open Brain, above.
+other names; this stack's is Daemonic Brain, above.
 
 A canary (`deploy/canary.sh`) is not on stable's `mesh` (SMD-2874), and its
 env file is made from stable's at its first `up`: with the endpoint in
@@ -1904,11 +1918,11 @@ from (measured): remove them first, or after, with the folder command under
 
 ## Keeping the board in the brain
 
-The fork's own brain holds its Linear board — every issue in the Open Brain
-initiative's projects as one thought, in the shape the hand captures used. Until
-SMD-1954 that was a paste per ticket, and a ticket that moved to Done kept
-reading Backlog until someone pasted it again, which made a second row. The
-coordinator's `board-sync` pass is that sweep, unattended:
+The maintainer's own brain holds the project's Linear board — every issue in the
+Open Brain initiative's projects as one thought, in the shape the hand captures
+used. Until SMD-1954 that was a paste per ticket, and a ticket that moved to
+Done kept reading Backlog until someone pasted it again, which made a second
+row. The coordinator's `board-sync` pass is that sweep, unattended:
 
 ```bash
 # deploy/.env: LINEAR_API_KEY=lin_api_…  (and OB1_LINEAR_INITIATIVE when the
@@ -2223,14 +2237,59 @@ vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call), then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. A migration run beside it — `migrate.ts`' lock held
+order above is built in. Beside consolidation runs the subject sweep
+(`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
+thought in the subject pool given its own subject, the rules' or the judge
+model's: started once a period, its claims bounded by the period's start plus
+30 days, so a thought it sets back waits for a later period. On a brain with
+no pool named, the first period names one and pools every thought with no
+current subject, the rules keying what they can and the judge model asked the
+rest, one call at a time — a median of 71 s for the 27B with its reasoning
+on, at most about 1,200 a day, so weeks on a brain of tens of thousands of
+thoughts. **Upgrading to the release that brings it** — from a stack running
+`sleep`, from 1.9.0, where `sleep` was a service of its own, from the
+`workers` pass, or at a first start: settle what the first period asks before
+the scheduler runs on the release. Leave `sleep` out of `OB1_PASSES` in
+`deploy/.env` — from 1.9.0, name the other passes there as its upgrade says,
+but not `sleep` yet; take `workers` out too, whose followers would run the
+claim passes unpaused meanwhile — and bring the stack up on the release, its
+migrations applied and no scheduler running (where it ran before, preflight's
+`sleep` row warns it stopped meanwhile, as expected); set `OB1_SUBJECT_REASONING` as wanted first
+(off is about 8x faster a call), since the count's pool and limit follow it;
+count the first pooling in the stack, `podman compose -f deploy/compose.yaml
+run --rm --no-deps coordinator db/coordinator.ts run extract --subjects
+--dry-run`, with the -f files and -p the stack was started with; on a brain
+whose judge model is not yet measured on the question, name the rules' pool
+with the same one-off and `--subjects rules --limit 1`, which the scheduler
+then follows, asking no model; then put `sleep` in `OB1_PASSES` and recreate
+the coordinator. Where the scheduler named the judge model's pool first,
+`--subjects rules --switch-key --limit 1` moves it to the rules' once the
+judge call in hand ends, its answer dropped, what the judge recorded meanwhile
+standing. A hand run that asks the judge model (`--subjects --switch-key`,
+`--judge-checked`) lengthens no limit of the scheduler's: on a model server of
+one slot, run it while preflight's `sleep` row reads idle, or retry the claims
+consolidation failed beside it after. The scheduler never
+switches a pool: another one named — a rule's, the question's or
+`OB1_SUBJECT_REASONING`'s change — holds the sweep until `--subjects
+--switch-key` is run by hand in the stack, and a garbage-judge alarm's trip
+holds it until a `--judge-checked` run by hand; preflight's `sleep` row gives
+each command. Anything else that ends the sweep sets it down for the period
+alone, said on `heartbeat:sleep`, the other passes running on. While its run
+asks the judge model, consolidation's judge calls each get their own 120 s and
+one of the sweep's calls (1,020 s, or 420 s with the reasoning off), read as
+each call starts: on a model server of one slot a call of consolidation's
+waits out the sweep's call in hand, which its 120 s alone could time out. So a
+hung judgement takes that long a pair to notice, and a hung provider up to
+twice that, the probe after the call getting the same, until SMD-3379 PR 2b
+keeps a slot's wait out of the limit. A
+migration run beside the scheduler — `migrate.ts`' lock held
 at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
 (SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses
 re-embed — the embedding key, credit, the model not served — or its endpoint
 down sets it down for
-that period, said in its log and on `heartbeat:sleep`, and extraction and
-consolidation run on; the next period tries again. **Upgrading a
+that period, said in its log and on `heartbeat:sleep`, and the other passes
+run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
 labelled by the first periods, one embedding call a row, before extraction;
 `bun db/reembed.ts --dry-run` says how many first. A brain recording another
@@ -2243,15 +2302,18 @@ the coordinator, which read them once. On the next live call it pauses them
 within `OB1_SLEEP_POLL` seconds (unset, 5): they wait between thoughts and go
 on once `OB1_SLEEP_CAPTURE` seconds pass with no live call, a model call in
 hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
-its thought set back (SMD-3379 PR 1c-3b). One during the sweep ends the period
+its thought set back (SMD-3379 PR 1c-3b) — consolidation's and the subject
+sweep's at most three a period's hour, their later calls run to their end. A
+live call during the re-derive sweep ends the period
 there (its call in hand given 2 s, then cancelled). A period ends once its
 pools drain, however long that takes (SMD-3379 PR 1c-4b), and the next begins
 once there is work again: a capture's claim, read each poll, or what the
 idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
 (unset, 3600), and within about a minute and a poll of a vector arriving —
 the vector mender's, say, which gives consolidation a thought to judge
-(SMD-3379 PR 1d). Each pass's cost is the same as under `workers`, spent
-only while nobody is writing to the brain.
+(SMD-3379 PR 1d). Each pass's cost is the same as under `workers`, the
+subject sweep's as its hand run's, spent while nobody is writing to the
+brain but for the calls in hand a pause lets run.
 `db/README.md`, "Sleep", has the full rules.
 
 **What pauses it.** A live write: one through a key that is not classified
@@ -2263,7 +2325,9 @@ searches (SMD-3315). Preflight's `sleep` row says whether it is working,
 paused or idle, with its last period.
 
 **First start.** The same worker key as the `workers` pass (`OB1_WORKER_KEY`,
-its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES`, then:
+its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES` — once the subject
+sweep's first pool is settled ("Upgrading to the release that brings it",
+above) — then:
 
 ```bash
 podman compose -f deploy/compose.yaml up -d coordinator
@@ -2286,8 +2350,10 @@ live call. The coordinator is a default service and `unless-stopped`, so the
 stack's `up -d` and a reboot bring it back ("After a reboot", above), and a
 plain `down` stops it with the rest.
 
-**From the `workers` pass.** Name `sleep` in `OB1_PASSES` in place of
-`workers` and recreate the coordinator: it stops the followers and starts the
+**From the `workers` pass.** Settle the subject sweep's first pool first
+("Upgrading to the release that brings it", above). Then name `sleep` in
+`OB1_PASSES` in place of `workers` and recreate the coordinator: it stops the
+followers and starts the
 scheduler, never both at once. Then delete the followers' rows, or
 preflight's `workers` row asks for them back. A follower run outside the
 coordinator — by hand, or an old stack's `extract` and `consolidate`
@@ -2317,7 +2383,8 @@ its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
-`OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
+`OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep
+runs one),
 digits only (`deploy/.env.example`). The budget (SMD-2679), each pass's
 session settings:
 `OB1_SLEEP_STATEMENT_TIMEOUT` in seconds (0–86400, unset 300; 0 leaves the
@@ -2330,7 +2397,9 @@ pass a statement holds. **Upgrading to 2.0.0:** `OB1_SLEEP_QUIET` and
 delete them from `deploy/.env`. A period now begins on work rather than after
 a quiet, and runs until its pools drain rather than to a clock, so a backlog
 drains in one period, paused by each live call (`db/README.md`, "Upgrading to
-2.0.0"). The scheduler reads its
+2.0.0"). It also runs the subject sweep, whose first period names its pool:
+settle that pool before the scheduler runs on 2.0.0, with `sleep` out of
+`OB1_PASSES` meanwhile, as "The `sleep` pass instead" above says. The scheduler reads its
 environment once, so recreate the coordinator after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
 A `restart` keeps the values it was created with.
@@ -2600,7 +2669,7 @@ loopback check, `tier.ts` guards `--to` two ways:
     cannot reach it, so a refresh that failed partway can simply be re-run;
   - one stamped `canary` or `working`;
   - one whose public schema holds nothing but what extensions own;
-  - an Open Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
+  - a Daemonic Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
     holding no thoughts. `schema_migrations` alone is not enough, since Rails,
     Ecto, golang-migrate and dbmate use that name too.
 
@@ -3152,7 +3221,7 @@ the same contract on the same port.
 
 ## Orchestration
 
-The fork's orchestration tool is n8n (`../docs/orchestration-tool.md`,
+Daemonic Brain's orchestration tool is n8n (`../docs/orchestration-tool.md`,
 SMD-1863). It runs workflows that need state — a schedule, a trigger, a retry,
 a cursor. The `orchestration` profile runs it beside the stack (SMD-2210).
 The image is n8n's, pinned by digest and never vendored.
@@ -3580,8 +3649,8 @@ and the run data the kit counts are not n8n's published contract. The kit
 runs this profile as it ships (`../evals/README.md`, "The orchestration
 profile (SMD-2210)").
 
-**Licences** (the fork's reading, not legal advice; the ADR's Gate 1). n8n is
-under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
+**Licences** (Daemonic Brain's reading, not legal advice; the ADR's Gate 1). n8n
+is under its Sustainable Use License, OB1 under FSL-1.1-MIT, and an operator
 running the profile is running two non-OSI licences side by side.
 Installing an OB1 brain with the profile on a client's own infrastructure is
 inside both: n8n's FAQ permits consulting and installing on a client's
@@ -3591,7 +3660,7 @@ commercial product built on OB1 that competes with it is outside OB1's.
 ## Authorization server
 
 OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
-13–16): oidc-provider 9.12.2 in a small Bun service of the fork's own
+13–16): oidc-provider 9.12.2 in a small Bun service of Daemonic Brain's own
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
 `auth` profile runs it. It publishes no port: the proxy routes `/auth` and
 the three discovery paths outside it to it while it answers, and answers them

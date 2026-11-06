@@ -1,6 +1,6 @@
 {
   "name": "Updating Thoughts",
-  "description": "Behavioral skill for editing an existing Open Brain thought with the update_thought MCP tool — deciding between metadata tagging and a content rewrite, and guarding read-modify-write with optimistic concurrency.",
+  "description": "Behavioral skill for editing an existing Daemonic Brain thought with the update_thought MCP tool — deciding between metadata tagging and a content rewrite, and guarding read-modify-write with optimistic concurrency.",
   "category": "skills",
   "author": {
     "name": "Ezana Azene",
@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "tools": [
-      "Open Brain MCP connector with a write-scoped key",
+      "Daemonic Brain MCP connector with a write-scoped key",
       "AI client with reusable skills, rules, or custom instructions"
     ]
   },

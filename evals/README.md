@@ -206,7 +206,7 @@ diluting model makes that thought unfindable by its decision.
 ### Prefixes did not help
 
 `nomic-embed-text` is documented as wanting `search_document:` / `search_query:`
-prefixes, which OB1 does not send. Adding them made retrieval slightly *worse*
+prefixes, which Daemonic Brain does not send. Adding them made retrieval slightly *worse*
 (MRR 0.950 → 0.929 on the v1 set). At this sample size that is noise, but it is
 not the improvement the docs imply.
 
@@ -613,7 +613,7 @@ instructions would have been a regression dressed as an upgrade.
 `embeddinggemma`, by contrast, gains 0.002 from its documented format, which is why
 it never mattered before and why the templates are keyed per model rather than
 applied globally. Nomic's `search_query:`/`search_document:` prefixes measurably
-hurt in this fork's earlier benchmarks and are deliberately absent.
+hurt in Daemonic Brain's earlier benchmarks and are deliberately absent.
 
 The trade is real: 3.3x the embedding latency and four times the disk for +0.019
 MRR. What tips it is the long-document result — `qwen3-embedding:4b` is the only
@@ -1096,7 +1096,7 @@ neighbours. That discrimination is precisely a reranker's single-hop strength
 *destroys* a pre-decomposition multi-hop set yet belongs **after** decomposition,
 on the single-hop sub-pools. **Decision:** decomposition alone is declined for the
 default path (marginal strict gain at the cost of an LLM call plus N retrievals per
-query, on a local-by-default fork); the measured, motivated follow-up is
+query, on a local-by-default brain); the measured, motivated follow-up is
 **decompose-then-rerank** — lift each sub-pool's gold to rank 0, then interleave —
 whose headroom is the 39% of golds not yet at rank 0. Like the reranker itself
 (SMD-1304), that belongs on a *hard* held-out corpus, not only LongMemEval.
@@ -1307,7 +1307,7 @@ time. Making that configurable is the obvious follow-up.
 
 `eval-extract-windows.ts` (SMD-1879). Until this change `db/extract-entities.ts`
 sent a thought to the metadata model in one call, cut at 8,000 characters,
-with no bound on the answer. On the fork's own brain 32 of 295 thoughts —
+with no bound on the answer. On the maintainer's own brain 32 of 295 thoughts —
 1,656 to 13,113 characters — failed with "The operation timed out." on
 `qwen2.5:7b`, re-run serially with `--timeout 900`. The ticket read that as one
 oversized read-and-generate. Measured, it was half that.
@@ -3020,7 +3020,7 @@ a sample: one did within hours of the record, entering three first-registration
 samples. `--self-check` holds the recorded numbers (each registration's at the
 round it was decided) and the record's invariants with no database.
 
-## LongMemEval: the fork on a public benchmark, and the floor it exposed
+## LongMemEval: Daemonic Brain on a public benchmark, and the floor it exposed
 
 `eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second
 corpus). Needs Ollama, a Postgres you keep for the run (not the throwaway — the
@@ -3114,12 +3114,12 @@ Beside the field, same metric, same 470 questions:
 | GBrain v0.48.4 | 95.53% | Voyage-4 1024d, `rerank-2.5` on, graph boosts |
 | GBrain, reranker off | 93.40% | |
 | MemPalace hybrid v4 + LLM rerank | 90.0% | reproduced by gbrain-evals |
-| **this fork, no floor, `qwen3-embedding:4b`** | **89.4%** | local 2.5 GB model, no reranker, no hosted call |
-| **this fork, no floor, `qwen3-embedding:0.6b`** | **87.7%** | local 639 MB model |
+| **Daemonic Brain, no floor, `qwen3-embedding:4b`** | **89.4%** | local 2.5 GB model, no reranker, no hosted call |
+| **Daemonic Brain, no floor, `qwen3-embedding:0.6b`** | **87.7%** | local 639 MB model |
 | MemPalace raw (ChromaDB) | 85.7% | reproduced by gbrain-evals |
 | LongMemEval paper, flat retrievers | ~71% | Stella V5 / BM25 |
-| **this fork as shipped, threshold 0.5, 4b** | **64.0%** | |
-| **this fork as shipped, threshold 0.5, 0.6b** | **45.3%** | |
+| **Daemonic Brain as shipped, threshold 0.5, 4b** | **64.0%** | |
+| **Daemonic Brain as shipped, threshold 0.5, 0.6b** | **45.3%** | |
 
 ### What it says
 
@@ -3163,7 +3163,7 @@ its reranker and 6.1 below with it, on a 2.5 GB local model with no reranker
 and no hosted call, at 1.5 ms a query — just under MemPalace's reranked
 hybrid and 3.7 above its raw store. The 0.6b is 1.7 points behind the 4b for a
 quarter of the size and a quarter of the load time. The paper's flat
-retrievers are 17–18 points behind. The two things between this fork and
+retrievers are 17–18 points behind. The two things between Daemonic Brain and
 GBrain's number are a reranker, measured flat on the tracker and worth
 re-deriving here, and a lexical arm over prose.
 
@@ -3289,7 +3289,7 @@ current-first and is no longer distinguishable from the shipped order
   almost every one the stale row is the top hit and the update is second.
   Both are always retrieved, so the strict number is 97–99% and the reader's
   number is 45–53%. That is MERIT's range, reproduced on a public corpus
-  through the fork's own write and read path, and it is invisible to every
+  through Daemonic Brain's own write and read path, and it is invisible to every
   table above this one.
 * **The date is not the lever, again.** The blend a caller can send is a
   byte-identical no-op here: at a 90-day half-life a row from 2023 has a
@@ -4566,7 +4566,7 @@ on to open. This loop captures it and gates PRs on it.
    the stronger relevance label and the export includes it. A `supersedes` cite
    labels the *superseded* row — the one the searcher needed in order to
    correct it — so a replay on a corpus that has since demoted superseded rows
-   would read that query as a miss; the fork labels such rows at read time and
+   would read that query as a miss; Daemonic Brain labels such rows at read time and
    does not demote them (SMD-1720, change 88), and every click-through label is bound to
    the corpus at export time (`baseline` says which).
    A caller who searches then opens result 3 has labelled result 3 relevant —
@@ -4655,9 +4655,9 @@ gate over its own corpus would redact its thoughts to id+embedding.
 ## Does the store matter? pgvector against a dedicated vector database (SMD-1037)
 
 Every retrieval number above was measured on Postgres with pgvector, because
-that is the store the fork kept when it left Supabase. The choice was argued —
-one transactional store lets a hybrid query run as one statement over one
-snapshot — never measured against the alternative it rules out. SMD-1038
+that is the store Daemonic Brain kept when it left Supabase. The choice was
+argued — one transactional store lets a hybrid query run as one statement over
+one snapshot — never measured against the alternative it rules out. SMD-1038
 (changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") wrote the two-store shape and
 the bar its numbers would have to clear *before* this measurement; this is the
 measurement, read against that bar. Nothing in the product changes as a result —
@@ -4856,10 +4856,10 @@ SMD-1037's bracket had a separate server (Qdrant) and an in-engine index
 store, run in-process against local files with no second server and no network
 round trip — though still a second store to keep consistent with Postgres.
 LanceDB is that store, and it is the external candidate most likely to help a
-local-by-default fork, because it removes the "second process + network hop" part
-of the two-store cost while the id→row resolve and the consistency tax remain. So
-measuring it isolates which part of that cost is the network and which is
-architectural. It is wired as a fourth store into the same harness
+local-by-default brain, because it removes the "second process + network hop"
+part of the two-store cost while the id→row resolve and the consistency tax
+remain. So measuring it isolates which part of that cost is the network and which
+is architectural. It is wired as a fourth store into the same harness
 (`store-backends.ts`, a `LanceEngine` behind the same `ExternalEngine` interface
 as Qdrant), embedded — no container, only a temp dataset directory — and scored
 against the same exact-cosine oracle over the same points.
@@ -4967,7 +4967,7 @@ consistency tax of keeping two stores in step. LanceDB is the best-behaved
 external store measured — prefilter recall, the leanest footprint, no server —
 and a best-behaved second store is still a second store that does not beat what
 migration 014 gives Postgres in-engine. **Not built**; the `thoughts.embedding`
-column stays the source of truth. (LanceDB is Apache-2.0 and the fork is
+column stays the source of truth. (LanceDB is Apache-2.0 and Daemonic Brain is
 FSL-1.1-MIT — SMD-1038's guardrail — so it is a dependency of an eval, not the
 product.) Reproduce with `OB1_STORE_EXTERNAL=qdrant,lance` (the default) on
 `store-compare.ts` and `store-scale.ts`; `OB1_STORE_LANCE_INDEXES` picks the
@@ -5106,7 +5106,7 @@ Batched propagation erases the append path, but payload *edits* do not stay chea
 | read-model append (batched) | 0.17 ms/row | 0.02 ms/row |
 | mutable content edit — `update` by ref | 3.34 ms/ref | 11.65 ms/ref |
 
-An outbox/CDC drain is the right shape and the one OB1 already runs — embeddings
+An outbox/CDC drain is the right shape and the one Daemonic Brain already runs — embeddings
 are *already* eventually consistent with content (the re-embed worker lags writes),
 so a read model is that same consistency model relocated, not a new one. A batched
 append is one Lance fragment write amortised over the batch, so it is cheap and does
@@ -5138,8 +5138,8 @@ near or above the logical figure — 4 MB on disk vs 2 MB logical on the real co
 **Verdict — SMD-1037's holds, and the resolve it leaned on is shown not to be the
 bottleneck.** The read-model topology *works*: its read path is provably
 zero-Postgres — it serves reads with Postgres stopped — and appends are cheap when
-batched, on the eventual-consistency model the fork already uses. But removing the
-resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
+batched, on the eventual-consistency model Daemonic Brain already uses. But removing
+the resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
 three paths are within noise on the real corpus and single-store pgvector has the
 fastest *p50* from 1M up, and the read-model-vs-resolve delta is within noise
 throughout. (One tail-latency caveat already points at the scale case: at 10M the
@@ -5340,7 +5340,7 @@ store earns its place as the **recall tier** at scale, with Postgres as the
 clears. Complements SMD-1697 (where the single store stops fitting). Stage 3 (a
 cross-encoder / LLM reranker) is out of scope: the rerank spikes (SMD-1305-era)
 measured it flat-to-negative and it is a heavy out-of-process dependency. (LanceDB
-is Apache-2.0, the fork FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an
+is Apache-2.0, Daemonic Brain FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an
 eval, not the product.)
 
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
@@ -5587,7 +5587,7 @@ writer's declaration — not the 7B — is what makes any of them reliable.
 
 ## Was the confidence earned? An outcome ledger and a calibration score per mechanism (SMD-1809)
 
-`eval-calibration.ts`. The fork writes a confidence in three places — the
+`eval-calibration.ts`. Daemonic Brain writes a confidence in three places — the
 consolidation judge on every proposal (029), the entity extractor on every
 mention and edge (016), and the metadata model's kind band that the section
 above froze — and it resolves claims in three: a reviewer accepts or rejects a
@@ -5756,8 +5756,8 @@ What it says:
   two kinds run opposite ways.** Read per kind or not at all.
 
 Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
-not to the fork), the hedged strata clustered on six thoughts for mentions and
-three for edges, and a strict rule on type. The grades stand as they were
+not to the project), the hedged strata clustered on six thoughts for mentions
+and three for edges, and a strict rule on type. The grades stand as they were
 given blind; re-grading the calls the grader marked borderline — the two
 quoted example tokens `migration 021` and `Edge0` read as held, the control's
 `Jev per-type gates` and `PR #119` read as failed — leaves the mention finding
@@ -5790,10 +5790,10 @@ before and after — copied small enough to run in CI in seconds.
 **The reduced first form, said so.** The ticket's "deliverable that carries
 citations" needs SMD-1715's `capture_deliverable`, which is not built, and
 migration 042's `record_citation` has no MCP caller (SMD-1733 owns the
-argument). On this fork today a deliverable is what SMD-1719 already scores as
-a citation: a `capture_thought` whose `derived_from` names the returned ids it
-used. That is the form that ran; when 1715 lands the arm swaps the tool and the
-scorer does not change.
+argument). In Daemonic Brain today a deliverable is what SMD-1719 already scores
+as a citation: a `capture_thought` whose `derived_from` names the returned ids
+it used. That is the form that ran; when 1715 lands the arm swaps the tool and
+the scorer does not change.
 
 **The corpus is code, not a fixture.** Twenty fictional sessions over twelve
 fictional subjects, thirty-six captures by two keys — the operator's and an
@@ -6809,7 +6809,7 @@ at the test split's base rate, scored on the same rows:
   project), balanced accuracy 0.505. No shape rule separates the code
   identifiers either: under rubric v1 they are invalid, and under the
   maintainer's decision below they are entities.
-- **What the self-check holds.** `--self-check` is a fork-checks step.
+- **What the self-check holds.** `--self-check` is a brain-checks step.
   - The gate is a post-filter with no other path to the graph. Off, it keeps
     every candidate with the extractor's type: today's graph. That is
     `gate()`'s identity, held by the self-check, not a live measurement.
@@ -6947,7 +6947,7 @@ have. SemIf (SMD-2052) is the test of that reading.
 ## Which orchestration tool? The same two workflows on n8n, Activepieces and Windmill (SMD-1863)
 
 SMD-1863 asks which self-hosted workflow tool — n8n, Activepieces or Windmill —
-should own the fork's ingestion and sync (vendor auth, schedules, triggers,
+should own Daemonic Brain's ingestion and sync (vendor auth, schedules, triggers,
 retries) instead of one hand-rolled recipe per service, and whether to adopt one
 at all. The decision is `../docs/orchestration-tool.md` (n8n); this is the
 evidence it reads. The criteria, the bar and the prior were posted on
@@ -7163,7 +7163,7 @@ inherits every capture's latency, and only n8n let the workflow say so.
   is refused on the other's path (SMD-2210, below). The MCP Client node is a normal workflow step
   (Streamable HTTP, a header credential); the MCP Server Trigger exposes exactly
   the tool nodes wired to it, behind a static header the operator chooses — so
-  an AI client connects with a URL and a header, the OB1 pattern. A toolkit's
+  an AI client connects with a URL and a header, the Daemonic Brain pattern. A toolkit's
   tools are prefixed with the node's name (`brain_search_thoughts`). The Linear
   node lists issues with no filter, only a limit, so the fetch is the HTTP
   Request node with n8n's stored `linearApi` credential — the tool still holds
@@ -7226,7 +7226,7 @@ the clients and the OpenAPI spec Apache 2.0, and the published CE image carries
 proprietary code under "a right to distribute the community edition as is but
 not to sell, resell, serve as a managed service, modify or wrap under any form
 without an explicit agreement" — the ticket's "Apache 2.0" was wrong. What the
-licenses mean for a profile OB1 ships is the ADR's to decide.
+licenses mean for a profile Daemonic Brain ships is the ADR's to decide.
 
 **The live AI-client check (n8n).** The verifier is the MCP SDK's client; the
 ticket asked for the AI client itself. A headless Claude Code session (Opus

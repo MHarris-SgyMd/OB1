@@ -1,12 +1,12 @@
 # Shared MCP Server
 
-A guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.
+A guide to building scoped MCP servers that give other people limited access to specific parts of your brain.
 
-> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was.
+> **Daemonic Brain (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was, its `../_shared/auth.ts` and `../_shared/sse.ts` the copies that sat in `extensions/_shared/` until SMD-3747 retired them, and with them the MCP packages from the vendored servers' install. This tree takes no vendored MCP server (`integrations/test-auth.ts` fails one): new operations on the brain are a plugin instead (`plugins/README.md`), on the brain's own connector and behind its own scopes.
 
 ## When You Need This
 
-You've built your Open Brain—a personal knowledge system with thoughts, contacts, goals, and work data. But now you want to share *part* of it with someone else:
+You've built your brain—a personal knowledge system with thoughts, contacts, goals, and work data. But now you want to share *part* of it with someone else:
 
 - Your spouse needs access to meal plans and shopping lists
 - A collaborator needs to see project tasks but not your personal notes
@@ -45,8 +45,8 @@ Control operations per table:
 
 Before building a shared MCP server:
 
-- Working Open Brain installation with your primary MCP server
-- A PostgreSQL database with RLS support — the fork's stack, or a Supabase project
+- Working Daemonic Brain installation with your primary MCP server
+- A PostgreSQL database with RLS support — Daemonic Brain's stack, or a Supabase project
 - Node.js 18+ installed
 - Understanding of database roles and permissions
 - The other person's Claude Desktop config access (or ability to share config)
@@ -116,7 +116,7 @@ CREATE POLICY "Household members update shared lists"
 
 ### Step 3: Build a Separate MCP Server
 
-Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; meal-planning's was this tree's one until it retired with SMD-2311. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Open Brain and all extensions.
+Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; meal-planning's was this tree's one until it retired with SMD-2311. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Daemonic Brain and all extensions.
 
 ```typescript
 // extensions/<name>/shared-server.ts — a second, Bun-native server beside the extension's index.ts
@@ -247,14 +247,14 @@ The shared server's keys are its own environment, separate from the extension se
 
 ```bash
 # Mint a separate, named key for the shared server — read-scoped unless this
-# member should add or check off items (Step 3 of the Run a Remote MCP Server
+# member should add or check off items (Step 3 of the Run a Vendored Server
 # primitive shows the by-hand form). The HASH goes in MCP_HOUSEHOLD_ACCESS_KEYS;
 # the key goes in the other person's connector URL. From a checkout, in a
 # subshell so the cwd stays here:
 (cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
 ```
 
-The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` pins the packages the file imports.
+The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` pinned the packages the file imports.
 
 ### Step 5: Run It as a Separate Server
 
@@ -297,7 +297,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/mcp -H 'x
 # → 401: the primary server's key is not in MCP_HOUSEHOLD_ACCESS_KEYS
 ```
 
-The list is the whole boundary: a tool a key is not given is not registered for it, so there is nothing to call. (`extensions/test-auth.ts` asserts exactly this for the shared server in CI.) To have the database hold a second line, give the shared server a `SUPABASE_URL` whose role has only the household tables' privileges, and verify with `psql` as that role — `select count(*) from thoughts` should be refused.
+The list is the whole boundary: a tool a key is not given is not registered for it, so there is nothing to call. (The vendored suite asserted exactly this for the shared server in CI, until it retired.) To have the database hold a second line, give the shared server a `SUPABASE_URL` whose role has only the household tables' privileges, and verify with `psql` as that role — `select count(*) from thoughts` should be refused.
 
 ## Concrete Example: Spouse Access to Meal Planning
 
@@ -352,7 +352,7 @@ After following this guide, you will have:
 4. Verified security boundaries preventing unauthorized access
 5. A working shared-access pattern you can replicate for other use cases
 
-The other person can now use Claude to interact with shared data, while your personal Open Brain remains completely private.
+The other person can now use Claude to interact with shared data, while your personal brain remains completely private.
 
 ## Troubleshooting
 
@@ -481,4 +481,4 @@ None in this tree since SMD-2311: [Meal Planning](../../extensions/meal-planning
 - **Document for users**: Create a simple guide for the other person explaining what they can ask Claude to do
 - **Consider other use cases**: Team collaboration, family calendars, shared project tracking
 
-You now have a reusable pattern for sharing parts of your Open Brain without compromising privacy.
+You now have a reusable pattern for sharing parts of your brain without compromising privacy.

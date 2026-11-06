@@ -18,7 +18,7 @@
  * relative cutoff loosens most) or a weak one.
  *
  *   OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun decoy-admission.ts
- *   OB1_EVAL_EMBED=qwen3-embedding:4b@1024   embedding spec (default: the fork default)
+ *   OB1_EVAL_EMBED=qwen3-embedding:4b@1024   embedding spec (default: Daemonic Brain's default)
  */
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";

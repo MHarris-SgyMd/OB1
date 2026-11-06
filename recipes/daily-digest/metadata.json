@@ -1,6 +1,6 @@
 {
   "name": "Daily Digest",
-  "description": "Automated daily summary of recent thoughts delivered via Gmail draft, powered by Claude Code scheduled tasks and Open Brain MCP. Zero infrastructure required.",
+  "description": "Automated daily summary of recent thoughts delivered via Gmail draft, powered by Claude Code scheduled tasks and Daemonic Brain MCP. Zero infrastructure required.",
   "category": "recipes",
   "author": {
     "name": "Matt Hallett",

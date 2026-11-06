@@ -9,12 +9,13 @@
  * What changes, and why each matters here:
  *
  *   Scopes. The tools that write — `capture_thought`, and since changes 22 and 60
- *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five,
- *   and the vendored recipes' and integrations' likewise since change 67 — are
- *   registered only for a write-scoped key. A read-only key means a leaked
- *   ChatGPT connector URL cannot add or alter anything: read-only keys do not
- *   merely fail to write, the write tools are never registered for them, so they
- *   do not appear in tools/list at all.
+ *   `update_thought` and `delete_thought`, and twenty-four of the extensions'
+ *   forty-five until they became plugins (SMD-2311) — are registered only for a
+ *   write-scoped key. A read-only key means a leaked ChatGPT connector URL cannot
+ *   add or alter anything: read-only keys do not merely fail to write, the write
+ *   tools are never registered for them, so they do not appear in tools/list at
+ *   all. The vendored recipe and integration servers (change 67), HTTP routes
+ *   and workers alone since SMD-3747, refuse a read key's write with a 403.
  *
  *   A third scope, `capture` (SMD-1298), is the mirror image: `capture_thought`,
  *   `set_priority` and `clear_priority` on a thought the key captured (SMD-3664,
@@ -69,23 +70,25 @@
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
  *
- * Consumers: the REST core (rest/app.ts) and mcp-server/; the six vendored extensions under
- * extensions/ (seven servers), which authenticated with `key !== expected` on a
- * URL query key and ran as the service role until they were made consumers of
- * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
- * integrations that compared the same way — nine MCP and HTTP servers, four
- * workers and one webhook receiver (SMD-1455, change 67). Each imports
+ * Consumers: the REST core (rest/app.ts) and mcp-server/; and the vendored
+ * recipes and integrations that compared with `key !== expected` — nine MCP and
+ * HTTP servers, four workers and one webhook receiver when they became
+ * consumers (SMD-1455, change 67), an HTTP API, four workers and the webhook
+ * receiver now. The six vendored extensions under extensions/ (seven servers),
+ * which authenticated with `key !== expected` on a URL query key and ran as the
+ * service role until they were made consumers of this module (SMD-1252, FORK.md
+ * change 64), are plugins since SMD-2311. Each vendored server imports
  * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
  * supabase/functions/, one level under which every function sits, and
  * `_shared/` beside it is the one place a shared module can live — so a
  * byte-for-byte copy of this file sits in every directory that holds a
- * function directory: extensions/_shared/,
- * recipes/editorial-policy/_shared/, integrations/_shared/ and
- * integrations/consolidation-workers/_shared/ (recipes/_shared/ went with
+ * function directory: recipes/editorial-policy/_shared/, integrations/_shared/
+ * and integrations/consolidation-workers/_shared/ (extensions/_shared/ went
+ * with the extension servers — SMD-2311, SMD-3747 — recipes/_shared/ with
  * ob-graph and work-operating-model-activation — SMD-2920 — and the cost
  * recipe's examples/_shared/ with that recipe — SMD-1800).
- * `bun run sync-auth` in extensions/ rewrites them all from this file;
- * extensions/test-auth.ts fails if any copy differs or is missing from either list.
+ * `bun run sync-auth` in integrations/ rewrites them all from this file;
+ * integrations/test-auth.ts fails if any copy differs or is missing from either list.
  * Everything here is runtime-neutral — node:crypto and node:buffer resolve on
  * Bun, Node, Workers (nodejs_compat) and Deno — so the copies run as they are.
  */
@@ -310,7 +313,7 @@ export function queryOf(url: string): URLSearchParams {
 
 // routable, requestAt and listenHostFrom live here, not in root.ts, because
 // this is the module whose byte-identical copies sit in each vendored tree
-// (`bun run sync-auth` in extensions/) (SMD-2595, SMD-3323).
+// (`bun run sync-auth` in integrations/) (SMD-2595, SMD-3323).
 
 /** Where a request whose URL will not parse is rebuilt: `.invalid` (RFC 6761) is no host a client dials or an origin names. */
 export const REBUILD_ORIGIN = "http://unparsable-host.invalid";

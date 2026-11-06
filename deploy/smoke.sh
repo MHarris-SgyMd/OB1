@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test a running Open Brain server over MCP.
+# Smoke-test a running Daemonic Brain server over MCP.
 #
 # Point it at the compose stack, on its own machine or behind the TLS proxy or
 # tunnel in front of it. It only needs the URL and the access key.
@@ -15,7 +15,7 @@
 # captures a thought, so it is safe against production.
 #
 # Checks 2, 3, 4 and 10 are the ones upstream's Edge Function deployment cannot
-# pass (the fork retired that build in SMD-1800): 2 because Supabase's API
+# pass (Daemonic Brain retired that build in SMD-1800): 2 because Supabase's API
 # gateway answers the OAuth discovery path with 401 before the function sees
 # it, 3, 4 and 10 because of the build. FORK.md changes 42 and 75 say why, and
 # why those failures are real (10: upstream's server has no keyed health body,

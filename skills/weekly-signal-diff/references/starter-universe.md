@@ -8,7 +8,7 @@ Rules for using it:
 - Start here only if the user has not provided categories, companies, or a
   source packet.
 - Treat the categories and companies as suggested defaults.
-- Re-rank, replace, or expand the list using Open Brain memory before you write
+- Re-rank, replace, or expand the list using Daemonic Brain memory before you write
   the final diff.
 - Preserve some baseline discovery. Do not personalize so aggressively that the
   scan stops surfacing new signal.
@@ -49,4 +49,4 @@ Demote or replace an entity or category when:
 
 Use wording like this at the top of the weekly diff:
 
-`This week's scan started from 10 suggested categories and 30 suggested companies, then reweighted coverage using Open Brain context around [focus areas].`
+`This week's scan started from 10 suggested categories and 30 suggested companies, then reweighted coverage using Daemonic Brain context around [focus areas].`

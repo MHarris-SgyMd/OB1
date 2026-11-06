@@ -27,7 +27,7 @@ You ran into someone at a conference six months ago. They mentioned they were lo
 
 A professional contact management system with interaction logging, opportunity tracking, follow-up reminders, meeting prep and stale-contact detection.
 
-On this fork the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins/professional-crm/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_professional_crm`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins/professional-crm/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_professional_crm`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `professional_contacts` — The people in your network
@@ -55,7 +55,7 @@ The old server's tables were in `public`, made by a `schema.sql` here that is go
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-4 recommended
 
 ## Steps
@@ -112,7 +112,7 @@ Prep me for my meeting with Sarah
 
 ### `professional_crm_link_thought` — The Bridge Tool
 
-Your core Open Brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
+Your brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
 
 **Example workflow:**
 

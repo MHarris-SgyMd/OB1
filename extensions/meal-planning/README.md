@@ -26,7 +26,7 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 A meal planning system with recipes, weekly meal plans, and shopping lists made from them.
 
-On this fork the meal planner is a **plugin**: [`plugins/meal-planning`](../../plugins/meal-planning/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_meal_planning`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the meal planner is a **plugin**: [`plugins/meal-planning`](../../plugins/meal-planning/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_meal_planning`, which the brain's migrator makes when you turn the plugin on.
 
 Upstream's extension also had a second, "shared" server, so a household member could view the plan and tick off the list on a key of their own. A plugin's operations take the brain's own scopes, which cannot express "read, and mark bought", so that server is retired (SMD-2920). The plugin's own `get_shopping_list` and `mark_item_purchased` do the reading and ticking, behind the brain's read and write keys.
 
@@ -49,7 +49,7 @@ The plugin's [README](../../plugins/meal-planning/README.md) gives each one's in
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-3 recommended (Extension 3's family calendar, a plugin, is read for cross-extension integration)
 
 ## Steps

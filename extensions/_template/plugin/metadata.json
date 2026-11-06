@@ -1,0 +1,18 @@
+{
+  "name": "Extension Name Plugin",
+  "description": "What the plugin keeps and what an agent can do with it, in a sentence: the learning path's Extension N, as a plugin of the brain's.",
+  "category": "plugins",
+  "author": {
+    "name": "Your Name",
+    "github": "your-github-username"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": ["plugin", "tag1"],
+  "difficulty": "beginner",
+  "estimated_time": "15 minutes"
+}

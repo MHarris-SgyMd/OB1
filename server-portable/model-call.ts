@@ -33,13 +33,14 @@
  *
  * Two more things the context carries, for PR 2b's and 2c's hooks: the pass a
  * call belongs to (`asPass`, which each claim worker's run sets: `extract`,
- * `consolidate`, `reembed`), so a hook can order the passes' calls; and an
- * observer told when a call starts waiting on the hook — the hook says so,
- * through the `waiting` it is handed, where it queues, defers or finds no slot
- * free — and when it runs (`withCallWaits`), so a worker's clocks — N12's call
- * in hand, extraction's stall — do not count a wait for a slot as the call's
- * time (review pass 3), and a stopping pass gives back only a call that waits
- * (PR 2b-1, its review pass 6).
+ * `consolidate`, `reembed`; and the subject sweep's, `subjects`, SMD-3306 PR 6b-2),
+ * so a hook can order the passes' calls; and an observer told when a call
+ * starts waiting on the hook — the hook says so, through the `waiting` it is
+ * handed, where it queues, defers or finds no slot free — and when it runs
+ * (`withCallWaits`), so a worker's clocks — N12's call in hand, extraction's
+ * stall — do not count a wait for a slot as the call's time (review pass 3),
+ * and a stopping pass gives back only a call that waits (PR 2b-1, its review
+ * pass 6).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -101,7 +102,7 @@ export function asBackground<T>(fn: () => T): T {
   return context.run({ ...context.getStore(), cls: "background" }, fn);
 }
 
-/** Runs `fn` with every model call it makes belonging to `pass`: a claim worker's run. */
+/** Runs `fn` with every model call it makes belonging to `pass`: a claim worker's run, or the subject sweep's. */
 export function asPass<T>(pass: string, fn: () => T): T {
   return context.run({ ...context.getStore(), pass }, fn);
 }

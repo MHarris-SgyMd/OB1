@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * session-capture.mjs — a session hook for Claude Code and Codex that captures
- * ONE summary thought into Open Brain at each of a session's checkpoints — a
+ * ONE summary thought into Daemonic Brain at each of a session's checkpoints — a
  * compaction (Claude Code's PreCompact) and the session's end — with the
  * thoughts the session retrieved as its provenance (SMD-1298, SMD-2012) —
  * one thought per EPISODE of the session, not per session (SMD-2013): a
@@ -784,7 +784,7 @@ const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "S
 export function ticketsIn(text, teams) {
   const out = [];
   for (const m of String(text ?? "").matchAll(TICKET_RE)) {
-    const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: the fork's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
+    const team = m[1].toUpperCase(), id = `${team}-${m[2]}`; // `team`, not `key`: Daemonic Brain's credential-compare check reads a `key` under an equality operator as a secret compared, comments included
     if (NOT_TICKETS.has(team) || out.includes(id)) continue;
     if (teams && (teams.size ? !teams.has(team) : m[1] !== team)) continue;
     out.push(id);
@@ -1245,11 +1245,12 @@ export const SECRET_PATTERNS = [
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
   ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
-  // This fork's own access keys are 64 hex characters (keygen.ts), as are their
-  // digests — told apart only by where they sit: a digest follows `name:scope:`
-  // in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key until proven
-  // otherwise (second review pass: the mixed-case rule let every hex string by).
-  // …and not the everyday spellings of a digest: `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
+  // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
+  // their digests — told apart only by where they sit: a digest follows
+  // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
+  // until proven otherwise (second review pass: the mixed-case rule let every
+  // hex string by). …and not the everyday spellings of a digest:
+  // `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
   // and `sha256sum`'s own output shape, `<hex>  file` — two spaces then the name (fifth review pass:
   // an actionlint pin line refused a session; sixth: a lookbehind on the WORD sha256sum excused any
   // hex later on that line, a key included).
@@ -2014,7 +2015,7 @@ export function pointerFor(sessionId, name, state, landedHere) {
 /** One model call's ceiling. The detached child has no 1.5 s hook budget, but a summary is not worth a long wait; a slower model falls back to the derived one. */
 const MODEL_TIMEOUT_MS = 30_000;
 
-/** The model's brief: the fork's plain register, what to write, the caps, and the guards. */
+/** The model's brief: Daemonic Brain's plain register, what to write, the caps, and the guards. */
 const MODEL_SYSTEM = [
   "You are writing a memory of one piece of a coding session's work, to be stored and retrieved later by any AI.",
   "From the derived summary and the assistant's own messages below, write plain, direct prose covering:",
@@ -2857,8 +2858,8 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 // the hook is the backstop. What the agent must hear, it leaves beside the token
 // file: `<id>.ended.json` when the claim ended, `<id>.blocked.json` when another
 // claim covered its work, at a renewal of the hook's or the agent's own (read
-// from the claims hook's PostToolUse), or while it lapsed — checked before the
-// hook revives a claim it knows lapsed (lapseCheck).
+// from the claims hook's PostToolUse and PostToolUseFailure), or while it
+// lapsed — checked before the hook revives a claim it knows lapsed (lapseCheck).
 
 export const CLAIMS_DIRNAME = ".work-claims";
 const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
@@ -2975,6 +2976,33 @@ const QUIET_LAPSE_HEAD = " (it had lapsed at ";
 const quietLapse = (at) => `${QUIET_LAPSE_HEAD}${at}; no other claim was made or renewed on its work meanwhile)`;
 /** A marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2; WORK_CLAIMED's too, review pass 3). */
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
+/** A time as the server writes one, and a real one (isTime), nothing else: it goes into the log and the hook's record. */
+const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const isTime = (v) => typeof v === "string" && ISO_TIME_RE.test(v) && Number.isFinite(Date.parse(v));
+/**
+ * When CLAIM_UNATTRIBUTED says the claim `id` had lapsed (SMD-3705): its
+ * `lapsedAt`, from the reply's facts, else from its words, for a harness that
+ * hands a hook the text alone. Undefined for another claim's, or none.
+ */
+function unattributedLapse(sc, text, id) {
+  let at;
+  if (sc?.code === "CLAIM_UNATTRIBUTED") at = String(sc.id).toLowerCase() === id ? sc.lapsedAt : undefined;
+  else {
+    const m = new RegExp(`^Refused: claim (${UUID}) was made under this key's agent id\\b.*? It had lapsed at (\\S+?), and stays lapsed until a renewal lands\\b`, "i").exec(text);
+    at = m && m[1].toLowerCase() === id ? m[2] : undefined;
+  }
+  // Past, give or take five minutes of the two clocks' skew: one further off is no lapse (review pass 3).
+  return isTime(at) && Date.parse(at) <= Date.now() + 300_000 ? at : undefined;
+}
+/** CLAIM_UNATTRIBUTED in the log, from the reply's facts: the brain's words run past markerSaid's cut once a lapse is in them (SMD-3807). */
+const unattributedSaid = (cause, lapsedAt) => `CLAIM_UNATTRIBUTED (${cause}): the agent registry ${cause === "registry_away" ? "did not give the claim key's agent id just now; renewals retry" : "cannot give the claim key's agent id until an operator acts (the server's log says why): tell the user"}${lapsedAt ? `; it had lapsed at ${lapsedAt}, and until a renewal lands a claim on exactly its work can take it over` : ""}`;
+/** A tool result's structuredContent, from any shape resultText reads; undefined without one. */
+function resultFacts(resp) {
+  if (typeof resp === "string") { try { return resultFacts(JSON.parse(resp)); } catch { return undefined; } }
+  if (!resp || typeof resp !== "object" || Array.isArray(resp)) return undefined;
+  const sc = resp.structuredContent ?? resultFacts(resp.result);
+  return sc && typeof sc === "object" && !Array.isArray(sc) ? sc : undefined;
+}
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
@@ -2998,8 +3026,9 @@ export async function renewClaim(cfg, claim) {
   }
   const text = textOfResult(result);
   if (!result?.isError) {
-    const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
-    const o = { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
+    // A time, or none: a brain's words go into the state and the log unmasked (review pass 3).
+    const at = [result?.structuredContent?.claim?.expiresAt, /\buntil (\S+)/.exec(text)?.[1]].find(isTime);
+    const o = { ok: true, expiresAt: at, line: `renewed ${what}${at ? ` until ${at}` : ""}` };
     // Renewed, but it had lapsed and claims were made on its work meanwhile (or they, or whether it had lapsed, couldn't be read) — the server
     // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
     const lapsed = result?.structuredContent?.lapsed;
@@ -3018,6 +3047,13 @@ export async function renewClaim(cfg, claim) {
   if (toolRefused(text)) return cannot;
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
   if (code === "WORK_CLAIMED") return { whole: scrubTokens(oneLine(text)), blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work and tell the user; a .blocked.json beside its token file says so, and renewals wait until it is deleted)` };
+  // The registry away: a lapse it reports is recorded and checked (renewOne, SMD-3807). An error with no facts at all,
+  // an SDK's or another server's, is kept below (review pass 1: it threw, and the claims after it went unrenewed).
+  const cause = result.structuredContent?.cause;
+  if (code === "CLAIM_UNATTRIBUTED" && typeof cause === "string" && /^[a-z_]{1,40}$/.test(cause)) {
+    const lapsedAt = unattributedLapse(result.structuredContent, text, claim.id);
+    return { keep: true, lapsedAt, cause, line: `kept: ${what} — ${unattributedSaid(cause, lapsedAt)}` };
+  }
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
@@ -3104,25 +3140,30 @@ function ownPieceNote(text, root, claimId) {
  * claim made before the lapse and revived during it counts (review pass 2 of
  * SMD-3654: it was missed). Lapsed with one: `blocked`, the marker written as
  * for WORK_CLAIMED, naming each claim's id and its state so the agent can
- * match it against the claim named after the user's decision. Can't tell: `keep`.
+ * match it against the claim named after the user's decision. Can't tell:
+ * `keep`, its line, and `reason`, why alone, for a line of renewOne's own
+ * (SMD-3807 review pass 2: a " — " in a piece split the line). `markerNote`
+ * goes into the marker after "not renewed", ahead of its cut: an operator's
+ * part, when the renewal just tried met the registry waiting on one.
  */
-async function lapseCheck(cfg, claim, knownExpiry) {
+async function lapseCheck(cfg, claim, knownExpiry, markerNote = "") {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
+  const unchecked = (reason) => ({ keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and ${reason}`, reason });
   let result;
   try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "list_claims", arguments: { ticket: claim.ticket, include_ended: true, limit: 1000 } }, 15_000); }
-  catch (e) { return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}` }; }
+  catch (e) { return unchecked(`the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}`); }
   let claims = result?.structuredContent?.claims;
   if (!Array.isArray(claims)) { try { claims = JSON.parse(textOfResult(result)).claims; } catch { claims = undefined; } }
-  if (result?.isError || !Array.isArray(claims)) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims gave no list to check: ${scrubTokens(oneLine(textOfResult(result))).slice(0, 200)}` };
+  if (result?.isError || !Array.isArray(claims)) return unchecked(`list_claims gave no list to check: ${scrubTokens(oneLine(textOfResult(result))).slice(0, 200)}`);
   const mine = claims.find((c) => String(c?.id).toLowerCase() === claim.id);
-  if (!mine) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims for ${claim.ticket} doesn't list it` };
+  if (!mine) return unchecked(`list_claims for ${claim.ticket} doesn't list it`);
   if (mine.state !== "lapsed") return {};
   const lapsedAt = Date.parse(mine.expiresAt);
   const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && (Date.parse(c?.claimedAt) > lapsedAt || Date.parse(c?.renewedAt) > lapsedAt) && overlaps(c, mine));
   // Lapsed with nothing since: renewed, and the log says it had lapsed, as a brain since SMD-3654 says it (review pass 3: on an older brain it was a plain renewal).
   if (!since.length) return { quiet: quietLapse(mine.expiresAt) };
   // "not renewed" in the marker itself: the agent reads the file, not the log, to know it must renew after a carry-on (review pass 3).
-  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
+  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed${markerNote}; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
 }
 
@@ -3136,16 +3177,27 @@ async function renewOne(b, path, claim) {
     if (closeUp(path, 0o600, 0, claim)) closed.push("its token file was readable by others: now mode 600");
   }
   const known = readClaimState(claim.id).expiresAt;
-  let o;
+  let o, check;
   if (typeof known === "string" && Date.parse(known) < Date.now()) {
-    const check = await lapseCheck(b.cfg, claim, known);
+    check = await lapseCheck(b.cfg, claim, known);
     if (check.blocked || check.keep) o = check.blocked ? { blocked: check.blocked, line: check.line } : { keep: true, line: check.keep };
-    else {
-      o = await renewClaim(b.cfg, claim);
-      if (check.note) o.line += check.note;
-      if (check.quiet && o.ok && !o.blocked && !o.line.includes(QUIET_LAPSE_HEAD)) o.line += check.quiet;
-    }
+    else o = await renewClaim(b.cfg, claim);
   } else o = await renewClaim(b.cfg, claim);
+  // A lapse the registry's refusal reported (SMD-3807) is checked now, as one the record knew is: list_claims needs no
+  // agent id, so a claim made on its work since is marked while the registry is still away (review pass 1: a next
+  // renewal up to an hour off let a push go first).
+  if (o.lapsedAt && !check) {
+    // Waiting on an operator, the marker says so too, ahead of its cut: the user must hear it whatever they decide (review passes 2 and 3).
+    check = await lapseCheck(b.cfg, claim, o.lapsedAt, o.cause === "registry_away" ? "" : ` (and the agent registry cannot give the claim key's agent id until an operator acts, ${o.cause}: tell the user that too)`);
+    if (check.blocked) o = { blocked: check.blocked, line: check.line, lapsedAt: o.lapsedAt };
+    else if (check.keep) o.line += `; the claims made since were not checked (${check.reason}), and the hook renews it only once they are`;
+  }
+  if (check && !check.blocked && !check.keep) {
+    // The lapse time once: the refusal's line already gives it (review pass 4).
+    if (check.note) o.line += o.lapsedAt ? " (its token file names no ticket, so the claims made since were not checked)" : check.note;
+    if (check.quiet && o.ok && !o.blocked && !o.line.includes(QUIET_LAPSE_HEAD)) o.line += check.quiet;
+    if (check.quiet && o.lapsedAt) o.line += "; no other claim was made or renewed on its work since, and each renewal checks again";
+  }
   if (o.blocked) o.line += ownPieceNote(o.whole ?? o.blocked.message, dirname(dirname(path)), claim.id);
   // An ended claim's stamp goes with its file; one whose file could not be
   // ended keeps a stamp, or every event would ask again (review pass 1).
@@ -3153,7 +3205,7 @@ async function renewOne(b, path, claim) {
   else {
     if (o.ended) o.line += " (its token file could not be ended now; the next run tries again)"; // the line said "ended" while the file stayed (review pass 5)
     if (o.blocked && !writeMarker(path, claim, "blocked", o.blocked)) o.line += " (the marker could not be written)";
-    writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
+    writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : o.lapsedAt ? { expiresAt: o.lapsedAt } : {}), last: o.line });
   }
   if (closed.length) o.line += ` (${closed.join("; ")})`;
   log(`claims: ${o.line}`);
@@ -3168,10 +3220,18 @@ async function renewOne(b, path, claim) {
  * claim gets its `<id>.blocked.json`, as the hook's own renewal would give it
  * — else the agent's next renewal, once the covering claim ends, revives it
  * silently. Renewed, the hook records the new expiry, so its own record never
- * reads a lapse the agent's renewal prevented. Nothing is sent to a brain.
+ * reads a lapse the agent's renewal prevented. Refused CLAIM_UNATTRIBUTED
+ * saying it had lapsed, the hook records the lapse and makes the claim due, so
+ * the renewal after this checks the claims made since (SMD-3807). Nothing is
+ * sent to a brain here. A refusal is an MCP error result, which Claude Code
+ * hands to PostToolUseFailure: its `error` is the reply's text, and there is
+ * no `tool_response` (SMD-3874, probed on the canary). A success reaches
+ * PostToolUse, its `tool_response` the reply's text as a string, never its
+ * structuredContent: the facts are read where another harness hands them over.
  */
 function noteAgentClaimCall(hook, brains) {
-  if (String(hook.hook_event_name ?? "") !== "PostToolUse") return;
+  const event = String(hook.hook_event_name ?? "");
+  if (event !== "PostToolUse" && event !== "PostToolUseFailure") return;
   const m = /^mcp__([A-Za-z0-9_-]+)__(renew_claim|claim_work)$/.exec(String(hook.tool_name ?? ""));
   const token = String(hook.tool_input?.token ?? "").toLowerCase();
   if (!m || !CLAIM_TOKEN_RE.test(token)) return;
@@ -3181,17 +3241,30 @@ function noteAgentClaimCall(hook, brains) {
   if (!f) return;
   const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
   useStateRoot(brain.root);
-  const text = resultText(hook.tool_response);
+  // What the call answered: a failure's is its `error`, a string in Claude Code; any other shape, or none with the
+  // answer left in tool_response, is read as a result is, its words and its facts alike (review passes 1 and 2).
+  const answer = event === "PostToolUseFailure" ? hook.error ?? hook.tool_response : hook.tool_response;
+  const text = event === "PostToolUseFailure" && typeof answer === "string" ? answer : resultText(answer);
   // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
-    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
+    const until = isTime(renewed[1]) ? renewed[1] : undefined; // a time, or none (review pass 3)
+    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: until, last: `the agent renewed ${claimLabel(f.claim)}${until ? ` until ${until}` : ""}` });
     // A renewal that revived a lapsed claim after claims were made or renewed on its work meanwhile, or couldn't read them or the lapse (the server says so since SMD-3654): marked as a covered claim is.
     if (REVIVED_COVERED_RE.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
       const said = markerSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
       const wrote = writeMarker(f.path, f.claim, "blocked", { code: "CLAIMED_WHILE_LAPSED", message: said });
       log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} revived it: ${said}${wrote ? "" : " (the marker could not be written)"}`);
     }
+    return;
+  }
+  // CLAIM_UNATTRIBUTED on its own lapsed claim (SMD-3807): the lapse recorded, and the claim made due, so this run's
+  // renewal checks the claims made since at once, as the hook's own renewal does (review pass 1).
+  const lapsedAt = unattributedLapse(resultFacts(answer), text, f.claim.id);
+  if (lapsedAt) {
+    const line = `the agent's own ${m[2]} met CLAIM_UNATTRIBUTED: ${claimLabel(f.claim)} had lapsed at ${lapsedAt}; ${f.claim.ticket ? "made due, so the hook's renewal checks the claims made or renewed on its work since" : "its token file names no ticket, so the claims made since are not checked"}`;
+    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: 0, expiresAt: lapsedAt, last: line });
+    log(`claims: ${line}`);
     return;
   }
   // One claim in the way or several: render.ts says "a live claim" or "N live claims" (review pass 3: several went
@@ -3334,13 +3407,15 @@ export function fanOutHookJson({ connector = "open-brain", runtime } = {}) {
 
 /**
  * The claims hook's settings JSON (SMD-3602): `--claims` on every tool's
- * PostToolUse and on each prompt, async, so a renewal never holds the session.
- * The flag keeps it apart from the fan-out's PostToolUse, which would
- * otherwise copy a write twice, and from the capture.
+ * PostToolUse and PostToolUseFailure and on each prompt, async, so a renewal
+ * never holds the session. PostToolUseFailure is where Claude Code hands the
+ * agent's own refused claim calls (SMD-3874). The flag keeps it apart from the
+ * fan-out's PostToolUse, which would otherwise copy a write twice, and from
+ * the capture.
  */
 export function claimsHookJson({ runtime } = {}) {
   const hook = { type: "command", command: [shellWord(runtime || process.execPath), shellWord(SELF), "--claims"].join(" "), async: true };
-  return { hooks: { PostToolUse: [{ matcher: "*", hooks: [hook] }], UserPromptSubmit: [{ hooks: [hook] }] } };
+  return { hooks: { PostToolUse: [{ matcher: "*", hooks: [hook] }], PostToolUseFailure: [{ matcher: "*", hooks: [hook] }], UserPromptSubmit: [{ hooks: [hook] }] } };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -3424,12 +3499,13 @@ export async function main(argv) {
     if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
-    // The claims hook (SMD-3602): Claude Code's async PostToolUse and
-    // UserPromptSubmit, renewing the claims a session's worktree holds tokens for.
+    // The claims hook (SMD-3602): Claude Code's async PostToolUse,
+    // PostToolUseFailure (SMD-3874) and UserPromptSubmit, renewing the claims a
+    // session's worktree holds tokens for.
     if (has(args, "--claims")) {
       if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
       for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }
-      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key.`);
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key. A claims hook pasted before 1.7.3 has no PostToolUseFailure entry, so it never saw the agent's own refused claim calls (SMD-3874): add that entry, or replace all three if the printed command differs from yours.`);
       console.log(JSON.stringify(claimsHookJson(), null, 2));
       return 0;
     }

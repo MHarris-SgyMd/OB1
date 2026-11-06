@@ -31,7 +31,7 @@ export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 /** Postgres's text holds no NUL character, and refuses one as a 22021 the store would raise as a fault (review pass 3). */
 const NO_NUL = (s: string) => !s.includes(String.fromCharCode(0));
 const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
-/** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
+/** A priority's or an item's time (SMD-3664): an instant with its offset, or a date alone — a due time by the end of that day (the next day's start in UTC, SMD-3778), a not_before from its start. */
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
 // Open items (SMD-3665 PR 2): an id 117 reads (a uuid, in any case, white space around it), a short free text, a reason.
 const ITEM_ID = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
@@ -79,9 +79,9 @@ const minTrustInput = z.enum(TRUST).optional()
 
 export const SPECS = {
   search: {
-    title: "Search Open Brain",
+    title: "Search Daemonic Brain",
     description:
-      "Search Open Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
+      "Search Daemonic Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
       "Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts. " +
       "A result naming a ticket whose status has moved since it was written carries `moved` — `{ticket, was, now}` in status types — and over MCP its title starts `[moved since written: <ticket> <then> → <now>]`, each status as its type's word (Triage, Backlog, Todo, In Progress, Done, Canceled, Duplicate; a custom \"In Review\" shows as In Progress), never the board's name; trust the ticket's status now over what the thought says (a ticket now Duplicate: its work is tracked under the ticket it duplicates). " +
       "No `moved` makes no claim: a superseded thought, a ticket row and a note filed under a ticket are not checked, nor is any result on a brain before migration 095, nor a key past the first 50 a result mentions (beside a move, `movedNotRead` counts them)." +
@@ -91,19 +91,19 @@ export const SPECS = {
       readOnlyHint: true,
     },
     inputSchema: {
-      query: z.string().describe("The search query to run against Open Brain thoughts"),
+      query: z.string().describe("The search query to run against Daemonic Brain thoughts"),
     },
   },
   fetch: {
-    title: "Fetch Open Brain Thought",
+    title: "Fetch Daemonic Brain Thought",
     description:
-      "Fetch one Open Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
+      "Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
       "A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs.",
     annotations: {
       readOnlyHint: true,
     },
     inputSchema: {
-      id: z.string().describe("The Open Brain thought ID returned by the search tool"),
+      id: z.string().describe("The Daemonic Brain thought ID returned by the search tool"),
     },
   },
   search_thoughts: {
@@ -260,7 +260,7 @@ export const SPECS = {
   thought_changes: {
     title: "What Changed",
     description:
-      "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
+      "List what changed in the brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
       "Start from `since`: an ISO-8601 time with Z or an offset (2026-09-22T08:00:00Z), a date (read as UTC midnight), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
       "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
     annotations: {
@@ -325,7 +325,7 @@ export const SPECS = {
   brain_info: {
     title: "Brain Info",
     description:
-      "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
+      "Say what this brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
       "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
       "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects), the long-running workers' heartbeats (alive, stopped or stale), and what consolidation found: the supersession proposals pending review (how many, how long ago the oldest was judged, how many pair two tickets the board does not link, how many are stale), the judged relations standing, by word, and what became of the findings posted to the board (accepted, rejected, withdrawn, open, unanswered after a month, and the acceptance rate: accepted over accepted, rejected and unanswered). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
       "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
@@ -337,7 +337,7 @@ export const SPECS = {
   capture_thought: {
     title: "Capture Thought",
     description:
-      "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.",
+      "Save a new thought to the brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,
@@ -591,8 +591,8 @@ export const SPECS = {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity, or item (an open item)"),
       key: PRIORITY_KEY.describe("The item's key: a thought's or an entity's id (a uuid), or a ticket's key such as SMD-3664 (case and surrounding white space don't matter)"),
       level: z.number().int().min(0).max(5).describe("0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical"),
-      due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
-      not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms; never after due_at"),
+      due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC)"),
+      not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms (a date from the start of that day in UTC); never after due_at"),
       due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: PRIORITY_KEY }).strict().optional()
         .describe("Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself"),
       // 116 counts a reason's characters once cleaned; the schema's cap only bounds the request, four UTF-16 units a
@@ -631,7 +631,7 @@ export const SPECS = {
       // 117 counts a text's characters once cleaned (at most 1000); the schema's cap only bounds the request (set_priority's reason's rule).
       text: z.string().min(1).max(4000).refine(NO_NUL, "may not hold a NUL character").describe("What is to be done, at most 1000 characters"),
       owner: ITEM_OWNER.optional().describe("Who is to do it, at most 200 characters: free text, not a key"),
-      due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
+      due_at: PRIORITY_TIME.optional().describe("When it is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, by the end of that day: the next day's start in UTC)"),
       origin_thought: UUID_ARG.optional().describe("The id of the thought the item was read from"),
       plugin_row: ITEM_OWNER.optional().describe("Through a plugin's ctx.call alone: the plugin's row the item stands for. Refused from any other caller"),
       proposed: z.boolean().optional().describe("True for an item inferred, not stated (the extractor's): it reads as not yet open until a write key confirms it"),

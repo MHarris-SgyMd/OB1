@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * eval-meta.ts — score the metadata-extraction model on the task it actually does.
+ * eval-extraction.ts — score the metadata-extraction model on the task it actually does.
  *
- * This is the second call OB1 makes per capture, and its output is not decoration:
+ * This is the second call Daemonic Brain makes per capture, and its output is not decoration:
  * `type` drives list_thoughts filtering, `people` and `topics` drive the stats
  * tallies, `dates_mentioned` and `action_items` are what someone scans a week
  * later. Getting it wrong is not a crash — it is a brain that quietly cannot find
@@ -23,12 +23,12 @@
 
 /**
  * Any OpenAI-compatible endpoint. Ollama by default, but the point of the
- * indirection is that the *hosted* defaults this fork inherited can be measured
+ * indirection is that the *hosted* defaults Daemonic Brain inherited can be measured
  * on the same corpus as the local ones — otherwise the comparison is a leaderboard
  * citation, not a measurement.
  *
- *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
- *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
+ *   OB1_EVAL_TEMP=0 OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… \
+ *     bun eval-extraction.ts openai/gpt-4o-mini
  */
 
 // A module, not a script: this file imports and exports nothing, and without
@@ -174,8 +174,9 @@ type Score = {
 
 /**
  * OB1_EVAL_TEMP lets the same model be scored at different sampling temperatures.
- * The server currently sends none, so extraction runs at the provider default —
- * 0.8 on Ollama — for a task with exactly one right answer.
+ * Unset, the eval sends none, so a run samples at the provider default — 0.8 on
+ * Ollama. The server extracts at OB1_METADATA_TEMPERATURE, 0 unless set
+ * (server-portable/metadata.ts), so set OB1_EVAL_TEMP=0 to score what it does.
  */
 const TEMP = process.env.OB1_EVAL_TEMP === undefined ? undefined : Number(process.env.OB1_EVAL_TEMP);
 

@@ -5,7 +5,7 @@
  *
  * Extracted from index.ts so a second writer does not carry a second copy of
  * the prompt, the fallback vocabulary and the refusal marker — the value
- * defined twice this fork keeps finding. The function is pure over its
+ * defined twice Daemonic Brain keeps finding. The function is pure over its
  * arguments: the text, whose it is (the egress subject, SMD-1903) and the
  * resolved configuration, so it can be called from a process with no server
  * environment accessor. index.ts passes `embedConfig()`; a worker passes the

@@ -27,7 +27,7 @@
 --   yourself AFTER reviewing your RLS policy.
 --
 -- Prerequisites:
---   - The core `thoughts` table from the Open Brain getting-started guide.
+--   - The core `thoughts` table from the Daemonic Brain getting-started guide.
 --   - The `enhanced-thoughts` schema (adds `source_type` and
 --     `sensitivity_tier` columns used by these RPCs). Install that first.
 --
@@ -107,7 +107,7 @@ begin
 end;
 $$;
 
--- This fork (SMD-1796): upstream's `grant execute … to authenticated,
+-- Daemonic Brain (SMD-1796): upstream's `grant execute … to authenticated,
 -- service_role` after each of the four functions is gone. Those are Supabase's
 -- roles — on plain Postgres the first grant stops the file (`role
 -- "authenticated" does not exist`) — and EXECUTE is PUBLIC's by default, so

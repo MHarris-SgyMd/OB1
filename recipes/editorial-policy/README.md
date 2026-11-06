@@ -4,7 +4,7 @@
 
 **Created by [@HansBohlmann](https://github.com/HansBohlmann)**
 
-> A 40-rule constitution that governs every synthesis prompt in your Open Brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
+> A 40-rule constitution that governs every synthesis prompt in your brain, plus a weekly auditor that enforces it. Synthesis stops drifting because drift becomes detectable.
 
 ## What It Is
 
@@ -28,13 +28,13 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 - **`editorial-policy.md`** — the full 40-rule constitution. Copy to your `docs/editorial-policy.md`. Adapt the operator-specific rules (R1.1, R9.2, R9.3) to your name and timezone; keep everything else.
 - **`schema.sql`** — adds one helper RPC (`get_recent_audit_reports`) and one partial index on the `thoughts` table. No new tables.
-- **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
+- **`auditor/index.ts`** — the auditor server (`bun recipes/editorial-policy/auditor/index.ts`) that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. In Daemonic Brain the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
 - **`schedule.sql`** — a pg_cron entry to fire the auditor weekly, for a Postgres that has `pg_cron` and `pg_net`; an ordinary cron line does the same (Step 6).
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the same steps)
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
+- [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the auditor runs under Bun ([Run a Vendored Server](../../primitives/deploy-remote-mcp/) walks the same steps)
 - A scheduler: cron on the machine that runs the auditor, or `pg_cron` + `pg_net` in your Postgres
 - OpenRouter API key (the auditor uses `gpt-4o-mini` by default — swap to `claude-haiku-4-5` if you want stricter compliance reasoning)
 - Slack workspace with a bot token (only required if you want critical findings posted automatically; otherwise the auditor still stores reports silently)
@@ -79,13 +79,13 @@ Commit the policy to your repo. Future prompt updates will reference its version
 Per R10.2, every synthesis prompt's system message must start with:
 
 ```
-Follow Open Brain Editorial Policy v{version}. Specific rules referenced below by number.
+Follow Daemonic Brain Editorial Policy v{version}. Specific rules referenced below by number.
 ```
 
 Update your `morning-briefing` and `weekly-summary` prompts to start that way and to cite specific rules where relevant. A minimal example:
 
 ```ts
-const system = `Follow Open Brain Editorial Policy v1.3.
+const system = `Follow Daemonic Brain Editorial Policy v1.3.
 
 You are the operator's morning briefing assistant.
 
@@ -118,7 +118,7 @@ SLACK_DIGEST_CHANNEL=<optional; defaults to SLACK_CAPTURE_CHANNEL>
 POLICY_VERSION=1.3   # or whatever your editorial-policy.md says
 ```
 
-`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
+`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Run a Vendored Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
 
 ### Step 5: Run the auditor
 
@@ -136,7 +136,7 @@ bun recipes/editorial-policy/auditor/index.ts
 
 The two Slack variables are read only when a run posts (`post_to_slack: true` and a critical finding); a run without them stores its report and then fails on the post, so either set them or schedule with `post_to_slack: false`.
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `integrations/test-auth.ts` starts it this way in CI, and `integrations/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
 
 ### Step 6: Schedule the weekly run
 

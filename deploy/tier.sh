@@ -116,10 +116,10 @@
 # is the --from database (the two halves compare the identity each server
 # reports), and resets only a target an earlier refresh marked
 # (ob1.refresh_target on the database), one stamped canary or working, one whose
-# public schema holds nothing but what extensions own, or an Open Brain schema
-# (schema_migrations, ob1_config and thoughts) with no thoughts. A --to given as
-# a URL gets no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with
-# tier.ts.
+# public schema holds nothing but what extensions own, or a Daemonic Brain
+# schema (schema_migrations, ob1_config and thoughts) with no thoughts. A --to
+# given as a URL gets no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one,
+# as with tier.ts.
 #
 # The client major, 16, must be at least both servers' (pg_dump reads the
 # source, and --to for the probe before the reset): refreshToolsReady refuses

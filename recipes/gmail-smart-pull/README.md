@@ -6,7 +6,7 @@
 
 <!-- markdownlint-disable MD013 -->
 
-> Pull emails from Gmail into an Open Brain pack with local sensitivity routing, engagement filtering, contact-based relationship tiers, and LLM atomization of long messages.
+> Pull emails from Gmail into a Daemonic Brain pack with local sensitivity routing, engagement filtering, contact-based relationship tiers, and LLM atomization of long messages.
 
 This recipe complements [`recipes/email-history-import/`](../email-history-import/). Where `email-history-import` is a one-email-one-thought onboarding path, `gmail-smart-pull` is for users who already have enough email to need careful filtering, routing, and splitting before ingest.
 
@@ -20,13 +20,13 @@ This recipe complements [`recipes/email-history-import/`](../email-history-impor
 6. **Atomizes** long messages (default: >= 150 words) via an LLM so each atomic idea becomes its own thought.
 7. Captures **RFC 2822 threading headers** (`Message-ID`, `In-Reply-To`, `References`) so replies-to edges can be built offline by a follow-up job.
 8. Parses **structured correspondents** (From/To/Cc into `{ name, email }` arrays) once at pull time so a downstream entity-resolver can upsert them as first-class entities without re-splitting headers.
-9. Emits a **pack file** (JSON) that your Open Brain ingest pipeline can read.
+9. Emits a **pack file** (JSON) that your Daemonic Brain ingest pipeline can read.
 
 The recipe does **not** ingest into Supabase itself. It produces a pack that a downstream importer consumes. That separation keeps this recipe portable across Open Brain deployments with different ingest paths.
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - Node.js 18+ (tested on 20 and 22)
 - Google Cloud project with the Gmail API enabled and an OAuth 2.0 Desktop-app client
 - One LLM provider for atomization: Anthropic API key OR OpenRouter API key
@@ -65,7 +65,7 @@ GENERATED DURING SETUP
 2. Create (or select) a project.
 3. Enable the Gmail API: <https://console.cloud.google.com/apis/library/gmail.googleapis.com>.
 4. Configure the OAuth consent screen. User type "External" is fine for personal use — add your own Google account as a test user so you don't have to submit the app for verification.
-5. Credentials → Create Credentials → OAuth client ID → **Application type: Desktop app** → name it (e.g. "Open Brain Gmail Smart Pull") → Create.
+5. Credentials → Create Credentials → OAuth client ID → **Application type: Desktop app** → name it (e.g. "Daemonic Brain Gmail Smart Pull") → Create.
 6. Copy the client id and client secret; you'll set them as env vars below.
 
 > [!IMPORTANT]
@@ -176,7 +176,7 @@ The pack record carries `sensitivity: <tier>` and `sensitiveReasons: [...]`. **T
 - **Tag-and-store.** Everything lands in one store but `sensitivity` is indexed so queries can filter.
 
 > [!CAUTION]
-> On this fork the default deployment keeps every thought on your box (local models, the egress gate's `deny` default — `SETUP.md`, "What may leave the box"), but this recipe's atomizer sends every long email to Anthropic or OpenRouter (`--atomize-provider`), and the pack is embedded wherever your ingest pipeline runs — so "restricted stays local" is not automatic here; you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
+> In Daemonic Brain the default deployment keeps every thought on your box (local models, the egress gate's `deny` default — `SETUP.md`, "What may leave the box"), but this recipe's atomizer sends every long email to Anthropic or OpenRouter (`--atomize-provider`), and the pack is embedded wherever your ingest pipeline runs — so "restricted stays local" is not automatic here; you have to wire it up. If you intend to treat restricted content as off-cloud, write the policy into your ingest pipeline before you run this recipe on a large mailbox.
 
 The patterns are intentionally conservative. If you find false positives (e.g., a specific API-key pattern matches your own account IDs), fork `sensitivity.mjs` and tune the two arrays to taste.
 

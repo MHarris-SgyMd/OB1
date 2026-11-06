@@ -2,7 +2,7 @@
 
 ## Why This Matters
 
-You're at the paint store and can't remember what shade of blue is in the living room. Your kid's shoe size changed and you're ordering online from memory. The plumber who fixed the leak last year — what was their number? Every household accumulates hundreds of small facts that matter at exactly the wrong moment. Your Open Brain agent can hold all of them and surface them when you need them.
+You're at the paint store and can't remember what shade of blue is in the living room. Your kid's shoe size changed and you're ordering online from memory. The plumber who fixed the leak last year — what was their number? Every household accumulates hundreds of small facts that matter at exactly the wrong moment. Your Daemonic Brain agent can hold all of them and surface them when you need them.
 
 ## Learning Path: Extension 1 of 6
 
@@ -19,7 +19,7 @@ You're at the paint store and can't remember what shade of blue is in the living
 
 A store of household facts — paint colors, appliance details, vendor contacts, measurements, warranty info, and anything else about your home and family that you'd otherwise forget.
 
-On this fork the knowledge base is a **plugin**: [`plugins/household-knowledge`](../../plugins/household-knowledge/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_household_knowledge`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the knowledge base is a **plugin**: [`plugins/household-knowledge`](../../plugins/household-knowledge/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_household_knowledge`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `household_items` — Facts about things in your home, with their particulars (brand, model, colour code) as a flexible JSON object
@@ -43,7 +43,7 @@ The plugin's [README](../../plugins/household-knowledge/README.md) gives each on
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 
 ## Steps
 

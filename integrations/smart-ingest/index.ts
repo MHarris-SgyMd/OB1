@@ -9,18 +9,18 @@
 // boot under any other scheme and skipped when unset — it built the URL from
 // SUPABASE_URL, the Postgres DSN here, so every trigger handed fetch() the
 // database credentials and failed inside its timeout; and it never fired,
-// because upsert_thought answers the fork's UUID id, which extractThoughtId
-// read as no id, so every add was reported failed.
-// ob1-fork (SMD-2128): the write path is the fork's. Upstream's 2-argument
-// upsert_thought carried the vector inside the payload, where the fork's
-// function does not look, so every thought this server wrote landed without a
-// vector, unlabelled, its type and source_type NULL and the other enhanced
-// columns at their defaults — invisible to semantic search. writeThought()
-// below is the 3-argument form every other vendored writer uses (SMD-1228):
-// the vector as p_embedding, its model's label and the actor (SMD-1541) in the
-// envelope, the enhanced columns by an update on a fresh row. The item columns
-// that hold a thought id are uuid (schemas/smart-ingest), so a match is
-// persisted and the written id recorded.
+// because upsert_thought answers Daemonic Brain's UUID id, which
+// extractThoughtId read as no id, so every add was reported failed.
+// ob1-fork (SMD-2128): the write path is Daemonic Brain's. Upstream's
+// 2-argument upsert_thought carried the vector inside the payload, where
+// Daemonic Brain's function does not look, so every thought this server wrote
+// landed without a vector, unlabelled, its type and source_type NULL and the
+// other enhanced columns at their defaults — invisible to semantic search.
+// writeThought() below is the 3-argument form every other vendored writer uses
+// (SMD-1228): the vector as p_embedding, its model's label and the actor
+// (SMD-1541) in the envelope, the enhanced columns by an update on a fresh row.
+// The item columns that hold a thought id are uuid (schemas/smart-ingest), so a
+// match is persisted and the written id recorded.
 /**
  * smart-ingest — the Smart Ingest server.
  *
@@ -41,8 +41,8 @@
  * Dependencies:
  *   - Smart ingest tables (schemas/smart-ingest): ingestion_jobs, ingestion_items
  *   - append_thought_evidence(uuid, jsonb) RPC (from the smart-ingest schema)
- *   - match_thoughts RPC (base OB1)
- *   - upsert_thought(text, jsonb, vector) RPC (base OB1; db/migrations/004, last redefined by 046)
+ *   - match_thoughts RPC (base Daemonic Brain)
+ *   - upsert_thought(text, jsonb, vector) RPC (base Daemonic Brain; db/migrations/004, last redefined by 080)
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
@@ -86,13 +86,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const ACTOR = { name: "MCP_ACCESS_KEY", via: "smart-ingest" };
 
 /**
- * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which on this fork is the
+ * An HTTP target read from its own variable, or null when unset: never derived from SUPABASE_URL, which in Daemonic Brain is the
  * Postgres connection string — a URL built on it carries the database credentials into fetch() and fails there
  * (SMD-2110). Parsed at boot and refused unless it is a bare http(s) address — scheme, host, port, an optional path
  * prefix; no query, fragment or credentials, since a path is appended to it — and the message names the variable and
  * the scheme, never the value (a connection string's userinfo is the password; Bun's own "Invalid URL" error quotes the
- * value whole, so it is caught and not rethrown). Trailing slashes are dropped. The same text as in the sibling server
- * that reads a knob this way; extensions/test-writes.ts holds the two copies identical.
+ * value whole, so it is caught and not rethrown). Trailing slashes are dropped.
  */
 function httpTargetFrom(name: string): string | null {
   const value = process.env[name]?.trim();
@@ -197,7 +196,7 @@ interface IngestionItem {
   content_fingerprint: string;
   action: ReconcileAction;
   reason: string;
-  matched_thought_id: string | null; // thoughts.id, a UUID on this fork (SMD-2128)
+  matched_thought_id: string | null; // thoughts.id, a UUID in Daemonic Brain (SMD-2128)
   similarity_score: number | null;
   status: "pending" | "executed" | "failed";
   error_message: string | null;
@@ -219,7 +218,7 @@ interface IngestionJob {
   error_message: string | null;
 }
 
-/** What the fork's upsert_thought answers (db/migrations/035): the row's UUID, and whether the text was already there. */
+/** What Daemonic Brain's upsert_thought answers (db/migrations/035): the row's UUID, and whether the text was already there. */
 type UpsertThoughtResult = {
   thought_id?: string;
   id?: string;
@@ -409,7 +408,7 @@ function mergeTags(existing: unknown, extras: string[]): string[] {
   ]);
 }
 
-/** An id a function answered: this fork's UUID (`thoughts.id` is uuid here; SMD-2110/2128 — upstream's integer is not one). */
+/** An id a function answered: Daemonic Brain's UUID (`thoughts.id` is uuid here; SMD-2110/2128 — upstream's integer is not one). */
 function isThoughtId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -744,7 +743,7 @@ async function reconcileThought(
 /**
  * The item's row after it is decided: `executed`, with the thought's id in `result_thought_id` — the one an add or
  * revision wrote, the one an append or a skip matched (a skipped duplicate's result is the thought it duplicates, so a
- * job view can lead to it). A uuid column since SMD-2128 (it was upstream's bigint, which the fork's UUID failed whole;
+ * job view can lead to it). A uuid column since SMD-2128 (it was upstream's bigint, which Daemonic Brain's UUID failed whole;
  * SMD-2110 parked the id in the item's metadata meanwhile, and the sidecar moves it into the column). The error is
  * logged, not thrown: the thought is written, and the job's counts say so. Both paths — the inline execute and
  * /execute — record a skip through this: /execute stepped over a skipped item, leaving it `ready` under a complete job
@@ -766,11 +765,11 @@ const withoutTrust = (m: Record<string, unknown> | null | undefined): Record<str
 };
 
 /**
- * A capture through the 3-argument upsert_thought — the fork's shape for every server (SMD-1228; db/migrations/004,
- * last redefined by 046): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
+ * A capture through the 3-argument upsert_thought — Daemonic Brain's shape for every server (SMD-1228; db/migrations/004,
+ * last redefined by 080): the vector as p_embedding, its model's label (021) and the actor (008, SMD-1541) in the
  * envelope, and the enhanced-thoughts columns by an update carrying neither content nor vector, on a fresh row only —
  * a re-capture of text already there keeps that row's own (as the retired rest-api and enhanced-mcp did). Upstream's
- * 2-argument call put the vector inside the payload, where the fork's function does not look: every thought this
+ * 2-argument call put the vector inside the payload, where Daemonic Brain's function does not look: every thought this
  * server wrote landed without a vector, unlabelled, the enhanced columns at their defaults (SMD-2128). `envelope` is what a
  * caller adds to the payload beyond these — a revision's `supersedes`, the pointer 025 made the one mechanism for it.
  */
@@ -878,7 +877,7 @@ async function executeItem(
         source_snippet: item.source_snippet,
       };
       // The revision supersedes the thought it matched: the row's `supersedes` pointer (db/migrations/025, the one
-      // mechanism for supersession on this fork — upstream put the id in metadata.supersedes, a second place for the
+      // mechanism for supersession in Daemonic Brain — upstream put the id in metadata.supersedes, a second place for the
       // same fact), validated and written by the function on a fresh row; the self-FK refuses a thought deleted since
       // the dry run, and the item fails with its message. On a fresh row only: a re-capture of text already there keeps
       // that row's provenance (035), so a revision whose text was captured between the dry run and now would report

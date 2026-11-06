@@ -275,7 +275,7 @@ if (FULL || REPLAY) {
   console.log(`  cost: ${lines.length} judge calls for ${loaded.size} thoughts (${withEntities} with entities) = ${Math.round((1000 * lines.length) / loaded.size)} calls per thousand thoughts; ~${promptTokens.toLocaleString()} estimated prompt tokens, ~${Math.round(promptTokens / lines.length || 0)} per call, ~${Math.round((promptTokens / loaded.size) * 1000).toLocaleString()} per thousand thoughts` +
     (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.judgeModel}` : ""));
 
-  // 110's seven arguments, as every fork caller passes them (a hand re-apply of 029, 070 or 109 can make a shorter call ambiguous).
+  // 110's seven arguments, as every caller here passes them (a hand re-apply of 029, 070 or 109 can make a shorter call ambiguous).
   const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200, NULL::boolean, NULL::text, NULL::numeric, NULL::timestamptz, NULL::uuid)`) as Record<string, unknown>[];
   // Every proposal's two issue ids in one read, not two queries per proposal.
   const proposalIds = proposals.flatMap((p) => [String(p.older_id), String(p.newer_id)]);

@@ -125,7 +125,7 @@ Use Deal Memo Drafting on 01-competitive-analysis.md, 02-financial-model-review.
 - Skip the meeting synthesis step if no call, interview, or meeting is informing the decision.
 - Skip the deal memo step if the final artifact is a strategic brief, not a memo.
 
-## Optional Open Brain Capture Moments
+## Optional Daemonic Brain Capture Moments
 
 - Capture the strongest competitive brief after `01-competitive-analysis.md`
 - Capture durable findings after `03-research-synthesis.md`

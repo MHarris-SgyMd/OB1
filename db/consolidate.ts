@@ -44,11 +44,12 @@
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
  * thought extracted after a run is judged against its older neighbours by the
- * next run or a --follow process. On the fork's default — Ollama, `qwen2.5:7b`
- * — that is compute on your own machine and nothing leaves it. Pointed at a
- * hosted provider it is money per pair and both thoughts' text goes to that
- * provider. evals/README.md has the measured calls per thousand thoughts and
- * the wall clock at the shipped --k and --min-sim, which were chosen there.
+ * next run or a --follow process. On Daemonic Brain's default — Ollama,
+ * `qwen2.5:7b` — that is compute on your own machine and nothing leaves it.
+ * Pointed at a hosted provider it is money per pair and both thoughts' text
+ * goes to that provider. evals/README.md has the measured calls per thousand
+ * thoughts and the wall clock at the shipped --k and --min-sim, which were
+ * chosen there.
  *
  * ── The pool ────────────────────────────────────────────────────────────────
  * Thoughts with at least one extracted entity, a vector, that nothing
@@ -93,7 +94,9 @@
  *   - a pair's timeout after which a one-token probe gets no answer either.
  * In each case the thought goes back to the pool unrecorded and the follower
  * probes the judge model until it answers. A thought that fails the same way
- * right after a probe answered is recorded failed. A follower probes once
+ * right after a probe answered is recorded failed — unless every error of its
+ * streak was the provider holding calls back (a 429, a 503, the model not
+ * served), which makes no suspect (SMD-3311). A follower probes once
  * before it writes anything, and refuses an unserved model, a refused key or
  * a wrong base URL with exit 2.
  *
@@ -164,7 +167,7 @@ import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeAtStart, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -248,6 +251,13 @@ export function pendingByPassLine(byPass: { judge_key: string; n: number }[]): s
 export const MAX_STALE_DAYS = 2_000_000;
 
 /**
+ * A judge call's limit when --timeout says none, in seconds: started before the request, so a call queued on a model
+ * server of one slot waits in it. sleep.ts adds one of the subject sweep's calls to it, read at each call, while the
+ * sweep asks the judge model beside it (`timeoutNow`, SMD-3306 PR 6b-2).
+ */
+export const JUDGE_TIMEOUT_S = 120;
+
+/**
  * What one consolidation run is asked to do — the CLI's flags, typed
  * (SMD-2304). A number left out takes the CLI's default, and one given is
  * held to its flag's rule and refused in the CLI's words; `follow` is
@@ -292,6 +302,13 @@ export interface ConsolidateOptions {
   ttl?: number;
   heartbeat?: number;
   timeout?: number;
+  /**
+   * A judge call's limit in seconds, read as each pair's call starts, in place of `timeout`, which stays the run's
+   * own: sleep.ts's, one of the subject sweep's calls longer while the sweep asks the judge model beside it (SMD-3306
+   * PR 6b-2's review pass 3). The window in which a thought that hangs the provider is its own grows with what it
+   * adds. Unused by --status, --dry-run and a decision.
+   */
+  timeoutNow?: () => number;
   k?: number;
   minSim?: number;
   minConfidence?: number;
@@ -396,7 +413,7 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
   if (typeof ttl === "string") return ttl;
   const heartbeat = read("--heartbeat", opts.heartbeat, heartbeatFor(ttl));
   if (typeof heartbeat === "string") return heartbeat;
-  const timeout = read("--timeout", opts.timeout, 120, { min: 1, max: MAX_CALL_TIMEOUT_S });
+  const timeout = read("--timeout", opts.timeout, JUDGE_TIMEOUT_S, { min: 1, max: MAX_CALL_TIMEOUT_S });
   if (typeof timeout === "string") return timeout;
   const k = read("--k", opts.k, DEFAULT_CANDIDATES, { min: 1, max: 50 });
   if (typeof k === "string") return k;
@@ -699,7 +716,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const chat = await probeChat(cfg.chat, cfg.judgeModel, ms, wake);
     return jev && chat.state === "up" ? probeTier(jev, cfg.decider, ms, wake) : chat;
   };
-  const outage = new ProviderOutage();
+  /** A judge call's limit as it starts: `timeoutNow`'s, sleep.ts's beside the subject sweep, or the run's own (SMD-3306 PR 6b-2). */
+  const limitNow = (): number => opts.timeoutNow?.() ?? TIMEOUT_S;
+  // A thought that hangs the provider is its own when it does so again within the window after the probe answered
+  // (worker-bootstrap.ts's SUSPECT_WINDOW), read at its error: longer by five times what a caller adds to the run's
+  // limit — the suspect's next streak at its longest, three calls paused for, a fourth timed out and its probe — so
+  // beside the sweep, a call up to 1,020 s, such a thought is still failed, not looped at the pool's head for ever
+  // (SMD-3306 PR 6b-2's review pass 3, the definitions reviewer's: hang after hang, an outage each).
+  const outage = new ProviderOutage(undefined, () => SUSPECT_WINDOW.ms + 5 * Math.max(0, limitNow() - TIMEOUT_S) * 1000);
   /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
@@ -734,14 +758,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     return null;
   }
+  /** The start's refusal of a probe that answered. */
+  const refusalAtStart = async (p: Probe): Promise<FollowerRefusal | null> => {
+    const line = startRefusal(p);
+    return line ? { kind: probeRefusal(p), line } : null;
+  };
   /** Why the provider did not answer at start, when it did not: waited for below, before the pool. */
   let startOut: string | null = null;
   if (FOLLOW && !REVIEW_ONLY && !STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
-    const first = await probe(undefined, opts.signal);
-    const refusal = startRefusal(first);
-    if (refusal) return refused(probeRefusal(first), refusal);
-    if (first.state === "out") startOut = first.why;
+    const first = await probeAtStart({ probe: (wake) => probe(undefined, wake), refusal: refusalAtStart, wake: opts.signal });
+    if ("refused" in first) return refused(first.refused.kind, first.refused.line);
+    startOut = first.out;
   }
 
   // ── Identity ────────────────────────────────────────────────────────────────
@@ -1108,8 +1136,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         JOIN thoughts n ON n.id = f.thought_id
         JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
         LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117).
-       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
+       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117). A work
+       -- thread's edge (origin thread, 120) is no judgement to review (SMD-3306).
+       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+         AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
          -- --key (SMD-3248): one pass's relations alone, by the key its facet names.
          AND (${KEY ?? null}::text IS NULL OR f.payload->>'judge_key' = ${KEY ?? null}::text)
        ORDER BY f.created_at DESC, f.id
@@ -1201,7 +1231,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           JOIN thoughts n ON n.id = f.thought_id
           JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
           LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
+         -- The judge's alone: a work thread's edges (origin thread, 120) are the subjects' (SMD-3306).
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
       out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them` +
         (r.distinct_pairs ? `; ${r.distinct_pairs} pair(s) judged distinct — near neighbours the judge called unrelated, kept apart (102)` : ""));
@@ -1439,20 +1470,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // ── The run ─────────────────────────────────────────────────────────────────
 
   if (startOut !== null) {
-    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
-    const wake = opts.signal ?? new AbortController().signal;
-    const down = Date.now();
-    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said through a caller's stamper while it lasts — the sleep scheduler's,
-    // so heartbeat:sleep and preflight's row say a pass waits at its start for
-    // the provider, not that its passes run (SMD-2752).
-    await opts.stamper?.startWait?.(true);
-    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out").finally(() => opts.stamper?.startWait?.(false));
-    if (answered) {
-      const refusal = startRefusal(answered);
-      if (refusal) return refused(probeRefusal(answered), refusal);
-      out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
-    }
+    // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait. Said through a
+    // caller's stamper while it lasts — the sleep scheduler's, so heartbeat:sleep and preflight's row say a pass waits
+    // at its start for the provider, not that its passes run (SMD-2752).
+    const waited = await waitAtStart({
+      who: "the provider",
+      why: startOut,
+      meanwhile: `claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token`,
+      probe: (wake) => probe(undefined, wake),
+      refusal: refusalAtStart,
+      wake: opts.signal ?? new AbortController().signal,
+      writer: { out, err },
+      stamper: opts.stamper,
+    });
+    if (waited !== null && waited !== "up") return refused(waited.refused.kind, waited.refused.line);
   }
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
@@ -1724,6 +1755,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       reachedOlders.add(c.older_id);
       const staleRow = staleByOlder.get(c.older_id);
       const t0 = Date.now();
+      // The limit as this call starts (SMD-3306 PR 6b-2's review pass 3): longer while the subject sweep asks the judge
+      // model beside it, its own once the sweep stops asking — and the probe after its timeout gets the same.
+      const limitS = limitNow();
       let j: Judgement;
       try {
         // SMD-1726: the judge hears who wrote each side — the database's mark
@@ -1732,8 +1766,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
         // The pair's bound counts its calls' own time: a wait for a slot on the model-call seam pauses it, told by
-        // the worker's waits observer beside its call in hand (SMD-3379 PR 2b-1).
-        const deadline = pausableTimeout(TIMEOUT_S * 1000);
+        // the worker's waits observer beside its call in hand (SMD-3379 PR 2b-1); the limit as this call starts.
+        const deadline = pausableTimeout(limitS * 1000);
         const callSignal = AbortSignal.any([deadline.signal, onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
@@ -1752,13 +1786,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The pass's caller aborted it (abortInHand): the worker sets the thought back.
         if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
-        // else is the provider's and is classified by the caller.
-        if (timedOut(e)) {
+        // else is the provider's and is classified by the caller. Under --follow
+        // an answer whose words say "timed out" that followerFault reads as the
+        // provider's (a gateway's 408 "Request timed out", a 429 saying so) is
+        // the caller's, an outage as extract's is (SMD-3311 review pass 2); any
+        // other — a deadline with no answer, a 400 saying so — is this pair's,
+        // probed as before (review pass 3).
+        if (timedOut(e) && !(FOLLOW && followerFault(e).kind === "transient")) {
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.
-          if (FOLLOW && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))) throw new ProviderDown(`the judge call timed out after ${TIMEOUT_S} s, and a one-token call got no answer either`);
-          problems.push(`pair with ${c.older_id}: timed out after ${TIMEOUT_S} s`);
+          if (FOLLOW && !stopping && (outage.reason !== null || isOut(await probe(limitS * 1000, halt.signal)))) throw new ProviderDown(`the judge call timed out after ${limitS} s, and a one-token call got no answer either`);
+          problems.push(`pair with ${c.older_id}: timed out after ${limitS} s`);
           continue;
         }
         // The egress gate refused a side of this pair (SMD-1903): a fact about
@@ -2083,6 +2122,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
             const asked = { at: readAt };
+            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+            let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 // A wait for a slot on the model-call seam is not the call's time (review pass 3).
@@ -2119,7 +2160,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                const kind = classifyError(e);
+                // Under --follow through followClassify's split, as extract-entities.ts reads it (followerFault, SMD-3311).
+                const { kind, suspect } = FOLLOW ? followerFault(e) : { kind: classifyError(e), suspect: true };
+                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
                 // Under --follow, the provider's state rather than the thought's
                 // or the request's (SMD-2599), as extract-entities.ts reads it: a
@@ -2132,7 +2175,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
-                  if (outage.begin(msg, b.thought_id) === "outage") {
+                  if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
@@ -2361,12 +2404,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.onStart?.({ ok: true, provider: "up" });
   opts.onPass?.(stop, inCall.abortInHand);
 
-  /**
-   * Workers whose leases could not be returned as they ended — the database
-   * was not answering — returned at the start of the next pass rather than
-   * left to expire a lease later (SMD-2599). A follower's only.
-   */
-  const unreturned = new Set<string>();
+  /** Workers whose leases could not be returned as they ended, returned at the start of the next pass (SMD-2599). */
+  const unreturned = new Unreturned((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`);
 
   // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
   // pass and re-stamped while one runs. A one-shot run stamps nothing. A
@@ -2406,10 +2445,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       passEnds = new AbortController();
       gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
     }
-    for (const w of unreturned) {
-      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-      unreturned.delete(w);
-    }
+    await unreturned.returnAll();
     // After the leases a worker could not return, a small write and no new
     // work (review pass 6): the admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
     // 1b). A stop while it waits ends the run with no pass: the summary's
@@ -2454,34 +2490,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
-  /**
-   * A follower's pass, which a database outage does not end (SMD-2599), as
-   * extract-entities.ts's: said once, waited out until a SELECT 1 answers —
-   * and the pass runs again at once, so its counts are read — or a stop wakes
-   * the wait, and the counts are null. Any other error ends the run, as
-   * before; a run without --follow is unchanged.
-   */
-  async function followedPass(): Promise<Counts | null> {
-    for (;;) {
-      try {
-        const c = await stampedPass();
-        // A worker found the provider not answering and ended the pass
-        // (SMD-2599): the heartbeat says so, and stays a running follower's
-        // while it probes, so preflight reads it alive, not stale (SMD-2261).
-        if (outage.reason !== null && !stopping) {
-          await stamper?.stamp("failed");
-          await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
-        }
-        return c;
-      } catch (e) {
-        if (!FOLLOW || !databaseUnavailable(e)) throw e;
-        const down = Date.now();
-        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-        if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
-        out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-      }
-    }
-  }
+  /** A pass a database outage does not end (followedPass, SMD-2599): the counts, or null when a stop ended its wait. */
+  const followed = () => followedPass({
+    pass: stampedPass,
+    // A worker found the provider not answering and ended the pass (SMD-2599): the heartbeat says so, and stays a
+    // running follower's while it probes, so preflight reads it alive, not stale (SMD-2261).
+    afterPass: async () => {
+      if (outage.reason === null || stopping) return;
+      await stamper?.stamp("failed");
+      await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
+    },
+    follow: !!FOLLOW,
+    check: () => sql`SELECT 1`,
+    wake: onStop.signal,
+    writer: { out, err },
+  });
 
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
@@ -2489,7 +2512,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 102 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1) — said
   // beside relations' note too, so fixing the role does not reveal the migration only then (review pass 3).
   if (saidMissing) out(RELATIONS_OFF ? `  distinct: not stored either — ${NO_102}` : `  distinct: not stored this run — ${NO_102}; a pair judged unrelated at the floor now has its edge closed, as before 102, unless that edge is a distinct, and gets no new distinct until its claim is cleared`);
-  let after = await followedPass();
+  let after = await followed();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
@@ -2498,7 +2521,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // A follower sees a migration or a grant applied while it runs — 102's sentinel too (SMD-3117),
       // both read before either is said (review pass 3).
       storesNow(await relationsOff().catch(() => RELATIONS_OFF), await readHas102().catch(() => HAS_102), "from this poll on");
-      after = await followedPass();
+      after = await followed();
       await stamper?.stamp(passOutcome);
     }
     // The follower ends — a signal, its --limit, or the provider refusing the
@@ -2512,10 +2535,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // ends where the database answers; else they expire within --ttl (review pass 3).
   // All at once, and not when the run ended waiting for the database; one
   // line when they could not go (review pass 4).
-  if (after !== null && unreturned.size > 0) {
-    const kept = (await Promise.all([...unreturned].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
-    if (kept > 0) err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${TTL} s`);
-  }
+  if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
     `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed.toFixed(1)}s ` +
@@ -2634,7 +2654,7 @@ if (import.meta.main) {
   const batch = cli.int("batch", { absent: 1, min: 1, max: MAX_BATCH });
   const ttl = cli.int("ttl", { absent: DEFAULT_TTL_S, min: 1 });
   const heartbeat = cli.has("heartbeat") ? cli.int("heartbeat", { absent: DEFAULT_HEARTBEAT_S, min: 1 }) : undefined;
-  const timeout = cli.int("timeout", { absent: 120, min: 1, max: MAX_CALL_TIMEOUT_S });
+  const timeout = cli.int("timeout", { absent: JUDGE_TIMEOUT_S, min: 1, max: MAX_CALL_TIMEOUT_S });
   const k = cli.int("k", { absent: DEFAULT_CANDIDATES, min: 1, max: 50 });
   const minSim = cli.number("min-sim", { absent: DEFAULT_MIN_SIMILARITY, min: -1, max: 1, fraction: true });
   const minConfidence = cli.number("min-confidence", { absent: DEFAULT_MIN_CONFIDENCE, min: 0, max: 1, fraction: true });

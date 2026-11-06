@@ -1,6 +1,6 @@
-# OB1 Local HTTP
+# Daemonic Brain Local HTTP
 
-Skill pack that lets Claude Code (or any skill-aware AI coding tool) capture, search and browse thoughts in an Open Brain over plain HTTP, with no MCP transport involved. It calls the brain's REST core — every operation the MCP tools expose, as JSON — at `/api` on the brain's origin, on the stack [`SETUP.md`](../../SETUP.md) builds.
+Skill pack that lets Claude Code (or any skill-aware AI coding tool) capture, search and browse thoughts in a brain over plain HTTP, with no MCP transport involved. It calls the brain's REST core — every operation the MCP tools expose, as JSON — at `/api` on the brain's origin, on the stack [`SETUP.md`](../../SETUP.md) builds.
 
 > The skill called the `open-brain-rest` gateway until SMD-1931 retired it in favour of the REST core, and a self-hosted Supabase stack's Edge Functions (the `local-brain-no-mcp` recipe) before SMD-1800. Its job is unchanged: three `curl` calls, an access key in a header.
 

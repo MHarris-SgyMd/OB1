@@ -1,6 +1,6 @@
 # Schema Name
 
-> One-line description of what this schema adds to Open Brain.
+> One-line description of what this schema adds to Daemonic Brain.
 
 ## What It Does
 
@@ -8,7 +8,7 @@
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - List any additional requirements
 
 ## Credential Tracker
@@ -29,7 +29,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply the SQL migration below: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates. Grant nothing to Supabase's roles in the file itself, and enable no RLS: `scripts/check-consistency.ts` check 12 refuses both, and `db/config.mjs` ROLE_GRANTS' `community` group is where a new table's grant goes (this fork, SMD-1796).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates. Grant nothing to Supabase's roles in the file itself, and enable no RLS: `scripts/check-consistency.ts` check 12 refuses both, and `db/config.mjs` ROLE_GRANTS' `community` group is where a new table's grant goes (Daemonic Brain, SMD-1796).
 
    ```sql
    -- Paste the SQL here or reference the file

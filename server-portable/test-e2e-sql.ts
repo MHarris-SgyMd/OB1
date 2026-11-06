@@ -1457,7 +1457,7 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
     assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
 
     const undated = JSON.parse(await call("fetch", { id: undatedId }));
-    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(/^Daemonic Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Daemonic Brain …", not the epoch (${undated.title})`);
     assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
 
     const inf = JSON.parse(await call("fetch", { id: infinityId }));
@@ -1573,8 +1573,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // Absent, not refused: a read through the capture key is an unknown tool. v2's
   // McpServer surfaces a call to a tool that was never registered for this principal
   // as a JSON-RPC error (-32602), where v1 wrapped "tool not found" as an isError
-  // result (SMD-2278). The fork's own refusals-as-values path (SMD-1978) is
-  // unaffected — this is the SDK's built-in not-found, not a fork refusal.
+  // result (SMD-2278). Daemonic Brain's own refusals-as-values path (SMD-1978) is
+  // unaffected — this is the SDK's built-in not-found, not one of those refusals.
   const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
   assert(read.result === undefined && read.error?.code === -32602 && /Tool search_thoughts not found/.test(String(read.error?.message)), `search_thoughts is not a tool the capture key can call — a JSON-RPC -32602 error, not a result (${JSON.stringify(read.error ?? read.result)?.slice(0, 80)})`);
   assert(/not found|unknown tool/i.test(String(read.error?.message ?? "")), "…told as a missing tool, not a permission error");
@@ -2482,7 +2482,11 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const here = dirname(fileURLToPath(import.meta.url));
-  const treeLast = Math.max(...readdirSync(join(here, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+  const treeNumbers = readdirSync(join(here, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+  const treeLast = Math.max(...treeNumbers);
+  // The file before the last, read from the tree: a number may be skipped while a branch in review holds it
+  // (SMD-3306's 120 was numbered past SMD-3778's 119, in review then).
+  const treePrev = Math.max(...treeNumbers.filter((n) => n < treeLast));
   const health = async (key: string | null) => {
     const r = await fetch(`${BASE}/health`, { headers: key ? { "x-brain-key": key } : {} });
     const body = await r.text();
@@ -2492,8 +2496,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // resetSchema applies the files with no ledger: the record says so rather
   // than inventing a number, and does not judge the brain against the tree.
   // Another tool's schema_migrations (Supabase's supabase_migrations, Rails,
-  // dbmate) is not the fork's ledger: no sha256 column, so the brain still has
-  // none — not one it cannot resolve (review pass 3).
+  // dbmate) is not Daemonic Brain's ledger: no sha256 column, so the brain
+  // still has none — not one it cannot resolve (review pass 3).
   await sql.unsafe(`CREATE SCHEMA e2e_other_tool`);
   await sql.unsafe(`CREATE TABLE e2e_other_tool.schema_migrations (version text PRIMARY KEY)`);
   const bare = await health("e2e-key") as Record<string, any>;
@@ -2628,6 +2632,9 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND thought_id = ${t[4]}::uuid AND payload->>'target' = ${t[0]}`;
     // 102 (SMD-3117): a pair judged distinct — counted apart, and never a board pair, though its two tickets are unlinked.
     await relate(t[2], t[0], "distinct");
+    // 120 (SMD-3306): a work thread's evolves on that board pair, beside the judge's distinct — the subjects' order, not
+    // a judgement: no relation and no board pair of the judge's.
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[2]}::uuid, 'relation', ${{ relation: "evolves", target: t[0], judge_key: "thread:v1", key: "ticket:SMD-7001" }}::jsonb)`;
 
     // The count by hand: every row read, the rule applied here.
     // A ticket is metadata.ticket, else metadata.issue; whether Linear links
@@ -2650,12 +2657,15 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       oldest: Math.max(...pend.map((r: { age: number }) => r.age)),
       board: pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length,
     };
-    const facets = (await sql`SELECT thought_id::text AS h, payload, valid_until FROM thought_facets WHERE kind = 'relation'`).filter((f: { valid_until: unknown }) => f.valid_until === null);
+    const standing = (await sql`SELECT thought_id::text AS h, payload, valid_until FROM thought_facets WHERE kind = 'relation'`).filter((f: { valid_until: unknown }) => f.valid_until === null);
+    const threadEdges = standing.filter((f: { payload: { origin: string } }) => f.payload.origin === "thread").length;
+    const facets = standing.filter((f: { payload: { origin: string } }) => f.payload.origin === "judged");
     const byWord = (w: string) => facets.filter((f: { payload: { relation: string } }) => f.payload.relation === w).length;
     const relationPairs = () => facets.filter((f: { h: string; payload: { target: string; relation: string } }) => f.payload.relation !== "distinct" && boardPair(f.h, f.payload.target)).length;
     const wantRel = { related: byWord("related"), evolves: byWord("evolves"), duplicate: byWord("duplicate"), distinct: byWord("distinct"), boardPairs: relationPairs() };
-    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.distinct === 1 && boardPair(t[2], t[0]) && wantRel.boardPairs === 2,
-      `the fixture is what the comment says (${JSON.stringify(want)}, ${JSON.stringify(wantRel)})`);
+    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.distinct === 1 && boardPair(t[2], t[0]) && wantRel.boardPairs === 2
+        && threadEdges === 1 && standing.length === 6,
+      `the fixture is what the comment says, a thread's edge standing beside the judge's five (${JSON.stringify(want)}, ${JSON.stringify(wantRel)}, ${threadEdges} thread's)`);
     assert(before.proposals?.boardPairs === want.board && before.relations?.boardPairs === wantRel.boardPairs,
       `before any link, a ticket row and another ticket's section count as a board pair (${before.proposals?.boardPairs}, ${before.relations?.boardPairs})`);
     // Linear links t0's ticket to t1's after the verdicts: nothing moves the
@@ -2676,7 +2686,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     assert(q.pending === want.pending && q.stale === want.stale && q.boardPairs === want.board && Math.abs(q.oldestPendingS - want.oldest) <= 2 && q.oldestPendingS >= 5 * 86400,
       `keyed /health's proposals are the queue counted by hand: pending, stale, the oldest's age, the board pairs — not one ticket's two rows, not a row with no ticket, not a stale or rejected row (${JSON.stringify(q)} vs ${JSON.stringify(want)})`);
     assert(JSON.stringify(found.relations) === JSON.stringify(wantRel),
-      `…and its relations the standing ones by word, the closed one not counted, the distinct counted apart and never a board pair, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
+      `…and its relations the judge's standing ones by word, the closed one not counted, the distinct counted apart and never a board pair, a thread's edge none of them, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
     assert(Object.keys(found.unread ?? {}).length === 0, `every read answered (${JSON.stringify(found.unread)})`);
     const table = await call("brain_info");
     const pRow = table.split("\n").find((l) => l.startsWith("Proposals"));
@@ -2687,6 +2697,21 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
         && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — acceptance 100% \(1 of 1: accepted over accepted, rejected and unanswered\), median 3 d to an answer$/.test(fRow ?? ""),
       `the finding posted before the link reads accepted in keyed /health and the tool's table (${JSON.stringify(found.findings)} / ${fRow})`);
+    // 120 (SMD-3306): a posted evolves finding the judge took back reads withdrawn, though a work thread's evolves stands
+    // on its pair: the thread's edge is no word of the judge's. Put back after, as the fixture was.
+    const judgedEvolves = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${t[2]}::uuid
+                                     AND payload->>'target' = ${t[1]} AND payload->>'origin' = 'judged'`)[0].id as string;
+    await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
+              VALUES ('SMD-7002', 'SMD-7003', 'evolves', 'SMD-7003', 'posted', 'c-e2e-thread', ARRAY[${judgedEvolves}::uuid], now() - interval '1 day')`;
+    await sql`SELECT record_thought_relation(${t[2]}::uuid, ${t[1]}::uuid, NULL, NULL, 'consolidate:e2e@p4', NULL, 'a', 'b', NULL)`;
+    const [{ id: threadsEvolves }] = (await sql`INSERT INTO thought_facets (thought_id, kind, payload)
+        VALUES (${t[2]}::uuid, 'relation', ${{ relation: "evolves", target: t[1], judge_key: "thread:v1", key: "ticket:SMD-7002" }}::jsonb) RETURNING id::text AS id`) as { id: string }[];
+    const takenBack = ((await health("e2e-key")) as Record<string, any>).database?.findings ?? {};
+    assert(takenBack.posted === 2 && takenBack.withdrawn === 1 && takenBack.open === 0,
+      `a posted evolves finding the judge took back reads withdrawn, a work thread's evolves standing on its pair none of the judge's (${JSON.stringify(takenBack)})`);
+    await sql`DELETE FROM thought_facets WHERE id = ${threadsEvolves}::uuid`;
+    await sql`DELETE FROM board_findings_posted WHERE comment_id = 'c-e2e-thread'`;
+    await relate(t[2], t[1], "evolves");
 
     // A server role granted capture and server — no worker group — reads the
     // queue: the server group's SELECT on supersession_proposals (SMD-2680).
@@ -2762,7 +2787,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const [{ name: lastName }] = await sql`SELECT name FROM schema_migrations WHERE name LIKE ${last + "%"}`;
   await sql`DELETE FROM schema_migrations WHERE name = ${lastName}`;
   const behind = await health("e2e-key") as Record<string, any>;
-  assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
+  assert(behind.ledgerStatus === "behind" && behind.database?.highestMigration === treePrev, `a ledger missing ${last} is behind this server's tree (${behind.ledgerStatus}, ${behind.database?.highestMigration})`);
 
   // Against the live catalog. A role that may read the
   // corpus and not the ledger, the chunks or the entities: the ledger is
@@ -2850,9 +2875,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       await lost.close();
     }
 
-    // Another tool's schema_migrations earlier on the role's path shadows the
-    // fork's (review pass 4): what resolves is not the ledger — no sha256 —
-    // so the fork's is invisible, not "read" and failing with 42703.
+    // Another tool's schema_migrations earlier on the role's path shadows
+    // Daemonic Brain's (review pass 4): what resolves is not the ledger — no
+    // sha256 — so Daemonic Brain's is invisible, not "read" and failing with
+    // 42703.
     await sql.unsafe(`CREATE SCHEMA e2e_shadow`);
     await sql.unsafe(`CREATE TABLE e2e_shadow.schema_migrations (version text PRIMARY KEY)`);
     await sql.unsafe(`GRANT USAGE ON SCHEMA e2e_shadow TO brain_reader`);
@@ -2863,7 +2889,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const f = await readDatabaseFacts(shadowed);
       assert(f.unread.ledger?.reason === "invisible" && /schema public/.test(f.unread.ledger?.message ?? "") && /reaches e2e_shadow\.schema_migrations first/.test(f.unread.ledger?.message ?? "")
           && f.highestMigration === null && f.schemaVersion === BRAIN_VERSION,
-        `a foreign schema_migrations ahead on the path is not the ledger; the fork's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
+        `a foreign schema_migrations ahead on the path is not the ledger; Daemonic Brain's is invisible behind it (${JSON.stringify(f.unread.ledger)})`);
     } finally {
       await shadowed.close();
       await sql.unsafe(`DROP TABLE e2e_shadow.schema_migrations`);
@@ -2899,7 +2925,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       const took = performance.now() - t0;
       const d = bodies[0].database ?? {};
       const locked = ["thoughts", "thought_audit", "thought_chunks"].every((t) => d.unread?.[`counts.${t}`]?.reason === "timeout");
-      assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
+      assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treePrev && d.pgvector?.version === truth.vec && took < 2500,
         `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
       assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: at most ${waiting} backend(s) waiting on the lock, one body`);
       // The reads that touch a refused table are not tried: one lock wait per

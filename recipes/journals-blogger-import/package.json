@@ -1,7 +1,7 @@
 {
   "name": "ob1-recipe-journals-blogger-import",
   "version": "1.0.0",
-  "description": "Import Google Blogger Atom XML blog exports into Open Brain as journal thoughts",
+  "description": "Import Google Blogger Atom XML blog exports into Daemonic Brain as journal thoughts",
   "type": "module",
   "main": "import-blogger.mjs",
   "scripts": {

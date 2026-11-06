@@ -17,7 +17,7 @@ It is a routing skill, not a framework. It helps the client choose the right har
 
 ## Prerequisites
 
-- Working Open Brain setup if you want to capture resulting architecture notes or evaluation findings into memory ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup if you want to capture resulting architecture notes or evaluation findings into memory ([guide](../../docs/01-getting-started.md))
 - AI client that supports reusable skill files, project rules, or custom instructions
 - Ability to keep the bundled `references/` directory next to the installed skill file
 
@@ -69,7 +69,7 @@ Solution: Install the whole folder, not just one prompt file. The root `SKILL.md
 
 ## Notes for Other Clients
 
-The root [`SKILL.md`](./SKILL.md) is the canonical portable version for OB1. The two client variants are adaptation layers:
+The root [`SKILL.md`](./SKILL.md) is the canonical portable version for Daemonic Brain. The two client variants are adaptation layers:
 
 - [`variants/codex/SKILL.md`](./variants/codex/SKILL.md) adds Codex-friendly discovery metadata and routing signals
 - [`variants/anthropic/SKILL.md`](./variants/anthropic/SKILL.md) stays closer to the Anthropic-style prompt shape

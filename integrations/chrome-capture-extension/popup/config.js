@@ -59,7 +59,7 @@
 
     const granted = await chrome.permissions.request({ origins: [origin] });
     if (!granted) {
-      throw new Error('Permission denied. Open Brain Capture needs access to this origin to send captures.');
+      throw new Error('Permission denied. Daemonic Brain Capture needs access to this origin to send captures.');
     }
     return true;
   }
@@ -79,7 +79,7 @@
       const apiKey = String(keyInput.value || '').trim();
 
       if (!endpoint) {
-        throw new Error('Enter your Open Brain REST API URL.');
+        throw new Error('Enter your Daemonic Brain REST API URL.');
       }
       if (!apiKey) {
         throw new Error('Enter your x-brain-key API key.');
@@ -139,7 +139,7 @@
   testBtn.addEventListener('click', testConnection);
 
   loadExistingConfig().catch((err) => {
-    console.error('[Open Brain Capture] Config page init failed', err);
+    console.error('[Daemonic Brain Capture] Config page init failed', err);
     showResult(err.message, 'error');
   });
 })();

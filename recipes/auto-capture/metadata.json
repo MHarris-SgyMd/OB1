@@ -1,6 +1,6 @@
 {
   "name": "Auto-Capture Protocol",
-  "description": "Workflow guidance for using the reusable Auto-Capture skill to store ACT NOW items and session summaries in Open Brain at session close.",
+  "description": "Workflow guidance for using the reusable Auto-Capture skill to store ACT NOW items and session summaries in Daemonic Brain at session close.",
   "category": "recipes",
   "author": {
     "name": "Jared Irish",

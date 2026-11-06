@@ -1537,6 +1537,40 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 120's edge (SMD-3306): a work thread's standing edge without its lineage
+  // row is refused the same way, counted apart from a judged relation, and the
+  // remedy is the thread's own: close the edge and re-link its key, which
+  // writes it again with its row. The thoughts are removed after.
+  const thA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the first note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const thB = ((await ctx.unsafe(`SELECT upsert_thought('preflight-120 the second note on the thread', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  for (const id of [thA, thB])
+    await ctx.unsafe(`SELECT record_thought_subject('${id}'::uuid, 'ticket:SMD-9120', 'first_line', 'subject:t@p1', NULL, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = '${id}'::uuid), NULL)`);
+  const edge120 = String((await ctx.unsafe(`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9120'`))[0].id);
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${edge120}'::uuid`);
+  const noEdge = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noEdge.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 thread edge\\(s\\) \\(${edge120} under ticket:SMD-9120\\)`).test(noEdge.out) && !/judged relation\(s\)/.test(noEdge.out)
+         && /A thread edge's row is written with it by 120's thread_relink: close the edge/.test(noEdge.out) && /bun db\/threads\.ts --url … --key '<the key each edge is named under above>'/.test(noEdge.out),
+         `a thread's edge without its lineage row does not start, counted as a thread edge, not a judged relation, and the remedy is the thread's own (exit ${noEdge.code}: ${noEdge.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${edge120}'::uuid`);
+  const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
+  assert(relinked.added === 1 && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
+         "…and following the remedy — the edge closed, its thread re-linked — the edge stands again with its row, and the check is ok again");
+  // Judged relations and thread edges are each read under a bound of their own: a brain of 20,000 thread edges (raw,
+  // with no lineage) still has a judged relation without its row named, where one bound for both read 10,000 rows of
+  // whichever came first.
+  await ctx.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload)
+    SELECT '${thB}'::uuid, 'relation', jsonb_build_object('relation', 'evolves', 'target', '${thA}', 'judge_key', 'thread:v1',
+                                                          'key', 'phrase:bound ' || translate(g::text, '0123456789', 'abcdefghij'))
+      FROM generate_series(1, 20000) g`);
+  const fpOf = async (id: string) => String((await ctx.unsafe(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = '${id}'::uuid`))[0].f);
+  const judged = ((await ctx.unsafe(`SELECT record_thought_relation('${thB}'::uuid, '${thA}'::uuid, 'related', 0.7, 'consolidate:bound@p1', NULL, '${await fpOf(thA)}', '${await fpOf(thB)}', NULL) AS r`))[0].r as { id: string }).id;
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${judged}'::uuid`);
+  const bounded = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  await ctx.unsafe(`DELETE FROM thought_facets WHERE kind = 'relation' AND (payload->>'key' LIKE 'phrase:bound %' OR id = '${judged}'::uuid)`);
+  assert(bounded.code === 1 && new RegExp(`1 judged relation\\(s\\) \\(${judged}\\)`).test(bounded.out) && /more than 10,000 thread edge\(s\)/.test(bounded.out),
+         `…and beside 20,000 thread edges a judged relation without its row is still named, each read under its own bound (exit ${bounded.code}: ${bounded.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 200)})`);
+  await ctx.unsafe(`SELECT delete_thought('${thB}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${thA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger
@@ -2237,6 +2271,12 @@ else {
   assert(/the sleep scheduler runs this key \(stamped 2\d s ago; working, consolidate waiting for the provider mid-pass\), and its last pass failed/.test(row(consSleptMid.out, "consolidate pass"))
          && /The provider stopped answering mid-pass — check it/.test(fix(consSleptMid.out, "consolidate pass")) && !/log says why/.test(fix(consSleptMid.out, "consolidate pass")),
          `the scheduler's pass waiting mid-pass is said on the consolidate pass row, the fix naming the provider (${row(consSleptMid.out, "consolidate pass")} | ${fix(consSleptMid.out, "consolidate pass")})`);
+  // …but another pass's wait is not consolidation's: the subject sweep's, on the same chat endpoint, leaves the cause to
+  // the scheduler's log (SMD-3306 PR 6b-2; PR 6b-1's Not here).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "failed", waitingMidPass: ["subjects"] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSweepMid = fix((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
+  assert(/^→ The scheduler's log says why/.test(consSweepMid.trim()) && !/The provider stopped answering mid-pass/.test(consSweepMid),
+         `the subject sweep waiting mid-pass is not read as consolidation's wait on its row (${consSweepMid})`);
   // Its pass held out, or the scheduler paused by a live call (SMD-3379 PR 1c-2):
   // the row says its own pass's hold, not another's listed first, or the
   // pause, with or without a pass running — not "its passes running" or "idle".
@@ -2638,17 +2678,21 @@ else {
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
+    // 120's thread_relink stands here, so each names the subject writes refused too.
+    const [{ relinkHere }] = (await claims`SELECT to_regprocedure('public.thread_relink(text, boolean)') IS NOT NULL AS "relinkHere"`) as { relinkHere: boolean }[];
     const rr = await run(SQL_ENV);
     // Since 068 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
     assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
              && /and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type/.test(rr.out)
-             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 068's and 071's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out)
+             && relinkHere && /; and 120's thread_relink refuses repeatable read, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\) — and the writers' lock order/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 068's, 071's and 120's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out)
+             && /; and 120's thread_relink refuses serializable, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\)/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions and 120's refused subject writes (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not
@@ -2865,10 +2909,10 @@ else {
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call
   // both take — under three arguments — is ambiguous (not unique) and fails,
-  // while the fork's callers pass seven (measured on Postgres, SMD-2313's
+  // while Daemonic Brain's callers pass seven (measured on Postgres, SMD-2313's
   // run-it, first review pass: the arm had said the older body answered). The
   // check counts the forms and warns naming 110, whose DROPs take the older forms.
-  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the seven-argument one \(029, 070 or 109 re-applied by hand over 110\): a call both forms take — under three arguments beside 029's, under four beside 070's, under five beside 109's — is ambiguous \(not unique\) and fails, so a reader passing fewer than five may error on the queue, while the fork's callers pass seven \(SMD-2313, SMD-3248, SMD-3249\)/;
+  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the seven-argument one \(029, 070 or 109 re-applied by hand over 110\): a call both forms take — under three arguments beside 029's, under four beside 070's, under five beside 109's — is ambiguous \(not unique\) and fails, so a reader passing fewer than five may error on the queue, while Daemonic Brain's callers pass seven \(SMD-2313, SMD-3248, SMD-3249\)/;
   const beside029 = await run(SQL_ENV);
   assert(beside029.code === 0 && besideRe.test(beside029.out) && /Apply db\/migrations\/110_listing_pages\.sql\./.test(fix(beside029.out, "lineage")),
          `029 re-applied over 110 leaves its two-argument listing beside 110's: a warning naming 110 (${lpLine(beside029.out).slice(0, 200)})`);
@@ -2884,7 +2928,7 @@ else {
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
   // A brain at 109 under this server: 109's four-argument listing alone (109
-  // applied over the ladder's 029 leftover, which it drops). Every fork caller
+  // applied over the ladder's 029 leftover, which it drops). Every caller here
   // passes 110's seven arguments, so every listing fails, naming the
   // seven-argument form; the check warns naming 110.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });
@@ -3737,9 +3781,12 @@ else {
   // than from the generated module preflight reads it from.
   {
     const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`\\b${name}\\b`).test(l))?.trim();
-    const treeLast = Math.max(...readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+    const treeNumbers = readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3)));
+    const treeLast = Math.max(...treeNumbers);
     const last = String(treeLast).padStart(3, "0");
-    const prev = String(treeLast - 1).padStart(3, "0");
+    // The file before the last, read from the tree: a number may be skipped while a branch in review holds it
+    // (SMD-3306's 120 was numbered past SMD-3778's 119, in review then).
+    const prev = String(Math.max(...treeNumbers.filter((n) => n < treeLast))).padStart(3, "0");
     const [{ v: extversion }] = await claims`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`;
     const bare = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
@@ -4610,7 +4657,7 @@ else {
         `re-embed and extraction waiting name both providers' rows (${bothWaitFix})`);
       assert(/the pass goes on by itself once it answers; re-embed is set down for the period at the scheduler's next poll, .*, the thoughts in hand back in the pool meanwhile\./.test(bothWaitFix),
         `…each wait's own ending, extraction's going on and re-embed's set down (${bothWaitFix})`);
-      // The subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-1, read before PR 6b-2 writes it): its wait said
+      // The subject sweep, the scheduler's fourth pass (SMD-3306 PR 6b-1; written since PR 6b-2): its wait said
       // by its name, a chat provider's; its judge hold said, the fix the hand run that lifts it, a stopped row's too.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["subjects"], slept: { from: await at(130), to: null } }), 10);
       const subjectsWait = await run(LOG_ON);
@@ -4628,11 +4675,12 @@ else {
       // said so).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "model", until: null }, { pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsHeldBeside = await run(LOG_ON);
-      // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it.
+      // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it — its set-down's own
+      // (SMD-3306 PR 6b-2).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherHold = await run(LOG_ON);
-      // …and a failed row held for another reason of the sweep's keeps the generic cause of a failed pass (review pass
-      // 5, mutant: the cause left out beside any hold lived).
+      // …and a failed row so held says the set-down's cause, not the generic cause of a failed pass, another pass's
+      // failure its log's, as the judge hold's fix does (PR 6b-2; until it the generic cause, review pass 5's mutant).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherFailed = await run(LOG_ON);
       // …nor for a judge hold of another pass's, which the scheduler never writes (SMD-3306 PR 6b-1's review pass 2,
@@ -4647,6 +4695,8 @@ else {
              && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep"))
              && /held out: extract \(judge\)/.test(row(extractJudgeHold.out, "sleep")) && !/The subject sweep is held/.test(fix(extractJudgeHold.out, "sleep")),
         `the subject sweep's wait and judge hold are said by its name, the hold's fix the hand run that lifts it, a stopped row's too (${row(subjectsWait.out, "sleep")} | ${fix(subjectsHeld.out, "sleep")} | ${fix(subjectsHeldDown.out, "sleep")})`);
+      assert(/The subject sweep was set down for this period \(provider\) — the provider refused the judge model's one-token call: check the chat endpoint's key and base URL \(OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL\), and the account's credit where it answered 402; a setting mended in deploy\/\.env reaches the scheduler once the coordinator is recreated \(up -d coordinator\), and the next period with work tries the sweep again\. The other passes run on meanwhile\.$/.test(fix(subjectsOtherHold.out, "sleep")),
+        `the sweep set down for a period says its cause's remedy, the recreate a setting needs, and that the next period tries it, the others running on (SMD-3306 PR 6b-2, review pass 1, walkthrough: ${fix(subjectsOtherHold.out, "sleep")})`);
       assert(/The subject sweep is held:/.test(fix(subjectsHeldFailed.out, "sleep")) && !/Its last pass failed/.test(fix(subjectsHeldFailed.out, "sleep"))
              && /The other passes run on meanwhile\. Another pass's failure, if any, its log says\./.test(fix(subjectsHeldFailed.out, "sleep"))
              && !/Another pass's failure/.test(fix(subjectsHeld.out, "sleep")),
@@ -4654,8 +4704,51 @@ else {
       assert(/→ Its last pass failed — a pass refused at its start/.test(fix(subjectsHeldBeside.out, "sleep")) && /The subject sweep is held:/.test(fix(subjectsHeldBeside.out, "sleep"))
              && !/the other passes run on meanwhile/i.test(fix(subjectsHeldBeside.out, "sleep")) && !/Another pass's failure/.test(fix(subjectsHeldBeside.out, "sleep")),
         `beside another pass's hold a failed row says the failed pass's cause, the hold's fix not that the other passes run on (${fix(subjectsHeldBeside.out, "sleep")})`);
-      assert(/Its last pass failed/.test(fix(subjectsOtherFailed.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherFailed.out, "sleep")),
-        `a failed row held for another reason of the sweep's keeps the generic cause (${fix(subjectsOtherFailed.out, "sleep")})`);
+      assert(!/Its last pass failed/.test(fix(subjectsOtherFailed.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherFailed.out, "sleep"))
+             && /The subject sweep was set down for this period \(provider\) — .* The other passes run on meanwhile\. Another pass's failure, if any, its log says\.$/.test(fix(subjectsOtherFailed.out, "sleep")),
+        `a failed row with the sweep set down says the set-down's cause, another pass's failure its log's, not a failed pass's generic cause (SMD-3306 PR 6b-2: ${fix(subjectsOtherFailed.out, "sleep")})`);
+      // The sweep held for another pool named (key, SMD-3306 PR 6b-2): the hold's fix the switch by hand, in the stack,
+      // to the judge model's pool, counted first, or to the rules' pool, which the scheduler follows (review pass 1,
+      // walkthrough), and the reasoning's way back, the generic cause not said beside it; a stopped row's last word too,
+      // the passes not said to run on.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const keyHeld = await run(LOG_ON);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const keyHeldFailed = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "stopped", ended: true, holds: [{ pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
+      const keyHeldDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/held out: subjects \(key\)/.test(row(keyHeld.out, "sleep"))
+             && /^→ The subject sweep is held: ob1_config names a subject pool that is neither of the scheduler's — the judge model's or the rules' — after a rule's, the question's or OB1_SUBJECT_REASONING's change since it was named, and the scheduler names a pool only when none is, never switching one; its log names the pools\. Switch it by hand in the stack as the coordinator runs, recreated first after a change to deploy\/\.env \(up -d coordinator\) — podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --switch-key --limit 1, with the -f files and -p the stack was started with \(docker compose alike\) — to the judge model's pool, the scheduler's runs taking the rest: it pools again every thought whose subject is not current under it, those keyed by no rule among them, and, with the reasoning on, those found with it off, which the same command with --dry-run in place of --limit 1 counts first; or to the rules' pool \(--subjects rules --switch-key --limit 1\), which the scheduler follows asking no model, for a judge model not yet measured on the question; or, where OB1_SUBJECT_REASONING alone tells them apart, set it back in deploy\/\.env and recreate the coordinator\. The other passes run on meanwhile\.$/.test(fix(keyHeld.out, "sleep").trim())
+             && !/garbage-judge/.test(fix(keyHeld.out, "sleep")),
+        `the sweep held for another pool named says the switch by hand in the stack, counted first, the rules' pool, and the reasoning's way back (${fix(keyHeld.out, "sleep")})`);
+      assert(!/Its last pass failed/.test(keyHeldFailed) && /The subject sweep is held: ob1_config names a subject pool that is neither .* Another pass's failure, if any, its log says\.$/.test(keyHeldFailed)
+             && /The subject sweep is held: ob1_config names a subject pool that is neither/.test(keyHeldDown) && !/the other passes run on meanwhile/i.test(keyHeldDown),
+        `…a failed row's fix the hold, another pass's failure its log's; a stopped row's the hold, the passes not said to run on (${keyHeldFailed} | ${keyHeldDown})`);
+      // Set down by a start refusal's kind, on a stopped row: its remedy, mended before the start (SMD-3306 PR 6b-2).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "failed", ended: true, holds: [{ pass: "subjects", why: "tables", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
+      const tablesDown = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "failed", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const failedDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/The subject sweep was set down for its last period \(tables\) — apply the migrations as the tables' owner .* the subject sweep's, grant the roles its log names what it names .*; mend that before the scheduler starts again, a setting in deploy\/\.env reaching it once the coordinator is recreated \(up -d coordinator\), or its next period sets the sweep down again\./.test(tablesDown)
+             && /The subject sweep was set down for this period \(failed\) — it ended by itself — the provider refusing a question, a grant refused, the pool's name blanked, the database lost past its start, its naming or pooling broken off, another judge model's trip, or a throw — and its log gives the reason; a setting mended in deploy\/\.env reaches the scheduler once the coordinator is recreated \(up -d coordinator\), and the next period with work tries the sweep again\./.test(failedDown),
+        `a set-down by its kind says its remedy, a stopped row's mended before the start (${tablesDown} | ${failedDown})`);
+      // The judge model's own words for its kinds, not extraction's (review pass 1, walkthrough).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "model", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const modelDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/The subject sweep was set down for this period \(model\) — the judge model is not served: pull the model its log names, or set OB1_JUDGE_MODEL to one the provider serves; a setting mended/.test(modelDown) && !/OB1_EXTRACT_ESCALATE_MODEL|--switch-key/.test(modelDown),
+        `a set-down for the judge model unserved names OB1_JUDGE_MODEL, not extraction's settings (${modelDown})`);
+      // The sweep's own statement hold (N9) is a statement's, not a set-down's: its fix the statement's, the other passes
+      // running on; and another pass's statement hold beside the sweep's key hold ends without that, the hold's fix
+      // saying the sweep is held (review pass 1, mutants: a statement hold read as a set-down; the ending read off a
+      // judge hold alone).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "statement", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const sweepStmt = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "extract", why: "statement", until: null }, { pass: "subjects", why: "key", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const stmtBesideKey = fix((await run(LOG_ON)).out, "sleep");
+      assert(/subjects held until a restart: a statement passed its statement_timeout.*; the other passes run on meanwhile\./.test(sweepStmt) && !/set down|The subject sweep is held/.test(sweepStmt)
+             && /extract held until a restart: a statement passed its statement_timeout/.test(stmtBesideKey) && !/the other passes run on meanwhile/i.test(stmtBesideKey)
+             && /The subject sweep is held: ob1_config names a subject pool/.test(stmtBesideKey),
+        `the sweep's statement hold has the statement's fix, the other passes running on, and beside its key hold another pass's statement fix does not say they run on (${sweepStmt} | ${stmtBesideKey})`);
       // …and beside consolidation's hold alike, any pass's (SMD-3306 PR 6b-1's review pass 6, mutant: extraction's
       // alone lived); and where no line says a failed pass's cause — a stopped row ended failed, or a pass waiting on
       // its provider taking the line — the hold's fix names another pass's failure, never that the other passes run on
@@ -4698,7 +4791,7 @@ else {
       assert(/Re-embed was set down for this period/.test(besideSetDown) && /The subject sweep is held:/.test(besideSetDown)
              && (besideSetDown.match(/Another pass's failure, if any, its log says\./g) ?? []).length === 1,
         `beside re-embed set down under the judge hold, another pass's failure is named once (${besideSetDown})`);
-      // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
+      // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; the other passes run on.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
       // The brain recording the switch's model, as the scheduler read it.
       const [{ value: recordSwitch }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
@@ -4724,7 +4817,7 @@ else {
       assert(/; re-embed set aside at its word, the switch to this stack's model made since$/.test(row(unprintableMade.out, "sleep")) && /The brain records this stack's model now, as this stack is configured: the set-aside clears at the scheduler's next poll\./.test(fix(unprintableMade.out, "sleep")),
         `a switch with names outside the alphabet, made since, clears as a printable one does (${row(unprintableMade.out, "sleep")} | ${fix(unprintableMade.out, "sleep")})`);
       assert(/; re-embed set aside for a model switch — its model names hold characters preflight does not print; its log names them$/.test(row(unprintable.out, "sleep"))
-          && /Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out/.test(fix(unprintable.out, "sleep")) && !/Its last pass failed/.test(fix(unprintable.out, "sleep")),
+          && /Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out — --switch-model, or the recorded model back in deploy\/\.env with api and sleep recreated\. The other passes run on meanwhile\./.test(fix(unprintable.out, "sleep")) && !/Its last pass failed/.test(fix(unprintable.out, "sleep")),
         `a switch with names outside the alphabet is said without them, not as a generic failure (${row(unprintable.out, "sleep")} | ${fix(unprintable.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
       // The record moved on again since the row's word: the fix names it as it stands (review pass 2).
@@ -4750,7 +4843,7 @@ else {
       assert(/Re-embed is set aside while the brain records .* recreate api and sleep, which read it once\./.test(stoppedSwitchFix) && !/run on meanwhile/.test(stoppedSwitchFix),
         `a stopped scheduler's switch is not said to let the others run on (review pass 4: ${stoppedSwitchFix})`);
       assert(/!\s+sleep\s+.*; re-embed set aside — the brain records old-embed, this stack is configured for new-embed$/.test(row(switched.out, "sleep"))
-          && /Re-embed is set aside while the brain records old-embed and this stack is configured for new-embed: to keep new-embed, cd db && OB1_EMBEDDING_MODEL=new-embed bun reembed\.ts --url \$DATABASE_URL --switch-model .*; to keep old-embed, set OB1_EMBEDDING_MODEL=old-embed \(and OB1_EMBEDDING_DIM to its width\) in deploy\/\.env and recreate api and sleep/.test(fix(switched.out, "sleep"))
+          && /Re-embed is set aside while the brain records old-embed and this stack is configured for new-embed: to keep new-embed, cd db && OB1_EMBEDDING_MODEL=new-embed bun reembed\.ts --url \$DATABASE_URL --switch-model .*; to keep old-embed, set OB1_EMBEDDING_MODEL=old-embed \(and OB1_EMBEDDING_DIM to its width\) in deploy\/\.env and recreate api and sleep, which read it once\. The other passes run on meanwhile\./.test(fix(switched.out, "sleep"))
           && !/Its last pass failed/.test(fix(switched.out, "sleep")),
         `a model switch set aside is said, with both ways out and not the generic failure (${row(switched.out, "sleep")} | ${fix(switched.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model" } }, slept: { from: await at(130), to: null } }), 10);
@@ -4760,13 +4853,13 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "provider" } }, slept: { from: await at(130), to: null } }), 10);
       const setDown = await run(LOG_ON);
       assert(/; re-embed set down for this period \(provider\)$/.test(row(setDown.out, "sleep"))
-          && /Re-embed was set down for this period — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; extraction and consolidation run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
+          && /Re-embed was set down for this period — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; the other passes run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
         `re-embed set down for the period is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
       // A statement holds re-embed until a restart (SMD-3379 PR 1c-4b, review pass 2): said as a hold, not a period's set-down.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "statement" } }, holds: [{ pass: "reembed", why: "statement", until: null }], slept: { from: await at(130), to: null } }), 10);
       const reHeld = await run(LOG_ON);
       assert(/; re-embed held until a restart \(statement\)$/.test(row(reHeld.out, "sleep"))
-          && /Re-embed is held until a restart — a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env, then .*; extraction and consolidation run on meanwhile\./.test(fix(reHeld.out, "sleep")) && !/next period/.test(fix(reHeld.out, "sleep")),
+          && /Re-embed is held until a restart — a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env, then .*; the other passes run on meanwhile\./.test(fix(reHeld.out, "sleep")) && !/next period/.test(fix(reHeld.out, "sleep")),
         `re-embed a statement holds is said as held until a restart, with its remedy (${row(reHeld.out, "sleep")} | ${fix(reHeld.out, "sleep")})`);
       // …under OB1_SLEEP_STATEMENT_TIMEOUT 0, the role's or the database's own named, ours set above theirs (review pass 3).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "statement" } }, holds: [{ pass: "reembed", why: "statement", until: null }], budget: { minutes: 0, statementTimeoutS: 0, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 1 }, slept: { from: await at(130), to: null } }), 10);

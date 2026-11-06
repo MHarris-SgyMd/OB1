@@ -39,7 +39,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to pin notes.
 
 ## Turn it on
@@ -63,7 +63,7 @@ Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off
 
 ## Start your own plugin
 
-Copy this directory to `plugins/<name>/` and set `name` in `index.ts` to the directory's name. Then import it in `plugins/registry.ts` and add it to `PLUGINS`. See [plugins/README.md](../README.md) for the rules a plugin is held to.
+Copy this directory to `plugins/<name>/` when the plugin calls the core, has a GUI page or a webhook, or [extensions/_template/plugin/](../../extensions/_template/plugin/) for a plugin of tables and operations alone, as an extension's is ([AGENT_SPEC.md](../../extensions/_template/AGENT_SPEC.md) says how). Set `name` in `index.ts` to the directory's name. Then import it in `plugins/registry.ts` and add it to `PLUGINS`. See [plugins/README.md](../README.md) for the rules a plugin is held to.
 
 ## Troubleshooting
 

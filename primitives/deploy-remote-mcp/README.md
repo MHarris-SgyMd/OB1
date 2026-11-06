@@ -1,58 +1,69 @@
-# Run a Remote MCP Server
+# Run a Vendored Server
 
-A guide to running any Open Brain extension server — and the recipe and integration servers that share its shape — as a remote MCP server: one process under [Bun](https://bun.sh) against your brain's Postgres, reachable over HTTPS by any AI client. These servers run beside the brain, each on its own port, each with its own access keys. The brain itself is the compose stack in [`SETUP.md`](../../SETUP.md), its one deployment (SMD-2288); this guide does not run it.
+A guide to running a vendored recipe or integration server: one process under [Bun](https://bun.sh) against your brain's Postgres, beside the brain, on its own port and with its own access keys. These are the HTTP APIs, workers and webhook receivers under `recipes/` and `integrations/` that a recipe or integration README tells you to run. The brain itself is the compose stack in [`SETUP.md`](../../SETUP.md), its one deployment (SMD-2288); this guide does not run it, and new operations on the brain are a plugin ([`plugins/README.md`](../../plugins/README.md)), not a server here.
 
-"Remote" is about the client, not the machine. A connector in Claude Desktop, claude.ai or ChatGPT dials your server from the vendor's side, so it needs an HTTPS URL it can reach; a client on the same machine (Claude Code, Cursor) reaches `http://127.0.0.1:<port>` directly. Either way the server is one HTTP process — never a stdio process a client spawns, and never a `claude_desktop_config.json` entry.
+Each server is one HTTP process reached by URL: never a stdio process a client spawns, and never a `claude_desktop_config.json` entry. None of them speaks MCP. An agent reaches the brain through the brain's own connector ([Remote MCP Connection](../remote-mcp/)); these servers are called by a schedule, by a service's webhook or by another server.
 
 ## Prerequisites
 
-- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
+- A running Daemonic Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
 - [Bun](https://bun.sh) 1.4+ on the machine that will run the server
-- A checkout of this repository — the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
-- The extension's README: its Step 1 applies the extension's own tables
+- A checkout of this repository: the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
+- The server's README, which names its tables, its environment and what calls it
 
-## What You Need From the Extension
+## What You Need From the Server's README
 
-Every extension README names the file to run and the environment it reads. The table below is the shape; the values are the extension's:
+Every vendored server's README names the file to run and the environment it reads. The table below is the shape; the values are the server's:
 
 | Setting | Value |
 |---------|-------|
-| Server file | `extensions/extension-name/index.ts` |
+| Server file | `integrations/<name>/index.ts` or `recipes/<name>/<file>.ts` |
 | Port | `8787` (any free port; `PORT` unset means 8000, the stack's published port, which podman's `gvproxy` may hold too) |
 | Listen address | every address, unset; `OB1_LISTEN_HOST` names one IP address instead (`127.0.0.1` keeps the server to this machine). A value that is not one, or a link-local one, stops the server at start, in words; one this host does not have stops it with Bun's own error, `Is port N in use?` on macOS, EADDRNOTAVAIL on Linux (SMD-3323) |
-| Environment | `SUPABASE_URL` (the Postgres connection string — the shim keeps the variable's name), `MCP_ACCESS_KEYS`, and whatever else the README lists (`DEFAULT_USER_ID`, `OPENROUTER_API_KEY`, …) |
+| Environment | `SUPABASE_URL` (the Postgres connection string: the shim keeps the variable's name), `MCP_ACCESS_KEYS` (the editorial-policy auditor reads `AUDITOR_ACCESS_KEYS`; smart-ingest, the single raw `MCP_ACCESS_KEY`; readwise-capture no key list at all, but the secret Readwise echoes, `READWISE_WEBHOOK_SECRET`), and whatever else the README lists (`OPENROUTER_API_KEY`, …) |
 
-Replace `extension-name` below with the extension's directory name.
+These servers run this way, and `integrations/test-auth.ts` starts each one so in CI:
+
+| Server | Kind | Called by |
+|--------|------|-----------|
+| [`integrations/agent-memory-api`](../../integrations/agent-memory-api/) | HTTP API | an agent runtime's recall and write-back |
+| [`integrations/smart-ingest`](../../integrations/smart-ingest/) | HTTP API | a client that sends a document to split into thoughts |
+| [`integrations/entity-extraction-worker`](../../integrations/entity-extraction-worker/) | worker | a schedule, or smart-ingest after a write |
+| [`integrations/consolidation-workers`](../../integrations/consolidation-workers/) (`bio`, `metadata-norm`) | workers | a schedule |
+| [`recipes/editorial-policy`](../../recipes/editorial-policy/) (`auditor/index.ts`) | worker | a weekly schedule |
+| [`integrations/readwise-capture`](../../integrations/readwise-capture/) | webhook receiver | Readwise |
 
 ---
 
-## Step 1: Apply the Extension's Schema
+## Step 1: Apply the Server's Tables
 
-Run the extension's `schema.sql` against your Open Brain database, as the extension's README Step 1 says — `psql "$DATABASE_URL" -f extensions/extension-name/schema.sql`, nothing first (no `auth.*` stub, no Supabase role — SMD-1810). The core server's tables are already there from the migrations; this adds the extension's. With the compose stack, run it inside the database's container — `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < extensions/extension-name/schema.sql` — which needs neither a published port nor psql on the host. The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
+Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/agent-memory` for agent-memory-api, `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/readwise-books` for readwise-capture, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your brain's database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
+
+The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 
 ## Step 2: Install the Pinned Packages
 
 Once per checkout:
 
 ```bash
-(cd extensions && bun install)
+(cd integrations && bun install)
 ```
 
-`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server resolves the same install through `integrations/node_modules` or `recipes/node_modules`, committed links to `../extensions/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
+`integrations/package.json` pins `hono` and `zod`, the packages the vendored servers share (SMD-3747). An integration resolves the install from under it, and a recipe through `recipes/node_modules`, a committed link to `../integrations/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). A server that needs another package has a `package.json` of its own, and its README says to install there too. A README's run line that passes `--no-install` makes a skipped install fail the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 
-The extensions authenticate the way the core Open Brain server does: a key is **named**, has a **scope** (`read` or `write`; a `capture` key exists for the core server's session hook and is not admitted here), and only its **SHA-256 hash** is stored — the server never holds the key itself, and a key is revoked on its own by removing its line and restarting. A read-scoped key is never given the tools that write, so it does not even see them; that is the key to put in a connector URL.
+The vendored servers authenticate the way the brain does: a key is **named**, has a **scope** (`read` or `write`; a `capture` or `forward` key is the brain's alone and is not admitted here), and only its **SHA-256 hash** is stored. The server never holds the key itself, and a key is revoked on its own by removing its line and restarting. A read-scoped key is refused, with a 403, by a route that writes, and may only dry-run a worker; that is the key to give anything that only reads.
 
-> **Already have keys from the core server?** An extension server reads its own `MCP_ACCESS_KEYS` from its own environment, so reuse a line or mint a new one per extension — your choice. Nothing is shared unless you pass the same value.
+> **Already have keys from the brain?** A vendored server reads its own `MCP_ACCESS_KEYS` from its own environment, so reuse a line or mint a new one per server: your choice. Nothing is shared unless you pass the same value.
 
 Mint one from the checkout with Bun (it prints the key once, and the line to store):
 
 ```bash
-bun server-portable/keygen.ts --name laptop --scope write
+bun server-portable/keygen.ts --name cron --scope write
 ```
 
-Or by hand — generate a key, then hash it:
+Or by hand: generate a key, then hash it.
 
 🟩 **Mac/Linux:**
 
@@ -72,13 +83,17 @@ $hash = ([System.Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encod
 "key:  $key"; "hash: $hash"
 ```
 
-Save the **key** somewhere safe — it goes in your Connection URL and is not recoverable from the hash. The **hash** goes in the server's environment as `name:scope:hash`; several keys are separated by commas:
+Save the **key** somewhere safe: it goes with each request, and is not recoverable from the hash. The **hash** goes in the server's environment as `name:scope:hash`; several keys are separated by commas:
 
 ```bash
-MCP_ACCESS_KEYS=laptop:write:paste-the-hash-here,phone:read:paste-another-hash-here
+MCP_ACCESS_KEYS=cron:write:paste-the-hash-here,dashboard:read:paste-another-hash-here
 ```
 
-> The older `MCP_ACCESS_KEY=<raw key>` variable still works — one key for every client, with write scope, compared by digest now. Move to `MCP_ACCESS_KEYS` when you next touch the environment; both may be set at once.
+A request carries the key in an `x-brain-key` or `x-access-key` header, as `Authorization: Bearer <key>`, or as `?key=` on the URL. A wrong key in any of them is refused with a 401.
+
+> **smart-ingest is the exception.** It predates the hashed list (change 67) and holds one raw key, `MCP_ACCESS_KEY`, compared constant-time by its own check, with no scope: the key may do everything the server does. It reads it from an `x-brain-key` header or as `Authorization: Bearer <key>` alone. Its README says so.
+
+> The older single raw key still works (`MCP_ACCESS_KEY`, the auditor's `AUDITOR_ACCESS_KEY`): one key for every caller, with write scope, compared by digest. Move to `MCP_ACCESS_KEYS` when you next touch the environment; both may be set at once.
 
 ## Step 4: Run the Server
 
@@ -86,70 +101,67 @@ From the checkout, with the environment on the command (or in a file your proces
 
 ```bash
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-PORT=8787 bun extensions/extension-name/index.ts
+MCP_ACCESS_KEYS='cron:write:paste-the-hash-here' \
+PORT=8787 bun --no-install integrations/<name>/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the SQL shim (`compat/supabase-sql`) keeps supabase-js's variable names so the vendored code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`). Your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key:
+`SUPABASE_URL` carries the Postgres connection string (the SQL shim, `compat/supabase-sql`, keeps supabase-js's variable names so the vendored code does not change), and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`). The server's README names its routes under that root, and what its callers send.
 
-```text
-http://your-host:8787/mcp?key=your-access-key
-```
-
-Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five such servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database. `extensions/test-auth.ts` starts every vendored recipe and integration server this way in CI.
+Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five such servers beside the brain are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
 
 ## Step 5: Put It Behind HTTPS
 
-A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the stack ([`SETUP.md`](../../SETUP.md), "Connect a client"):
+A caller on this machine, outside a container (a cron job), is done: give it the `http://127.0.0.1:8787` URL. A scheduled workflow in the stack's `orchestration` profile runs in a container, where `127.0.0.1` is the container itself: it reaches a server on the host as `http://host.containers.internal:8787` under podman, or `host.docker.internal` under Docker Desktop, both of which reach the host's loopback (measured on podman 5; on Linux Docker a container reaches the host by its bridge address, so there the server listens on that address, not `127.0.0.1` alone). A caller on another machine, and a service that calls from its own side (Readwise's webhook, a hosted runtime), needs an HTTPS URL that reaches your port. The same answers serve the stack ([`SETUP.md`](../../SETUP.md), "Connect a client"):
 
-- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself, so start the server with `OB1_LISTEN_HOST=127.0.0.1` and it listens on the loopback alone. One proxy fronts every port you run: the stack's on 8000, each extension on its own.
-- **Any host that runs Bun and reaches the brain's Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile`, the brain's server image, is the shape to copy.
+- **A TLS proxy or tunnel on this host** (caddy, cloudflared, `tailscale funnel`) dials `127.0.0.1:8787` itself, so start the server with `OB1_LISTEN_HOST=127.0.0.1` and it listens on the loopback alone. One proxy fronts every port you run: the stack's on 8000, each server on its own.
+- **Any host that runs Bun and reaches the brain's Postgres** (a VPS, a container built from a Bun image with this checkout in it) runs the same command; put its TLS terminator in front. `server-portable/Dockerfile`, the brain's server image, is the shape to copy.
 
-Save the HTTPS form of the Connection URL, then follow the [Remote MCP Connection](../remote-mcp/) guide to connect it to your AI client. Keep the process up the way you keep any service up — a systemd unit, a compose service, a process manager; `bun` restarts in a second and the URL and key stay.
+Keep the process up the way you keep any service up: a systemd unit, a compose service, a process manager. `bun` restarts in a second, and the URL and key stay.
 
 ---
 
 ## Updating a Running Server
 
-Pull the checkout and restart the process:
+Pull the checkout, install again in case the pins moved, and restart the process:
 
 ```bash
 git pull
-PORT=8787 … bun extensions/extension-name/index.ts
+(cd integrations && bun install)
+PORT=8787 … bun --no-install integrations/<name>/index.ts
 ```
 
-The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Every extension's schema re-runs cleanly: each table and index is `IF NOT EXISTS`, and each trigger is dropped before it is made. A column changed in place is applied by hand.
+The URL and access key stay the same, so its callers need no change. If the server's tables changed, its README says what to re-run.
 
 ---
 
 ## Troubleshooting
 
 **`EADDRINUSE` on start**
-- Something holds the port. `PORT` unset is 8000, the stack's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the clients the new URL.
+- Something holds the port. `PORT` unset is 8000, the stack's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the callers the new URL.
 
-**`Cannot find package 'hono'` (or `zod`, `@hono/mcp`)**
-- Step 2 was skipped: `(cd extensions && bun install)`. An integration or recipe server needs the same install; it finds it through the `node_modules` link in `integrations/` or `recipes/`.
+**`Cannot find package 'hono'` (or `zod`)**
+- Step 2 was skipped: `(cd integrations && bun install)`. A recipe server needs the same install; it finds it through the `node_modules` link in `recipes/`.
 
 **401 on every request**
-- The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either — they admit read and write): check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
-- A `read`-scoped key authenticates but is given no writing tool; a server whose only tools write shows a read key nothing to call.
+- The request must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either: they admit read and write). Check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.
+
+**403 on a write, or a worker's real run**
+- The key is read-scoped. A read key may call the routes that read and dry-run a worker; give a caller that writes a `write` key.
 
 **`relation "…" does not exist`**
-- Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the extension's `schema.sql` against that database.
+- Step 1 was skipped, or ran against another database than `SUPABASE_URL` names. Re-run the server's schema against that database.
 
 **`permission denied for table …`**
-- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>` — the **recipes** group (`db/README.md`, "Grants for a capturing role"; the **extensions** group retired with SMD-2311). (`function auth.uid() does not exist` was this entry until SMD-1810; a `schema.sql` from this tree calls no `auth.*` function.)
+- The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>`: the **community** group for the tables under `schemas/`, the **recipes** group for a recipe's own SQL (`db/README.md`, "Grants for a capturing role").
 
-**The connector in Claude Desktop or ChatGPT cannot reach the server**
-- It dials from the vendor's side: the URL must be HTTPS and reachable from the internet (Step 5). A `127.0.0.1` or LAN address works only for a client on this machine or network.
+**A caller on another machine, or a service's webhook, cannot reach the server**
+- It needs the HTTPS URL (Step 5). A `127.0.0.1` or LAN address works only from this machine or network.
 - Read the server's terminal: a refused request logs its cause there.
 
 ## Expected Outcome
 
-One `bun` process per extension, each answering on its own port with the extension's tools — the full set for a write key, the reading tools alone for a read key — and, behind a TLS proxy, an HTTPS Connection URL that any MCP client accepts. Stopping the process stops the server; restarting it with the same environment brings it back at the same URL.
+One `bun` process per server, each answering on its own port: every route for a write key, the reading routes and a worker's dry run for a read key, a 401 for anything else (readwise-capture answers Readwise's echoed secret instead). Behind a TLS proxy, an HTTPS URL its callers reach. Stopping the process stops the server; restarting it with the same environment brings it back at the same URL.
 
 ## Extensions That Use This
 
-None since SMD-2311: the six extensions are plugins, on the brain's own connector with no server of their own. SMD-3747 rewrites this guide for the servers that remain.
-
-The recipe and integration servers under `recipes/` and `integrations/` run the same way; each README's run line names its file, port and environment.
+None: the six extensions are plugins since SMD-2311, served by the brain itself with no server of their own. The vendored recipe and integration servers in the table above run this way.

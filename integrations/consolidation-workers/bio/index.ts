@@ -8,7 +8,7 @@
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
-// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// reaches the audit (008). FORK.md change 69; integrations/test-writes.ts drives it
 // against Postgres, and scripts/check-consistency.ts check 10 holds it.
 // SMD-1524 (change 71): the first run's row too — the raw insert computed its own
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
@@ -16,14 +16,14 @@
 // functions record an actor only when the caller names one; change 69 named none).
 // SMD-1544 (change 73): the source and profile queries filter on JSON paths
 // (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
-// refused — a 500 at the first query on the fork — and renders now; the shim
+// refused — a 500 at the first query here — and renders now; the shim
 // also hands created_at back as a string, as PostgREST does, which the prompt
-// slices. extensions/test-writes.ts drives the worker on both write paths.
+// slices. integrations/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 67; extensions/test-auth.ts exercises it.
+// change 67; integrations/test-auth.ts exercises it.
 /**
  * consolidation-bio — Generate a canonical biographical profile from existing thoughts.
  *
@@ -482,11 +482,11 @@ async function upsertProfile(
   // itself and stored no vector at all, so the first profile was unsearchable
   // until a re-embed pass reached it. The function reads p_payload->'metadata'
   // and ->>'embedding_model' only — sibling keys such as type/importance/
-  // source_type are dropped, by upstream's function and this fork's alike — so
-  // the enhanced-thoughts columns follow by a raw update that carries neither
-  // content nor vector, as the rewrite path's do. findExistingProfile() has
-  // already run; `existed` is a concurrent run's row, reported as not created
-  // and left with its columns. The key's name rides as the actor (008).
+  // source_type are dropped, by upstream's function and Daemonic Brain's alike
+  // — so the enhanced-thoughts columns follow by a raw update that carries
+  // neither content nor vector, as the rewrite path's do. findExistingProfile()
+  // has already run; `existed` is a concurrent run's row, reported as not
+  // created and left with its columns. The key's name rides as the actor (008).
   const embedding = await embedText(profileContent);
   const { data, error: insertError } = await supabase.rpc("upsert_thought", {
     p_content: profileContent,

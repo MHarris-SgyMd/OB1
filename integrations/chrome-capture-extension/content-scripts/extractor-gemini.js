@@ -1,5 +1,5 @@
 /**
- * Open Brain Capture — Gemini extractor.
+ * Daemonic Brain Capture — Gemini extractor.
  *
  * DOM-only extraction of the most recent user/assistant message pair from
  * gemini.google.com. Used for manual capture (popup button click).
@@ -151,6 +151,6 @@
   if (self.__OBBridge) {
     self.__OBBridge.registerExtractor('gemini', extractVisibleResponse);
   } else {
-    console.error('[Open Brain Capture] Bridge not loaded before extractor-gemini.js');
+    console.error('[Daemonic Brain Capture] Bridge not loaded before extractor-gemini.js');
   }
 })();

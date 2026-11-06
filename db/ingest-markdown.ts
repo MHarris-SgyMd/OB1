@@ -15,6 +15,7 @@
  *   [[Note]], [[Note#heading|alias]], ![[Note]]   →  references Note
  *   #tag (inline) and frontmatter `tags:`         →  mentions (topic)
  *   frontmatter                                   →  facets.frontmatter, title, tags
+ *   frontmatter `priority:` and `due:`            →  priority (SMD-3666), on the note's thought
  *
  * Identity: the note's NAME — the file name without `.md`, which is what a
  * wikilink names and how Obsidian itself resolves one, so a link's target and
@@ -231,6 +232,18 @@ export function noteCreatedAt(fm: Frontmatter): string | undefined {
   return undefined;
 }
 
+/**
+ * What the note says of how much it matters (SMD-3666): frontmatter `priority:` (none, low, medium, high, urgent or
+ * critical, in any case — docs/priority.md's frontmatter row) and `due:` (a date, or a time with its offset), stated
+ * on the note's own thought. Every note carries one, null for a key it has not got, so a note whose `priority:` line
+ * is deleted clears the statement an earlier run made. A list, or any value that is not one string, is none; a word
+ * the table does not hold is unknown, and kept raw in `facets.frontmatter`.
+ */
+export function notePriority(fm: Frontmatter): NonNullable<Ingested["priority"]> {
+  const one = (v: unknown) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+  return { scale: "frontmatter", value: one(fm.priority), due: one(fm.due) };
+}
+
 /** The adapter. */
 export const markdownAdapter: Adapter<MarkdownFile> = {
   system: MARKDOWN_SYSTEM,
@@ -256,6 +269,7 @@ export const markdownAdapter: Adapter<MarkdownFile> = {
       mentions: normaliseMentions(mentions),
       facets: { path: file.path, note: noteName, title: typeof fm.title === "string" ? fm.title : noteName, tags, ...(Object.keys(fm).length ? { frontmatter: fm } : {}) },
       createdAt: noteCreatedAt(fm),
+      priority: notePriority(fm),
     };
   },
 };
@@ -372,6 +386,14 @@ export function selfCheck(): number {
   ok(parseFrontmatter("---\nno closing fence").fence === "" && parseFrontmatter("text\n---\nnot frontmatter\n---\n").fence === "", "an unclosed or non-leading fence is body");
   ok(inlineTags("# Heading\n#tag1 and (#tag2) `#not` and ```\n#nor\n``` and a#b").join(",") === "tag1,tag2", "inline tags: not headings, not code, not mid-word");
   ok(wikilinks("[[A]] ![[B|b]] [[C#h|c]]").map((w) => `${w.embed ? "!" : ""}${w.note}${w.anchor ? "#" + w.anchor : ""}${w.alias ? "|" + w.alias : ""}`).join(" ") === "A !B|b C#h|c", "wikilinks parsed with anchor, alias and embed");
+
+  // SMD-3666: frontmatter priority and due, on the note's thought; none when the note says none, so a deleted line clears.
+  const said = markdownAdapter.map(file("Plan.md", "---\npriority: High\ndue: 2026-12-01\n---\nbody")).priority;
+  const bare = markdownAdapter.map(file("Bare.md", "just a body")).priority;
+  const listed = notePriority(parseFrontmatter("---\npriority:\n  - high\n  - low\ndue: soon\n---\n").fm);
+  ok(JSON.stringify(said) === JSON.stringify({ scale: "frontmatter", value: "High", due: "2026-12-01" }) && said?.on === undefined
+     && JSON.stringify(bare) === JSON.stringify({ scale: "frontmatter", value: null, due: null }) && listed.value === null && listed.due === "soon",
+    `a note's priority and due day are its frontmatter's, on its own thought; a note with none carries none, so a deleted line clears; a list is no value, and a due day the scale reads as none is kept for the pipeline to drop (${JSON.stringify([said, bare, listed])})`);
 
   if (bad === 0) console.log("ingest-markdown.ts self-check PASS");
   return bad === 0 ? 0 : 1;

@@ -12,8 +12,9 @@
  * the old vector and 022's chunk rows of the old vector under the new one.
  * scripts/check-consistency.ts check 10 holds the text; this proves the
  * behaviour: each writer that can run is driven as deployed against a real
- * Postgres carrying the fork's schema, and the row it leaves is compared with
- * the row update_thought leaves for the same edit — the ticket's own verify.
+ * Postgres carrying Daemonic Brain's schema, and the row it leaves is compared
+ * with the row update_thought leaves for the same edit — the ticket's own
+ * verify.
  *
  * SMD-1524 (FORK.md change 71) added the other door: eight vendored files
  * INSERTED a fresh row with content, or content and a vector, around the
@@ -33,7 +34,7 @@
  * SMD-1544 (FORK.md change 73) moved the bio worker from the read set to the
  * driven one. Its source and profile queries filter on JSON paths
  * (`metadata->>generated_by`, `->>subject` …), which the SQL shim refused, so
- * on the fork the worker answered 500 at its first query and everything
+ * in Daemonic Brain the worker answered 500 at its first query and everything
  * changes 69 and 71 gave its write paths was held by the text guards alone.
  * With the shim rendering the path — and handing a timestamp back as a
  * string, as PostgREST does, which the worker's prompt slices — the worker runs
@@ -76,17 +77,17 @@
  * the stub was handed, all suite long, began postgres:// or carried
  * /functions/v1/.
  *
- * SMD-2128: smart-ingest's write path is the fork's — the 3-argument
+ * SMD-2128: smart-ingest's write path is Daemonic Brain's — the 3-argument
  * upsert_thought with the vector as p_embedding, its model's label and the
  * actor in the envelope, the enhanced columns by an update on a fresh row —
  * where upstream's 2-argument call put the vector inside the payload, which
- * the fork's function ignores, so every thought the server wrote had no
- * vector; and the item columns that hold a thought id are uuid, where the
- * fork's UUID into upstream's bigint failed every item of a job with a match
- * and recorded no result. The smart-ingest block asserts the row's vector at
- * the stub's axis, its label, its enhanced columns and 008's row; the item's
- * result_thought_id; the same text again as a skip by fingerprint naming the
- * first thought; and, through a stub vector 0.88 from the first thought's,
+ * Daemonic Brain's function ignores, so every thought the server wrote had no
+ * vector; and the item columns that hold a thought id are uuid, where
+ * a UUID into upstream's bigint failed every item of a job with
+ * a match and recorded no result. The smart-ingest block asserts the row's
+ * vector at the stub's axis, its label, its enhanced columns and 008's row; the
+ * item's result_thought_id; the same text again as a skip by fingerprint naming
+ * the first thought; and, through a stub vector 0.88 from the first thought's,
  * the two branches between the thresholds — append_thought_evidence(uuid,
  * jsonb) on the richer existing thought, and a revision whose `supersedes`
  * is the thought it revises. The sidecar's retype of a table created under
@@ -95,14 +96,14 @@
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799); every server
  * imports compat/supabase-sql itself since SMD-1798, and resolves its packages
- * through the committed node_modules links (SMD-1991). The model provider is
- * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — as are Readwise's book lookup and the extraction worker
- * smart-ingest triggers (SMD-2110), and everything below the tool or
- * route boundary is real; test-auth.ts is where the servers start under bun
- * for real.
+ * through the install in integrations/ and the committed recipes/node_modules
+ * link (SMD-1991). The model provider is stubbed — a unit vector keyed off the
+ * text, so the vector a writer stored is recognisable — as are Readwise's book
+ * lookup and the extraction worker smart-ingest triggers (SMD-2110), and
+ * everything below the tool or route boundary is real; test-auth.ts is where
+ * the servers start under bun for real.
  *
- * The database is the fork's migrations plus four vendored sidecars the
+ * The database is Daemonic Brain's migrations plus four vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …),
  * schemas/agent-memory (the write-back's own tables), schemas/readwise-books
@@ -147,10 +148,10 @@ const { assert, report } = createAssert();
 
 // Pinned, as test-e2e-sql.ts pins them: this suite asserts the data layer, not
 // the model choice, and every writer here spells the OpenRouter default — so
-// the brain is built at ITS width. The fork's default is qwen3-embedding:4b at
-// 1024, where every one of these writers' vectors is refused by the function
-// and the capture or edit fails whole; that case is the operator's to avoid
-// (each README says so) and is not driven here.
+// the brain is built at ITS width. Daemonic Brain's default is
+// qwen3-embedding:4b at 1024, where every one of these writers' vectors is
+// refused by the function and the capture or edit fails whole; that case is the
+// operator's to avoid (each README says so) and is not driven here.
 const DIM = 1536;
 const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
@@ -303,9 +304,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-// A recipe or integration imports STACK's four by bare name and has no install of its own beside it; they resolve
-// from extensions/node_modules through the committed recipes/node_modules and integrations/node_modules links,
-// which test-auth.ts holds (SMD-1991).
+// A recipe or integration imports STACK's packages (hono and zod) by bare name and has no install of its own beside it; they resolve
+// from integrations/node_modules, the integrations from under it and the recipes through the committed
+// recipes/node_modules link, which test-auth.ts holds (SMD-1991; this directory's since SMD-3747).
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
@@ -586,11 +587,11 @@ try {
   // One ingest, executed at once: the stubbed model extracts the text as one thought, the server writes it through
   // upsert_thought, and the write POSTs to the extraction worker at ENTITY_EXTRACTION_WORKER_URL — set before the module
   // loaded — with its key and the count as ?limit=. Main's file built that URL from SUPABASE_URL, the Postgres DSN, so every
-  // trigger handed fetch() the credentials and failed inside its timeout — and fired never, on this fork: upsert_thought
-  // answers a UUID id, which the file read as no id, so every add was reported failed (SMD-2110). The row is the fork's
+  // trigger handed fetch() the credentials and failed inside its timeout — and fired never, in Daemonic Brain: upsert_thought
+  // answers a UUID id, which the file read as no id, so every add was reported failed (SMD-2110). The row is Daemonic Brain's
   // capture (SMD-2128): the 3-argument form, so the vector is stored at the stub's axis under the model's label, the
   // enhanced columns set beside it and 008's row naming the key and this server — upstream's 2-argument call put the
-  // vector inside the payload, where the fork's function does not look, and every thought this server wrote had none.
+  // vector inside the payload, where Daemonic Brain's function does not look, and every thought this server wrote had none.
   const text = "The shim binds a vector by its column's declared type, so a raw write with a number array reaches Postgres as JSON text.";
   const mark = reached.length;
   const ingested = await send(h, "POST", "/", { text, dry_run: false, skip_classification: true, source_label: "test-writes" });
@@ -997,9 +998,10 @@ const BYPASS_1524 = ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/sche
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
   "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128
-// Every vendored .ts, read once; each ticket's rule tests the same texts.
+// Every vendored .ts, read once; each ticket's rule tests the same texts. The suites beside the install in
+// integrations/ (here since SMD-3747) are not vendored servers: they name the tickets they test.
 const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-  .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
+  .filter((f) => !f.includes("node_modules") && f !== "integrations/test-auth.ts" && f !== "integrations/test-writes.ts").map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
 for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544], ["SMD-1541", DRIVEN_1541]] as const) {
   const headed = HEADED.filter(([, text]) => new RegExp(ticket).test(text)).map(([f]) => f).sort();
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
@@ -1008,7 +1010,7 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
   assert(existsSync(join(ROOT, "scripts/check-consistency.ts")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-consistency.ts"), "utf8")),
     "scripts/check-consistency.ts check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
-// SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string on this fork. Every
+// SMD-2110: an HTTP target comes from its own variable, never from SUPABASE_URL — the connection string in Daemonic Brain. Every
 // URL the stub was handed, by every writer this suite drove, and smart-ingest's text: no URL built on that variable.
 assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
   `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
@@ -1016,7 +1018,7 @@ assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u
 // an alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
 spells("integrations/smart-ingest/index.ts",/^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
 // SMD-2128: smart-ingest's text — one upsert_thought call site, the 3-argument form with the vector as p_embedding and the
-// actor in the envelope, and no `embedding` key inside the payload (upstream's shape, which the fork's function ignores).
+// actor in the envelope, and no `embedding` key inside the payload (upstream's shape, which Daemonic Brain's function ignores).
 {
   const F = "integrations/smart-ingest/index.ts";
   assert((readFileSync(join(ROOT, F), "utf8").match(/rpc\("upsert_thought"/g) ?? []).length === 1, `${F} calls upsert_thought from one place, writeThought`);
@@ -1029,7 +1031,7 @@ spells("integrations/smart-ingest/index.ts",/^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|
   let depth = 0, end = -1;
   for (let i = at; at >= 0 && i < text.length && end < 0; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) end = i; }
   const payload = at >= 0 && end > at ? text.slice(at, end + 1) : "";
-  assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which the fork's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
+  assert(payload.length > 0 && !/(?:^|[^\w])["'`]?embedding["'`]?\s*:/.test(payload), `${F} puts no \`embedding\` key inside upsert_thought's payload — the 2-argument form's shape, which Daemonic Brain's function does not read (${payload.replace(/\s+/g, " ").slice(0, 160)})`);
 }
 
 } catch (e) {

@@ -8,7 +8,7 @@ Open Brain's knowledge graph (from the [`entity-extraction` schema (PR #197)](ht
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - [`entity-extraction` schema (PR #197)](https://github.com/NateBJones-Projects/OB1/pull/197) applied (this schema extends its `edges` table)
 - (Recommended) the companion [`recipes/typed-edge-classifier/`](../../recipes/typed-edge-classifier/) to populate `thought_edges` automatically
 
@@ -30,7 +30,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group). The file hard-fails with a clear message if `public.thoughts` or `public.edges` is missing, so apply `schemas/entity-extraction` first.
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (Daemonic Brain, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group). The file hard-fails with a clear message if `public.thoughts` or `public.edges` is missing, so apply `schemas/entity-extraction` first.
 3. Open **Table Editor** and confirm the new `thought_edges` table appears with the following columns:
    - `id`, `from_thought_id`, `to_thought_id`, `relation`, `confidence`, `decay_weight`, `valid_from`, `valid_until`, `classifier_version`, `support_count`, `metadata`, `created_at`, `updated_at`
 4. Confirm the existing `edges` table now also has `valid_from`, `valid_until`, `decay_weight` columns (SQL Editor → `SELECT column_name FROM information_schema.columns WHERE table_name = 'edges';`)
@@ -52,11 +52,11 @@ After running the migration:
 - Four indexes on `thought_edges`: outgoing `(from_thought_id, relation)`, incoming `(to_thought_id, relation)`, "currently valid" partial index (`valid_until IS NULL`), and a decay-sweep index on `valid_until`.
 - Three new columns on `edges`: `valid_from`, `valid_until`, `decay_weight`, plus a range-check constraint and two new indexes for temporal queries.
 - An `updated_at` trigger on `thought_edges`.
-- No row-level security and no grants in the file (this fork, SMD-1796): upstream enabled RLS on `thought_edges` for Supabase's `service_role` only, a role that does not exist off Supabase; `bun migrate.ts --grant <role>` gives the role you connect as the table, its sequence and `EXECUTE` on `thought_edges_upsert`. Upstream's posture: `authenticated` and `anon` have no access. This matches the posture of `public.thoughts` in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). See [RLS posture](#rls-posture-service-role-only) below.
+- No row-level security and no grants in the file (Daemonic Brain, SMD-1796): upstream enabled RLS on `thought_edges` for Supabase's `service_role` only, a role that does not exist off Supabase; `bun migrate.ts --grant <role>` gives the role you connect as the table, its sequence and `EXECUTE` on `thought_edges_upsert`. Upstream's posture: `authenticated` and `anon` have no access. This matches the posture of `public.thoughts` in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). See [RLS posture](#rls-posture-service-role-only) below.
 
 ## RLS posture (service-role only)
 
-Upstream's posture, kept in spirit: `thought_edges` was readable and writable **only by `service_role`**, with no `SELECT` for `authenticated`. On this fork those roles do not exist and the file grants nothing (SMD-1796); the table is readable and writable by its owner and by the roles `bun migrate.ts --grant` covers, which on a single-operator brain (SMD-1716) is the same boundary `public.thoughts` has.
+Upstream's posture, kept in spirit: `thought_edges` was readable and writable **only by `service_role`**, with no `SELECT` for `authenticated`. In Daemonic Brain those roles do not exist and the file grants nothing (SMD-1796); the table is readable and writable by its owner and by the roles `bun migrate.ts --grant` covers, which on a single-operator brain (SMD-1716) is the same boundary `public.thoughts` has.
 
 **Why.** Each row carries `from_thought_id`, `to_thought_id`, and `metadata.rationale`. Together those expose derived relationships between private thoughts. Since the underlying `public.thoughts` table is service-role-only in stock Open Brain, exposing `thought_edges` to `authenticated` via PostgREST would leak derived private-thought relationships that the base table intentionally hides. The only safe posture is to mirror `public.thoughts`.
 

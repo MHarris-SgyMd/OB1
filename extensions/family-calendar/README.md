@@ -27,7 +27,7 @@ Two kids, two parents, overlapping schedules. Soccer practice conflicts with the
 
 A multi-person family scheduling system. Track activities, important dates, and family members so your agent can spot conflicts, surface upcoming events, and make sure nothing gets forgotten.
 
-On this fork the family calendar is a **plugin**: [`plugins/family-calendar`](../../plugins/family-calendar/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_family_calendar`, which the brain's migrator makes when you turn the plugin on.
+In Daemonic Brain the family calendar is a **plugin**: [`plugins/family-calendar`](../../plugins/family-calendar/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_family_calendar`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `family_members` — People in your household
@@ -47,7 +47,7 @@ The plugin's [README](../../plugins/family-calendar/README.md) gives each one's 
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-2 recommended but not required
 
 ## Steps

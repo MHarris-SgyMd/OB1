@@ -14,7 +14,9 @@
  * least one call would go through — and never call process.exit or touch the
  * sql client. extract-entities.ts's, consolidate.ts's and reembed.ts's
  * importable run() turn the result into a return code (SMD-2304). Banners are
- * returned as strings for the caller to print with its own label and spacing.
+ * returned as strings for the caller to print with its own label and spacing;
+ * a follower's waits (SMD-2636) and throughOutage say their lines through the
+ * caller's writer, and run the statements the caller hands them.
  */
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
@@ -210,7 +212,8 @@ export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
  * timeout is the thought's (retry it later); a 429 or 5xx is transient (pause and
  * retry the call); a 400 about the input's length (refusesLength, shared with
  * embed.ts) is the thought's; any other 4xx is fatal (stop the pass); a connection
- * error is transient; anything else is the thought's.
+ * error is transient; anything else is the thought's. Their followers read it
+ * through followerFault, followClassify's split (SMD-3311).
  *
  * `maxTokensFatal` (extract only): a 400 naming the answer budget
  * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
@@ -379,8 +382,20 @@ export function missingModelIs(e: unknown, model: string): boolean {
  *   (a TypeError, a SyntaxError) among them.
  * Pure, the worker's state apart: a stop is the caller's. Each verdict here
  * was met by a real error, Bun's SQL client's and embed.ts's (review pass 5).
+ * The extraction and judge calls keep their own fetch and throw an Error
+ * carrying the answer's `status` (entities.ts, consolidate.ts): read as an
+ * embed.ts `http` error of that status, its words providerWords'; and a
+ * call's deadline passing (timedOut) as embed.ts's `timeout` (SMD-3311).
  */
 export type FollowVerdict = "db-wait" | "db-end" | "db-moment" | "backpressure" | "maybe-poison" | "thought" | "probe-decides";
+
+/** The status of a provider's answer an error carries — an embed.ts `http` error's, or the extraction and judge calls' own Error's — else null: no answer (a deadline, no connection) or another kind (SMD-3311). */
+function answerStatus(e: unknown): number | null {
+  if (e instanceof ProviderError) return e.kind === "http" ? e.status ?? 0 : null;
+  const status = (e as { status?: unknown } | undefined)?.status;
+  return e instanceof Error && typeof status === "number" ? status : null;
+}
+
 export function followClassify(e: unknown): FollowVerdict {
   if (databaseUnavailable(e)) return "db-wait";
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
@@ -389,20 +404,45 @@ export function followClassify(e: unknown): FollowVerdict {
     if (/^(40|53)/.test(errno) || ["55P03", "25006", "25P02"].includes(errno)) return "db-moment";
     return "thought";
   }
-  if (e instanceof ProviderError) {
-    if (e.kind === "egress") return "thought";
-    if (e.kind === "timeout") return "maybe-poison";
-    if (e.kind === "http") {
-      const s = e.status ?? 0;
-      if (s === 429 || s === 503 || modelMissing(e)) return "backpressure";
-      if (s >= 500 || s === 408) return "maybe-poison";
-      if (refusesLength(s, e.body)) return "thought";
-    }
+  const http = answerStatus(e);
+  if (e instanceof ProviderError && e.kind === "egress") return "thought";
+  if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
+  if (http !== null) {
+    if (http === 429 || http === 503 || modelMissing(e)) return "backpressure";
+    if (http >= 500 || http === 408) return "maybe-poison";
+    if (refusesLength(http, e instanceof ProviderError ? e.body : providerWords(e))) return "thought";
     return "probe-decides";
   }
+  if (e instanceof ProviderError) return "probe-decides";
   // A runtime error with a connection's code: the provider not reached.
   if (providerDown(e)) return "maybe-poison";
   return "probe-decides";
+}
+
+/**
+ * A provider error as a claim follower that pauses before an outage reads it
+ * — extract-entities.ts's and consolidate.ts's — through followClassify's
+ * split (SMD-3311; re-embed's follower has no pauses and reads the verdict
+ * itself). `kind` is classifyError's, but two readings are transient —
+ * paused for, then an outage: a 4xx followClassify reads as the provider's
+ * outage, a 408, not the request's, which stopped every worker; and an
+ * answer classifyError called the thought's for its words saying "timed out"
+ * where followClassify reads its status as the provider's (a gateway's 408, a
+ * 504, a 429 or a 503 saying so: review passes 1 and 2). `suspect`: whether an outage it
+ * begins makes the thought in hand a suspect, recorded failed if it meets
+ * the provider again right after a probe answers. followClassify's
+ * backpressure — a 429, a 503, the model not served — says nothing about the
+ * thought and makes none; any other error does, as before.
+ */
+export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {}): { kind: ErrorKind; suspect: boolean } {
+  const verdict = followClassify(e);
+  const kind = classifyError(e, opts);
+  // An answer's status outranks classifyError's "timed out" in its words: a 408 whose body says
+  // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
+  // decides (review pass 1), and so is a 429 or a 503 saying so, backpressure, no suspect (review
+  // pass 2). A deadline with no status keeps "thought", which the probe decides.
+  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answerStatus(e) !== null && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
+  return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
 }
 
 /**
@@ -447,7 +487,7 @@ export const PROBE_PROMPT = "Reply with the word OK.";
 /**
  * What one probe found. `up`: the model answered, or the provider answered a
  * way the next real call will judge (a 400 for the probe's own `max_tokens`,
- * say). `out`: no answer, a timeout, a 429 or a 5xx — `unanswered`
+ * say). `out`: no answer, a timeout, a 408, a 429 or a 5xx — `unanswered`
  * (probeChat's) when no answer came within its limit or the answer's body
  * never arrived, the provider holding the call, not refusing it nor erring on
  * it (SMD-3306 PR 6b-1: the subject sweep reads a call aborted in hand, this
@@ -505,7 +545,9 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
   // (review pass 3).
   if (unread) return { state: "out", why: `${r.status}, and the answer did not arrive`, unanswered: true };
   if (r.ok) return { state: "up" };
-  if (r.status === 429 || r.status >= 500) return { state: "out", why };
+  // A 408 is the provider's outage, as followClassify reads one (SMD-3311):
+  // read as up, the follower's next call met it again and failed its suspect.
+  if (r.status === 429 || r.status === 408 || r.status >= 500) return { state: "out", why };
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
   if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
   return { state: "up" };
@@ -515,7 +557,8 @@ async function probeExchange(endpoint: Pick<ProviderEndpoint, "base" | "headers"
  * The typed-decision tier's probe, for consolidate's decide mode (SMD-3115): its /info, which sends no text.
  * `up` when it serves `model`; `missing` when it serves another (the pass key names the decider, so another
  * model's verdicts would be recorded under the wrong name); `out` when it does not answer (no answer, a timeout,
- * a 5xx); `refused` when the address answers as something else (a 4xx, or not ob1-jev/1).
+ * a 429 or a 5xx, and a 408 since SMD-3311); `refused` when the address answers as something else (any other 4xx, or not
+ * ob1-jev/1).
  */
 export async function probeTier(jev: JevConfig, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   try {
@@ -525,7 +568,9 @@ export async function probeTier(jev: JevConfig, model: string, timeoutMs: number
     if (wake?.aborted) return { state: "out", why: "the probe was stopped", tier: true };
     const why = `the tier at ${jev.endpoint.base}: ${((e as Error).message ?? "").slice(0, 200)}`;
     const err = e as { kind?: string; status?: number };
-    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429);
+    // A 408 is the tier's outage, as probeChat reads one (SMD-3311 review pass 1): read as refused, an
+    // outage over the decide call's 408 settled at once and its next 408 failed the suspect.
+    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429 && err.status !== 408);
     return { state: answeredAsOther ? "refused" : "out", why, tier: true };
   }
 }
@@ -634,13 +679,17 @@ export class ProviderOutage {
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(
     private readonly now: () => number = Date.now,
-    /** How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15 minutes (the subject sweep's, SMD-3306 PR 6b-1). */
-    private readonly windowMs: number = SUSPECT_WINDOW.ms,
+    /**
+     * How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15
+     * minutes (the subject sweep's, SMD-3306 PR 6b-1), or read at each error, when its calls' limit changes as it runs
+     * (consolidation's beside the sweep, PR 6b-2's review pass 3).
+     */
+    private readonly windowMs: number | (() => number) = SUSPECT_WINDOW.ms,
   ) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.windowMs) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= (typeof this.windowMs === "number" ? this.windowMs : this.windowMs())) {
       this.suspects.delete(thoughtId);
       return "thought";
     }
@@ -754,5 +803,161 @@ export async function throughOutage<T>(run: () => Promise<T>, opts: {
       await sleep(outageWait(step), opts.wake);
       if (opts.wake.aborted) return null;
     }
+  }
+}
+
+// ── A follower's waits (SMD-2636) ────────────────────────────────────────────
+// One copy of what extract-entities.ts, consolidate.ts and reembed.ts each kept of SMD-2599's glue: the start probe's
+// refusal, the wait at the start, the wait for the database and the pass it does not end, and the leases a worker
+// could not return. Each worker passes its own words and probe; the outage wait and a fault's reading are next.
+
+/** A follower's lines: the start's and the waits'. */
+export type FollowerWriter = { out: (line: string) => void; err: (line: string) => void };
+
+/** A start refusal: which it is, for `onStart` (SMD-2752), and the line that says it. */
+export type FollowerRefusal = { kind: StartRefusal; line: string };
+
+/**
+ * A follower's first probe, before it writes anything (SMD-2599): its refusal — a model unserved, the endpoint
+ * refusing, or a worker's own check of what answered (extract's escalation model) — or, through, why it did not
+ * answer, waited for at its start (`waitAtStart`), or null when it did. `refusal` reads only a probe that answered:
+ * no answer refuses nothing at start.
+ */
+export async function probeAtStart(o: {
+  probe: (wake?: AbortSignal) => Promise<Probe>;
+  refusal: (p: Probe, wake?: AbortSignal) => Promise<FollowerRefusal | null>;
+  wake?: AbortSignal;
+}): Promise<{ refused: FollowerRefusal } | { out: string | null }> {
+  const first = await o.probe(o.wake);
+  if (first.state === "out") return { out: first.why };
+  const refused = await o.refusal(first, o.wake);
+  return refused ? { refused } : { out: null };
+}
+
+/**
+ * A follower's wait at its start for a provider whose first probe got no answer (SMD-2599): said, and said through a
+ * caller's stamper while it lasts (the sleep scheduler's, so its row says a pass waits at its start, SMD-2752);
+ * probed on outageWait's schedule until a probe settles — anything but out — and that probe held to `refusal`, the
+ * start's refusals. "up" when it answered and none refuses it, said; null when `wake` ended the wait.
+ */
+export async function waitAtStart(o: {
+  /** The provider in the lines: "the provider", "the embedding provider". */
+  who: string;
+  /** Why the first probe got no answer. */
+  why: string;
+  /** What the follower holds back meanwhile and how it probes: "claims nothing until it does; it calls m at b for one token". */
+  meanwhile: string;
+  probe: (wake: AbortSignal) => Promise<Probe>;
+  refusal: (p: Probe, wake: AbortSignal) => Promise<FollowerRefusal | null>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  stamper?: { startWait?: (on: boolean) => Promise<void> | void } | null;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<"up" | { refused: FollowerRefusal } | null> {
+  const down = Date.now();
+  o.writer.err(`  ${o.who} is not answering at start (${o.why.slice(0, 200)}) — the follower ${o.meanwhile} after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
+  await o.stamper?.startWait?.(true);
+  const answered = await probeUntil(() => o.probe(o.wake), o.wake, (p) => p.state !== "out", o.sleep).finally(() => o.stamper?.startWait?.(false));
+  if (answered === null) return null;
+  const refused = await o.refusal(answered, o.wake);
+  if (refused) return { refused };
+  o.writer.out(`  ${o.who} answers after ${Math.round((Date.now() - down) / 1000)} s`);
+  return "up";
+}
+
+/**
+ * A follower's wait for the database after an error databaseUnavailable reads as its outage (SMD-2599): said once,
+ * waited out on outageWait's schedule until `check` (a SELECT 1) answers, and said again — true; false when `wake`
+ * ended the wait. A check the database refuses otherwise is thrown, the run's end. `firstLine`: the error's first
+ * line alone in the line (re-embed's).
+ */
+export async function waitForDatabase(e: unknown, o: {
+  check: () => Promise<unknown>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  firstLine?: boolean;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<boolean> {
+  const down = Date.now();
+  const message = (e as Error).message;
+  o.writer.err(`  the database is not answering (${o.firstLine ? message.split("\n")[0] : message}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
+  if (!(await waitOut({ check: o.check, outage: databaseUnavailable, wake: o.wake, sleep: o.sleep }))) return false;
+  o.writer.out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+  return true;
+}
+
+/**
+ * A follower's pass, which a database outage does not end (SMD-2599; extract's and consolidate's): an error
+ * databaseUnavailable reads as the database not answering is waited out (waitForDatabase), and the pass runs again at
+ * once, so its counts are read — or a stop ends the wait, and the counts are null. `afterPass` runs after a pass that
+ * returns, inside the same catch: the worker's wait for its provider. Any other error ends the run, and with `follow`
+ * false a database outage too, as a run without --follow always ended.
+ */
+export async function followedPass<C>(o: {
+  pass: () => Promise<C>;
+  afterPass: () => Promise<void>;
+  follow: boolean;
+  check: () => Promise<unknown>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<C | null> {
+  for (;;) {
+    try {
+      const c = await o.pass();
+      await o.afterPass();
+      return c;
+    } catch (e) {
+      if (!o.follow || !databaseUnavailable(e)) throw e;
+      if (!(await waitForDatabase(e, o))) return null;
+    }
+  }
+}
+
+/**
+ * The workers whose leases could not be returned as they ended — the database not answering — returned at the
+ * follower's next pass or poll rather than left to expire (SMD-2599). A follower's only.
+ */
+export class Unreturned {
+  private readonly workers = new Set<string>();
+  /** `release` returns one worker's leases: release_claims_for_worker. */
+  constructor(private readonly release: (worker: string) => Promise<unknown>) {}
+
+  add(worker: string): void {
+    this.workers.add(worker);
+  }
+
+  get size(): number {
+    return this.workers.size;
+  }
+
+  /** Each returned in turn, before a pass's or a poll's pool; the first the database refuses throws, it and the rest kept. */
+  async returnAll(): Promise<void> {
+    for (const w of this.workers) {
+      await this.release(w);
+      this.workers.delete(w);
+    }
+  }
+
+  /** As returnAll, but one the database refuses ends the returns quietly, it and the rest kept for later (re-embed's before its admit gate, SMD-3379 PR 1b-1 review pass 7). */
+  async returnWhileAnswered(): Promise<void> {
+    for (const w of [...this.workers]) {
+      try {
+        await this.release(w);
+        this.workers.delete(w);
+      } catch {
+        break;
+      }
+    }
+  }
+
+  /** All at once as the run ends; one line when any could not go, which expire within `ttlS` (review passes 3 and 4). */
+  async returnAtEnd(ttlS: number, writer: Pick<FollowerWriter, "err">): Promise<void> {
+    if (this.workers.size === 0) return;
+    const kept = (await Promise.all([...this.workers].map((w) => this.release(w).then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
+    if (kept > 0) writer.err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${ttlS} s`);
   }
 }

@@ -1,6 +1,6 @@
 # Common Troubleshooting
 
-Solutions for issues that come up across Open Brain's extensions, recipes and integrations. If your problem is specific to one (e.g., a particular table or tool), check its README instead. The extensions are plugins since SMD-2311, served by the brain's own servers; a recipe or integration server runs under `bun` beside them. Every server logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core (and every plugin's tools), the terminal the `bun` command runs in for a recipe or integration.
+Solutions for issues that come up across Daemonic Brain's extensions, recipes and integrations. If your problem is specific to one (e.g., a particular table or tool), check its README instead. The extensions are plugins since SMD-2311, served by the brain's own servers; a recipe or integration server runs under `bun` beside them. Every server logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core (and every plugin's tools), the terminal the `bun` command runs in for a recipe or integration.
 
 ## Connection Issues
 
@@ -16,10 +16,10 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
 - An entry in `MCP_ACCESS_KEYS` that is not `name:read|write|capture|forward:<64 hex characters>` is ignored silently — `bun preflight.ts` in `server-portable/` with the same value in its environment prints the parse problem
 - A key's scope is what you expect: a read-scoped key does not see the tools that write, and a server whose only tools write shows it nothing
-- Try minting a new key: Step 3 of [Run a Remote MCP Server](../deploy-remote-mcp/), then restart the server with the new line and update your Connection URL
+- Try minting a new key. For the brain's connector: Step 3 of [Getting Started](../../docs/01-getting-started.md), swapped in as [Remote MCP Connection](../remote-mcp/)'s "Keys and Scope" says, then update your Connection URL. For a vendored server: Step 3 of [Run a Vendored Server](../deploy-remote-mcp/), then restart it and give its callers the new key
 
 **"Tools don't appear in Claude Desktop"**
-- The connector dials from Anthropic's side: the URL must be HTTPS and reachable from the internet (Step 5 of [Run a Remote MCP Server](../deploy-remote-mcp/)); `http://127.0.0.1:…` works only for a client on this machine
+- The connector dials from Anthropic's side: the URL must be HTTPS and reachable from the internet (Step 6.1 of [Getting Started](../../docs/01-getting-started.md)); `http://127.0.0.1:…` works only for a client on this machine
 - Verify the connector is enabled for your conversation — click the "+" button at the bottom of the chat → Connectors → check the toggle
 - Check that the MCP Connection URL is correct and includes `?key=your-access-key`
 - Try removing and re-adding the connector in Settings → Connectors
@@ -35,7 +35,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 
 **The server won't start**
 - `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the compose stack's, and on macOS podman's `gvproxy` holds it too. Pick another port.
-- `Cannot find package 'hono'`: run `(cd extensions && bun install)` once; an integration or recipe server reaches that same install through the `node_modules` link in `integrations/` or `recipes/`
+- `Cannot find package 'hono'`: run `(cd integrations && bun install)` once; a recipe server reaches that same install through the `node_modules` link in `recipes/`
 - A missing environment variable: the server names it and exits. The recipe's or integration's README lists what it reads.
 - The stack's `api` service exits with `preflight FAILED` (the image runs it first): read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
 
@@ -43,7 +43,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Read the server's output: a failed tool call logs its cause there
 - `relation "…" does not exist`: the recipe's `schema.sql` did not run against the database `SUPABASE_URL` names
 - `schema "auth" does not exist`, or `function auth.uid() does not exist` / `relation "auth.users" does not exist` once an `auth` schema was created by hand: a `schema.sql` from before SMD-1810, or one of your own with Supabase's policies — the files in this tree call no `auth.*` function; take the current file
-- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at this fork's local default (1024); the README says which width it needs
+- Vector width: a server that embeds through OpenRouter at 1536 dimensions refuses on a brain built at Daemonic Brain's local default (1024); the README says which width it needs
 
 ## Database Issues
 
@@ -53,7 +53,7 @@ Solutions for issues that come up across Open Brain's extensions, recipes and in
 - Check for errors in the SQL output — common issues include missing the pgvector extension or running statements out of order
 
 **"permission denied"**
-- The role in `SUPABASE_URL` needs grants on the recipe's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the recipe tables too — the **recipes** group (`db/README.md`, "Grants for a capturing role"). An extension's tables are its plugin's since SMD-2311, under the plugin's own role. The schemas grant nothing themselves; a role that owns the tables needs nothing
+- The role in `SUPABASE_URL` needs grants on the recipe's tables; `bun db/migrate.ts --grant <role>` grants the core tables and, since SMD-1810, the recipe tables too — the **recipes** group for a recipe's own SQL, the **community** group for the tables under `schemas/` (`db/README.md`, "Grants for a capturing role"). An extension's tables are its plugin's since SMD-2311, under the plugin's own role. The schemas grant nothing themselves; a role that owns the tables needs nothing
 - Check that `user_id` values are valid UUIDs
 
 **"Foreign key violation" errors**

@@ -14,10 +14,10 @@
  * The reduced first form, said so. The ticket's "deliverable that carries
  * citations" needs SMD-1715's `capture_deliverable`, which is not built, and
  * migration 042's `record_citation` has no MCP caller (SMD-1733 owns that
- * argument). On this fork today a deliverable is what SMD-1719 already scores
- * as a citation: a `capture_thought` whose `derived_from` names the returned
- * ids it used. That is what runs here; when 1715 lands the arm swaps the
- * tool and the read-back of the citations (today `thoughts.derived_from`;
+ * argument). In Daemonic Brain today a deliverable is what SMD-1719 already
+ * scores as a citation: a `capture_thought` whose `derived_from` names the
+ * returned ids it used. That is what runs here; when 1715 lands the arm swaps
+ * the tool and the read-back of the citations (today `thoughts.derived_from`;
  * under 042 a facet row per citation), and the scorer keeps taking a list of
  * source ids per deliverable.
  *

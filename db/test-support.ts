@@ -460,6 +460,10 @@ const FUNCTIONS = [
   // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
   "release_closed_ticket_claims(text, boolean, jsonb)",
   "ob1_work_claim_closed_head(text)",
+  // 120 (SMD-3306): a work thread's re-link and the trigger function that calls it; the triggers and the indexes go with
+  // thought_facets.
+  "thread_relink(text, boolean)",
+  "ob1_thread_relink_subject()",
 ];
 
 /**
@@ -489,7 +493,7 @@ export type SchemaOptions = {
    * suites exercise the schema a stock deployment gets. Read from config rather
    * than written as a literal here: SMD-944 flipped that default from off to on
    * and a hardcoded copy would have silently kept the old one, which is the
-   * defined-twice failure this fork keeps removing.
+   * defined-twice failure Daemonic Brain keeps removing.
    */
   trgm?: boolean;
   /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
@@ -596,7 +600,7 @@ async function assertThrowawayConnection(sql: SQL, url: string): Promise<void> {
 function refuseDrop(refusal: string, overridable: boolean): never {
   console.error(
     `  Refusing to drop the schema: ${refusal}.\n\n` +
-      `  This command DROPS every table Open Brain owns in that database. That is\n` +
+      `  This command DROPS every table the brain owns in that database. That is\n` +
       `  safe against a throwaway container and destructive against anything else.\n` +
       (overridable
         ? `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
@@ -781,32 +785,35 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
- * The MCP stack — the four packages extensions/package.json installs for the
- * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
- * holds that install to them, and server-portable's and mcp-server's to the
- * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
- * recipes and integrations reach that install through the committed
- * recipes/node_modules and integrations/node_modules links (SMD-1991). A name
- * added here alone reaches every reader.
+ * The vendored servers' stack — the packages integrations/package.json installs
+ * for them, one list (SMD-1800): integrations/test-auth.ts's pin guard holds
+ * that install to exactly these, and server-portable's and mcp-server's to the
+ * same versions (the Kubernetes image's, held exactly, retired: SMD-2288). The
+ * integrations reach that install from under it, the recipes through the
+ * committed recipes/node_modules link (SMD-1991; in integrations/ since
+ * SMD-3747). The v1 MCP pair, `@hono/mcp` and `@modelcontextprotocol/sdk`, left
+ * it with SMD-3747: no vendored server on this install imports an MCP package
+ * (the Vercel recipe's route has its own). A name added here alone reaches
+ * every reader.
  */
-export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
+export const STACK: readonly string[] = ["hono", "zod"];
+/** The v1 MCP packages: in none of the installs integrations/test-auth.ts holds since SMD-2278 (server-portable, mcp-server) and SMD-3747 (integrations); the Vercel recipe's route keeps its own. */
+export const RETIRED_V1_MCP: readonly string[] = ["@hono/mcp", "@modelcontextprotocol/sdk"];
 
 /**
  * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
  * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
  * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
  * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
- * `hono` and `zod` are shared with STACK. The vendored servers (extensions) stay
- * on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
- * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
- * holds each install to its own.
+ * `hono` and `zod` are shared with STACK, and integrations/test-auth.ts's pin guard
+ * holds them to the versions integrations/package.json pins. The vendored
+ * servers import no MCP package since SMD-3747, so integrations/ installs `hono`
+ * and `zod` alone.
  */
 export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
 /**
  * The v2 packages' pinned versions — the independent truth the drift guard holds
- * server-portable and mcp-server to while they are the v2 installs. Stages 2 and
- * 3 (SMD-2279, SMD-2281) move the vendored servers onto these too and the
- * cross-install version check resumes.
+ * server-portable and mcp-server to, the two installs that serve MCP.
  */
 export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
   "@modelcontextprotocol/core": "2.1.0",
@@ -824,7 +831,7 @@ export type CountLine = { suite: string; variant: string | null; job: string | n
 
 /**
  * Append this run's counts to the file TEST_COUNTS_ENV names, one JSON line,
- * when it is set: each Fork Checks job that runs suites sets it and uploads the
+ * when it is set: each Brain Checks job that runs suites sets it and uploads the
  * file (check-consistency.ts 50 holds that a job setting it uploads it and
  * is published), and on a push to main the lines are published to the wiki's
  * Test-counts page (SMD-3614, SMD-3709).
@@ -906,7 +913,7 @@ export function createAssert(): {
       // A suite that names no variant is told apart by its flags (eval-write-path.ts --gate).
       recordCount({ variant: variant ?? (process.argv.slice(2).join(" ") || null), assertions: passed + failed, passed, failed, skipped, docFailed });
       console.log(`\n${"─".repeat(52)}`);
-      // Fork Checks' schema step, its data-layer legs (behind a +<s>s stamp,
+      // Brain Checks' schema step, its data-layer legs (behind a +<s>s stamp,
       // SMD-3468) and Portable server's background pair grep this line from
       // each log for their closing summaries (`^[0-9]+ assertions: `,
       // SMD-2092, SMD-2219, SMD-3470), as db/ci-parity.sh does for its rows:

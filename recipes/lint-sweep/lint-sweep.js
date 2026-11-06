@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // ob1-fork (SMD-2144): this script read PostgREST's `/<table>` route with a
-// service-role key, and this fork's stack runs no PostgREST. It reads the same
+// service-role key, and Daemonic Brain's stack runs no PostgREST. It reads the same
 // tables through compat/supabase-sql now — SUPABASE_URL is a postgres:// connection
 // string, SUPABASE_SERVICE_ROLE_KEY is accepted and ignored (the credentials live
 // in the URL). Two reads changed with the transport: the "most recent" samples
@@ -8,11 +8,11 @@
 // Tier 2 reads `edges` by the columns schemas/entity-extraction gives it
 // (from_entity_id, to_entity_id). Run it from a checkout: the import is relative.
 /**
- * lint-sweep.js — Bounded weekly brain-quality audit for Open Brain.
+ * lint-sweep.js — Bounded weekly brain-quality audit for Daemonic Brain.
  *
  * ESM module; see the sibling package.json for `"type": "module"`. The `.js`
  * extension (rather than `.mjs`) is upstream's, for a gate that admits only
- * `.sql|.ts|.js|.py`; this fork's checks do not read the extension.
+ * `.sql|.ts|.js|.py`; Daemonic Brain's checks do not read the extension.
  *
  * Inspired by Karpathy's "lint" concept and the CRATE CLI. Scans the
  * `public.thoughts` table for quality issues across three cost tiers:
@@ -99,7 +99,7 @@ function envVarWithLegacy(primary, legacy) {
   if (fromLegacy && !_deprecationWarned.has(legacy)) {
     console.warn(
       `[lint-sweep] WARNING: ${legacy} is deprecated; prefer ${primary} ` +
-        `(matches every other OB1 recipe and shared .env.local setups).`
+        `(matches every other Daemonic Brain recipe and shared .env.local setups).`
     );
     _deprecationWarned.add(legacy);
   }
@@ -171,7 +171,7 @@ function parseArgs(argv) {
 }
 
 const HELP = `
-lint-sweep.js — bounded brain-quality audit for Open Brain
+lint-sweep.js — bounded brain-quality audit for Daemonic Brain
 
 Usage: bun lint-sweep.js [options]
 
@@ -333,7 +333,7 @@ async function tier1SqlLint(db, args) {
 
   // Orphans by tag: metadata.topics and metadata.tags both empty or missing.
   // The safer path is to pull a bounded sample and filter in JS. We look at the
-  // most recent 2000 rows — by created_at: ids are uuids on this fork, so
+  // most recent 2000 rows — by created_at: ids are uuids in Daemonic Brain, so
   // `id desc` would order nothing (SMD-2144).
   const recent = await db.rows(
     db.from("thoughts").select("id,content,created_at,metadata,source_type,importance").order("created_at", { ascending: false }).order("id", { ascending: false }).limit(2000),
@@ -408,7 +408,7 @@ async function tier2GraphLint(db, args) {
     graphTablesMissing: [],       // which of (entities, edges, thought_entities) are absent
   };
 
-  // Probe graph tables — they're optional in Open Brain
+  // Probe graph tables — they're optional in Daemonic Brain
   for (const t of ["entities", "edges", "thought_entities"]) {
     try {
       await db.rows(db.from(t).select("*").limit(1), t);
@@ -583,7 +583,7 @@ async function tier3LlmLint(db, args) {
         Authorization: `Bearer ${openrouterKey}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/NateBJones-Projects/OB1",
-        "X-Title": "Open Brain Lint Sweep",
+        "X-Title": "Daemonic Brain Lint Sweep",
       },
       body: JSON.stringify({
         model: args.llmModel,
@@ -644,7 +644,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
   lines.push(`finished_at: ${finishedAt}`);
   lines.push("---");
   lines.push("");
-  lines.push(`# Open Brain Lint Sweep — ${now.slice(0, 10)}`);
+  lines.push(`# Daemonic Brain Lint Sweep — ${now.slice(0, 10)}`);
   lines.push("");
   lines.push("*Read-only audit. This script never mutates thoughts.*");
   lines.push("");
@@ -722,7 +722,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
         else lines.push(`  - fingerprint ${d.fingerprint}… → ${d.copies} copies (ids: ${d.ids.join(", ")})`);
       }
     }
-    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — on this fork migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).`);
+    lines.push(`- Rows missing content_fingerprint: **${tier1.noFingerprint}** — in Daemonic Brain, migration 023 backfills them (a raw insert leaves the column NULL; a capture through the functions fills it).`);
     lines.push("");
   }
 

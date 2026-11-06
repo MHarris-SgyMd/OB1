@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
+# ci-parity.sh — run what .github/workflows/brain-checks.yml runs, the way CI does:
 # the data-layer job's database-backed suites in CI's order against ONE shared
-# Postgres; beside them, all from the start, test-live.ts's four shards, each on
+# Postgres; beside them, all from the start, test-live.ts's five shards, each on
 # a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
 # test-preflight on another as CI's are, test-schema's two widths in a lane of
 # their own (SMD-3715), and in another the suites and self-checks that need no
@@ -21,7 +21,7 @@
 #   ./db/ci-parity.sh
 #
 # Check 35 in scripts/check-consistency.ts holds this list to the workflow:
-# every script a fork-checks.yml step runs is a `run` or `nodb` line here, from
+# every script a brain-checks.yml step runs is a `run` or `nodb` line here, from
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
@@ -316,7 +316,7 @@ free_rows() {
   nodb deploy/auth        limits.ts --self-check
   nodb deploy/auth        target.ts --self-check
   nodb deploy/auth        admin.ts --self-check
-  nodb extensions         test-auth.ts
+  nodb integrations       test-auth.ts
   nodb db                 sync-linear.ts --self-check
   nodb db                 ingest-linear.ts --self-check
   nodb db                 ingest-markdown.ts --self-check
@@ -369,11 +369,11 @@ pair_rows() {
   return "$FAILED"
 }
 
-# The live lanes (SMD-3688): test-live.ts's four shards side by side, each on a
+# The live lanes (SMD-3688): test-live.ts's five shards side by side, each on a
 # Postgres of its own, as CI's db-live matrix runs them (SMD-3048, SMD-3169).
 # The script runs itself again under a with-postgres.sh per shard with --live,
 # and that run does only its shard's row. One Postgres per shard, not one with
-# four databases: roles and backends are the cluster's, and the suite makes
+# five databases: roles and backends are the cluster's, and the suite makes
 # roles and counts connections. [2] edits a copy of the migrations, never the
 # tracked tree (SMD-3639), so no shard reads another's edit. Like the pair
 # lane, the live lanes need podman or docker even when DATABASE_URL is given:
@@ -391,8 +391,10 @@ live_rows() {
     OB1_LIVE_SHARD=long run db test-live.ts
   elif [ "$1" = extract ]; then
     OB1_LIVE_SHARD=extract run db test-live.ts
+  elif [ "$1" = sweep ]; then
+    OB1_LIVE_SHARD=sweep run db test-live.ts
   else
-    echo "ci-parity.sh --live takes rest, sleep, long or extract, not '$1'" >&2; return 2
+    echo "ci-parity.sh --live takes rest, sleep, long, extract or sweep, not '$1'" >&2; return 2
   fi
   # The lane ran its own shard's row, or it fails: check 35 and the sed below
   # read lines, and a row bash never reaches (dead code, after an exit, in a
@@ -506,9 +508,9 @@ main() {
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
-  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth integrations scripts compat/supabase-sql dashboard; do install "$dir"; done
 
-  # Every other lane starts now, beside this one (SMD-3688): the four test-live
+  # Every other lane starts now, beside this one (SMD-3688): the five test-live
   # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
   # (schema_rows) and the database-free rows (free_rows). Until SMD-3639 the
   # rest shard's [2] appended a line to the tracked db/migrations/002 for a
@@ -544,7 +546,7 @@ main() {
   # data-layer job runs them — last, since it applies vendored schemas to the
   # shared database and drops them after. (The extension tools' suite,
   # test-tools.ts, retired with the last extension server: SMD-2311.)
-  run extensions         test-writes.ts
+  run integrations       test-writes.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
   local shard pid

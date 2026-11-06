@@ -24,7 +24,7 @@
 	});
 </script>
 
-<svelte:head><title>{page.status} · Open Brain</title></svelte:head>
+<svelte:head><title>{page.status} · Daemonic Brain</title></svelte:head>
 
 <!-- Inside the layout, so the nav and sign-out stay; the message is the GUI's own (rest.ts), never the core's words. -->
 <section class="bg-bg-card border border-white/10 rounded-xl p-5">

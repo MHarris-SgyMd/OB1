@@ -1152,6 +1152,16 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const ended = await rest("POST", "/v1/claims", { ticket: "SMD-9306" }, KEYS.writer);
   const endedId = String((ended.body.claim as Claim | undefined)?.id), endedToken = String(ended.body.token ?? "");
   await rest("POST", `/v1/claims/${endedId}/release`, { token: endedToken }, KEYS.writer);
+  // SMD-3705: the writer's own claim made under its agent id, lapsed and never released; and the rival's, lapsed too.
+  const lapsedOwn = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 1" }, KEYS.writer);
+  const lapsedOwnId = String((lapsedOwn.body.claim as Claim | undefined)?.id), lapsedOwnToken = String(lapsedOwn.body.token ?? "");
+  const lapsedRival = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 3" }, KEYS.rival);
+  const lapsedRivalId = String((lapsedRival.body.claim as Claim | undefined)?.id), lapsedRivalToken = String(lapsedRival.body.token ?? "");
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '10 minutes', expires_at = now() - interval '5 minutes' WHERE id IN (${lapsedOwnId}::uuid, ${lapsedRivalId}::uuid)`;
+  // The lease's end as the row holds it: what lapsedAt must name, over REST and in MCP's structured reply (review pass 2).
+  const lapsedLeaseEnd = ((await sql`SELECT expires_at FROM work_claims WHERE id = ${lapsedOwnId}::uuid`)[0]?.expires_at as Date | undefined)?.toISOString();
+  const rowsOf = (id: string) => sql`SELECT released_at, release_reason FROM work_claims WHERE id = ${id}::uuid` as Promise<{ released_at: unknown; release_reason: string | null }[]>;
+  const claimsOn = async (piece: string) => Number((await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9318' AND piece_key = ${piece}` as { n: number }[])[0]?.n);
   await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_smd3598_away`;
   try {
     const renewAway = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token }, KEYS.writer);
@@ -1169,8 +1179,33 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
         && renewAwayMcp.isError && /was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it/.test(renewAwayMcp.text),
       `the registry unable to give the holder's id: its own renew and release with its token answer 503 CLAIM_UNATTRIBUTED, no Retry-After, never CLAIM_NOT_YOURS (${renewAway.status} ${renewAway.body.code} ${renewAway.headers.get("retry-after")} | ${releaseAway.status} ${releaseAway.body.code} | ${renewAwayMcp.text.slice(0, 80)})`);
     assert(wrongToken.status === 403 && wrongToken.body.code === "CLAIM_NOT_YOURS" && othersToken.status === 403 && othersToken.body.code === "CLAIM_NOT_YOURS" && endedAway.status === 409 && endedAway.body.code === "CLAIM_RELEASED"
-        && claimAway.status === 409 && claimAway.body.code === "WORK_CLAIMED" && unattributed(forceAway, true),
-      `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim WORK_CLAIMED, and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
+        && unattributed(claimAway, false) && claimAway.body.id === mine?.id && claimAway.body.lapsedAt === undefined && renewAway.body.lapsedAt === undefined && unattributed(forceAway, true),
+      `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim with its live claim's token CLAIM_UNATTRIBUTED as renew_claim answers (SMD-3705), neither saying a lapse, and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
+    // SMD-3705: claim_work with its own lapsed claim's token, on exactly its work, refused as renew_claim refuses it,
+    // and no takeover row written; the same token on other work, and another key's token, stay 115's.
+    const lapsedClaim = await rest("POST", "/v1/claims", { ticket: "smd-9318", piece: "pr  1", token: lapsedOwnToken }, KEYS.writer);
+    const lapsedClaimMcp = await mcp("claim_work", { ticket: "SMD-9318", piece: "PR 1", token: lapsedOwnToken });
+    const lapsedRenew = await rest("POST", `/v1/claims/${lapsedOwnId}/renew`, { token: lapsedOwnToken }, KEYS.writer);
+    const [lapsedRow] = await rowsOf(lapsedOwnId);
+    assert(unattributed(lapsedClaim, false) && lapsedClaim.body.id === lapsedOwnId && !JSON.stringify(lapsedClaim.body).includes(lapsedOwnToken)
+        && lapsedClaimMcp.isError && /^Refused: claim \S+ was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it\. It had lapsed at \S+, and stays lapsed until a renewal lands, so a claim on exactly its work can take it over meanwhile: list the ticket's claims with list_claims and include_ended: .* so stop, and tell the user; with none, carry on\. Either way, tell the user: it can't be renewed until an operator acts\.$/.test(lapsedClaimMcp.text) && !lapsedClaimMcp.text.includes(lapsedOwnToken)
+        && lapsedClaim.body.lapsedAt === lapsedLeaseEnd && lapsedClaimMcp.sc.lapsedAt === lapsedLeaseEnd
+        && unattributed(lapsedRenew, false) && lapsedRenew.body.id === lapsedClaim.body.id && lapsedRenew.body.cause === lapsedClaim.body.cause && lapsedRenew.body.lapsedAt === lapsedClaim.body.lapsedAt
+        && lapsedRow?.released_at === null && lapsedRow.release_reason === null && await claimsOn("pr 1") === 1,
+      `SMD-3705: the registry set up wrong, claim_work with the holder's own lapsed claim's token on its work answers 503 CLAIM_UNATTRIBUTED as renew_claim does, over both doors, saying when it lapsed (review pass 1: another claim may cover its work by now); no takeover: the claim unreleased, no new row (${lapsedClaim.status} ${lapsedClaim.body.code} ${lapsedClaim.body.cause} | ${lapsedRenew.status} ${lapsedRenew.body.code} | ${lapsedClaimMcp.text.slice(0, 80)} | ${JSON.stringify(lapsedRow)})`);
+    const otherPiece = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 2", token: lapsedOwnToken }, KEYS.writer);
+    const othersLapsed = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 3", token: lapsedRivalToken }, KEYS.writer);
+    const [rivalRow] = await rowsOf(lapsedRivalId);
+    assert(otherPiece.status === 200 && otherPiece.body.outcome === "claimed" && othersLapsed.status === 200 && othersLapsed.body.outcome === "claimed" && rivalRow?.release_reason === "lapsed; taken over",
+      `…while its token on other work is ignored (a new claim), and another key's lapsed claim, its token passed, is 115's to take over (${otherPiece.status} ${otherPiece.body.outcome} | ${othersLapsed.status} ${othersLapsed.body.outcome} ${rivalRow?.release_reason})`);
+    // A claim made by name alone (no agent id, as one made while the registry is away is): 115's own by name, renewed.
+    const byName = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 4" }, KEYS.writer);
+    const byNameId = String((byName.body.claim as Claim | undefined)?.id), byNameToken = String(byName.body.token ?? "");
+    await sql`UPDATE work_claims SET claimed_at = now() - interval '10 minutes', expires_at = now() - interval '5 minutes' WHERE id = ${byNameId}::uuid`;
+    const byNameAgain = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 4", token: byNameToken }, KEYS.writer);
+    const [byNameRow] = await sql`SELECT holder_agent_id FROM work_claims WHERE id = ${byNameId}::uuid` as { holder_agent_id: unknown }[];
+    assert(byName.status === 200 && byNameRow?.holder_agent_id === null && byNameAgain.status === 200 && byNameAgain.body.outcome === "renewed" && (byNameAgain.body.claim as Claim | undefined)?.id === byNameId,
+      `…and its own lapsed claim made by name alone (no agent id) is 115's own by name: claim_work with its token renews it, not refused (${byName.status} ${String(byNameRow?.holder_agent_id)} | ${byNameAgain.status} ${byNameAgain.body.outcome ?? byNameAgain.body.code})`);
   } finally {
     await sql`ALTER FUNCTION resolve_agent_smd3598_away(text, text, text) RENAME TO resolve_agent`;
   }
@@ -1184,12 +1219,25 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     assert(away.status === 503 && away.body.code === "CLAIM_UNATTRIBUTED" && away.body.cause === "registry_away" && away.body.retryable === true && away.headers.get("retry-after") !== null
         && awayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\.$/.test(awayMcp.text),
       `the registry unreachable: the holder's own renew answers 503 CLAIM_UNATTRIBUTED registry_away, retryable, with Retry-After, "retry shortly" over MCP (${away.status} ${away.body.cause} ${away.body.retryable} ${away.headers.get("retry-after")} | ${awayMcp.text.slice(0, 80)})`);
+    const lapsedAway = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 1", token: lapsedOwnToken }, KEYS.writer);
+    const lapsedAwayMcp = await mcp("claim_work", { ticket: "SMD-9318", piece: "PR 1", token: lapsedOwnToken });
+    const lapsedAwayRenew = await rest("POST", `/v1/claims/${lapsedOwnId}/renew`, { token: lapsedOwnToken }, KEYS.writer);
+    const [awayRow] = await rowsOf(lapsedOwnId);
+    assert(lapsedAway.status === 503 && lapsedAway.body.code === "CLAIM_UNATTRIBUTED" && lapsedAway.body.cause === "registry_away" && lapsedAway.body.retryable === true && lapsedAway.body.forced === false
+        && lapsedAway.body.id === lapsedOwnId && lapsedAway.headers.get("retry-after") !== null
+        && lapsedAwayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\. It had lapsed at \S+, and stays lapsed until a renewal lands/.test(lapsedAwayMcp.text) && /with none, carry on\.$/.test(lapsedAwayMcp.text) && lapsedAwayMcp.sc.lapsedAt === lapsedLeaseEnd
+        && lapsedAway.body.lapsedAt === lapsedLeaseEnd && lapsedAwayRenew.status === 503 && lapsedAwayRenew.body.cause === "registry_away" && lapsedAwayRenew.body.id === lapsedOwnId && lapsedAwayRenew.body.lapsedAt === lapsedAway.body.lapsedAt
+        && awayRow?.released_at === null && await claimsOn("pr 1") === 1,
+      `SMD-3705: the registry unreachable, the same claim_work answers 503 CLAIM_UNATTRIBUTED registry_away with Retry-After, as renew_claim does, its lapse check ending "carry on" with no operator's "either way"; still no takeover (${lapsedAway.status} ${lapsedAway.body.cause} ${lapsedAway.headers.get("retry-after")} | ${lapsedAwayRenew.status} ${lapsedAwayRenew.body.cause} | ${lapsedAwayMcp.text.slice(0, 80)})`);
   } finally {
     await sql`DROP FUNCTION resolve_agent(text, text, text)`;
     await sql`ALTER FUNCTION resolve_agent_smd3598_real(text, text, text) RENAME TO resolve_agent`;
   }
   const renewBack = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token: token.toUpperCase() }, KEYS.writer);
   assert(renewBack.status === 200, `…and with the registry back, the same token renews, upper-cased by a model as it may be (${renewBack.status} ${renewBack.body.code ?? ""})`);
+  const lapsedBack = await rest("POST", "/v1/claims", { ticket: "SMD-9318", piece: "PR 1", token: lapsedOwnToken }, KEYS.writer);
+  assert(lapsedBack.status === 200 && lapsedBack.body.outcome === "renewed" && (lapsedBack.body.claim as Claim | undefined)?.id === lapsedOwnId && (lapsedBack.body.lapsed as { at?: unknown } | undefined)?.at != null,
+    `SMD-3705: …and with the registry back, that claim_work renews the same claim, saying it had lapsed (${lapsedBack.status} ${lapsedBack.body.outcome} ${JSON.stringify(lapsedBack.body.lapsed ?? null).slice(0, 80)})`);
   // SMD-3780: a principal with no agent id and no word from the registry why (a caller of the core's own) is told
   // registry_unknown, final — claims' own answer once the shared helper finds no registry failure to name.
   const noWord = { name: "writer", scope: "write", keyHash: "" } as unknown as Parameters<typeof direct.renewClaim>[0];
@@ -1328,20 +1376,20 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const set = m.sc.assertion as A | undefined;
     const h = await rest("GET", path(item));
     const hist = (h.body.history ?? []) as A[];
-    assert(!m.isError && m.sc.outcome === "asserted" && set?.maker.name === "writer" && set.maker.trust === "operator" && set.tierName === "operator" && set.dueAt === "2027-03-01T00:00:00.000Z"
+    assert(!m.isError && m.sc.outcome === "asserted" && set?.maker.name === "writer" && set.maker.trust === "operator" && set.tierName === "operator" && set.dueAt === "2027-03-02T00:00:00.000Z"
         && h.status === 200 && hist.length === 1 && hist[0].id === set.id && hist[0].maker.name === "writer" && hist[0].maker.trust === "operator" && hist[0].tier === 1
         && (h.body.winner as A | undefined)?.id === set.id && h.body.level === 4 && h.body.exists === true,
-      `a set over MCP and the history over REST name the same assertion, maker and trust: the operator's urgent, due at the start of 2027-03-01 UTC (${m.text.slice(0, 120)} | ${h.status} ${hist.length} ${hist[0]?.maker.name}/${hist[0]?.maker.trust})`);
+      `a set over MCP and the history over REST name the same assertion, maker and trust: the operator's urgent, due by the end of 2027-03-01, the next day's start in UTC (SMD-3778) (${m.text.slice(0, 120)} | ${h.status} ${hist.length} ${hist[0]?.maker.name}/${hist[0]?.maker.trust})`);
     const [row] = await sql`SELECT maker_scope, maker_agent_id IS NOT NULL AS has_id FROM priority_assertions WHERE id = ${set?.id ?? null}::uuid`;
     assert(row?.maker_scope === "write" && row?.has_id === true, `the envelope stated the write key's scope, and its agent id, to 116 (${JSON.stringify(row)})`);
 
     // Verify 3: the same record through both doors — the history as REST answers it is what MCP says, text and value.
     const hm = await mcp("priority_history", { kind: "thought", key: item });
     const out = rendered((v) => say.renderPriorityHistory(ok(v)), h.body);
-    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due 2027-03-01T00:00:00\.000Z by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
+    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due by the end of 2027-03-01 \(UTC\) by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
       `priority_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 120)} | ${firstDiff(out.structuredContent, hm.sc)})`);
     // The same statement again, once through each door: unchanged, nothing written, one reply.
-    const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-01T00:00:00Z", reason: "the passport renewal is urgent" });
+    const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-02T00:00:00Z", reason: "the passport renewal is urgent" });
     const againMcp = await mcp("set_priority", { kind: "thought", key: item, level: 4, due_at: "2027-03-01", reason: "the passport renewal is urgent" });
     const againOut = rendered((v) => say.renderSetPriority(ok(v)), againRest.body);
     assert(againRest.status === 200 && againRest.body.outcome === "unchanged" && againOut.content[0].text === againMcp.text && same(againOut.structuredContent, againMcp.sc)
@@ -1680,9 +1728,15 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
   const reopened = await mcp("set_item_status", { id, status: "open", reason: "they cancelled" });
   const listed = await rest("GET", `/v1/items?status=open&overdue=true`);
   const row = ((listed.body.items ?? []) as (I & { overdue: boolean })[]).find((r) => r.id === id);
-  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && (moved.body.item as I).dueAt?.startsWith(yesterday)
+  assert(moved.status === 200 && moved.body.outcome === "updated" && (moved.body.item as I).owner === null && Date.parse(String((moved.body.item as I).dueAt)) === Date.parse(`${yesterday}T00:00:00Z`) + 86_400_000
       && !reopened.isError && (reopened.sc.item as I).status === "open" && listed.status === 200 && row?.overdue === true && listed.body.truncated === false,
-    `a PATCH with owner null clears it and moves the due time to yesterday; reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+    `a PATCH with owner null clears it and moves the due time to yesterday, by its end (SMD-3778); reopened over MCP; list_items over REST shows it overdue (${moved.status} ${reopened.text.slice(0, 60)} | ${listed.status} ${row?.overdue})`);
+  // Due today, a date alone: by the end of today, so not overdue on its own day (SMD-3778).
+  const today = new Date().toISOString().slice(0, 10);
+  const dueToday = await rest("POST", "/v1/items", { text: "omicron: due today, not yet late", due_at: today });
+  const overdueNow = ((await rest("GET", `/v1/items?overdue=true`)).body.items ?? []) as I[];
+  assert(dueToday.status === 200 && Date.parse(String((dueToday.body.item as I).dueAt)) === Date.parse(`${today}T00:00:00Z`) + 86_400_000 && !overdueNow.some((r) => r.id === (dueToday.body.item as I).id),
+    `an item due today, a date alone, is due by today's end and is not overdue on its own day (SMD-3778) (${(dueToday.body.item as I | undefined)?.dueAt})`);
 
   // A read key may not open, and lists; a capture-only key opens its own, is refused another's alike for one that is not there, and reads nothing.
   const readerOpen = await rest("POST", "/v1/items", { text: "a read key's to-do" }, KEYS.reader);

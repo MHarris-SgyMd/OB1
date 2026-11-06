@@ -1,6 +1,6 @@
 {
   "name": "Common Troubleshooting",
-  "description": "Solutions for connection, deployment, database, and performance issues across all Open Brain extensions.",
+  "description": "Solutions for connection, deployment, database, and performance issues across all Daemonic Brain extensions.",
   "category": "primitives",
   "author": {
     "name": "Nate B. Jones",

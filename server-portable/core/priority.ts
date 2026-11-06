@@ -11,6 +11,7 @@
 import type { Principal } from "../auth.ts";
 import { PriorityRefused, type PriorityAnswer, type PriorityAssertion, type PriorityItem, type PriorityRecord } from "../store.ts";
 import { asked, readOnly, unattributedAs, writerScope } from "./caller.ts";
+import { endOfDay } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -30,10 +31,13 @@ export type PriorityHistoryResult = PriorityRecord;
 export type PriorityHistoryCode = "REFUSED_PRIORITY_INPUT" | "ITEM_NOT_FOUND";
 
 /**
- * A date alone is the start of that day in UTC, so `2027-03-01` means one instant whatever the database's time
- * zone; a time with its offset is that instant.
+ * A time as 116 takes it, whatever the database's time zone: a time with its offset is that instant. A date alone is
+ * a due time's end of that day — the next day's start in UTC (SMD-3778: due on the 1st is due by the end of the 1st) —
+ * and a not_before's start of it.
  */
-const instant = (t: string | undefined) => (t === undefined ? undefined : /^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t}T00:00:00Z` : t);
+const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const dueBy = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? endOfDay(t) : t);
+const startOf = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? `${t}T00:00:00Z` : t);
 
 const inputRefused = (e: PriorityRefused) => refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: e.problem, message: e.message });
 /** The brain holds no such item, or no such due reference (`which`). */
@@ -102,7 +106,7 @@ export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"
   const scope = writerScope(principal);
   if (!scope) return readOnly(principal);
   const a = await asked(PriorityRefused, async () => (await ctx.store()).assertPriority({
-    kind: input.kind, key: input.key, level: input.level, dueAt: instant(input.due_at), notBefore: instant(input.not_before),
+    kind: input.kind, key: input.key, level: input.level, dueAt: dueBy(input.due_at), notBefore: startOf(input.not_before),
     dueRef: input.due_ref, reason: input.reason, inferred: input.inferred, actor: actorOf(ctx, principal), scope, plugin: opts.plugin,
   }));
   if (a instanceof PriorityRefused) return argumentRefused(ctx, a, input);

@@ -1,5 +1,5 @@
 -- ============================================================
--- Auditor schema additions for Open Brain
+-- Auditor schema additions for Daemonic Brain
 --
 -- Adds one helper RPC and one partial index. The audit_report
 -- type is just metadata.type='audit_report' on the existing

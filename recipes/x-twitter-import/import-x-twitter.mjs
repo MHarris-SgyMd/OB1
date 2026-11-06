@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * X/Twitter Import for Open Brain — an emitter of ingestion-contract items
+ * X/Twitter Import for Daemonic Brain — an emitter of ingestion-contract items
  *
  * Parses X (Twitter) data exports (tweets, DMs and Grok chats) and prints one
  * ingestion-contract item per thought, one JSON object per line, for the

@@ -29,7 +29,7 @@ export const esc = (s: unknown) => String(s).replace(/[&<>"']/g, (c) => `&#${c.c
 
 /** A whole page, marked with the prompt it asks for (`login`, `consent`, or `none` for an error). */
 export function pageHtml(prompt: string, body: string): string {
-  return `<!doctype html><title>Open Brain sign-in</title><main data-prompt="${esc(prompt)}">${body}</main>`;
+  return `<!doctype html><title>Daemonic Brain sign-in</title><main data-prompt="${esc(prompt)}">${body}</main>`;
 }
 
 export type Asking = {

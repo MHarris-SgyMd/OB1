@@ -119,6 +119,8 @@ import { egressRefusal, type StartRefusal } from "./worker-bootstrap.ts";
 import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { captureLineage } from "../server-portable/lineage.ts";
 import { actorPayload, type Actor } from "../server-portable/store.ts";
+import { dueInstant, levelOf, reasonOf, type PriorityLevel } from "../server-portable/priority-scale.ts";
+import { priorityWritersProblem } from "./priority-writers.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, LINEAR_SYSTEM, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
@@ -996,7 +998,7 @@ async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], deriv
   const g = decideCalls(subject, w.cfg, w.cfg.egress);
   if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, ...(await chain()) }; }
   // The vector first, the tags after: an embedder that throws (a provider
-  // answering no vector) fails the edit — the fork's rule, only an egress
+  // answering no vector) fails the edit — Daemonic Brain's rule, only an egress
   // refusal stores a row bare — and paid for no chat call it would have thrown
   // away (tenth review pass). A capture runs the two together because it keeps
   // both; here the second is worth making only once the first is in hand.
@@ -1185,6 +1187,105 @@ export function formatClosedClaims(released: ClosedClaim[], dryRun: boolean): st
 }
 
 // ---------------------------------------------------------------------------
+// The tickets' priorities (SMD-3666). Linear's priority and due day, which the
+// head rows carry as facets (`priority`, `due_date`), stated through 116 on
+// each ticket as this tool's actor — the source tier once the operator has
+// declared it a priority source (docs/priority.md, decision 4), its kind's
+// until then. Read from the rows, not the fetch, so every ticket is kept, a
+// ticket synced before this step among them, and the same board again writes
+// nothing. "No priority", or a word Linear's row does not hold, is unknown:
+// the tool's statement is cleared. A statement written before the declaration
+// (or after its withdrawal) is stated again, so its tier follows. A dry run
+// counts and writes nothing; an audit does not call it.
+// ---------------------------------------------------------------------------
+
+/** One ticket head as the step reads it: Linear's label and due day off its facets, and this tool's open statement on the ticket, if any. */
+export type PriorityHead = { issue: string; label: string | null; due: string | null; level: number | null; due_at: string | null; reason: string | null; source: boolean | null };
+/** What the step does for one ticket: state Linear's level and due day, or clear the tool's statement. */
+export type PriorityMove = { issue: string; act: "assert"; level: PriorityLevel; due: string | null; reason: string } | { issue: string; act: "clear" };
+/** The step's count: statements written and cleared (would be, in a dry run), and each ticket 116 refused, with its code. */
+export type PriorityTally = { asserted: number; cleared: number; refused: string[] };
+export type PriorityStep = { run: (opts: { dryRun: boolean }) => Promise<PriorityTally> };
+
+/**
+ * The moves for the heads, pure: a known level not already stated as it stands — the level, the due day, the
+ * reason, and the tier the tool's declaration gives it now (`declared`) — is stated; an unknown one with a statement
+ * open is cleared; the rest are left.
+ */
+export function priorityMoves(heads: readonly PriorityHead[], declared: boolean): PriorityMove[] {
+  const moves: PriorityMove[] = [];
+  for (const h of heads) {
+    const level = levelOf("linear", h.label);
+    if (level === null) {
+      if (h.level !== null) moves.push({ issue: h.issue, act: "clear" });
+      continue;
+    }
+    const due = dueInstant(h.due);
+    const reason = reasonOf("linear", h.label!);
+    const sameDue = h.due_at === null ? due === null : due !== null && Date.parse(h.due_at) === Date.parse(due);
+    if (h.level === level && sameDue && h.reason === reason && h.source === declared) continue;
+    moves.push({ issue: h.issue, act: "assert", level, due, reason });
+  }
+  return moves;
+}
+
+/**
+ * The step, when this brain and role can take it — asked once at start, as the closed-claims step is: 116's two
+ * writers, and every privilege the priority grant group gives (priority-writers.ts; review pass 2: EXECUTE, which
+ * PUBLIC holds, said nothing). Otherwise why not, said once by the caller; the tickets' priorities stay as facets.
+ * `problem` is the check, a self-check's stub in its place.
+ */
+export async function priorityStep(sql: SQL, actor: Actor, problem: (sql: SQL) => Promise<string | null> = priorityWritersProblem): Promise<{ step: PriorityStep } | { off: string }> {
+  const off = await problem(sql);
+  if (off !== null) return { off };
+  const env = { ...actorPayload(actor), scope: "write" };
+  return {
+    step: {
+      run: async ({ dryRun }) => {
+        // Every head this tool or the ingester wrote (`source` linear), with the tool's newest open statement on its
+        // ticket: one per maker is open, and a key that gained an agent id since has a second maker key.
+        const heads = (await sql`
+          SELECT DISTINCT ON (h.issue) h.issue, t.metadata->>'priority' AS label, t.metadata->>'due_date' AS due,
+                 a.level::int AS level, to_jsonb(a.due_at) #>> '{}' AS due_at, a.reason, a.maker_source AS source
+            FROM ob1_ticket_head h
+            JOIN thoughts t ON t.id = h.head_id
+            LEFT JOIN priority_assertions a ON a.item_kind = 'ticket' AND a.item_key = h.issue AND a.closed_at IS NULL AND a.maker_name = ${actor.name}
+           WHERE t.metadata->>'source' = ${LINEAR_SYSTEM}
+           ORDER BY h.issue, a.asserted_at DESC NULLS LAST`) as PriorityHead[];
+        const [d] = await sql`SELECT EXISTS (SELECT 1 FROM priority_sources WHERE label = ${actor.name} AND withdrawn_at IS NULL) AS declared`;
+        const moves = priorityMoves(heads, (d as { declared: boolean }).declared);
+        const tally: PriorityTally = { asserted: 0, cleared: 0, refused: [] };
+        for (const m of moves) {
+          if (dryRun) { tally[m.act === "assert" ? "asserted" : "cleared"]++; continue; }
+          const [x] = (m.act === "assert"
+            ? await sql`SELECT assert_priority('ticket', ${m.issue}::text, ${m.level}::int, ${m.due}::timestamptz, NULL::timestamptz, NULL::text, NULL::text, ${m.reason}::text, false, ${env}::jsonb) AS r`
+            : await sql`SELECT clear_priority('ticket', ${m.issue}::text, ${env}::jsonb) AS r`) as { r: { outcome: string; code: string | null } }[];
+          if (x.r.outcome === "refused") tally.refused.push(`${m.issue} ${x.r.code ?? "UNKNOWN"}`);
+          else if (x.r.outcome === "asserted") tally.asserted++;
+          else if (x.r.outcome === "cleared") tally.cleared++;
+        }
+        return tally;
+      },
+    },
+  };
+}
+
+/** The step after a pass: its line said when it moved anything, a failure said and counted (1) so the pass fails; nothing when off or stopping. */
+export async function statePriorities(step: PriorityStep | null, o: { dryRun: boolean; stopping: boolean; log: (line: string) => void; warn: (line: string) => void }): Promise<number> {
+  if (!step || o.stopping) return 0;
+  try {
+    const t = await step.run({ dryRun: o.dryRun });
+    if (t.asserted || t.cleared || t.refused.length) {
+      o.log(`  ticket priorities: ${o.dryRun ? "would state" : "stated"} ${t.asserted}, ${o.dryRun ? "would clear" : "cleared"} ${t.cleared}${t.refused.length ? `, refused ${t.refused.length} (${t.refused.slice(0, 10).join(", ")}${t.refused.length > 10 ? ", …" : ""})` : ""}`);
+    }
+    return t.refused.length ? 1 : 0;
+  } catch (e) {
+    o.warn(`  ticket priorities not stated: ${(e as Error).message.split("\n")[0]}`);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Self-check — the pure parts, and the write decisions against two fakes: a
 // recording store (which call each state gets) and a small brain that keeps
 // rows, judges DUPLICATE_CONTENT by fingerprint and refuses a cycle, so a
@@ -1239,7 +1340,7 @@ function fakeBrain(seed: Record<string, FakeRow>) {
  * `import … from "./x.ts"`, `import "./x.ts"`, `export … from "./x.ts"`, and a
  * dynamic `import("./x.ts")` with a literal specifier — as paths relative to
  * the repository root. A regex over the source, not a
- * bundler: the fork's imports are static relative specifiers with their
+ * bundler: Daemonic Brain's imports are static relative specifiers with their
  * extensions written, which is all this needs to hold the container's mount
  * to what the sync loads (third review pass).
  */
@@ -1773,6 +1874,56 @@ function selfCheck(): Promise<number> {
         `after a pass the step is asked with the pass's dry run and its line said; a failure is said on one line and fails the pass; off or stopping, it is not asked (${JSON.stringify(codes)}, ${JSON.stringify(asked)})`);
     }
 
+    // The tickets' priorities (SMD-3666): the moves from the heads, the step's off and on, and its line after a pass.
+    {
+      const head = (h: Partial<PriorityHead>): PriorityHead => ({ issue: "SMD-1", label: "High", due: null, level: null, due_at: null, reason: null, source: null, ...h });
+      const stated = { level: 3, reason: "Linear priority: High", source: false };
+      const moves = priorityMoves([
+        head({ issue: "SMD-1" }),                                                                   // no statement yet: stated
+        head({ issue: "SMD-2", ...stated }),                                                        // as it stands: left
+        head({ issue: "SMD-3", ...stated, label: "Urgent" }),                                       // a new level: stated
+        head({ issue: "SMD-4", ...stated, due: "2026-12-01" }),                                     // a due day added: stated
+        head({ issue: "SMD-5", ...stated, due: "2026-12-01", due_at: "2026-12-02T00:00:00+00:00" }), // the same instant (the day's end, SMD-3778), another spelling: left
+        head({ issue: "SMD-6", ...stated, label: "No priority" }),                                  // unknown now: cleared
+        head({ issue: "SMD-7", label: "No priority" }),                                             // unknown and none stated: left
+        head({ issue: "SMD-8", ...stated, reason: null }),                                          // stated by an older writer's reason: stated
+      ], false);
+      const declaredMoves = priorityMoves([head({ issue: "SMD-2", ...stated }), head({ issue: "SMD-9", ...stated, source: true })], true);
+      ok(JSON.stringify(moves.map((m) => `${m.issue} ${m.act}${m.act === "assert" ? ` ${m.level} ${m.due}` : ""}`)) === JSON.stringify(["SMD-1 assert 3 null", "SMD-3 assert 4 null", "SMD-4 assert 3 2026-12-02T00:00:00.000Z", "SMD-6 clear", "SMD-8 assert 3 null"])
+         && JSON.stringify(declaredMoves.map((m) => m.issue)) === JSON.stringify(["SMD-2"]),
+        `a ticket's priority is stated when none is, or the level, due day or reason moved; cleared when unknown; left as it stands; stated again when its tier would move with the declaration (${JSON.stringify(moves.map((m) => m.issue))} | ${JSON.stringify(declaredMoves.map((m) => m.issue))})`);
+      const fakeSql = (answers: Record<string, unknown>[][], seen: unknown[][]) =>
+        (async (_s: TemplateStringsArray, ...values: unknown[]) => { seen.push(values); return answers.shift() ?? []; }) as unknown as SQL;
+      const before116 = await priorityStep(fakeSql([[{ ok: false }]], []), { name: ACTOR_NAME });
+      const ungranted = await priorityStep(fakeSql([[{ ok: true }], [{ ok: false }]], []), { name: ACTOR_NAME });
+      ok("off" in before116 && /^migration 116 is not applied/.test(before116.off) && "off" in ungranted && /^this role lacks SELECT on priority_assertions \(the priority grant group: .*--groups priority\)$/.test(ungranted.off),
+        `the priority step is off before 116 and for a role without the priority group, the privilege it lacks named (${"off" in before116 ? before116.off.slice(0, 40) : "on"} | ${"off" in ungranted ? ungranted.off : "on"})`);
+      const allowed = async () => null;
+      const seen: unknown[][] = [];
+      const on = await priorityStep(fakeSql([[head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
+        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF }, allowed);
+      const dry = "step" in on ? await on.step.run({ dryRun: true }) : null;
+      const onAgain = await priorityStep(fakeSql([[head({ issue: "SMD-1" }), head({ issue: "SMD-6", ...stated, label: "No priority" })], [{ declared: false }],
+        [{ r: { outcome: "asserted" } }], [{ r: { outcome: "refused", code: "ITEM_NOT_FOUND" } }]], seen), { name: ACTOR_NAME, via: SELF }, allowed);
+      const wrote = "step" in onAgain ? await onAgain.step.run({ dryRun: false }) : null;
+      const assertCall = seen.at(-2) ?? [];
+      ok(JSON.stringify(dry) === JSON.stringify({ asserted: 1, cleared: 1, refused: [] }) && JSON.stringify(wrote) === JSON.stringify({ asserted: 1, cleared: 0, refused: ["SMD-6 ITEM_NOT_FOUND"] })
+         && assertCall[0] === "SMD-1" && assertCall[1] === 3 && assertCall[3] === "Linear priority: High" && (assertCall[4] as { name?: string; scope?: string }).name === ACTOR_NAME && (assertCall[4] as { scope?: string }).scope === "write",
+        `on, a dry run counts the moves and writes nothing; a run states each as board-sync at write scope with Linear's word as the reason, and names a refusal (${JSON.stringify(dry)} | ${JSON.stringify(wrote)})`);
+      const logged: string[] = [], warned: string[] = [];
+      const o = { log: (l: string) => logged.push(l), warn: (l: string) => warned.push(l) };
+      const codes = [
+        await statePriorities({ run: async () => ({ asserted: 2, cleared: 1, refused: [] }) }, { ...o, dryRun: false, stopping: false }),
+        await statePriorities({ run: async () => ({ asserted: 0, cleared: 0, refused: [] }) }, { ...o, dryRun: false, stopping: false }),
+        await statePriorities({ run: async () => ({ asserted: 0, cleared: 0, refused: ["SMD-6 ITEM_NOT_FOUND"] }) }, { ...o, dryRun: false, stopping: false }),
+        await statePriorities({ run: async () => { throw new Error("permission denied for function assert_priority\nDETAIL"); } }, { ...o, dryRun: false, stopping: false }),
+        await statePriorities(null, { ...o, dryRun: false, stopping: false }),
+      ];
+      ok(JSON.stringify(codes) === "[0,0,1,1,0]" && JSON.stringify(logged) === JSON.stringify(["  ticket priorities: stated 2, cleared 1", "  ticket priorities: stated 0, cleared 0, refused 1 (SMD-6 ITEM_NOT_FOUND)"])
+         && JSON.stringify(warned) === JSON.stringify(["  ticket priorities not stated: permission denied for function assert_priority"]),
+        `after a pass the step's line is said when it moved anything, a refusal or a failure fails the pass, and off it is not asked (${JSON.stringify(codes)} | ${JSON.stringify(logged)})`);
+    }
+
     if (bad === 0) console.log("sync-linear.ts self-check PASS");
     return bad === 0 ? 0 : 1;
   })();
@@ -1969,6 +2120,13 @@ async function main(): Promise<void> {
     if ("off" in set) console.error(`  claims on closed tickets are not released: ${set.off}; they stay until their holders release them`);
     else closed = set.step;
   }
+  // The tickets' priorities (SMD-3666): asked once, as the claims step is; off is said once and the passes go on.
+  let priorities: PriorityStep | null = null;
+  if (!cli.has("audit")) {
+    const set = await priorityStep(sql, writer.actor);
+    if ("off" in set) console.error(`  ticket priorities are not stated: ${set.off}; they stay as facets alone`);
+    else priorities = set.step;
+  }
 
   let resolved: Board | undefined;
   const once = async (): Promise<number> => {
@@ -1994,6 +2152,8 @@ async function main(): Promise<void> {
     // After the pass, so the statuses it just wrote are the ones read; a
     // failed call fails the pass, so the heartbeat says so.
     const unreleased = await releaseClosedClaims(closed, { run, dryRun, stopping, log: (l) => console.log(l), warn: (l) => console.error(l) });
+    // After the pass too, so the facets it just wrote are the ones stated; a refusal or a failure fails the pass.
+    const unstated = await statePriorities(priorities, { dryRun, stopping, log: (l) => console.log(l), warn: (l) => console.error(l) });
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     // After the pass, so the links it just brought in are the ones read; a
     // failed post fails the pass, so the heartbeat says so.
@@ -2002,7 +2162,7 @@ async function main(): Promise<void> {
       try { told = await findings.run({ dryRun, stopped: () => stopping, board: boardOf(report.listed, report.errors.map((e) => e.identifier)) }); }
       catch (e) { told = 1; console.error(`  findings step failed: ${(e as Error).message.split("\n")[0]}`); }
     }
-    return passCode(report.errors.length + unreleased, told);
+    return passCode(report.errors.length + unreleased + unstated, told);
   };
 
   // The initiative is configuration, resolved once before any pass: a name
