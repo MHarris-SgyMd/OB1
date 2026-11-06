@@ -436,7 +436,11 @@ BEGIN
   END IF;
   SELECT array_agg(f.system || ':' || f.identity) INTO v_seen FROM unnest(v_sys, v_id) AS f(system, identity);
   FOR d IN 1 .. p_depth LOOP
-    SELECT array_agg(n.system), array_agg(n.blocked) INTO v_next_sys, v_next_id
+    -- At most the open items the cap still allows: the gate and the settled
+    -- test run only until the LIMIT is met (review pass 6: a hub blocking
+    -- 3,000 had both run on all 3,000 for every item reaching it).
+    SELECT array_agg(x.system), array_agg(x.blocked) INTO v_next_sys, v_next_id
+      FROM (SELECT n.system, n.blocked
       FROM (SELECT DISTINCT b.system, b.blocked
               FROM unnest(v_sys, v_id) AS w(system, identity)
               CROSS JOIN LATERAL (
@@ -458,7 +462,8 @@ BEGIN
       LEFT JOIN ob1_ticket_head th ON n.system = 'linear' AND th.issue_key = md5(n.blocked)::uuid AND th.issue = n.blocked
      WHERE ob1_system_gates(n.system)
        AND NOT CASE WHEN n.system = 'linear' THEN COALESCE(th.status_type = ANY(node_settled_types()), false)
-                    ELSE ob1_node_settled(n.system, n.blocked) END;
+                    ELSE ob1_node_settled(n.system, n.blocked) END
+     LIMIT p_cap - v_count) x;
     EXIT WHEN v_next_sys IS NULL;
     v_count := v_count + cardinality(v_next_sys);
     EXIT WHEN v_count >= p_cap;

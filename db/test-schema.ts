@@ -17535,11 +17535,12 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `under a Low parent of a Critical, unknown; under a completed Critical, unknown; under a completed parent of a Critical, unknown (${past.map(from).join("; ")})`);
   const noHops = await one("ticket", "SMD-9451", { hops: 0 });
   assert(Number(noHops?.effective) === 2 && from(noHops) === "none", `hops 0 turns inheritance off (${from(noHops)})`);
-  // An Urgent ticket one hop off is read, and its Critical parent two off, the same 3, not walked to.
+  // A tie between one hop and two — an Urgent ticket one hop off (3) and its Critical parent two off (3) — goes to the
+  // nearer. (The walk's stop at a stating parent is held by SMD-9493's row below.)
   await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
   await put("ticket", "SMD-9490", 4);
   const tie = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
-  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `the stating ticket one hop off is read, its parent not walked to (${from(tie)})`);
+  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `a tie between one hop and two goes to the nearer (${from(tie)})`);
   // Two hops off: an open parent of no level under a completed Critical passes nothing; a tie among three Criticals
   // two hops off (a ticket whose rows state three parents, walked in key order) goes to the lowest key, which is
   // neither the first walked (SMD-9623, through SMD-9621) nor the last (SMD-9625, through SMD-9624).

@@ -2515,7 +2515,7 @@ unknown's 2), else unknown's 2; urgency from its due time in calendar days in UT
 at level 0 or once settled); and +0.5 or +1 for the open items it blocks,
 transitively to depth 3. The weights are docs/priority.md's, overridden by name.
 It reads; nothing is stored, and `node_state` is unchanged. The agenda (SMD-3669)
-and search (SMD-3668) are its callers.
+and search (SMD-3668) will call it; today the store's `effectivePriority` is its only caller.
 
 Migration 119 makes a due date alone mean the end of that day (SMD-3778, the
 maintainer's rule of 2026-11-05): `ob1_item_due` reads `2027-03-01` as the next
