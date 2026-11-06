@@ -17424,6 +17424,9 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   assert(/ob1:thread-edge/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:subject-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc)
          && /ob1:thread-lineage-with-its-artifact/.test(await src(RELINK)) && /ob1:relation-distinct/.test(await src(RTR)) && /ob1:relation-lineage-with-its-artifact/.test(await src(RTR)),
     "the sentinels: a thread's edge beside the relation's, the subject's and the link's in the validator, its lineage with it in the re-link, the door's two kept");
+  // The close's set difference is read once, materialized: left inline, under a misestimate of a key's rows the planner
+  // walks it again for every standing edge (372 ms a re-link at 8,000 thoughts, against 30 ms).
+  assert(/\bunwanted AS MATERIALIZED\b/.test(await src(RELINK)), "the re-link's close reads its set difference once, materialized");
   const definers = await q<{ fn: string }>(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p WHERE p.prosecdef AND p.oid = ANY (ARRAY[$1::regprocedure, $2::regprocedure, 'ob1_thread_relink_subject()'::regprocedure, 'thought_facets_validate()'::regprocedure])`, [RELINK, RTR]);
   assert(definers.length === 0, `SECURITY INVOKER throughout: the re-link runs as its caller, the triggers as the writer (${definers.map((d) => d.fn).join() || "none a definer"})`);
   for (const sig of [RELINK, "ob1_thread_relink_subject()", RTR]) {
