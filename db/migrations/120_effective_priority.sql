@@ -30,10 +30,11 @@
 --     inferred assertions count only once SMD-3670's agreement clears its
 --     bar). NULL is unknown.
 --   * A TICKET'S OWN ROW (its linear source row, or a pre-053 row claiming
---     metadata.issue), asked as a thought with no statement of its own, reads
---     as its ticket — level, due time, settledness, links, inheritance — and
---     its first term names the ticket (`as`). The maintainer's call, review
---     pass 1: search over thoughts must not rank a ticket's row below it.
+--     metadata.issue), asked as a thought, reads as its ticket — level, due
+--     time, settledness, links, inheritance — and its first term names the
+--     ticket (`as`). The maintainer's call, review pass 1: search over
+--     thoughts must not rank a ticket's row below it. A served item or a
+--     due reference that is a ticket's row is read as the ticket too.
 --   * inherited_from — with no level of its own: the highest effective level
 --     among the items it serves, less `hop` a hop, at most `hops` hops,
 --     counted only above unknown's value, so a link never lowers an item. A
@@ -45,8 +46,13 @@
 --     node_state reads them; else its standing ticket: subject, 111); an open
 --     item, its origin thought. The spec it names waits for SMD-2683.
 --   * due_at — the counted winner's due_at; else its due_ref's, one hop (the
---     referenced item's counted winner's due_at, else an open item's own);
---     else an open item's own due_at. due_from says which.
+--     referenced item's counted winner's due_at, its pool's for a ticket's
+--     row, else an open item's own); else an open item's own due_at. due_from
+--     says which. A referenced item since settled keeps its date (the
+--     maintainer, review pass 2): an item that took a release's due time
+--     reads overdue until it is restated.
+--   * A ticket and its own rows are ONE item: the statements on each compete
+--     by 116's rule as one pool (the maintainer, review pass 2).
 --   * urgency — in CALENDAR DAYS in UTC (SMD-3778's review pass 2: a bare
 --     date is due by the end of that day, so "tomorrow" is 24 to 48 hours
 --     away and hours would miss it): `soon` (2) when due by the end of
@@ -61,7 +67,8 @@
 --     through.
 --   * effective — the level (else the inherited value, else `unknown`, 2)
 --     plus urgency plus the unblocks term.
---   * settled — a ticket completed or canceled, a thought whose lifecycle is
+--   * settled — a ticket whose status type node_settled_types() names
+--     (completed, canceled, duplicate), a thought whose lifecycle is
 --     (node_lifecycle), an open item done or dropped.
 --   * not_before and waiting — the counted winner's not_before, and whether
 --     it is still ahead: the agenda (SMD-3669) leaves a waiting item out.
@@ -76,18 +83,22 @@
 --   Helpers: ob1_priority_counted (the counted winner), ob1_item_settled,
 --   ob1_item_serves (one hop of what an item serves), ob1_node_settled (a
 --   source identity's settledness), ob1_ticket_row_of (the ticket a thought
---   is the row of) and ob1_item_unblocks (the walk, one frontier a hop).
+--   is the row of), ob1_ticket_rows (a ticket's rows), ob1_priority_subject
+--   (what an item is read as), ob1_priority_open (its pool of open
+--   statements) and ob1_item_unblocks (the walk, one frontier a hop).
 --
 -- WHO READS
 --   No actor, as priority_of: any role with EXECUTE reads every item's terms.
---   It reads priority_assertions (the priority group), open_items (the items
---   group), thoughts, thought_facets, thought_sources and ob1_ticket_head (the
---   capture group's reads). The per-kind reads are plpgsql branches, so a
---   role without the items group reads tickets, thoughts and entities and
---   gets 42501 only on an item kind. No grant changes.
+--   It reads priority_assertions and open_items (the priority group grants
+--   both), thoughts and ob1_ticket_head (the capture group's), and
+--   thought_sources and thought_facets (the server group's, which the
+--   structure group grants too). The server's role holds all of them. A role
+--   short of one gets 42501 naming the table: one without thought_sources on
+--   any ticket or thought, since a thought is asked whether it is a ticket's
+--   row (review pass 2: this said the reverse). No grant changes.
 --
 -- SAFETY
---   Seven new functions; no table, and nothing existing changed. Every function
+--   Ten new functions; no table, and nothing existing changed. Every function
 --   is STABLE: one snapshot for the whole read. MINOR under FORK.md's version
 --   rules. test-schema [108], test-upgrade [20bl].
 --
@@ -130,24 +141,128 @@ END
 $qc$;
 
 -- ---------------------------------------------------------------------------
+-- ob1_ticket_row_of — the ticket a thought is the row of
+-- ---------------------------------------------------------------------------
+-- A ticket's own row: its linear source row (053), else, on a brain board-sync
+-- filled before 053, the row claiming metadata.issue with source linear
+-- (source_thought's fallback). An observation filed under a ticket carries
+-- `ticket`, not `issue`, and is not its row.
+CREATE OR REPLACE FUNCTION ob1_ticket_row_of(p_thought uuid)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  v text;
+BEGIN
+  SELECT s.identity INTO v FROM thought_sources s WHERE s.thought_id = p_thought AND s.system = 'linear';
+  IF v IS NULL THEN
+    SELECT t.metadata->>'issue' INTO v FROM thoughts t WHERE t.id = p_thought AND t.metadata->'source' = '"linear"'::jsonb;
+  END IF;
+  IF v ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
+    RETURN upper(v);
+  END IF;
+  RETURN NULL;
+END;
+$$;
+COMMENT ON FUNCTION ob1_ticket_row_of(uuid) IS
+  'The ticket key a thought is the own row of — its linear source row (053), else metadata.issue on a row whose source is linear — upper-cased; NULL for any other thought (an observation filed under a ticket carries `ticket`, not `issue`). effective_priority reads such a row as its ticket. Migration 120 / SMD-3667.';
+
+-- ---------------------------------------------------------------------------
+-- ob1_ticket_rows — a ticket's own rows
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ob1_ticket_rows(p_issue text)
+RETURNS SETOF text
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+  -- Its linear source row (053), and any row claiming metadata.issue with
+  -- source linear (a pre-053 row, a twin), by 068's issue index.
+  RETURN QUERY
+    SELECT s.thought_id::text FROM thought_sources s WHERE s.system = 'linear' AND s.identity = p_issue
+    UNION
+    SELECT t.id::text FROM thoughts t
+     WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(p_issue)::uuid
+       AND t.metadata->'issue' = to_jsonb(p_issue) AND t.metadata->'source' = '"linear"'::jsonb;
+END;
+$$;
+COMMENT ON FUNCTION ob1_ticket_rows(text) IS
+  'A ticket''s own rows, as thought ids: its linear source row (053), and every row claiming metadata.issue with source linear (by 068''s issue index). The thoughts whose statements count as the ticket''s in effective_priority. Migration 120 / SMD-3667.';
+
+-- ---------------------------------------------------------------------------
+-- ob1_priority_subject — what an item is read as
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ob1_priority_subject(p_kind text, p_key text, OUT kind text, OUT key text)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  v text;
+BEGIN
+  kind := p_kind; key := p_key;
+  IF p_kind = 'thought' THEN
+    v := ob1_ticket_row_of(p_key::uuid);
+    IF v IS NOT NULL THEN
+      kind := 'ticket'; key := v;
+    END IF;
+  END IF;
+END;
+$$;
+COMMENT ON FUNCTION ob1_priority_subject(text, text) IS
+  'What a normalised item is read as: a ticket''s own row (ob1_ticket_row_of) as its ticket, any other item as itself. Migration 120 / SMD-3667.';
+
+-- ---------------------------------------------------------------------------
+-- ob1_priority_open — an item's open statements, its ticket's pool for a ticket
+-- ---------------------------------------------------------------------------
+-- A ticket and its own rows are one item (the maintainer, review pass 2):
+-- the statements on the ticket and on each of its rows compete by 116's rule
+-- as one pool, so a tier-4 statement on the row never outranks a tier-1 one on
+-- the ticket. Any other item's are its own.
+CREATE OR REPLACE FUNCTION ob1_priority_open(p_kind text, p_key text)
+RETURNS SETOF priority_assertions
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  s record;
+BEGIN
+  s := ob1_priority_subject(p_kind, p_key);
+  IF s.kind = 'ticket' THEN
+    RETURN QUERY
+      SELECT a.* FROM priority_assertions a
+       WHERE a.closed_at IS NULL AND a.item_kind = 'ticket' AND a.item_key = s.key
+      UNION ALL
+      SELECT a.* FROM priority_assertions a
+       WHERE a.closed_at IS NULL AND a.item_kind = 'thought' AND a.item_key IN (SELECT r FROM ob1_ticket_rows(s.key) r);
+  ELSE
+    RETURN QUERY
+      SELECT a.* FROM priority_assertions a WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = p_key;
+  END IF;
+END;
+$$;
+COMMENT ON FUNCTION ob1_priority_open(text, text) IS
+  'A normalised item''s open assertions: for a ticket or a ticket''s own row, the pool of the ticket''s and every row''s (one item, review pass 2); for any other item, its own. Migration 120 / SMD-3667.';
+
+-- ---------------------------------------------------------------------------
 -- ob1_priority_counted — the winner a composed read counts
 -- ---------------------------------------------------------------------------
--- 116's rule (ob1_priority_winner: the lowest tier, then the later written),
--- with tier 4 left out unless p_inferred: decision 5 counts inferred
--- assertions only once SMD-3670's agreement clears its bar. All NULL for none.
+-- 116's rule (ob1_priority_winner: the lowest tier, then the later written)
+-- over the item's pool (ob1_priority_open), with tier 4 left out unless
+-- p_inferred: decision 5 counts inferred assertions only once SMD-3670's
+-- agreement clears its bar. All NULL for none.
 CREATE OR REPLACE FUNCTION ob1_priority_counted(p_kind text, p_key text, p_inferred boolean)
 RETURNS priority_assertions
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT a.* FROM priority_assertions a
-   WHERE a.item_kind = p_kind AND a.item_key = p_key AND a.closed_at IS NULL
-     AND (p_inferred OR a.tier < 4)
-   ORDER BY a.tier, a.seq DESC
+  SELECT o.* FROM ob1_priority_open(p_kind, p_key) o
+   WHERE p_inferred OR o.tier < 4
+   ORDER BY o.tier, o.seq DESC
    LIMIT 1
 $$;
 COMMENT ON FUNCTION ob1_priority_counted(text, text, boolean) IS
-  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written), tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Migration 120 / SMD-3667.';
+  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written) over its pool (ob1_priority_open: a ticket and its rows as one), tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_item_settled — whether an item is done with
@@ -173,7 +288,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_settled(text, text) IS
-  'Whether a normalised item is settled: a ticket whose head (068) is completed or canceled (node_settled_types), a thought whose lifecycle is (node_lifecycle: its ticket''s head, else its own status), an open item done or dropped. An entity, and an item the brain does not hold, is not. Migration 120 / SMD-3667.';
+  'Whether a normalised item is settled: a ticket whose head (068) has a settled status type (node_settled_types: completed, canceled, duplicate), a thought whose lifecycle is (node_lifecycle: its ticket''s head, else its own status), an open item done or dropped. An entity, and an item the brain does not hold, is not. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_node_settled — whether a source identity is settled
@@ -222,11 +337,16 @@ BEGIN
   ELSIF p_kind = 'thought' THEN
     -- The ticket it is about: metadata ticket, else issue (node_state's
     -- reading); else its standing ticket: subject (111).
-    SELECT coalesce(t.metadata->>'ticket', t.metadata->>'issue') INTO v_ticket FROM thoughts t WHERE t.id = p_key::uuid;
+    -- Each in turn, the first that is a ticket key (review pass 2: a
+    -- malformed metadata.ticket hid a valid issue and the subject).
+    SELECT CASE WHEN t.metadata->>'ticket' ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN t.metadata->>'ticket'
+                WHEN t.metadata->>'issue' ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN t.metadata->>'issue' END
+      INTO v_ticket FROM thoughts t WHERE t.id = p_key::uuid;
     IF v_ticket IS NULL THEN
       SELECT substr(f.payload->>'key', 8) INTO v_ticket
         FROM thought_facets f
        WHERE f.thought_id = p_key::uuid AND f.kind = 'subject' AND f.valid_until IS NULL AND f.payload->>'key' LIKE 'ticket:%'
+         AND substr(f.payload->>'key', 8) ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$'
        LIMIT 1;
     END IF;
     IF v_ticket ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
@@ -243,34 +363,6 @@ END;
 $$;
 COMMENT ON FUNCTION ob1_item_serves(text, text) IS
   'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its rows hold); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else its standing ticket: subject, 111); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migration 120 / SMD-3667.';
-
--- ---------------------------------------------------------------------------
--- ob1_ticket_row_of — the ticket a thought is the row of
--- ---------------------------------------------------------------------------
--- A ticket's own row: its linear source row (053), else, on a brain board-sync
--- filled before 053, the row claiming metadata.issue with source linear
--- (source_thought's fallback). An observation filed under a ticket carries
--- `ticket`, not `issue`, and is not its row.
-CREATE OR REPLACE FUNCTION ob1_ticket_row_of(p_thought uuid)
-RETURNS text
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-  v text;
-BEGIN
-  SELECT s.identity INTO v FROM thought_sources s WHERE s.thought_id = p_thought AND s.system = 'linear';
-  IF v IS NULL THEN
-    SELECT t.metadata->>'issue' INTO v FROM thoughts t WHERE t.id = p_thought AND t.metadata->'source' = '"linear"'::jsonb;
-  END IF;
-  IF v ~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
-    RETURN upper(v);
-  END IF;
-  RETURN NULL;
-END;
-$$;
-COMMENT ON FUNCTION ob1_ticket_row_of(uuid) IS
-  'The ticket key a thought is the own row of — its linear source row (053), else metadata.issue on a row whose source is linear — upper-cased; NULL for any other thought (an observation filed under a ticket carries `ticket`, not `issue`). effective_priority reads such a row as its ticket. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_item_unblocks — the open items an item blocks, walked
@@ -375,6 +467,7 @@ DECLARE
   h          record;
   v_lvl      smallint;
   v_inh_kind text; v_inh_key text; v_inh_level smallint; v_inh_hops int; v_inh_value numeric;
+  v_subj     record;
   s_kind     text;
   s_key      text;
   v_as       text;
@@ -442,23 +535,18 @@ BEGIN
     item_kind := q.kind;
     item_key := q.key;
     v_terms := '[]'::jsonb;
+    -- A ticket's own row reads as its ticket — its level, due time,
+    -- settledness, structure — and the read names the ticket (the
+    -- maintainer, review pass 1); the statements on the ticket and its rows
+    -- are one pool (review pass 2).
+    v_subj := ob1_priority_subject(q.kind, q.key);
+    s_kind := v_subj.kind; s_key := v_subj.key;
+    v_as := CASE WHEN q.kind = 'thought' AND s_kind = 'ticket' THEN s_key END;
     v_win := ob1_priority_counted(q.kind, q.key, w_inferred);
-    -- A ticket's own row, asked as a thought with no statement of its own,
-    -- reads as its ticket: its level, due time, settledness, structure (the
-    -- maintainer, SMD-3667 review pass 1). The read names the ticket it read.
-    s_kind := q.kind; s_key := q.key; v_as := NULL;
-    IF v_win.id IS NULL AND q.kind = 'thought' THEN
-      v_as := ob1_ticket_row_of(q.key::uuid);
-      IF v_as IS NOT NULL THEN
-        s_kind := 'ticket'; s_key := v_as;
-        v_win := ob1_priority_counted(s_kind, s_key, w_inferred);
-      END IF;
-    END IF;
     winner := CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END;
     SELECT COALESCE(jsonb_agg(ob1_priority_json(a) ORDER BY a.tier, a.seq DESC), '[]'::jsonb) INTO passed_over
-      FROM priority_assertions a
-     WHERE ((a.item_kind = q.kind AND a.item_key = q.key) OR (a.item_kind = s_kind AND a.item_key = s_key))
-       AND a.closed_at IS NULL AND a.id IS DISTINCT FROM v_win.id;
+      FROM ob1_priority_open(q.kind, q.key) a
+     WHERE a.id IS DISTINCT FROM v_win.id;
     settled := ob1_item_settled(s_kind, s_key);
     level := v_win.level;
     inherited_from := NULL;
@@ -479,8 +567,10 @@ BEGIN
       -- fewer hops, then kind and key.
       v_inh_kind := NULL;
       IF w_hops >= 1 THEN
-        FOR h1 IN SELECT x.kind, x.key FROM ob1_item_serves(s_kind, s_key) x LOOP
-          CONTINUE WHEN (h1.kind = q.kind AND h1.key = q.key) OR (h1.kind = s_kind AND h1.key = s_key) OR ob1_item_settled(h1.kind, h1.key);
+        -- Each served item read as its subject: an origin thought that is a
+        -- ticket's own row is that ticket, one hop off (review pass 2).
+        FOR h1 IN SELECT DISTINCT m.kind, m.key FROM ob1_item_serves(s_kind, s_key) x CROSS JOIN LATERAL ob1_priority_subject(x.kind, x.key) m ORDER BY 1, 2 LOOP
+          CONTINUE WHEN (h1.kind = s_kind AND h1.key = s_key) OR ob1_item_settled(h1.kind, h1.key);
           v_lvl := (ob1_priority_counted(h1.kind, h1.key, w_inferred)).level;
           IF v_lvl IS NOT NULL THEN
             IF v_lvl - w_hop > w_unknown
@@ -491,8 +581,8 @@ BEGIN
             CONTINUE;
           END IF;
           CONTINUE WHEN w_hops < 2;
-          FOR h IN SELECT x.kind, x.key FROM ob1_item_serves(h1.kind, h1.key) x LOOP
-            CONTINUE WHEN (h.kind = q.kind AND h.key = q.key) OR (h.kind = s_kind AND h.key = s_key) OR ob1_item_settled(h.kind, h.key);
+          FOR h IN SELECT DISTINCT m.kind, m.key FROM ob1_item_serves(h1.kind, h1.key) x CROSS JOIN LATERAL ob1_priority_subject(x.kind, x.key) m ORDER BY 1, 2 LOOP
+            CONTINUE WHEN (h.kind = s_kind AND h.key = s_key) OR ob1_item_settled(h.kind, h.key);
             v_lvl := (ob1_priority_counted(h.kind, h.key, w_inferred)).level;
             CONTINUE WHEN v_lvl IS NULL OR v_lvl - 2 * w_hop <= w_unknown;
             IF v_inh_kind IS NULL OR v_lvl - 2 * w_hop > v_inh_value
