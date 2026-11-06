@@ -12,5 +12,6 @@ import householdKnowledge from "./household-knowledge/index.ts";
 import jobHunt from "./job-hunt/index.ts";
 import mealPlanning from "./meal-planning/index.ts";
 import professionalCrm from "./professional-crm/index.ts";
+import readwise from "./readwise/index.ts";
 
-export const PLUGINS: readonly PluginManifest[] = [example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm];
+export const PLUGINS: readonly PluginManifest[] = [example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm, readwise];

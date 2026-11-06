@@ -1,6 +1,6 @@
 {
   "name": "Readwise Import",
-  "description": "One-shot backfill of your Readwise highlight history into Daemonic Brain via the /api/v2/export/ endpoint. Pair with the readwise-capture integration to keep it live.",
+  "description": "One-shot backfill of your Readwise highlight history into Daemonic Brain via the /api/v2/export/ endpoint. Pair with the readwise plugin's webhook to keep it live.",
   "category": "recipes",
   "author": {
     "name": "Mark Lavercombe",
@@ -18,5 +18,5 @@
   "difficulty": "beginner",
   "estimated_time": "15 minutes",
   "created": "2026-04-24",
-  "updated": "2026-04-24"
+  "updated": "2026-11-05"
 }

@@ -328,7 +328,7 @@ development — the test caught it.
 - **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers
   cannot pool connections at all. The servers on it run as `bun <file>` (step 3).
 - **Most migrated recipes and integrations are not individually tested.** Most
-  need live credentials — Gmail, Slack, Readwise. The shim is tested; each
+  need live credentials — Gmail, Slack. The shim is tested; each
   migrated file is verified to parse; `integrations/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
   filters on a JSON path, found the two gaps change 73 closed). Until the

@@ -247,8 +247,9 @@ The primitives that remain the brain's after the tool takes the transport, and
 their home under `primitives/` once SMD-1918 extracts them:
 
 - **Webhook receiver verification** — the shared-secret compare
-  (`integrations/_shared/auth.ts`'s `secretMatches`, SMD-1455) every push receiver
-  in the tree already uses; a low-code node inherits it as the node's auth, a
+  (`integrations/_shared/auth.ts`'s `secretMatches`, SMD-1455) the vendored push
+  receivers used, and a plugin's hook does with the SDK's `safeEqual` or
+  `verifyTimestamped` (SMD-2690); a low-code node inherits it as the node's auth, a
   native driver keeps it.
 - **The ack reply** — the source capability's confirmation to the captured
   message, one helper per chat family, never a sink.
@@ -383,7 +384,7 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 - **Text.** the highlight text; the user's note appended as `Note: …`; the source title and author named once
 - **Edges.** source-document edge (a document entity per book or article, cached in schemas/readwise-books today); author person edge
 - **Metadata.** `vendor`, `highlight_id`, `book_id`, `title`, `author`, `category`, `location`, `highlighted_at`, `tags`
-- **Identity.** `<vendor>:<highlight id>`; the id is stable across a note edit and a re-export, which is why readwise-capture answers `existed` on a re-delivery
+- **Identity.** `<vendor>:<highlight id>`; the id is stable across a note edit and a re-export, which is why the readwise plugin's webhook answers a re-delivery with the thought the first captured
 - **Dividing line.** the live webhook is a push → tool node (or the native receiver today); the history backfill is a pull the tool can page → tool node, or the native script; both map to one identity so running both makes no duplicate
 - **Instances today.** `readwise`
 
@@ -445,7 +446,7 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 | `grok` | source | `recipes/grok-export-import` (conversation-export · batch · native-driver); `recipes/x-twitter-import` (conversation-export · batch · native-driver) | — |
 | `instagram` | source | `recipes/instagram-import` (message-stream/chat · batch · native-driver); `recipes/instagram-import` (activity-export · batch · native-driver) | — |
 | `perplexity` | source | `recipes/perplexity-conversation-import` (conversation-export · batch · native-driver) | — |
-| `readwise` | source | `integrations/readwise-capture` (annotation/highlight · push · native-driver); `recipes/readwise-import` (annotation/highlight · pull · native-driver) | — |
+| `readwise` | source | `plugins/readwise` (annotation/highlight · push · native-driver); `recipes/readwise-import` (annotation/highlight · pull · native-driver) | — |
 | `slack` | bidirectional | `integrations/slack-capture` (message-stream/chat · push · native-driver) | `recipes/editorial-policy` (message-stream/chat · push · native-driver) |
 | `telegram` | bidirectional | `integrations/telegram-capture` (message-stream/chat · push · native-driver); `recipes/vercel-neon-telegram` (message-stream/chat · push · native-driver) | `recipes/weekly-digest` (message-stream/chat · push · native-driver); `recipes/life-engine` (message-stream/chat · push · mcp-server); `recipes/life-engine-video` (message-stream/chat · push · mcp-server) |
 | `x` | source | `recipes/x-twitter-import` (activity-export · batch · native-driver); `recipes/x-twitter-import` (message-stream/chat · batch · native-driver) | — |
@@ -456,7 +457,7 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 |---|---|---|---|---|---|---|---|
 | `integrations/slack-capture` | `slack` | message-stream/chat | push | source | 1:1 | read-only | native-driver |
 | `integrations/telegram-capture` | `telegram` | message-stream/chat | push | source | 1:1 | read-only | native-driver |
-| `integrations/readwise-capture` | `readwise` | annotation/highlight | push | source | 1:1 | read-only | native-driver |
+| `plugins/readwise` | `readwise` | annotation/highlight | push | source | 1:1 | read-only | native-driver |
 | `recipes/readwise-import` | `readwise` | annotation/highlight | pull | source | 1:1 | read-only | native-driver |
 | `integrations/chrome-capture-extension` | `claude-ai` | conversation-export | push | source | 1:1 | read-only | browser-extension |
 | `integrations/chrome-capture-extension` | `claude-ai` | conversation-export | pull | source | 1:1 | read-only | browser-extension |

@@ -73,9 +73,10 @@
  * Consumers: the REST core (rest/app.ts) and mcp-server/; and the vendored
  * recipes and integrations that compared with `key !== expected` — nine MCP and
  * HTTP servers, four workers and one webhook receiver when they became
- * consumers (SMD-1455, change 67), an HTTP API, four workers and the webhook
- * receiver now. The six vendored extensions under extensions/ (seven servers),
- * which authenticated with `key !== expected` on a URL query key and ran as the
+ * consumers (SMD-1455, change 67), an HTTP API and four workers now (the
+ * webhook receiver is the readwise plugin's hook since SMD-2690). The six
+ * vendored extensions under extensions/ (seven servers), which authenticated
+ * with `key !== expected` on a URL query key and ran as the
  * service role until they were made consumers of this module (SMD-1252, FORK.md
  * change 64), are plugins since SMD-2311. Each vendored server imports
  * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
@@ -230,6 +231,9 @@ function digestsMatch(a: string, b: string): boolean {
  * field is the caller's to shape, and a number or an object is refused here
  * rather than hashed or thrown on. No scope and no name: a webhook secret
  * identifies the caller's platform, not a client, so there is no principal to give.
+ * No vendored server calls it since the readwise receiver became a plugin
+ * (SMD-2690), whose hook compares digests with the plugin SDK's safeEqual;
+ * kept for a receiver of the kind.
  */
 export function secretMatches(presented: unknown, expected: string | null | undefined): boolean {
   if (typeof presented !== "string" || typeof expected !== "string" || !presented || !expected) return false;
