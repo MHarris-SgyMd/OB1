@@ -36,7 +36,7 @@ CI only does basic credential pattern matching. Scan deeper:
 
 Assess against OB1's core: "One brain, all your AI tools."
 
-- Does this add a capture, retrieval, or processing capability for Open Brain?
+- Does this add a capture, retrieval, or processing capability for Daemonic Brain?
 - Does it complement existing contributions? Check `recipes/`, `schemas/`, etc. for overlap.
 - Does it respect the upstream boundary (no core `thoughts` table or MCP server modifications)?
 - Does it require paid services with no free-tier alternative?

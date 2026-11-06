@@ -1,6 +1,6 @@
 # Resources
 
-Official companion files and packaged exports for Open Brain. Community-contributed plain-text skill packs live in [`../skills/`](../skills/).
+Official companion files and packaged exports for Daemonic Brain. Community-contributed plain-text skill packs live in [`../skills/`](../skills/).
 
 | Resource | What It Is |
 | -------- | ---------- |
