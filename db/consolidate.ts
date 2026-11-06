@@ -735,7 +735,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       calls: `${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""}`,
       outage,
       probe: (w) => probe(undefined, w),
-      // Pairs judged, not thoughts: one that has no candidate finishes without a call (review pass 1).
+      // Pairs answered (a malformed answer among them), not thoughts: one that has no candidate finishes without a call (review pass 1).
       settled: () => totals.pairs + failed,
       pollS: FOLLOW,
       pausesBefore: true,

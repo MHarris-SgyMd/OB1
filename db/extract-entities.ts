@@ -665,7 +665,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2): the outage's model by name, said on the row it
    * stamps — the sleep scheduler's, or this follower's own — so preflight names the provider (SMD-2905). The schedule
    * carries on from the last outage's when this one comes back within a minute, a poll and the pauses of its answer
-   * with no thought settled since; an answer polls again at once; a refusal ends the follower, exit 2.
+   * with nothing got past the provider since (a thought settled, or a window answered and kept); an answer polls again
+   * at once; a refusal ends the follower, exit 2.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const back = await waitOutProvider({
@@ -1247,10 +1248,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // — a window answered as the stop came was dropped).
         if (!keeping) return;
         try {
-          await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
+          const [saved] = (await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb) AS kept`) as { kept: boolean | null }[];
           // A window answered and kept got past the provider for good: the outage wait's carry reads it (SMD-2636
-          // PR 2, review passes 1 and 2). One not kept is asked again, so it counts no more than the thought does.
-          windowsAnswered++;
+          // PR 2, review passes 1 to 3). One not kept — the claim no longer this worker's, false since migration 101
+          // (before it the function returns nothing to read) — is asked again, so it counts no more than the thought does.
+          if (saved?.kept !== false) windowsAnswered++;
         } catch (e) {
           keepingFailed(e, "keep");
         }

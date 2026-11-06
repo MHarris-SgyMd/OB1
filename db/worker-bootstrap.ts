@@ -633,7 +633,7 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
 export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless, from = 0): Promise<Probe | null> {
-  // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (reembed.ts's, SMD-2679).
+  // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (waitOutProvider's, SMD-2679, SMD-2636 PR 2).
   for (let step = from; ; step++) {
     await sleep(outageWait(step), wake);
     if (wake.aborted) return null;
@@ -702,11 +702,11 @@ export class ProviderOutage {
     return "outage";
   }
 
-  /** Where the last outage's probe schedule ended, and the thoughts settled when it did: resumeFrom's. */
+  /** Where the last outage's probe schedule ended, and the caller's count of work got past the provider when it did: resumeFrom's. */
   private reached = 0;
   private settledAtEnd = -1;
 
-  /** A probe answered — at step `reached` of its schedule, with `settled` thoughts recorded either way (resumeFrom's; waitOutProvider passes both). */
+  /** A probe answered — at step `reached` of its schedule, the caller's count of work got past the provider at `settled` (resumeFrom's; waitOutProvider passes both). */
   end(reached = 0, settled = -1): void {
     this.reason = null;
     this.endedAt = this.now();
@@ -716,8 +716,8 @@ export class ProviderOutage {
 
   /**
    * The probe schedule's first step for an outage beginning now: where the
-   * last one's ended, when it ended within `windowMs` and no thought settled
-   * since — a limit the probe passes and no row gets past, whose waits then
+   * last one's ended, when it ended within `windowMs` and the count `settled`
+   * has not moved since — a limit the probe passes and no work gets past, whose waits then
    * keep growing to the cap; else 0, the first wait (SMD-2679 PR 4a-2b).
    */
   resumeFrom(settled: number, windowMs: number): number {
@@ -919,9 +919,9 @@ export async function followedPass<C>(o: {
 }
 
 /** The parenthesis an outage's line adds when its schedule carries on from the last one's. */
-export const CARRIED_NOTE = " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)";
+const CARRIED_NOTE = " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)";
 /** The same for a follower that pauses before an outage (extract's, consolidate's): its window takes in the pauses. */
-export const CARRIED_NOTE_PAUSED = " (back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on)";
+const CARRIED_NOTE_PAUSED = " (back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on)";
 
 /**
  * A follower's wait for its provider after a pass a worker halted on the provider's outage (SMD-2599; one copy for
@@ -936,10 +936,11 @@ export const CARRIED_NOTE_PAUSED = " (back within a minute, a poll and its pause
  *   not abort, can push it past the window, and such a call usually answers and moves `settled()` anyway.
  * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
  *   again at once.
- * - **Refused** — any 401, 402, 403 or 404 the probe reads so (probeChat; probeTier's any other 4xx): a key revoked,
- *   credit run out, the base URL gone while it was away, or a proxy answering 404 before its route is back — the
- *   request's, not the provider back: said, and returned with whether the tier's probe met it, for the caller's
- *   follower to stop on, exit 2, nothing marked failed.
+ * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404 (probeChat), the tier's any
+ *   other 4xx (probeTier), re-embed's any error neither down nor missing (embedProbe). A key revoked, credit run out,
+ *   the base URL gone while it was away, or a proxy answering 404 before its route is back — the request's, not the
+ *   provider back: said, in the tier's name when its probe met it, and returned with whether it did, for the
+ *   caller's follower to stop on, exit 2, nothing marked failed.
  * - **Stopped:** null, a stop ending the wait.
  * `calls` is what each probe calls, as the line says it: "m at b for one token".
  */
@@ -974,7 +975,7 @@ export async function waitOutProvider(o: {
     const answered = await probeUntil(() => { step++; return o.probe(o.wake); }, o.wake, (p) => !isOut(p), o.sleep, from);
     if (answered === null) return null;
     if (answered.state === "refused") {
-      o.writer.err(`  ${o.who} answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
+      o.writer.err(`  ${answered.tier ? "the decision tier" : o.who} answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
       return answered.tier ? { refused: answered.why, tier: true } : { refused: answered.why };
     }
     o.outage.end(step, o.settled());

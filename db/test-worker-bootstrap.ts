@@ -693,16 +693,17 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     o.begin("503 busy", "t5");
     lines.length = 0;
     providerStamps.length = 0;
-    const refused = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "refused", why: "401 invalid api key" }], "waitOutProvider's refused") }));
+    const refused = await onTheClock(() => waitOutProvider({ ...base, who: "the judge", outage: o, probe: scripted([{ state: "refused", why: "401 invalid api key" }], "waitOutProvider's refused") }));
     ok(refused !== null && refused !== "answered" && refused.refused === "401 invalid api key" && refused.tier === undefined && o.reason !== null && providerStamps.join() === "true,false"
-      && /^err {3}the provider answers now, refusing the request itself \(401 invalid api key\) — the follower stops; nothing is marked failed$/.test(lines[1] ?? ""),
+      && /^err {3}the judge answers now, refusing the request itself \(401 invalid api key\) — the follower stops; nothing is marked failed$/.test(lines[1] ?? ""),
       `waitOutProvider: a refusal is the request's, said, the follower to stop (${JSON.stringify(refused)}; ${lines[1]})`);
-    // The decision tier's probe refused: returned so, for the caller's remedy to name the tier (review pass 1).
+    // The decision tier's probe refused: said in the tier's name, not the caller's (review pass 3), and returned so, for
+    // the caller's remedy to name the tier (review pass 1).
     lines.length = 0;
     const byTier = await onTheClock(() => waitOutProvider({ ...base, who: "the judge", outage: o, probe: scripted([{ state: "refused", why: "not an ob1-jev/1 tier", tier: true }], "waitOutProvider's tier refused") }));
     ok(byTier !== null && byTier !== "answered" && byTier.tier === true && byTier.refused === "not an ob1-jev/1 tier"
-      && /^err {3}the judge answers now, refusing the request itself \(not an ob1-jev\/1 tier\)/.test(lines[1] ?? ""),
-      `waitOutProvider: a refusal the tier's probe met says so, in the caller's words (${JSON.stringify(byTier)}; ${lines[1]})`);
+      && /^err {3}the decision tier answers now, refusing the request itself \(not an ob1-jev\/1 tier\)/.test(lines[1] ?? ""),
+      `waitOutProvider: a refusal the tier's probe met says so, in the tier's name (${JSON.stringify(byTier)}; ${lines[1]})`);
     // A probe finding the model missing is still the outage: waited past, not an answer; the lines in the caller's
     // words (review pass 1, mutant: re-embed's "embedding provider" unheld).
     {
@@ -740,7 +741,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     };
     const edges = [await carriesAfter(65_000 + pausesMs - 1, true), await carriesAfter(65_000 + pausesMs, true), await carriesAfter(64_999, false), await carriesAfter(65_000, false)];
     ok(/for one token after 10 s and then .*its pauses of its last answer/.test(edges[0]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[1])
-      && /for one token after 10 s and then .*\(back within a minute and a poll of its last answer/.test(edges[2]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[3]),
+      && /for one token after 10 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(edges[2]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[3]),
       `waitOutProvider: the carry's window is a minute and the poll, and the pauses for a follower that spends them first, strictly within (${edges.map((l) => l.slice(-110)).join(" | ")})`);
     // A stop ends the wait: null, the stamp off.
     providerStamps.length = 0;

@@ -4488,6 +4488,11 @@ if (want("9f")) {
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
+    // Re-embed's carried line in its own words, as on main: no pauses in its window or its note (SMD-2636 PR 2,
+    // review pass 3, mutant: re-embed given extract's pausing window and words passed every row).
+    const carriedLines = throttledFollower.lines.filter((l) => /the follower calls stub-embed at /.test(l) && / \(back within /.test(l));
+    assert(carriedLines.length >= 2 && carriedLines.every((l) => l.endsWith(" (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)")),
+      `…each carried outage's line in re-embed's own words, no pauses (${carriedLines.length}; ${carriedLines[0]?.slice(-130)})`);
     await sql`DELETE FROM thoughts WHERE id = ${throttledThought}::uuid`;
 
     // The write's database errors are no thought's (review pass 3: each was recorded as its failure). A trigger on thoughts raises them for a marker.
@@ -5784,7 +5789,7 @@ if (want("10")) {
   }
 
   // SMD-2636 PR 2: after the provider answers a wait the follower polls again at once, not after its interval
-  // (re-embed's rule): one thought whose call and three pauses meet a 429, the interval 10 s — extracted within 5 s of
+  // (re-embed's rule): one thought whose call and three pauses meet a 429, the interval 10 s — extracted within 3 s of
   // the answer, where an interval first took 10. Stopped at 60 s if it runs on.
   {
     const restorePauses = shortenPauses();
@@ -5803,8 +5808,10 @@ if (want("10")) {
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 10, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soon}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
-      // Once: the interval comes back after the poll at once — a thought seeded now waits for the next pass, 10 s on
+      // Once: the interval comes back after the poll at once — a thought seeded a second later, the at-once pass over,
+      // waits for the next pass, 10 s on
       // (review pass 2, mutant: a reset dropped polled without end).
+      await Bun.sleep(1_000);
       later = await seed("Ulla checked the interval came back after the poll.");
       await Bun.sleep(4_000);
       laterStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${later}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status ?? "none";
@@ -5817,7 +5824,7 @@ if (want("10")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus === "pending",
-           `a follower polls again at once after the provider answers a wait, not after its 10 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a follower polls again at once after the provider answers a wait, not after its 10 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of [soon, later]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
@@ -15081,6 +15088,8 @@ if (want("16")) {
   let judge429 = 0;
   /** While set, a probe answered (not one the outage turns away) is refused 401 (SMD-2636 PR 2). */
   let judgeProbeRefuses = false;
+  /** The prompts of the calls an outage turned away (SMD-2636 PR 2, review pass 3): whose call met it. */
+  const judgeDownPrompts: string[] = [];
   /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
   let judge400TimedOut = 0;
   /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
@@ -15103,8 +15112,9 @@ if (want("16")) {
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
-      // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599).
+      // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599); a call's thoughts are kept, whose call met it (SMD-2636 PR 2, review pass 3).
       if (judgeOutage.down(isProbe)) {
+        if (!isProbe) judgeDownPrompts.push((body.messages ?? []).map((m) => m.content).join("\n"));
         if (judgeDown === "hang") return neverAnswers();
         return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "litellm.Timeout: Request timed out." } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
@@ -16602,6 +16612,7 @@ if (want("16")) {
       judgeDown = "503";
       judgeOutage.arm(1);
       judgeProbeRefuses = true;
+      judgeDownPrompts.length = 0;
       keySeeds.push(await seed("The key log names the judge's old key.", 71, 3, ["key-log"]));
       keySeeds.push(await seed("The key log names the judge's rotated key.", 71, 0, ["key-log"]));
       const armed = Date.now();
@@ -16615,14 +16626,16 @@ if (want("16")) {
       restorePauses();
     }
     const keyRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${keySeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
+    // Pending once enqueued as much as once returned: the pair's own judge call met the outage, so it was claimed and handed back.
+    const keyMet = judgeDownPrompts.some((p) => p.includes("rotated key"));
+    assert(code === 2 && keyMet && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
            && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)) && lines.some((l) => /Nothing was marked failed\.$/.test(l)),
-           `a consolidate follower whose wait's probe is refused stops, exit 2, its refusal said once and well before the 30 s backstop, its pair's thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
+           `a consolidate follower whose wait's probe is refused stops, exit 2, its refusal said once and well before the 30 s backstop, its pair's call met the outage and its thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, met ${keyMet}, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of keySeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-2636 PR 2: as [10]'s — after the judge answers a wait the follower polls again at once: one pair whose call
-  // and three pauses meet a 429, the interval 10 s, judged within 5 s of the answer. Stopped at 60 s if it runs on.
+  // and three pauses meet a 429, the interval 10 s, judged within 3 s of the answer. Stopped at 60 s if it runs on.
   {
     const restorePauses = shortenPauses();
     const restoreOutage = shortenOutage();
@@ -16641,6 +16654,7 @@ if (want("16")) {
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soonSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
       // Once, as [10]'s: a pair seeded now waits for the next pass (review pass 2, mutant).
+      await Bun.sleep(1_000);
       soonSeeds.push(await seed("The poll log names the judge's interval once more.", 72, 0, ["poll-log"]));
       await Bun.sleep(4_000);
       laterStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soonSeeds[2]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status ?? "none";
@@ -16653,7 +16667,7 @@ if (want("16")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus !== "succeeded" && laterStatus !== "failed",
-           `a consolidate follower polls again at once after the judge answers a wait, not after its 10 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a consolidate follower polls again at once after the judge answers a wait, not after its 10 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of soonSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
