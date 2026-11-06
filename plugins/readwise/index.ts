@@ -67,16 +67,22 @@ export function isoTime(s: string): string | null {
   return at.toISOString();
 }
 
-/** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
 /**
- * Each field's bound, in characters: room for any highlight Readwise makes, and
- * no more. Without them a leaked secret posted 1 MB texts (a capture's model
- * calls over all of it) and 1 MB notes and urls, every list of them answered
- * whole to a reader (review pass 3).
+ * Each field's bound, in UTF-16 code units (zod's count: an emoji is two):
+ * room for any highlight Readwise makes (its API keeps a passage and a note to
+ * 8,191 characters and a highlight's url to 4,095), and little more. Without
+ * them a leaked secret posted 1 MB texts (a capture's model calls over all of
+ * it) and 1 MB notes and urls, every list of them answered whole to a reader
+ * (review pass 3).
  */
-export const LIMITS = { text: 16_384, note: 8_192, url: 2_048, short: 64, tag: 128, tags: 100 } as const;
-/** The most a delivery's body may be, in bytes, before it is parsed: a highlight within LIMITS, and room to spare. */
-export const BODY_MAX = 128 * 1024;
+export const LIMITS = { text: 16_384, note: 8_192, url: 4_096, short: 64, tag: 128, tags: 100 } as const;
+/**
+ * The most a delivery's body may be, in bytes, before it is parsed: a highlight
+ * with every field at its bound, each character escaped as \uXXXX (six bytes,
+ * as a JSON encoder that escapes everything past ASCII writes it), fits.
+ */
+export const BODY_MAX = 256 * 1024;
+/** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
 const HighlightEvent = z.object({
   id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   text: z.string().max(LIMITS.text).refine((s) => s.trim().length > 0, "no text").refine(stored, "a NUL or a lone surrogate"),
@@ -85,10 +91,10 @@ const HighlightEvent = z.object({
   location_type: z.string().max(LIMITS.short).refine(stored, "a NUL or a lone surrogate").nullish(),
   // A time is metadata beside the passage: one the hook cannot read, a string or not, is stored as none, never a
   // reason to lose the highlight (review passes 2 and 3).
-  highlighted_at: z.unknown(),
+  highlighted_at: z.unknown().optional(),
   url: z.string().max(LIMITS.url).refine(stored, "a NUL or a lone surrogate").nullish(),
   color: z.string().max(LIMITS.short).refine(stored, "a NUL or a lone surrogate").nullish(),
-  updated: z.unknown(),
+  updated: z.unknown().optional(),
   book_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   tags: z.array(z.object({ name: z.string().max(LIMITS.tag).refine(stored, "a NUL or a lone surrogate") })).max(LIMITS.tags).nullish(),
 });
