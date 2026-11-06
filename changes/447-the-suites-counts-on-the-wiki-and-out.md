@@ -1,0 +1,59 @@
+# 447. The suites' counts on the wiki, and out of the docs (SMD-3614)
+
+**What changed.**
+- **`db/test-support.ts`'s `report()`** appends the run's counts as one JSON line to the file `OB1_TEST_COUNTS` names, when it is set: the suite by its path from the repo root, the variant its caller names, the CI job (`GITHUB_JOB`), and assertions, passed, failed, skipped and failed doc checks. A run with it unset, as on a laptop, writes nothing. One `appendFileSync` of one line, so the data layer's legs and the schema step's two widths, which run side by side, do not interleave. A failed write is said and leaves the exit code alone.
+- **A variant where a suite counts apart:** test-live and test-preflight name their shard (`shard rest`), test-schema its width (`width 1024`, `width 768`). A suite that names none is told apart by its flags (`eval-write-path.ts --gate`, beside its `--self-check`).
+- **`.github/workflows/fork-checks.yml`:**
+  - The six jobs that run suites set `OB1_TEST_COUNTS`: portable-server, db-schema, replay-gate, db-live, data-layer and compat-shim.
+  - Each uploads its file as `test-counts-<job>` (`test-counts-db-live-<shard>`) on a push to main, after a failed step too.
+  - A new job, **publish-test-counts**, needs those six. It runs on a push to main alone, and when one of them failed (`!cancelled()`). It writes the page with `.github/ci/test-counts-page.ts` and commits `Test-counts.md` to the wiki's repository.
+  - `contents: write` is set on that job alone. The token goes to git as an extraheader on each call, never into the clone's config or the checkout.
+  - `fork-checks-passed` needs the new job, and `MAY_SKIP` names it beside commit-lint, since a pull request, the merge queue and any other push skip it.
+- **`.github/ci/test-counts-page.ts`** (new) writes the page:
+  - a row a suite and variant, sorted by path, its skips and any failed doc checks shown;
+  - the commit, linked, and the run;
+  - the jobs that did not succeed, by result, and those that succeeded with no counts.
+  - Its `--self-check` runs in the repo-consistency job and in `db/ci-parity.sh`. It also runs a three-assertion suite of `report()`'s with `OB1_TEST_COUNTS` set and reads its lines back.
+
+**Held.**
+- `db/ci-parity.sh` with `OB1_TEST_COUNTS` set wrote 40 lines, one for each suite run that printed a `report()` total. The one other total, session-capture-hook's 795, comes from a suite that counts on its own.
+- Rendered, those lines already differ from the READMEs: test-server 1272 against 1265, test-e2e-sql 700 against 673, test-compat 302 against 295, test-jev 112 against 106. Those counts are the ones no check holds.
+- Mutants, each failing the self-check: the line never appended; the flags not used as the variant; the suite's own variant dropped.
+- actionlint 1.7.7 with shellcheck passes the workflow. A planted SC2086 and an undefined matrix property, as controls, are reported.
+- **`scripts/check-fork-consistency.ts`:**
+  - check 20's `AGGREGATE_MAY_SKIP` names publish-test-counts, with why;
+  - check 35 leaves `OB1_TEST_COUNTS` out of the environment it compares with `db/ci-parity.sh`, since it is where a run's totals go, not what the run tests;
+  - check 35's `PARITY_NOT_RUN` excuses the publish job.
+
+- **test-live `[10]`, a race this PR's ci-parity run met:** the case whose stand-in `claim_thoughts` raises 55P03 for three polls swapped the real one back with two statements, DROP then RENAME. A poll between them found no `claim_thoughts` at all, and the follower ended on it (`function claim_thoughts(text, text, integer, integer) does not exist`; the shard alone passed 478 of 478 at once after). Both statements now go in one query, which Postgres runs as one transaction. With 1.5 s between the two statements, the old form fails the case with that message. The one-query form passes, with the same 1.5 s before it and without.
+
+**Why.** The totals lived in committed docs, and test-schema's, test-live's and test-preflight's `[doc]` checks held them there. So every PR that added an assertion edited the same lines of `db/README.md`, two such PRs in flight conflicted there, and the second summed both sides by hand. 121 merge commits since 2026-09-01 name those counts in their subject. Twice on SMD-3476, both sides raised one count by the same amount and git kept the change once. A count is a fact about a commit's run, so it is written where the run is.
+
+**PR 2: the counts out of the docs.**
+- **The docs.** Every count a doc quoted is gone:
+  - `db/README.md`'s Expected outcome and Testing block;
+  - `server-portable/README.md`'s, `mcp-server/README.md`'s and `rest-client/README.md`'s `# N —` comments;
+  - `compat/supabase-sql/README.md`'s summary line and `jev/README.md`'s two totals;
+  - `FORK.md`'s shim count.
+
+  Each points to the wiki page instead, or writes the shape with N (`N assertions: N passed, 0 failed`).
+- **The README checks go.** test-schema's `[doc]` total check, test-live's and test-preflight's total checks, and their shard-sum checks are dropped.
+- **What the sum caught, now caught in the run.** An assertion made outside every `want()` section runs, and counts, in every shard. The README sum used to show it as the shards adding up to more than the full run.
+  - Now `trackSections` in `db/test-support.ts` wraps each suite's `assert`. `want()` tells it which header ran last and whether that section runs here. An assertion made while it does not is noted, and `[doc]` fails the run on it.
+  - A shard sees a stray made after a section it skips, and CI runs every shard, so a stray anywhere fails a cell. A full run, which runs every section, sees only one made before the first header.
+  - test-live's `[end]`, which every shard runs on purpose, marks itself as run.
+  - The header-id and listed-section checks stay.
+- **Check 45** in `scripts/check-fork-consistency.ts` fails a `.md` line that states a count:
+  - a suite (`test-*`, `eval-*`, `smoke*`, or `bun run test`) beside `# N —`, `# N assertions` or `N assertions`/`N passed`;
+  - or a summary line with digits.
+
+  It exempts changes/, CHANGELOG.md, and the two dated analyses that quote a count as a measurement. Its probe pins what it refuses and passes.
+- **Held (PR 2):**
+  - Every shard of test-live and test-preflight passes with the new check, none flagged. The counts equal main's published page: live 1089/129/283/434, preflight 451/563.
+  - **A stray `assert` placed just after a section another shard runs:**
+    - after test-preflight's `[2]`, it fails the first shard: `after [2], which this run skips: a stray…`;
+    - after test-live's `[16]`, it fails the long shard;
+    - with the check made a no-op, both shards pass, each count one higher (452, 284).
+  - **Check 45:**
+    - `# 123 assertions` planted beside `test-schema.ts` in `db/README.md` fails it;
+    - with the summary-line shape dropped from its rule, its probe fails.

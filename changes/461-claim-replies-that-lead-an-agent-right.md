@@ -1,0 +1,112 @@
+# 461. Claim replies that lead an agent right — a revived lapsed claim names what was claimed meanwhile, a release asks before a re-claim (SMD-3654)
+
+**What changed.**
+- **The lapse, reported.** `renew_claim`, and `claim_work` with a token, read the claim's lease before 115's writer runs. 115 answers with the new lease, so the old one is read first (`claimLease`): by id and token for `renew_claim`, which the primary key finds, by token for `claim_work`.
+  - If the renewal revived a lapsed claim, the value carries `lapsed: { at, claimedSince }`. The claims are those made or renewed on overlapping work after the lapse, read by 115's own piece key (`claimsMadeSince`): the same piece, or either the whole ticket. A renewed one counts: a claim made before the lapse and revived during it was live then, and no overlapping claim is made or renewed while ours is live.
+  - Each claim since carries its id, work, holder, `ownKey`, times (`renewedAt` among them) and `state`, never its label or reason. Those are another key's words, and its piece is quoted in the text.
+  - The store reads the first ten and counts them all; `moreSince` is the rest.
+  - `claimedSince` is null when it couldn't be read, and `at` is null too when the lease before couldn't be. The renewal stands either way.
+  - The words add: "It had lapsed at T; no other claim was made or renewed on its work meanwhile." Or: "…and since then another claim was made or renewed on its work: … Another agent may have built part of the work: stop, and tell the user before carrying on." Unread, they give one check and what each answer means: "list the ticket's claims with list_claims and include_ended: a claim other than this one (claim <id>) on its work, claimed or renewed after T, means another agent may have built part of it, so stop, and tell the user; with none, carry on." With the lease unread, they start "Whether it had lapsed could not be read", and T is the claim's own `claimedAt`, a time the agent can read.
+  - A live claim's renewal is unchanged. No migration: two reads beside 115's writers, the token a bind parameter matched by its hash, the server role's existing SELECT.
+- **`claim_work` with an ended claim's token** — the caller's own claim on exactly the work asked, released or taken over after it lapsed — is refused `CLAIM_RELEASED` in `renew_claim`'s words, before 115's writer, which would make a new claim. The lease read for `claim_work` asks, with 115's own ticket and piece cleaning and its own holder test (agent id where the claim has one; by name with the registry away, as `renew_claim`'s `ownWhileAway` reads it), whether the claim is the caller's own on that work (a piece blank once cleaned, which 115 refuses, is no match), and carries who released it and why. A token passed while claiming other work, or another key's, is left to the writer, which ignores it and makes a new claim; without a token, a new claim as before.
+- **A plain release** refusing a renewal says "ask the user before claiming it again: a release may be an operator's, made on purpose", where it said "claim it again".
+- **The own-key words** name this session's own claim on overlapping work, its id in the worktree's `.work-claims/` (work under it, or release it and claim the piece), before another session and a lost token. On a renewal's `WORK_CLAIMED` they say to release the claim being renewed instead.
+- **The descriptions:** `list_claims` says a session finds its own claims by its worktree's token files, and that `holder` lists every session of a key. `renew_claim`'s and `claim_work`'s say the reply reports a lapse. The OpenAPI document and the rest-client are regenerated.
+- **The session hook** (recipe 1.7.1) marks a renewal that reports claims made or renewed while the claim had lapsed, or couldn't read them or the lapse, with a `<id>.blocked.json` coded `CLAIMED_WHILE_LAPSED`. That covers its own renewal, and the agent's own when the claims hook reads it.
+  - It records the renewal, and the log says "renewed — but it had lapsed …"; a lapse with nothing since is logged as one too.
+  - A marker longer than 600 characters, a lapse's or a `WORK_CLAIMED`'s, is cut, and says where.
+  - The agent's own `WORK_CLAIMED` naming several claims in the way is marked; only one was.
+  - `--renew-claims` exits 1 on one it marked.
+  - The expiry it records from the agent's reply is the first `until … (claim <id>).`, so a piece named later can't set it.
+  - The lapse check it makes before reviving a claim it knows lapsed stays, for brains from before this change. It counts a claim renewed since the lapse, its marker says it did not renew and names each claim's id, and a lapse with nothing since is logged as one.
+- **The rule** (AGENTS.md and CLAUDE.md):
+  - The check before renewing a claim that may have lapsed stays, counting a claim claimed or renewed since.
+  - Every renewal's reply is read for a lapse, expected or not. One naming claims made or renewed meanwhile is handled as `WORK_CLAIMED`, the marker's carry-on not waiting on a claim that already ended. An unread one, or a marker saying so, gets the reply's own check first.
+  - After the user's "carry on", the renewal the agent then makes names the claim that was in the way again, and the hook may mark it more than once first: no new stop. A later reply or marker naming it means its holder may have worked on it: the user is told. When the agent can't tell whether the user decided — after a compaction, on resume — it tells the user. A carry-on waits for each other claim to end (released or lapsed): once the agent's claim is renewed, a lapsed one can't be revived while it stays live. The agent deletes each such marker, and renews if the marker says the hook did not.
+  - On a brain from before SMD-3654, a `claim_work` with the token that answers "Claimed" means the claim had ended: the agent releases the new claim and handles it as a release.
+  - Any marker that says it was cut, or a reply's "and N more", sends the agent to `list_claims` for the rest, its own pieces among them, before it tells the user.
+  - A `claim_work` with the token renews only on the same work; other work is claimed without one. After a release, on the user's go-ahead, the agent deletes the ended claim's files and claims without the token.
+  - After any lapse, or time away longer than the lease, the agent finds the ticket's work again before pushing. On resume it looks beside each token file again after renewing.
+
+**Why.** SMD-3602's review passes found that 115 revives a lapsed claim nothing covers without a word, so an agent renewing after a long absence could carry on over work another agent built while the claim was free. The client could only patch around it: a marker for one window, and a check the agent had to remember. Three reply texts also contradicted the rule they serve. The maintainer kept SMD-3602 client-only and raised this to Medium.
+
+**Held.**
+- `test-rest-sql.ts` `[10]`, against Postgres:
+  - a live renewal carries no lapse;
+  - a lapsed one nothing touched reports none;
+  - one renewed after another key claimed and released the whole ticket names that claim, with holder, state and no reason;
+  - neither a claim on another piece nor one made before the lapse is counted;
+  - one made before the lapse and renewed during it is named, with when it was renewed;
+  - `claim_work` with the token reports the same, naming the same claim;
+  - `claim_work` with its own taken-over or released claim's token on that work, however spelled, is refused, asking the user or saying stop, and makes no claim; on other work, or another key's call, it is the writer's;
+  - a released claim's renewal says to ask the user.
+- `test-server.ts` pins the lapse sentences (a piece quoted, a renewal's time, ten named and the rest counted, the unread and unknown checks with their bounds) and the changed refusals. Over a store that answers as told, the core reads the lease by id and token, asks the store for ten, counts the rest from its total, says a failed lease read as unknown, and refuses `claim_work` with its own ended claim's token on that work without calling the writer, asking the store with the work and the key; not its own on that work goes to the writer.
+- `test-store-sql.ts` `[21]` reads a lease by token, and by token and id; another claim's id with the token reads none. With the work asked, it says the claim is the caller's own on exactly that work, however spelled, and not on another piece, the whole ticket, another ticket or another key; by agent id under a new name, by name with no agent id, not another agent id's; "PR  1" as PR 1, a blank piece as no whole ticket. `claimsMadeSince` reads the first of two at limit 1, and counts both.
+- `test-session-capture.mjs` `[13]`:
+  - it marks a revival with claims since, or unread, or its lapse unread, its own or the agent's, and leaves one with none unmarked;
+  - by hand, a marked renewal exits 1;
+  - a piece in the reply naming a later expiry doesn't set the one recorded;
+  - a quiet lapse is logged as one; a long marker is cut, saying so;
+  - the lapse check counts a claim renewed during the lapse, names each claim's id and says it did not renew, and on an older brain logs a quiet lapse once;
+  - a `WORK_CLAIMED` naming several claims in the way is marked, and cut saying so; the hook's own line names this worktree's piece past the cut;
+  - the lapse check's marker gives a claim's renewal time beside its claim time;
+  - a `claim_work` for other work carrying the token marks nothing, one on the token file's work does, its piece cleaned as 115 cleans it, and a token file naming no ticket taken as that work.
+- Mutants, each killed and each rerun on the final tree: the change's fourteen (no lapse reported, the lease not read first, a live renewal reported, every claim overlapping, claims before the lapse counted, `claim_work` silent, the words silent, the old release and own-key words, a since-claim's reason leaking, and four of the hook's marking), then fourteen, twelve, twelve, ten and seven for review passes 1–5, at least one per fix below (pass 5's rows merge fixes); 67 distinct, no mutant for pass 6's wording. Pass 3's two holder mutants were retired with the name test they held, now 115's own holder test in SQL.
+
+**Review passes.** Six: passes 1–5 each a cold reader and a walkthrough reviewer, pass 6 a cold read of pass 5's diff, the findings in each pass's commit body with their `(caught: …)` tags.
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | the rule dropped its own check before renewing a claim that may have lapsed, leaning on the reply alone, though stable runs the old server | walkthrough | restored, the reply an added signal |
+| 1 | on a renewal's `WORK_CLAIMED`, the own-key words said to release this session's live claim in the way | walkthrough | they say release the claim being renewed |
+| 1 | the unread words gave a check with no meaning for its answers, and the rule stopped on any unread reply | walkthrough | one check, what each answer means, in both |
+| 1 | `WORK_CLAIMED`'s carry-on, and the hook's detached renewal taking the report first, didn't fit a lapse report | walkthrough | the carry-on waits only on a live claim; on resume the agent looks beside its token files again |
+| 1 | the rule named no label, marker code or search after a lapse | walkthrough | the `list_claims` label, `CLAIMED_WHILE_LAPSED`, step 1's search again |
+| 1 | another key's piece in the lapse list was unquoted, and one naming `until … (claim <id>)` steered the hook's greedy pattern | cold read | quoted as `WORK_CLAIMED`'s are; the hook takes the first match |
+| 1 | a failed lease read hid the lapse: the renewal answered as a live one | cold read | `lapsed.at` null, and words saying it couldn't be read |
+| 1 | `renew_claim`'s lease read scanned by token hash, which has no index | cold read | by id and token |
+| 1 | `--renew-claims` exited 0 on a renewal it marked; the agent's own unread reply untested | cold read | exit 1; tested |
+| 1 | the list of claims since had no bound, and `claim_work`'s description said nothing of a lapse | cold read | ten named, the rest counted; described |
+| 2 | a claim made before the lapse and renewed during it was missed, so the reply said no other claim was made | cold read | made or renewed since, in the server and the hook's check |
+| 2 | every carry-on came back as a second stop for the same claim, and the lapse-check marker named no ids | walkthrough | a claim already decided on is no new stop; the marker names ids |
+| 2 | a `CLAIMED_WHILE_LAPSED` marker saying the claims couldn't be read sat under `WORK_CLAIMED`'s stop | walkthrough | the reply's check first |
+| 2 | the unknown-lapse check's bound was a time nothing kept | walkthrough | the claim's own `claimedAt` |
+| 2 | a quiet lapse taken by the hook left no trace, and markers cut at 600 characters kept four of ten claims | walkthrough | logged as a lapse; a cut marker says so |
+| 2 | the Changelog, the README and two hook comments said what the code no longer did | walkthrough | each says what it does |
+| 2 | `claimsMadeSince` fetched every row to name ten | cold read | `LIMIT` and a window count |
+| 2 | the core's own cap went untested once the store read ten: the fake honoured the limit | mutant | the fake over-answers, holding the limit, the cap and the count apart |
+| 3 | `claim_work` with an ended claim's token made a new claim without a word, after a release or a takeover | cold read | refused `CLAIM_RELEASED` in `renew_claim`'s words, before the writer |
+| 3 | the rule's own pre-check still counted claims made, not renewed | cold read | either |
+| 3 | "already decided, by its id" waved through more work on that claim | walkthrough | narrowed (pass 4 again) |
+| 3 | the unread checks matched the agent's own claim, whose renewal set its `renewedAt` | walkthrough | the words name the claim to leave out |
+| 3 | a carry-on after the lapse-check marker left a claim the hook had not renewed to lapse | cold read | the rule says renew; the marker says "not renewed" |
+| 3 | an older brain's quiet lapse logged as a plain renewal; `WORK_CLAIMED` markers cut silently | walkthrough | logged once; cut saying so |
+| 3 | the claims hook marked the agent's `WORK_CLAIMED` only with one claim in the way, not "N live claims" | run-it | both read |
+| 4 | pass 3's refusal read any work, so a split's pieces claimed with the old token were told to ask the user | cold read, walkthrough | only the caller's own claim on exactly that work, by 115's cleaning and holder test in SQL |
+| 4 | after a release the rule had no carry-on, and the old token looped on "ask the user" | walkthrough | delete the ended claim's files, claim without the token; a token renews only on its own work |
+| 4 | "already decided" keyed on a decision time nothing records, and the lapse-check marker showed one time | walkthrough | no new stop only once the claim is released, a carry-on waiting for release (both replaced in pass 5); both times shown |
+| 4 | a cut `WORK_CLAIMED` marker lost the own-key words and id, and the rule's cut step covered lapse markers alone | walkthrough | any marker; the own-piece note reads the whole reply |
+| 4 | the ownership test compared names where 115 compares agent ids | cold read | 115's holder test |
+| 4 | the claims hook marked a healthy claim when a `claim_work` for other work carried its token | cold read | only a call on the token file's work marks it |
+| 5 | pass 4's carry-on waited for a release a gone holder's lapsed claim can't get without the operator key, though a renewed claim keeps it from reviving | walkthrough | a carry-on waits for the claim to end, released or lapsed |
+| 5 | pass 4's "already decided, released" keyed on a memory a compaction loses, and the two markers read alike | walkthrough | the renewal right after the decision is no new stop; a later naming, or not knowing, means tell the user |
+| 5 | with the registry away, pass 4's holder test let `claim_work` make a new claim from an ended token, and the agent-id path was untested | cold read | `ownWhileAway`'s name test in the read; store cases by agent id |
+| 5 | on a brain before SMD-3654 a `claim_work` with an ended token answered "Claimed" with nothing to say so | walkthrough | the rule reads "Claimed" as an ended claim |
+| 5 | a blank piece read as the whole ticket; the hook compared pieces looser than 115, and a token file with no ticket never matched; the log's "but It" | cold read, walkthrough | no match; 115's cleaning; taken as the work; lower-cased |
+| 6 | after a carry-on over a lapsed claim, its holder reviving it before the agent's renewal read as "no new stop" | cold read | no new stop only for a renewal that succeeds or a marker showing it lapsed or released; `WORK_CLAIMED` or live means tell the user |
+| 6 | the "Claimed" clause named only brains before SMD-3654, where the registry away answers so too | cold read | any "Claimed" for "Renewed" is an ended claim |
+
+**Tidied while the files were open.** A fresh tidy read after six passes, no behaviour changed: stale comments and assertion messages, a doubled call, one helper and one source each for a claim's work-and-holder words, the quiet-lapse note and the lease types.
+
+**Not taken.**
+- **A migration changing 115's writer to report the old lease.** Two reads in the core say the same, and leave 115, which every brain runs, untouched.
+- **Refusing to revive a lapsed claim when claims were made meanwhile.** The renewal still stands: the claim is the agent's, and the reply tells it to stop. A refusal would leave a claim held by nobody, while unmerged work may still exist.
+- **Declined in review:**
+  - the agent's own piece, released at merge, read as a claim made meanwhile, which needs the split step skipped (pass 1);
+  - a renewal within a millisecond of the expiry, which can only say "no other claim was made" (passes 1 and 2);
+  - the generic "another agent" words for an own-key claim, which the rule's own-key sentence covers (pass 2);
+  - `claim_work`'s lease read by token alone, which the `(issue, piece_key)` index serves only with 115's cleaning copied in (pass 2);
+  - a failed lease read letting `claim_work` make a new claim from an ended token, since refusing on a failed read would refuse every claim through a database blip (pass 4);
+  - with the registry away, `claim_work` with the token of the caller's own *unreleased* lapsed claim letting 115 take it over without a lapse report, older than this change (pass 5): SMD-3705.
+
+**Follow-ups.** SMD-3705: `claim_work` with the registry away and an unreleased lapsed claim's token refuses `CLAIM_UNATTRIBUTED`, as `renew_claim` does.

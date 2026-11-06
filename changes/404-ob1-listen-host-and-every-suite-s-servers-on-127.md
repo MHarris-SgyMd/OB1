@@ -1,0 +1,132 @@
+# 404. `OB1_LISTEN_HOST`, and every suite's servers on 127.0.0.1 — another app's listener no longer answers in their place: PRs 1, 2a and 2b (SMD-3323)
+
+**What changed.**
+- **`server-portable/auth.ts`:** `listenHostFrom(raw, hostAddresses?)` reads `OB1_LISTEN_HOST`:
+  - unset or blank is every address;
+  - an IP address, trimmed, is the one listened on, in one form: IPv6 as the URL parser writes it (`::0001` is `::1`), an IPv4-mapped one as its IPv4. `::` is every address and `0.0.0.0` every IPv4 one;
+  - anything else is a problem that names the setting, never its value (SMD-3235's rule): a name, a port, brackets, a link-local IPv6 address (fe80::/10, zone or none: Bun needs its interface, a zone, which this setting does not take, and the OS lists the address without one), or, where the caller passes the host's addresses, one they do not list (Linux's other 127/8 addresses are not listed, so they are refused).
+  - The IP check is string code, not `node:net`, so the file's runtime-neutral header still holds.
+  - It lives in auth.ts for the same reason `routable` does: `bun run sync-auth` copies the file into the vendored trees, so the vendored servers have it (PR 2b, below).
+- **`api.ts` and `mcp-server/index.ts`:**
+  - each passes its network interfaces' addresses (`node:os`), and the address to Bun as `hostname` beside `port`;
+  - each exits 2 on a problem before it serves, in words, as the MCP server's other settings do. Bun's own word for an address it cannot listen on misleads: "Is port N in use?" on macOS, EADDRNOTAVAIL on Linux.
+- **`server-portable/root.ts`:** `type Env` declares the setting.
+- **Check 14:** `NOT_FORWARDED` excuses it. A container is reached on the mesh, so a value forwarded from deploy/.env would cut it off from the proxy.
+- **Check 25:** api.ts's import lists name `listenHostFrom` from auth.ts and `networkInterfaces` from `node:os`.
+- **Check 42, new (PR 1, widened by PR 2a below):** in test-rest.ts, test-server.ts and db/test-support.ts, every server and child is held to 127.0.0.1. No suite sees a server put back on every address (the collision is rare, and Linux has none), so the checker does.
+  - Each `Bun.serve` and `Bun.listen` call, in any spelling (`Bun?.serve(`, `Bun["serve"](`, `Bun.serve<T>(`), sets `hostname: "127.0.0.1"` at its object's own top level, last and with no spread after it that could set it again. A `unix` socket is held by nature. A `Bun.serve` named but not called (an alias it cannot follow) is reported.
+  - Each node-style `.listen(` names that host, or a path (a string of digits is a port).
+  - Each object that gives a child `PORT` 0, in any quoting, or names `OB1_LISTEN_HOST`, sets `OB1_LISTEN_HOST` to that literal, last and with no spread after it.
+  - It reads the code alone: comments, string and template text, and regex literals blanked with their offsets kept, so a quote in a comment cannot carry the reading past a call, and a `hostname` nested, commented or quoted inside the call is not its own. PR 1's reader matched TypeScript's own tokens over the 419 tracked `.ts` files.
+  - It fails closed: a file it cannot read through (a template or `${` left open, brackets that do not pair by kind) is reported at the line it lost its way, never passed. Each kind of problem says its own fix.
+  - `LISTEN_EVERY_ADDRESS` names six exceptions, each with why: `secondLoopback`'s probe, serveChild's overridable default, and the four children [11b] and test-server's listen rows start on every address or refuse on purpose. An entry must name exactly one site that is still on every address.
+  - Its probe pinned 70 cases, and a failure named each case's wanted and actual count.
+- **`db/test-support.ts`:**
+  - serveChild's children get `OB1_LISTEN_HOST=127.0.0.1`, which a case's `env` can override;
+  - `secondLoopback()` finds a loopback address other than 127.0.0.1 that reaches a server on every address (`[::1]`, else `127.0.0.2`), by probing, so a row holding "127.0.0.1 alone" holds something on a host without IPv6 loopback, or fails saying so.
+- **test-rest:** its eight stub servers (the [12] collectors, the providers, the JWKS servers and [16]'s idle probe) listen on `hostname: "127.0.0.1"`, and the child it writes to show `up` is read from /health listens where `OB1_LISTEN_HOST` says.
+- **test-server:** its eighteen `Bun.serve` servers listen on 127.0.0.1 (its `Bun.listen` sockets and node listener already did), among them the [22] collectors its `bun index.ts` children export to (`firstTrickle` is trickled's MCP twin), its providers, and the in-process MCP server and REST app. Its own two spawns of api.ts and index.ts get `OB1_LISTEN_HOST`. Its base URL said `localhost`, which Bun dials at `[::1]` first, then 127.0.0.1; PR 2a dials 127.0.0.1 (below).
+- **Docs:**
+  - server-portable/README.md and mcp-server/README.md list the setting: compose never forwards it, the wildcards, and the exit;
+  - the README's suite lines name the topic, with the counts.
+- **PR 2a, the other suites:**
+  - every `Bun.serve` and `Bun.listen` in 20 more test files binds `hostname: "127.0.0.1"` (125 sites changed, 12 already held), after a spread where one ends the object (test-egress's `...stubOpts`), and test-thoughts' `closedNow`, which picks a closed port, picks it on 127.0.0.1; so do the dashboard smoke script's stub and the free port it picks for its strict preview;
+  - every suite dials its own servers and providers at `127.0.0.1`, never `localhost` (26 dials in 15 files, test-server's base URL and the redirect targets in test-brain-compare and test-client among them): Bun dials `localhost` at `[::1]` first, and a server held to 127.0.0.1 can sit beside another process's listener on its port there (a bind on 127.0.0.1 skips no port held on `[::1]` alone), which answers; at 127.0.0.1 our listener wins. test-brain-compare's six assertions that read a fake's label follow it. The `[::1]` rows accept a refusal or another app's answer, never the child's, and `secondLoopback` tries three probes, each on a port of its own;
+  - every child they start on port 0 gets `OB1_LISTEN_HOST`: test-mcp's three, test-egress's three, test-e2e-sql's, test-rest-sql's and test-plugins';
+  - check 42 reads every `test-*` and `smoke*` JavaScript or TypeScript file git tracks or would track (51), and flags a `localhost` dial of a port there (a `localhost:` with a port interpolated or added after it, in a string or template; none left), with its own fix, a request header's value aside (an `origin` or `referer` entry, or a scheme-less `host`, in a `headers:` object or `new Headers(`), and a dial is never an exception (a row sending a localhost Origin, as dashboard/smoke-breakglass.ts does, dials nothing); `walkProblems` fails a walk under 30 files or missing one of seven it names (two smoke scripts and an .mjs suite among them, so a narrowed pattern shows), and an exception naming a file outside it, with a probe of its own; three exceptions join the six, with why: `quietPort`'s two binds (SMD-3296), test-connect's listener on the machine's LAN address, and test-auth's vendored servers, until PR 2b removed it;
+  - check 42 reads with `blankedWithOpen`, over `scan`, the scanner the checker's readers share (the maintainer's decision), its `codeOnly` gone: `scan` gains the report of a template left open, the postfix, non-null and `default` cases at a `/`, which also mend `scan`'s reading of a line in evals/eval-mediated-pairs.ts (`median(ownMs)! / 1000`), a file no check reads, and adjacency kept by position, not by reading back into its output, which had made it quadratic (the checker took 178 s, where it takes about 5). `scan` as amended agrees with TypeScript's tokens on every file the old `scan` agreed on (580 JavaScript and TypeScript files at 7c80fa87; four `.tsx` files' JSX text aside, none a suite). Check 42's probe now pins 114 cases, each by count or, where how it reads matters, by kind and line; five more hold the walk's guards.
+- **PR 2b, the vendored servers:**
+  - auth.ts gains `listenOn(raw)`, Bun's listen options for a default export: `{ hostname }` for an IP address, `{}` for every address, unset or blank, and a value `listenHostFrom` refuses thrown, so the server exits 1 at start with its words, the value never printed. It does not hold the address to the host's interfaces as the core servers do: an address the host lacks gets Bun's own word. `bun run sync-auth` copies it to the four vendored trees;
+  - the 14 servers extensions/test-auth starts (six extensions and meal-planning's shared server, six integrations, the editorial-policy auditor) spread `...listenOn(process.env.OB1_LISTEN_HOST)` between `port` and `fetch`. test-auth's `ENTRY_SHAPE` finds them with the line or without it and fails one without it, so a server written from an older tail is listed and failed, not passed over; the extension template, the shared-server primitive, the Slack and Telegram samples and compat/supabase-sql's README carry the line, the template's checklist names it, and smart-ingest's README names `listenOn` beside `routable`;
+  - test-auth starts each with `OB1_LISTEN_HOST=127.0.0.1` and asks `secondLoopback`'s address. An answer there fails only if it stops with the child: a bind on 127.0.0.1 skips no port another app holds on `[::1]` alone, and that app's listener, which still answers, is reported, as PR 2a's rows accept it. The row holds a server off the dual-stack wildcard: an IPv4 one (`0.0.0.0`) escapes it where the second address is `[::1]`, and is no hazard, since a bind there skips a port held on 127.0.0.1 (300 binds on `0.0.0.0` walked a range where every second port was held there, and none landed on one). Check 42's test-auth exception goes (eight left);
+  - `secondLoopback` counts a probe met at `[::1]` by a listener that never answers, or resets, as another app's and tries a fresh port (not at macOS's 127.0.0.2, which times out for no listener at all); it returned no address, failing every listen row, in 12 of 60 calls beside a silent `[::1]` holder and 9 of 60 beside one that resets, 0 of 60 now in each;
+  - primitives/deploy-remote-mcp/README.md lists the setting beside `PORT`; its TLS-proxy bullet and each server's README, the Slack and Telegram samples' among them, start the server on 127.0.0.1 where a proxy or caller on this host is the only one.
+
+**Why.**
+- **The original failure.** SMD-3297's flake hunt saw test-rest [12]'s trickled stop once say `stopped in 3.0 s; …; telemetry not all sent within 3000 ms`, 1 in 162 runs under heavy load.
+- **What the stress showed.** 750 runs on an instrumented copy (five or ten test-rests at once beside test-server and 18 CPU burners) saw no trickled failure, but a family of failures in its neighbours, each child's exports answered by something not its collector: `noSpans` HTTP 404, `crowded` HTTP 401 (once the empty tallies SMD-3297 saw), `drained` 401 on every export, `slow` and `hungFirst` nothing, the JWKS stub `(503, 0)` across 14 rows, a child never up.
+- **Who answered.** One run's `lsof` snapshot had the child holding two connections to the collector's port that the collector never accepted, and Tailscale holding one too. `netstat -anv`, which sees every owner's sockets, named the listener: `io.tailscale.ipn` on `127.0.0.1:58487`. In the same way, `llama-server` held `127.0.0.1:63987` (the 404), and a stray `bun` held `127.0.0.1:55901` (the silent slow case).
+- **The mechanism, measured on this Mac (Bun 1.4.3):**
+  - `Bun.serve({ port: 0 })` with no hostname listens on `*:P`, IPv6 dual-stack. A default export does the same and ignores `HOST` and `HOSTNAME`. Linux in `oven/bun:1.4.3` does the same.
+  - macOS lets a `127.0.0.1:P` listener sit beside `*:P`, in either order, and gives it every connection to 127.0.0.1 at that port.
+  - macOS hands out port 0 from one cursor that every process and both address families share, so a bind lands on a held port only when the cursor comes round to it (about every 38 minutes on this Mac; a count over fewer binds reads 0 by construction). Over a wrap, a bind on every address skips no port held on 127.0.0.1 or `[::1]` alone, its own process's included; a bind on 127.0.0.1 skips those held on 127.0.0.1 or every address, not `[::1]` alone (review pass 2 of PR 2a, 500 ports held, 20,000 binds). Here 8 of 18,000 wildcard binds landed on a port an app held on 127.0.0.1 (Tailscale, gvproxy, krunkit, Notion, llama-server, a bun), and 0 of 18,000 binds on 127.0.0.1.
+  - With only wildcard servers on both sides, 18,000 requests from 30 processes at once reached the wrong server 0 times.
+- **trickled's line.** gvproxy and krunkit accept a connection and never answer. Their port read as trickled's: its span and log record read `no answer in time`, as the case intends, and the stop's metric export was never answered either, so the flush ran out its 3 s bound.
+
+**Held.**
+- test-server 1215 and test-rest 490: PR 1's three and five rows (1212 and 485 before it).
+- test-rest [11b] starts four api.ts children, and asks a second loopback address, probed:
+  - serveChild's own answers on 127.0.0.1 and refuses the second address;
+  - one told `"  "` (blank, so every address) answers its own health body, not just a status, at the second address. It is not asked at 127.0.0.1: on every address it is the one child this suite cannot keep from another app's listener (at `[::1]` another app can answer too, rarer still);
+  - one told a planted value, and one told `192.0.2.1` (an address no host has), exit 2 with their lines, and neither value is printed;
+  - a host where no second address answers fails a row of its own, not the others vacuously.
+- test-server holds:
+  - the MCP server's twin: serveChild's child on 127.0.0.1 alone, one with the variable blank on every address, and the planted value's exit;
+  - `listenHostFrom`'s rules over 24 cases: blank, IPv4, IPv6 in other forms, IPv4-mapped in either case, both wildcards, one the host lacks with and without the host's list, link-local with and without a zone and in upper case, a name, a port, brackets, `1`, a leading zero, a bracket-and-path smuggle, and two planted secrets.
+- A second address that times out reads `timed out`, not `refused`, so a slow `[::1]` cannot pass for a refusal.
+- PR 2a: the 23 suites it touches pass on it under ci-parity, which runs every one, the database's against one Postgres; the checker passes in about 5 s.
+- Mutants, each killed by the row meant for it:
+  - the entries ignoring the address or not exiting on a problem; serveChild not setting it: [11b]'s and test-server's listen and exit rows; printing the value or taking any value: the unit row and every exit row; passing it untrimmed: [11b]'s blank row; skipping the host's addresses: [11b]'s not-this-host row; listening on `0.0.0.0` unset: test-server's listen row, where the second address is `[::1]`;
+  - `listenHostFrom` keeping IPv4-mapped as IPv6, without its character filter, holding the wildcards to the host, or without the link-local refusal: the unit row;
+  - PR 1's reader without each of its blanking rules, its fail-closed reading or its postfix rule, reading `OB1_LISTEN_HOST` by presence, passing a later spread, an exception naming several sites, or a keyword after a `.`: its probe. PR 2a's scanner without its non-null rule, the postfix `--`, `default`, positional adjacency, the dotted-keyword exclusion, the `${` line or the inner `${`'s; its walk without the floor or the exception-file report: its probe, each alone. Planted regressions (a stub back on every address, the provider's hostname deleted, `PORT: '0'`, a call after an `"http://…"` string, a node `.listen` with no host, a dropped exception, a child on `0.0.0.0`): its scan, at the line.
+- On Linux (`oven/bun:1.4.3`, no network, 4 CPUs), test-rest (490) and test-server (1215) pass whole with IPv6 loopback on and with it off.
+  - With it off, the probe picks `127.0.0.2`, and the mutant where api.ts ignores the address fails [11b]'s first row.
+  - [11b]'s form before review pass 1 asked `[::1]` alone: with IPv6 off it failed its blank row, and the ignore mutant passed (the review pass's measurement).
+- extensions/test-auth (every vendored auth.ts byte for byte) 556/556, 559 after PR 2b: `listenOn`'s rules, each server's line, and every vendored server it starts off the dual-stack wildcard; test-mcp 193/193; checker PASS; typecheck PASS.
+  - PR 2b's mutants: `listenOn` returning `{}` in every copy fails its unit row and the listen row, with another app answering `[::1]` on every eighth port or not; in one vendored copy, the byte-copy check and the listen row; in server-portable's alone, the byte-copy check; one server without the line, the line row and the listen row; a new shim server in the old shape, the census and the line row.
+  - Beside that `[::1]` holder, answering, silent or resetting, test-auth passes with its foreign answers reported, and `secondLoopback` returned an address in 60 of 60 calls. One server put on every address escapes the row only where another app holds `[::1]` at its port: 1 of 5 runs of that mutant beside the holder.
+
+**Measured after.** The same stress, 300 test-rests in rounds of ten at once beside two test-server loops and 18 CPU burners, with the same seven foreign 127.0.0.1 listeners up in the port range:
+- this branch before review pass 1 (test-rest's stubs and serveChild's children on 127.0.0.1): 0 failed runs, trickled 300 of 300, and every test-server run passed (20 of 20);
+- after review pass 1: trickled 300 of 300 again, and every test-server run passed (22 of 22). One run failed the blank-value child's row, its 127.0.0.1 answered by another app (`200, another`): the hazard itself, on the one child left on every address. That row now asks the second address alone;
+- after review pass 2: trickled 300 of 300; under heavier load, three failures in rows this change did not add, none answered by another app: `pushedBack`'s span export never reached its collector, `perSignal`'s ended `timed out`, and test-server's provider row's 0.3 s embedding call timed out, the rejection unhandled and ending the suite;
+- main's code, in two runs of that shape: 8 and 7 of 300 runs failed. Every failed row reads a stub or a child at 127.0.0.1: those above, [11]'s child and its cut line, [16]'s idle probe (answered 404), and the JWKS section's other reads.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | an address the host does not have exited 1 with Bun's port message | run-it | ffcc0bea |
+| 1 | the `[::1]` rows held nothing on a host without IPv6 loopback | run-it | ffcc0bea |
+| 1 | test-server's servers were still on every address | cold read | ffcc0bea |
+| 1 | no suite sees a server put back on every address: check 42 | mutant | ffcc0bea |
+| 1 | another app answered the blank-value child at 127.0.0.1 | run-it | ffcc0bea |
+| 2 | check 42 read past a call on an apostrophe in a comment | mutant | ffcc0bea |
+| 2 | a link-local address passed the host check, and Bun exited 1 | run-it | ffcc0bea |
+| 2 | a timeout read as refused; the written busy child was on every address | run-it | ffcc0bea |
+| 3 | check 42 took `OB1_LISTEN_HOST` by its presence and passed a later spread | run-it | ffcc0bea |
+| 3 | a division read as a regex could carry a template over a later call | run-it | ffcc0bea |
+| 4 | check 42's fix text was wrong for a stale exception and an unreadable file | run-it | ffcc0bea |
+| 5 | `secondLoopback` spelled `[::1]`, a second loopback spelling db/test-connect.ts refuses | CI | 77475c21 |
+| 2a·1 | `scan`'s adjacency read back into its output: the checker took 178 s | run-it | 28a7cc88 |
+| 2a·1 | suites dialled their own 127.0.0.1 servers as `localhost`, reached at `[::1]` first | run-it | 28a7cc88 |
+| 2a·1 | the net missed the dashboard smoke script and the `.mjs` suites | cold read | 28a7cc88 |
+| 2a·1 | scanner rules unpinned; a case passed as unreadable, not its site | mutant | 28a7cc88 |
+| 2a·2 | the allocator counts never wrapped the shared port cursor; `[::1]` rows met another app | run-it | 28a7cc88 |
+| 2a·2 | no rule held the `localhost` dials; a brain-compare assertion could not fail | run-it | 28a7cc88 |
+| 2a·3 | merging main flagged a localhost Origin header; a dial printed a listener's fix | run-it | 28a7cc88 |
+| 2a·3 | narrowing the walk's pattern passed unnoticed | mutant | 28a7cc88 |
+| 2a·4 | a ternary's `:` read as a header key; `host:` excused full URLs | run-it | 28a7cc88 |
+| 2a·5 | the excuse covered any object key; its `:` test unpinned | mutant | 28a7cc88 |
+| 2a·6 | a `$headers` key or a `headers` label passed for a header object | run-it | 28a7cc88 |
+| 2b·1 | the listen row failed when another app answered at `[::1]` | run-it | 46def383 |
+| 2b·1 | a silent `[::1]` holder made `secondLoopback` return no address | run-it | 46def383 |
+| 2b·1 | a new shim server in the old shape passed the census | mutant | 46def383 |
+| 2b·1 | the deploy guide said the server keeps to the loopback, untrue unset | cold read | 46def383 |
+| 2b·2 | a 127.0.0.2 timeout counted as foreign: three probes for no address | run-it | 46def383 |
+| 2b·2 | the listen row claimed 127.0.0.1 alone; a server on `0.0.0.0` passes it | mutant | 46def383 |
+| 2b·3 | a `[::1]` holder that resets made `secondLoopback` return no address | run-it | 46def383 |
+| 2b·3 | twelve server READMEs never said when to set the setting | cold read | 46def383 |
+
+**Tidied while the files were open.** test-rest's and test-server's health probe and refusing-child wait are one helper each in db/test-support.ts, `healthAt` and `exitAndOutput`. PR 2a's: `headerKey`'s walks back over spaces are one `back` helper. PR 2b's: the test-auth line under Held split by what each part holds, its claim brought to the row's.
+
+**Not taken.**
+- **Reaching children at `[::1]`.** It sidesteps an IPv4 listener, but a runner without IPv6 loopback would refuse every child.
+- **A stub helper and a ban on raw `Bun.serve(`, in place of check 42's reader.** A ban still has to tell a call from a mention in a comment or a string, which is the tokenizer. A helper reaches neither the children's env objects nor node's `.listen(` nor the in-process exports served with a spread. And a stub a container reaches would need an exception at each site either way; PR 2a found none.
+- **The vendored servers holding the address to the host's interfaces**, as the core servers do: auth.ts stays runtime-neutral, so each of the 14 entries would import `node:os` for it. An address the host lacks gets Bun's own error (`Is port N in use?` on macOS, EADDRNOTAVAIL on Linux), which the deploy guide's row says.
+- **The refusal before the entry's other start-up work.** A mutant that refuses after the store's wiring and the telemetry's start survives; nothing claims "before any side effect", only "before it serves".
+
+**Follow-ups.**
+- SMD-3405: the write-path and chunking eval children (evals/_write-path-arm.ts, _chunk-e2e-child.ts) serve on the dual-stack wildcard and dial `localhost`, outside check 42's net; evals/auth/ and evals/orchestration/front.ts bind `0.0.0.0` in their containers on purpose;
+- SMD-3265 (filed before): test-server's provider row, whose 0.3 s embedding call times out under load and ends the suite unhandled; SMD-3408: test-rest [12]'s pushedBack and perSignal rows, each failed once in the same stress;
+- SMD-3406: email-history-import's OAuth callback listens on every address and checks no `state`; SMD-3407: the Slack and Telegram samples capture without a `trust`; SMD-3426: test-live's full run fails two of [28]'s replay rows that its `rest` shard passes.

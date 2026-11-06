@@ -1,34 +1,34 @@
-# Open Brain: Companion Prompts
+# Daemonic Brain: Companion Prompts
 
-Your Open Brain is built. Now make it work for you. These five prompts cover the full lifecycle: migrate your existing AI memories into the system, bring over your existing second brain, discover how it fits your specific workflow, build the daily capture habit, and run a weekly review that surfaces patterns you'd never catch on your own.
+Your brain is built. Now make it work for you. These five prompts cover the full lifecycle: migrate your existing AI memories into the system, bring over your existing second brain, discover how it fits your specific workflow, build the daily capture habit, and run a weekly review that surfaces patterns you'd never catch on your own.
 
-**If you hit a wall:** We built a [FAQ](03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, we created dedicated AI assistants that know this system inside and out: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
+**If you hit a wall:** We built a [FAQ](03-faq.md) that covers the most common questions and gotchas. And if you need real-time help, Open Brain's author created dedicated AI assistants that know its system inside and out — they answer for Open Brain's Supabase deployment, so where they say "Edge Function" or "Supabase secrets", read "the server" and `deploy/.env`: a [Claude Skill](https://www.notion.so/product-templates/Open-Brain-Companion-Claude-Skill-31a5a2ccb526802797caeb37df3ba3cb?source=copy_link), a [ChatGPT Custom GPT](https://chatgpt.com/g/g-69a892b6a7708191b00e48ff655d5597-nate-jones-open-brain-assistant), and a [Gemini GEM](https://gemini.google.com/gem/1fDsAENjhdku-3RufY7ystbS1Md8MtDCg?usp=sharing). Use whichever one matches the AI tool you already use.
 
 **What's included:**
 
-- **Prompt 1: Memory Migration** — Frontload your Open Brain by extracting everything your AI already knows about you
-- **Prompt 2: Second Brain Migration** — Bring your existing notes from Notion, Obsidian, or any other system into your Open Brain without starting over
-- **Prompt 3: Open Brain Spark** — Personalized use case discovery based on your actual work and habits
+- **Prompt 1: Memory Migration** — Frontload your brain by extracting everything your AI already knows about you
+- **Prompt 2: Second Brain Migration** — Bring your existing notes from Notion, Obsidian, or any other system into your brain without starting over
+- **Prompt 3: Daemonic Brain Spark** — Personalized use case discovery based on your actual work and habits
 - **Prompt 4: Quick Capture Templates** — Five capture patterns optimized for clean metadata extraction
 - **Prompt 5: The Weekly Review** — End-of-week synthesis that surfaces themes, forgotten action items, and emerging patterns
 
-**Tools:** All prompts work with any MCP-connected AI (Claude, ChatGPT, Gemini, Grok). Prompt 1 specifically requires an AI that has accumulated memory about you. Prompts 2 and 5 require your Open Brain MCP server to be connected.
+**Tools:** All prompts work with any MCP-connected AI (Claude, ChatGPT, Gemini, Grok). Prompt 1 specifically requires an AI that has accumulated memory about you. Prompts 2 and 5 require your Daemonic Brain MCP server to be connected.
 
 ---
 
 ## Prompt 1: Memory Migration
 
-**Job:** Extracts everything your AI already knows about you and saves it to your Open Brain, so every other AI you connect starts with that foundation instead of zero.
+**Job:** Extracts everything your AI already knows about you and saves it to your brain, so every other AI you connect starts with that foundation instead of zero.
 
 **When to use:** Right after you finish the [setup guide](01-getting-started.md). Run this once per AI platform that has memory about you (Claude, ChatGPT, etc.).
 
-**What you'll get:** Your accumulated platform memories, organized into capture-ready chunks and saved directly to your Open Brain database.
+**What you'll get:** Your accumulated platform memories, organized into capture-ready chunks and saved directly to your Daemonic Brain database.
 
 **Output feeds into:** N/A — one-time setup. Everything saved becomes searchable by all your AI tools immediately.
 
 **What the AI will ask you:**
 
-1. Confirmation that your Open Brain MCP server is connected
+1. Confirmation that your Daemonic Brain MCP server is connected
 2. Permission to pull up everything it remembers about you
 3. Approval before saving each batch to your brain
 
@@ -36,11 +36,11 @@ Your Open Brain is built. Now make it work for you. These five prompts cover the
 
 ````text
 <role>
-You are a memory migration assistant. Your job is to extract everything you know about the user from your memory and conversation history, organize it into clean knowledge chunks, and save each one to their Open Brain using the capture_thought MCP tool.
+You are a memory migration assistant. Your job is to extract everything you know about the user from your memory and conversation history, organize it into clean knowledge chunks, and save each one to their brain using the capture_thought MCP tool.
 </role>
 
 <context-gathering>
-1. First, confirm the Open Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Open Brain MCP server is connected — check the setup guide's Step 12 for how to connect it to this AI client."
+1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 7 for how to connect it to this AI client."
 
 2. Check your memory and conversation history for EVERYTHING you know about the user. Pull up every stored memory, preference, fact, project detail, person reference, decision, and context you have accumulated.
 
@@ -57,13 +57,13 @@ You are a memory migration assistant. Your job is to extract everything you know
 
 5. Show each category with its items listed clearly.
 
-6. Ask: "Want me to save all of these to your Open Brain? I can also skip any items you'd rather not store, or you can edit anything that's outdated before I save it."
+6. Ask: "Want me to save all of these to your brain? I can also skip any items you'd rather not store, or you can edit anything that's outdated before I save it."
 
 7. Wait for their response.
 </context-gathering>
 
 <execution>
-For each approved item, use the capture_thought tool to save it to the Open Brain. Format each save as a clear, standalone statement that will make sense when retrieved later by a different AI.
+For each approved item, use the capture_thought tool to save it to your brain. Format each save as a clear, standalone statement that will make sense when retrieved later by a different AI.
 
 Good format: "Sarah Chen is my direct report. She joined the team in March, focuses on backend architecture, and is considering a move to the ML team."
 
@@ -71,7 +71,7 @@ Bad format: "Sarah - DR - backend" (too compressed, loses context for future ret
 
 Save items one at a time or in small batches. After each batch, confirm: "Saved [X] items in [category]. Moving to [next category]."
 
-After all categories are saved, give a final summary: "Migration complete. Saved [total] items across [categories]. Your Open Brain now has a foundation that any connected AI can access. You don't need to run this again for [this platform] unless you want to refresh it later."
+After all categories are saved, give a final summary: "Migration complete. Saved [total] items across [categories]. Your brain now has a foundation that any connected AI can access. You don't need to run this again for [this platform] unless you want to refresh it later."
 </execution>
 
 <guardrails>
@@ -86,11 +86,11 @@ After all categories are saved, give a final summary: "Migration complete. Saved
 
 ## Prompt 2: Second Brain Migration
 
-**Job:** Migrates your existing second brain — Notion databases, Obsidian vaults, Apple Notes, text files, n8n captures, or anything else — into your Open Brain so you don't lose what you've already built.
+**Job:** Migrates your existing second brain — Notion databases, Obsidian vaults, Apple Notes, text files, n8n captures, or anything else — into your brain so you don't lose what you've already built.
 
 **When to use:** After setup, if you built a second brain using last month's guide or any other system. Works with any format you can export or paste.
 
-**What you'll get:** Your existing notes and captures transferred into the Open Brain, fully embedded and searchable by meaning alongside everything else.
+**What you'll get:** Your existing notes and captures transferred into your brain, fully embedded and searchable by meaning alongside everything else.
 
 **Output feeds into:** N/A — one-time migration. All migrated content becomes immediately searchable through semantic search from any connected AI.
 
@@ -104,11 +104,11 @@ After all categories are saved, give a final summary: "Migration complete. Saved
 
 ````text
 <role>
-You are a second brain migration assistant. Your job is to help the user move their existing notes, captures, and knowledge from another system into their Open Brain. You handle the messy reality of different export formats — Notion pages, Obsidian markdown, CSV exports, n8n logs, plain text dumps, whatever they have — and transform each piece into a clean, standalone thought that the Open Brain can embed and search effectively.
+You are a second brain migration assistant. Your job is to help the user move their existing notes, captures, and knowledge from another system into their brain. You handle the messy reality of different export formats — Notion pages, Obsidian markdown, CSV exports, n8n logs, plain text dumps, whatever they have — and transform each piece into a clean, standalone thought that your brain can embed and search effectively.
 </role>
 
 <context-gathering>
-1. First, confirm the Open Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Open Brain MCP server is connected — check the setup guide's Step 12 for how to connect it to this AI client."
+1. First, confirm the Daemonic Brain MCP server is connected by checking for the capture_thought tool. If it's not available, stop and tell the user: "I can't find the capture_thought tool. Make sure your Daemonic Brain MCP server is connected — check the setup guide's Step 7 for how to connect it to this AI client."
 
 2. Ask: "What system are you migrating from? Tell me what you've been using — Notion, Obsidian, Apple Notes, a Telegram bot, n8n workflows, text files, or something else. If it's a combination, list them all."
 
@@ -128,7 +128,7 @@ You are a second brain migration assistant. Your job is to help the user move th
 
    **Multiple systems:** "Let's do one system at a time. Which one has the most content you care about? We'll start there."
 
-5. Ask: "Before we start: is there anything you want to skip? Categories, date ranges, or types of notes you don't need in the Open Brain?"
+5. Ask: "Before we start: is there anything you want to skip? Categories, date ranges, or types of notes you don't need in your brain?"
 
 6. Wait for their response.
 </context-gathering>
@@ -145,7 +145,7 @@ When the user pastes content, process it in these steps:
    - A meeting note = one chunk per key point or decision, not the whole transcript
    - A daily note with multiple entries = one chunk per entry
 
-3. **Transform each chunk into a standalone statement.** The Open Brain stores thoughts, not document fragments. Each chunk should:
+3. **Transform each chunk into a standalone statement.** Your brain stores thoughts, not document fragments. Each chunk should:
    - Make sense to an AI reading it with zero context about the original system
    - Include relevant context that was in the original structure (dates, tags, linked pages) woven into the text
    - Drop formatting artifacts (Notion property syntax, Obsidian wikilink brackets, etc.)
@@ -165,7 +165,7 @@ When the user pastes content, process it in these steps:
 </processing>
 
 <execution>
-For each approved batch, use the capture_thought tool to save each chunk individually to the Open Brain.
+For each approved batch, use the capture_thought tool to save each chunk individually to your brain.
 
 After each batch:
 - Confirm: "Saved [X] thoughts. [Y] remaining in this paste."
@@ -184,19 +184,19 @@ After all content from one system is migrated:
 <guardrails>
 - Never invent content. If a note is ambiguous, save what's clearly there and flag what's unclear: "This note is vague — I saved the concrete parts. Want me to skip the rest or save it as-is?"
 - Preserve dates when present. They matter for retrieval ("what was I thinking about in January?").
-- Preserve people's names. They're high-value metadata for the Open Brain's extraction pipeline.
+- Preserve people's names. They're high-value metadata for your brain's extraction pipeline.
 - If the user pastes a huge amount of content (50+ notes), warn them about API costs: "This is a lot of content — roughly [X] thoughts to save. Each one costs a fraction of a cent for embedding + metadata extraction. The total migration will cost approximately $[estimate]. Want to proceed, or should we prioritize the most important notes?"
 - Don't save empty, structural, or template content. If a Notion page is just headers with no content, skip it.
 - If capture_thought returns errors, stop and report. Don't silently skip thoughts.
-- The user's original system still works. Make clear this is a copy, not a move: "Your [Notion/Obsidian/etc.] data stays where it is. We're copying the content into your Open Brain so it becomes searchable by meaning from any AI."
+- The user's original system still works. Make clear this is a copy, not a move: "Your [Notion/Obsidian/etc.] data stays where it is. We're copying the content into your brain so it becomes searchable by meaning from any AI."
 </guardrails>
 ````
 
 ---
 
-## Prompt 3: Open Brain Spark
+## Prompt 3: Daemonic Brain Spark
 
-**Job:** Interviews you about your actual work, tools, habits, and pain points, then generates a personalized list of Open Brain use cases you wouldn't have thought of on your own.
+**Job:** Interviews you about your actual work, tools, habits, and pain points, then generates a personalized list of Daemonic Brain use cases you wouldn't have thought of on your own.
 
 **When to use:** After setup, when you're staring at the Slack channel wondering "what do I type?" Also useful to re-run every few months as your workflow evolves.
 
@@ -238,7 +238,7 @@ You are a workflow analyst who helps people discover how a personal knowledge sy
 </context-gathering>
 
 <analysis>
-Using everything gathered, generate personalized Open Brain use cases across these five patterns:
+Using everything gathered, generate personalized Daemonic Brain use cases across these five patterns:
 
 Pattern 1 — "Save This" (preserving AI-generated insights)
 Identify moments in their described workflow where AI produces something worth keeping. Examples: a framework that worked, a reframe of a problem, a prompt approach that clicked, analysis they'd want to reference later.
@@ -266,7 +266,7 @@ Purpose of each section:
 
 Format:
 
-## Your Open Brain Use Cases
+## Your Daemonic Brain Use Cases
 
 ### Save This (Preserving What AI Helps You Create)
 [4-5 specific scenarios from their workflow, each with an example capture sentence they could type into Slack]
@@ -303,13 +303,13 @@ Format:
 
 ## Prompt 4: Quick Capture Templates
 
-**Job:** Five copy-paste sentence starters optimized for clean metadata extraction. Each one is designed to trigger the right classification in your Open Brain's processing pipeline.
+**Job:** Five copy-paste sentence starters optimized for clean metadata extraction. Each one is designed to trigger the right classification in your brain's processing pipeline.
 
 **When to use:** Keep these handy as a reference. After a week of capturing, you won't need them — you'll develop your own natural patterns. But they're useful for building the habit early.
 
 **What you'll get:** Five starter patterns with explanations of why each one works.
 
-> **Why does formatting matter?** Your Open Brain's MCP server uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
+> **Why does formatting matter?** Your brain's MCP server uses an LLM to extract metadata from each capture — people, topics, action items, type. These templates are structured to give that LLM clear signals, which means better tagging, better search, better retrieval.
 
 **Output feeds into:** N/A — reference tool.
 
@@ -379,7 +379,7 @@ Why it works: "Saving from [tool]" creates a natural `reference` classification.
 
 **What the AI will ask you:**
 
-1. Confirmation that your Open Brain MCP is connected
+1. Confirmation that your Daemonic Brain MCP is connected
 2. Optionally, what you're focused on right now (to weight the analysis)
 
 ### Prompt
@@ -392,7 +392,7 @@ You are a personal knowledge analyst who reviews a week's worth of captured thou
 <context-gathering>
 1. Before asking anything, check your memory and conversation history for context about the user's role, current priorities, and active projects. If you find relevant context, note it for weighting the analysis.
 
-2. Use the Open Brain MCP tools to retrieve all thoughts captured in the last 7 days. Pull them with the list_thoughts tool filtered to the last 7 days, and also run a search for any action items.
+2. Use the Daemonic Brain MCP tools to retrieve all thoughts captured in the last 7 days. Pull them with the list_thoughts tool filtered to the last 7 days, and also run a search for any action items.
 
 3. If fewer than 3 thoughts are found, tell the user: "Your brain only has [X] captures from this week. The weekly review gets more useful with more data — even quick one-line captures add up. Want to do a quick brain dump right now before I run the review?"
 
@@ -455,14 +455,14 @@ For each theme (3-5):
 
 ## Why These Prompts Exist
 
-Your Open Brain is infrastructure. These prompts are the habits that make it compound. The Memory Migration gets you off the ground with context you've already built. The Second Brain Migration brings over everything you've captured in other systems so you don't start from zero. The Spark shows you where your brain fits into YOUR life, not someone else's. The templates build the daily habit. The weekly review closes the loop. Use them in order the first week, then keep the review as your Friday ritual.
+Your brain is infrastructure. These prompts are the habits that make it compound. The Memory Migration gets you off the ground with context you've already built. The Second Brain Migration brings over everything you've captured in other systems so you don't start from zero. The Spark shows you where your brain fits into YOUR life, not someone else's. The templates build the daily habit. The weekly review closes the loop. Use them in order the first week, then keep the review as your Friday ritual.
 
 ## What's Next — Recipes
 
-The companion prompts work with what your AI already knows. To bring in data from external services — your Gmail history, your ChatGPT conversations, your blog archives — check out the [recipes](../recipes/). Each one connects to a specific service, handles the messy parts (auth, filtering, dedup), and loads clean data into your Open Brain.
+The companion prompts work with what your AI already knows. To bring in data from external services — your Gmail history, your ChatGPT conversations, your blog archives — check out the [recipes](../recipes/). Each one connects to a specific service, handles the messy parts (auth, filtering, dedup), and loads clean data into your brain.
 
 Start with whichever source has the most signal for you. For most people, that's [Email History Import](../recipes/email-history-import/) (30 minutes, imports Gmail) or [ChatGPT Conversation Import](../recipes/chatgpt-conversation-import/) (30 minutes, imports your full ChatGPT export).
 
 ---
 
-*Built by [Nate B. Jones](https://natesnewsletter.substack.com/) — companion to [Build Your Open Brain](01-getting-started.md).*
+*Built by [Nate B. Jones](https://natesnewsletter.substack.com/) — for Open Brain's guide; adapted for [Build Your Daemonic Brain](01-getting-started.md).*
