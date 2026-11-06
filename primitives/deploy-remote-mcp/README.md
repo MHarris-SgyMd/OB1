@@ -6,7 +6,7 @@ Each server is one HTTP process reached by URL: never a stdio process a client s
 
 ## Prerequisites
 
-- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
+- A running Daemonic Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
 - [Bun](https://bun.sh) 1.4+ on the machine that will run the server
 - A checkout of this repository: the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
 - The server's README, which names its tables, its environment and what calls it

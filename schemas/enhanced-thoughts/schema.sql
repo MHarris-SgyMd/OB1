@@ -1,5 +1,5 @@
 -- Enhanced Thoughts Columns and Utility RPCs
--- Adds structured columns and utility functions to the Open Brain thoughts table.
+-- Adds structured columns and utility functions to the Daemonic Brain thoughts table.
 -- Safe to run multiple times (fully idempotent).
 --
 -- Daemonic Brain (SMD-1250): upstream's file ended with a section 6 that

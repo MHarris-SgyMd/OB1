@@ -55,7 +55,7 @@ The old server's tables were in `public`, made by a `schema.sql` here that is go
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-4 recommended
 
 ## Steps
@@ -112,7 +112,7 @@ Prep me for my meeting with Sarah
 
 ### `professional_crm_link_thought` — The Bridge Tool
 
-Your core Open Brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
+Your core Daemonic Brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
 
 **Example workflow:**
 

@@ -12,7 +12,7 @@ Only `task` and `idea` thought types use the status field. All other types have 
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - A connection that can create functions (`psql` or your SQL console)
 
 ## Credential Tracker

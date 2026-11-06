@@ -61,7 +61,7 @@ The old server's ten tools keep their names under the plugin's prefix; the four 
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extension 5 (Professional CRM) recommended — the link into it needs the CRM plugin on
 
 ## Steps
@@ -150,7 +150,7 @@ Your agent has even more context when you're job hunting:
 - **Extension 3 (Family Calendar):** Can schedule interviews around existing commitments, factor in family obligations
 - **Extension 4 (Meal Planning):** Knows your dietary needs for interview lunches, can plan around busy interview days
 
-This is the power of a fully interconnected Open Brain — context flows across domains.
+This is the power of a fully interconnected Daemonic Brain — context flows across domains.
 
 ## Expected Outcome
 
@@ -201,7 +201,7 @@ At this point, your agent has a comprehensive, interconnected system:
 - **Extension 5:** Professional CRM (contacts, interactions, opportunities)
 - **Extension 6:** Job hunt pipeline (companies, applications, interviews)
 
-All wired together through your Open Brain, with cross-extension tools that let context flow between domains.
+All wired together through your brain, with cross-extension tools that let context flow between domains.
 
 ### What's Next?
 
