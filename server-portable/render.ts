@@ -1962,9 +1962,18 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
+/**
+ * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
+ * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
+ * and any other as the instant itself.
+ */
+const dueText = (iso: string) => {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
+};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
-  `${levelText(a.level)}${a.dueAt ? `, due ${a.dueAt}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
+  `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
   + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
   + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
 /** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
@@ -2015,13 +2024,13 @@ export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, Priority
 const quoted = (s: string, max = 200) => JSON.stringify(oneLine(snipText(s, max)));
 /** One item: its status, id, text, owner and due time. */
 const itemLine = (i: OpenItem) =>
-  `${i.status} item ${i.id}: ${quoted(i.text)}${i.owner ? `, owner ${quoted(i.owner, 80)}` : ""}${i.dueAt ? `, due ${i.dueAt}` : ""}${i.plugin ? `, for ${oneLine(snipText(i.plugin.name, 64))}'s row ${quoted(i.plugin.row, 80)}` : ""}`;
+  `${i.status} item ${i.id}: ${quoted(i.text)}${i.owner ? `, owner ${quoted(i.owner, 80)}` : ""}${i.dueAt ? `, due ${dueText(i.dueAt)}` : ""}${i.plugin ? `, for ${oneLine(snipText(i.plugin.name, 64))}'s row ${quoted(i.plugin.row, 80)}` : ""}`;
 const proposalLine = (p: ItemProposal) =>
   `proposal ${p.id} to close it ${p.status}${p.label ? ` (${oneLine(snipText(p.label, 40))})` : ""}${p.evidenceThoughtId ? `, shown by thought ${p.evidenceThoughtId}` : ""} by ${oneLine(snipText(p.proposer.name, 80))}`
   + `${p.reason ? `: ${quoted(p.reason)}` : ""}; ${p.decision === null ? "pending" : p.decision === "moot" ? `moot since ${p.decidedAt}` : `${p.decision} by ${oneLine(snipText(p.decider?.name ?? "", 80))} at ${p.decidedAt}`}`;
 const eventLine = (e: OpenItemEvent) =>
   `- ${e.at} ${e.event === "opened" ? "opened" : e.event === "updated" ? "changed" : `set ${e.status}`} by ${oneLine(snipText(e.maker.name, 80))}`
-  + `${e.proposalId ? ` (accepting proposal ${e.proposalId})` : ""}${e.reason ? `: ${quoted(e.reason)}` : ""} — then ${quoted(e.text, 120)}${e.owner ? `, owner ${quoted(e.owner, 80)}` : ""}${e.dueAt ? `, due ${e.dueAt}` : ""}`;
+  + `${e.proposalId ? ` (accepting proposal ${e.proposalId})` : ""}${e.reason ? `: ${quoted(e.reason)}` : ""} — then ${quoted(e.text, 120)}${e.owner ? `, owner ${quoted(e.owner, 80)}` : ""}${e.dueAt ? `, due ${dueText(e.dueAt)}` : ""}`;
 const itemRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND" ? `Refused: the brain holds no open item ${r.item.key}.`
   : r.code === "ITEM_NOT_YOURS"

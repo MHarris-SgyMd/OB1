@@ -1386,7 +1386,7 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     // Verify 3: the same record through both doors — the history as REST answers it is what MCP says, text and value.
     const hm = await mcp("priority_history", { kind: "thought", key: item });
     const out = rendered((v) => say.renderPriorityHistory(ok(v)), h.body);
-    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due 2027-03-02T00:00:00\.000Z by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
+    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due by the end of 2027-03-01 \(UTC\) by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
       `priority_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 120)} | ${firstDiff(out.structuredContent, hm.sc)})`);
     // The same statement again, once through each door: unchanged, nothing written, one reply.
     const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-02T00:00:00Z", reason: "the passport renewal is urgent" });
