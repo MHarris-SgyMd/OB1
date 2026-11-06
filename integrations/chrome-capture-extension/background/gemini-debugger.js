@@ -71,8 +71,8 @@
   let geminiEnabled = true;
   let initialized = false;
 
-  const LOG = (msg, ...rest) => console.log(`[OB Gemini] ${msg}`, ...rest);
-  const ERR = (msg, ...rest) => console.error(`[OB Gemini] ${msg}`, ...rest);
+  const LOG = (msg, ...rest) => console.log(`[Daemonic Brain Gemini] ${msg}`, ...rest);
+  const ERR = (msg, ...rest) => console.error(`[Daemonic Brain Gemini] ${msg}`, ...rest);
 
   function isHistoryUrl(url) {
     return typeof url === 'string'

@@ -75,8 +75,8 @@
   const READING_PAUSE_MIN_MS = 20000;
   const READING_PAUSE_MAX_MS = 35000;
 
-  const LOG = (msg, ...rest) => console.log(`[OB Gemini SYNC] ${msg}`, ...rest);
-  const ERR = (msg, ...rest) => console.error(`[OB Gemini SYNC] ${msg}`, ...rest);
+  const LOG = (msg, ...rest) => console.log(`[Daemonic Brain Gemini SYNC] ${msg}`, ...rest);
+  const ERR = (msg, ...rest) => console.error(`[Daemonic Brain Gemini SYNC] ${msg}`, ...rest);
 
   // Live waiter registry for notifyHistoryCaptured. Created lazily because
   // OBGeminiSyncState may not yet be on the global when this IIFE runs;

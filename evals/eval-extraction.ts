@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * eval-meta.ts — score the metadata-extraction model on the task it actually does.
+ * eval-extraction.ts — score the metadata-extraction model on the task it actually does.
  *
  * This is the second call Daemonic Brain makes per capture, and its output is not decoration:
  * `type` drives list_thoughts filtering, `people` and `topics` drive the stats
@@ -27,8 +27,8 @@
  * on the same corpus as the local ones — otherwise the comparison is a leaderboard
  * citation, not a measurement.
  *
- *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
- *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
+ *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-extraction.ts \
+ *     openai/gpt-4o-mini
  */
 
 // A module, not a script: this file imports and exports nothing, and without
