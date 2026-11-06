@@ -735,7 +735,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       calls: `${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""}`,
       outage,
       probe: (w) => probe(undefined, w),
-      settled: () => done + failed,
+      // Pairs judged, not thoughts: one that has no candidate finishes without a call (review pass 1).
+      settled: () => totals.pairs + failed,
       pollS: FOLLOW,
       pausesBefore: true,
       wake,
@@ -745,6 +746,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (back === "answered") pollNow = true;
     else if (back !== null) {
       configError = back.refused;
+      refusedByTier = back.tier === true;
       stopping = true;
     }
   }
@@ -2011,6 +2013,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
+  /** The configError is the decision tier's, its probe refused in an outage wait: the remedy names the tier (SMD-2636 PR 2, review pass 1). */
+  let refusedByTier = false;
 
   /**
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
@@ -2627,8 +2631,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (configError) {
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
-        `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
+        (refusedByTier
+          ? `  Check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md). Nothing was marked failed.`
+          : `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
+            `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`)
     );
     return 2;
   }

@@ -669,22 +669,61 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     o.begin("429 limited", "t3");
     lines.length = 0;
     const carried = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's carried") }));
-    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
-      `waitOutProvider: an outage back within the window, nothing settled, carries the last schedule on, said (${lines[0]})`);
+    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(lines[0] ?? "")
+      && /^out {3}the provider answers again after 20 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: an outage back within the window, nothing settled, carries the last schedule on, said and slept (${lines.join(" | ").slice(-200)})`);
+    // A third, nothing settled still: on from the carried wait's step, not the first one's (review pass 1, mutant).
+    o.begin("429 limited", "t6");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's third") }));
+    ok(/for one token after 40 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? "") && /^out {3}the provider answers again after 40 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: a third outage goes on from the carried wait's step (${lines.join(" | ").slice(-200)})`);
     // A thought settled since: the first wait again, no carry said.
     settledNow = 1;
     o.begin("429 limited", "t4");
     lines.length = 0;
     await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's settled") }));
     ok(/for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? ""), `waitOutProvider: a thought settled since starts the schedule over (${lines[0]})`);
+    o.begin("429 limited", "t7");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's settled, then unmoved") }));
+    ok(/for one token after 10 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
+      `waitOutProvider: the answer records the settled count, so the next outage with it unmoved carries (review pass 1, mutant; ${lines[0]})`);
     // A refusal at the end of the wait is the request's: said, returned, the outage left standing.
     o.begin("503 busy", "t5");
     lines.length = 0;
     providerStamps.length = 0;
     const refused = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "refused", why: "401 invalid api key" }], "waitOutProvider's refused") }));
-    ok(refused !== null && refused !== "answered" && refused.refused === "401 invalid api key" && o.reason !== null && providerStamps.join() === "true,false"
+    ok(refused !== null && refused !== "answered" && refused.refused === "401 invalid api key" && refused.tier === undefined && o.reason !== null && providerStamps.join() === "true,false"
       && /^err {3}the provider answers now, refusing the request itself \(401 invalid api key\) — the follower stops; nothing is marked failed$/.test(lines[1] ?? ""),
       `waitOutProvider: a refusal is the request's, said, the follower to stop (${JSON.stringify(refused)}; ${lines[1]})`);
+    // The decision tier's probe refused: returned so, for the caller's remedy to name the tier (review pass 1).
+    lines.length = 0;
+    const byTier = await onTheClock(() => waitOutProvider({ ...base, who: "the judge", outage: o, probe: scripted([{ state: "refused", why: "not an ob1-jev/1 tier", tier: true }], "waitOutProvider's tier refused") }));
+    ok(byTier !== null && byTier !== "answered" && byTier.tier === true && byTier.refused === "not an ob1-jev/1 tier"
+      && /^err {3}the judge answers now, refusing the request itself \(not an ob1-jev\/1 tier\)/.test(lines[1] ?? ""),
+      `waitOutProvider: a refusal the tier's probe met says so, in the caller's words (${JSON.stringify(byTier)}; ${lines[1]})`);
+    // A probe finding the model missing is still the outage: waited past, not an answer; the lines in the caller's
+    // words (review pass 1, mutant: re-embed's "embedding provider" unheld).
+    {
+      const m = new ProviderOutage(() => clock);
+      m.begin("model loading");
+      lines.length = 0;
+      const back = await onTheClock(() => waitOutProvider({ ...base, who: "the embedding provider", settled: () => 0, outage: m, probe: scripted([{ state: "missing", why: "404 model not found" }, { state: "up" }], "waitOutProvider's missing") }));
+      ok(back === "answered" && /^err {3}the embedding provider is not answering \(model loading\)/.test(lines[0] ?? "") && /^out {3}the embedding provider answers again after 15 s; polling resumes$/.test(lines[1] ?? ""),
+        `waitOutProvider: a missing model is waited past, the lines in the caller's words (${back}; ${lines.join(" | ").slice(0, 240)})`);
+    }
+    // At the cap the line says the probe's interval, not a doubling (review pass 1, mutant): a carry from step 6.
+    {
+      const c = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        c.end(6, 0);
+        c.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, outage: c, probe: scripted([{ state: "up" }], "waitOutProvider's cap") });
+      });
+      ok(/for one token every 5 min \(back within a minute, a poll and its pauses/.test(lines[0] ?? ""), `waitOutProvider: a carry at the cap says every 5 min (${lines[0]})`);
+    }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
     const pausesMs = TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0);

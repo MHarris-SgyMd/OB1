@@ -5710,7 +5710,7 @@ if (want("10")) {
       // Its second outage came back within the window, nothing settled between: the probe's schedule carried on from
       // the first's, as re-embed's does (SMD-2636 PR 2).
       const run429Waits = lines.slice(outagesBefore).filter((l) => /^ {2}the provider is not answering \(/.test(l));
-      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(l)),
+      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
              `…its second outage carries the first's probe schedule on, nothing settled between (SMD-2636 PR 2; ${run429Waits.map((l) => l.slice(-140)).join(" | ")})`);
 
       // The streak decides the suspect, not its last error (review pass 5, walkthrough; the subject sweep's streakPoison):
@@ -5750,6 +5750,7 @@ if (want("10")) {
     const backstop = setTimeout(() => ac.abort(), 30_000);
     let keyNote = "";
     let code = -1;
+    let tookMs = -1;
     try {
       const startProbes = probes;
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
@@ -5759,7 +5760,9 @@ if (want("10")) {
       outage.arm(1);
       probeRefuses = true;
       keyNote = await seed("Quinn rotated the provider key while it was down.");
+      const armed = Date.now();
       code = await running;
+      tookMs = Date.now() - armed;
     } finally {
       clearTimeout(backstop);
       probeRefuses = false;
@@ -5768,8 +5771,9 @@ if (want("10")) {
       restorePauses();
     }
     const keyRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${keyNote}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && keyRow !== "failed" && lines.some((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)),
-           `a follower whose wait's probe is refused — a key revoked meanwhile — stops, exit 2, its thought not failed (SMD-2636 PR 2; exit ${code}, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
+    assert(code === 2 && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
+           && lines.some((l) => /and OB1_METADATA_MODEL against the provider/.test(l)),
+           `a follower whose wait's probe is refused — a key revoked meanwhile — stops, exit 2, its refusal said once and well before the 30 s backstop, its thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     await sql`SELECT delete_thought(${keyNote}::uuid, NULL::jsonb)`;
   }
 
@@ -16524,7 +16528,7 @@ if (want("16")) {
       assert(run429Status === "succeeded" && run429Outages >= 2 && judge429 === 0,
              `one pair meeting a 429 past the pauses twice in a row, its second right after the probe answered, is judged, not failed as its own (${run429Status}, ${run429Outages} outage(s), ${judge429} 429s left)`);
       const run429Waits = lines.slice(outagesBefore).filter((l) => /^ {2}the provider is not answering \(/.test(l));
-      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(l)),
+      assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
              `…its second outage carries the first's probe schedule on, nothing settled between (SMD-2636 PR 2; ${run429Waits.map((l) => l.slice(-140)).join(" | ")})`);
 
       // A 400 whose words say "timed out" is no outage followerFault reads: under --follow it stays the pair's, probed
@@ -16576,6 +16580,7 @@ if (want("16")) {
     const backstop = setTimeout(() => ac.abort(), 30_000);
     const keySeeds: string[] = [];
     let code = -1;
+    let tookMs = -1;
     try {
       const startJudgeProbes = judgeProbes;
       const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
@@ -16586,7 +16591,9 @@ if (want("16")) {
       judgeProbeRefuses = true;
       keySeeds.push(await seed("The key log names the judge's old key.", 71, 3, ["key-log"]));
       keySeeds.push(await seed("The key log names the judge's rotated key.", 71, 0, ["key-log"]));
+      const armed = Date.now();
       code = await running;
+      tookMs = Date.now() - armed;
     } finally {
       clearTimeout(backstop);
       judgeProbeRefuses = false;
@@ -16595,8 +16602,9 @@ if (want("16")) {
       restorePauses();
     }
     const keyRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${keySeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && keyRow !== "failed" && lines.some((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)),
-           `a consolidate follower whose wait's probe is refused stops, exit 2, its pair's thought not failed (SMD-2636 PR 2; exit ${code}, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
+    assert(code === 2 && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
+           && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)),
+           `a consolidate follower whose wait's probe is refused stops, exit 2, its refusal said once and well before the 30 s backstop, its pair's thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of keySeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 

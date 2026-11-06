@@ -673,7 +673,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       calls: `${outageModel} at ${cfg.chat.base} for one token`,
       outage,
       probe: (w) => probe(undefined, w, outageModel),
-      settled: () => done + failed,
+      settled: () => done + failed + windowsAnswered,
       pollS: FOLLOW,
       pausesBefore: true,
       wake,
@@ -685,6 +685,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       pollNow = true;
     } else if (back !== null) {
       configError = back.refused;
+      if (outageModel !== cfg.metadataModel) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
       stopping = true;
     }
   }
@@ -1089,6 +1090,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
+  /** Windows of long thoughts answered and kept, run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2, review pass 1). */
+  let windowsAnswered = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
   /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
@@ -1239,6 +1242,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         return part;
       },
       async save(part, sent, windows) {
+        // An answered window got past the provider: the outage wait's carry reads it (SMD-2636 PR 2, review pass 1).
+        windowsAnswered++;
         // Past the hard stop too: a window saved before the stop's release
         // lands is kept, and the function keeps nothing after (review pass 1
         // — a window answered as the stop came was dropped).
@@ -1515,6 +1520,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
+  /** The model setting the closing remedy names: the escalation model's, its probe refused in an outage wait (SMD-2636 PR 2, review pass 1). */
+  let refusedKnob = "OB1_METADATA_MODEL";
 
   /**
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
@@ -2242,7 +2249,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   if (configError) {
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and ${refusedKnob} against the provider; a 400 about a request field\n` +
         `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint. Nothing was marked failed.`
     );
     return 2;

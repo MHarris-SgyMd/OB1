@@ -1867,7 +1867,8 @@ async function sweep(
     return "abortOwn";
   };
   /**
-   * A following run's wait for the provider past its pauses, or hung (PR 6b-1, extract-entities.ts's waitForProvider),
+   * A following run's wait for the provider past its pauses, or hung (PR 6b-1, extract-entities.ts's waitForProvider as
+   * it was before SMD-2636 PR 2 moved that onto re-embed's rules: no carry here, and a refusal left to the next call),
    * or after a hung thought failed as its own or a call aborted in hand, its thought marked hung or failed so
    * (outageAfter, no outage begun, so none ended): said through the caller's row while it lasts (providerWait), the
    * judge model probed on outageWait's schedule until it answers, or refuses, which the next call meets; false when the
