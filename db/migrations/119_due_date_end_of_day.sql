@@ -11,11 +11,11 @@
 --   all of Tuesday, from midnight UTC. "Due on Tuesday" means by the end of
 --   Tuesday. The maintainer chose (SMD-3778, 2026-11-05) the end of the day
 --   everywhere: one reading of one string, for an open item's due time and a
---   priority's alike. The server reads set_priority's due_at so itself
---   (server-portable/core/priority.ts) and the ingestion pipeline and board-sync
---   through server-portable/priority-scale.ts's dueInstant; this migration is
---   117's half. A priority's not_before is a start, and stays the start of its
---   day.
+--   priority's alike. The server reads set_priority's due_at that way itself
+--   (server-portable/core/priority.ts), and the ingestion pipeline and
+--   board-sync through server-portable/priority-scale.ts's dueInstant; this
+--   migration is 117's half. A priority's not_before is a start, and stays
+--   the start of its day.
 --
 -- WHAT
 --   ob1_item_due(text) replaced, its signature and every other rule as 117
@@ -29,8 +29,8 @@
 --
 -- Re-applying it is a no-op. Migration 119 / SMD-3778.
 
--- 117's open items before their due time is read again: a brain without them
--- gets no orphan reader of a column nothing holds.
+-- 117 first: on a brain without open items this reader would have nothing to
+-- read, so the file is refused by name.
 DO $qc$
 BEGIN
   IF to_regprocedure('ob1_item_due(text)') IS NULL OR to_regclass('open_items') IS NULL THEN
