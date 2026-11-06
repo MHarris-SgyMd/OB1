@@ -1754,8 +1754,8 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
 console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a model server's slots across the brain's processes by advisory locks, live calls never; off unless set; a stop ends a wait; the semaphore fails open (SMD-3379 PR 2b-1)");
 {
   const { backgroundSlotsFrom, normalisedBase, shareOf, installBackgroundSlots, SLOTS_APP } = await import("./slots.ts");
-  const { modelCall, asLive } = await import("./model-call.ts");
-  const { pausableTimeout } = await import("../db/lease.ts");
+  const { modelCall, asLive, withCallWaits } = await import("./model-call.ts");
+  const { pausableTimeout, inHandCalls, callWaitsFor: waitsFor, idleWhile, StoppedWaiting } = await import("../db/lease.ts");
   // The setting: types and per-model overrides; off by default; a value that does not parse said, the hook left off.
   const parsed = backgroundSlotsFrom("chat=1, embed=2,decide=1,chat:qwen3.8:27b=3");
   const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat", "chat:m=1,chat : m=2"].map((r) => backgroundSlotsFrom(r).problem ?? "");
@@ -1765,7 +1765,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     && spaced?.get("chat:qwen3.8:27b") === 2
     && /"chat" has no =N/.test(refused[6]) && /names no model type/.test(refused[2]),
     `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat (spaced or not) and a bare name, each in its own words; spaces about a model's name are not part of it (${JSON.stringify(refused.map((r) => r.slice(0, 40)))})`);
-  // The share a call counts against: per normalised server and model, the decide tier per server; live and unlisted types none.
+  // A call's share: per normalised server and model, the decide tier per server; live and unlisted types none.
   const sl = parsed.slots!;
   const bg = (type: "embed" | "chat" | "decide", model: string | undefined, base: string) => shareOf(sl, { type, model, base, cls: "background" });
   const decideKey = bg("decide", "m1", "http://t")?.key;
@@ -1779,9 +1779,11 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   const off = installBackgroundSlots({ url: URL_!, raw: undefined });
   assert(!off.installed, "unset, no hook is set");
   const watch = new SQL({ url: URL_, max: 1 });
+  const waitingLocks = async (db: SQL) => Number((await db`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
   const semConns = async () => Number((await watch`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`)[0].c);
   const call = (model = META_MODEL, cls?: "live") => ({ type: "chat" as const, model, base: PROVIDER, purpose: "test", ...(cls ? { cls } : {}) });
-  // On, chat=1: two background chat calls one at a time across the semaphore; a live one and an embedding beside them at once.
+  const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+  // On, chat=1: three background chat calls one at a time across the semaphore; a live one and an embedding at once.
   const said: string[] = [];
   const on = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => said.push(l) });
   try {
@@ -1811,9 +1813,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     await Promise.all(["m-a", "m-b", "m-c"].map((m) => modelCall(call(m), async () => { starts.push(Date.now() - t2); await Bun.sleep(300); })));
     assert(starts.length === 3 && Math.max(...starts) < 250, `three models under chat=1 each take their own share's slot at once (${JSON.stringify(starts)} ms)`);
     // Another process waiting: this one's calls, back to back, sit out a poll before each first try, and the other gets
-    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it); two workers at
-    // once — three, so one always polls here — their poller not woken by a slot this process lets go while the other
-    // waits (review pass 6), so each slot goes to whichever poller asks first.
+    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it); three workers
+    // at once, so one always polls here, their poller not woken by a slot this process lets go while the other waits
+    // (review pass 6), so each slot goes to whichever poller asks first.
     for (const shape of [{ workers: 1, calls: 14, most: 4 }, { workers: 3, calls: 21, most: 10 }]) {
       const startsA: number[] = [];
       const backlog = Promise.all(Array.from({ length: shape.workers }, async () => {
@@ -1831,7 +1833,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await child.exited;
       await backlog;
       // Back to back, each slot let go goes to the other process's poller more often than not (it asks within a poll,
-      // this one's next call after one): four in a row lost is about one run in a few thousand. Two at once, a coin
+      // this one's next call after one): four in a row lost is about one run in a few thousand. Three at once, a coin
       // each: eleven in a row lost about one in two thousand.
       const passedBy = startsA.filter((t) => t > askedAt && t < childAt).length;
       assert(childAt > askedAt && askedAt > 0 && passedBy <= shape.most,
@@ -1869,7 +1871,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       assert(wokeMs < 1500, `ten 10 ms calls two at a time under chat=1, no other process waiting, run in ${wokeMs} ms — each slot let go handed to this process's poller at once`);
       // …and 1 ms calls, a slot let go between a poller's try and its nap tried again at once, not lost to a poll's
       // nap (review pass 7: 424 such calls took 13 s against 0.6 off). A lost wake is a handoff of a nap, 250 ms at
-      // least: counted, one allowed for a loaded runner. Without the count of slots let go, 1 to 6 in 424 calls.
+      // least: counted, one allowed for a loaded runner. Without the count of slots let go, 28 over 200 ms in 800.
       const starts: number[] = [], ends: number[] = [];
       const tq = Date.now();
       await Promise.all(Array.from({ length: 2 }, async () => {
@@ -1886,14 +1888,14 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // handed to its own napping poller: it takes it at its next poll, not at once. Five handoffs, one gap at least past
     // 100 ms (all five under it about one run in a thousand; woken, each is a few ms).
     {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       const waiter = new SQL({ url: URL_, max: 1 });
       const gaps: number[] = [];
       let deferMarks = [0, 0];
       try {
         await waiter`SELECT pg_advisory_lock_shared(hashtext(${key}), -1)`;
         // A call that finds the lock held sits out a poll unmarked: marked, the other process's next call would read it
-        // and defer in turn, two backlogs deferring to each other on every call (review pass 8).
+        // and defer in turn, two backlogs deferring to each other on every call (review pass 8); nor on a lock of its
+        // own, slot -2, pass 8's other try (holders read as 4294967294).
         const marks = async (objid: number) => Number((await waiter`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = ${objid} AND classid::bigint = (hashtext(${key})::bigint & 4294967295) AND granted`)[0].c);
         const deferring = modelCall(call(), async () => undefined);
         await Bun.sleep(150);
@@ -1922,7 +1924,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // queued behind another tells it once (review pass 6: told before every hook, a stopping pass gave back calls
     // that never waited).
     {
-      const { withCallWaits } = await import("./model-call.ts");
       const told = { waiting: 0, running: 0 };
       const observer = { waiting: () => { told.waiting++; }, running: () => { told.running++; } };
       await withCallWaits(observer, () => modelCall(call(), async () => undefined));
@@ -1942,7 +1943,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       // …and one whose slot another process holds, told once too.
       const elsewhere = new SQL({ url: URL_, max: 1 });
       try {
-        const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
         await elsewhere`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
         setTimeout(() => { elsewhere`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 300);
         await withCallWaits(observer, () => modelCall(call(), async () => undefined));
@@ -1955,7 +1955,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // Another process holding the share's one slot: the call waits until it lets go.
     const other = new SQL({ url: URL_, max: 1 });
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       const [{ got }] = (await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
       const t1 = Date.now();
       // A tagged query runs only once awaited or then'd: so then'd here.
@@ -1977,7 +1976,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const otherHolds = new SQL({ url: URL_, max: 1 });
     let contended = "";
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await otherHolds`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       const stopper2 = new AbortController();
       setTimeout(() => stopper2.abort(new Error("the pass stopped")), 400);
@@ -1996,13 +1994,11 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   // statements — so a stopping pass gives none of them back (review pass 7: seven of eight told, seven answered
   // blurbs thrown away at a stop).
   {
-    const { withCallWaits } = await import("./model-call.ts");
     // The row before's stopped poller lets its waiting lock go with its session, a moment after: waited out first.
     const looker = new SQL({ url: URL_, max: 1 });
     try {
       for (let i = 0; i < 50; i++) {
-        const [{ c }] = await looker`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`;
-        if (Number(c) === 0) break;
+        if ((await waitingLocks(looker)) === 0) break;
         await Bun.sleep(20);
       }
     } finally {
@@ -2021,11 +2017,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   // A stop telling the queue behind another caller's poller aborts each queued call — every one, though each it stops
   // leaves the queue as the telling goes (review pass 8: every other skipped, one running its call through the stop).
   {
-    const { withCallWaits } = await import("./model-call.ts");
     const narrow = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
     const holder = new SQL({ url: URL_, max: 1 });
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await holder`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       // Let go at 3 s, so a call the stop missed runs, and says so, rather than hanging the row.
       setTimeout(() => { holder`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 3000);
@@ -2055,7 +2049,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", stop: procStop.signal, log: (l) => saidHere.push(l) });
     const other = new SQL({ url: URL_, max: 1 });
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       let firstRunning = false;
       const first = modelCall(call(), () => { firstRunning = true; return Bun.sleep(600).then(() => "first"); });
       for (let i = 0; i < 100 && !firstRunning; i++) await Bun.sleep(20);
@@ -2070,8 +2063,8 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       await other.close();
     }
   }
-  // A slot's connection was lost while its call ran — a Postgres restart, here its backend terminated: said as lost, not as
-  // a pooler, and the unlock not waiting on a reconnect.
+  // A slot's connection was lost while its call ran — a Postgres restart, here its backend terminated: said as lost,
+  // not as a pooler, and the unlock not waiting on a reconnect.
   {
     const lostSaid: string[] = [];
     const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => lostSaid.push(l) });
@@ -2102,10 +2095,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => reSaid.push(l) });
     const other = new SQL({ url: URL_, max: 1 });
     const admin = new SQL({ url: URL_, max: 1 });
-    // Slot -1 reads 4294967295 as pg_locks' oid; a backend other than `not`, so the terminated one's lock is not counted.
+    // Slot -1 reads 4294967295 as pg_locks' oid; a backend other than `not`, so the terminated one's lock is left out.
     const marks = async (not = 0) => Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND mode = 'ShareLock' AND granted AND pid <> ${not}`)[0].c);
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       const waiting = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
       let before = 0;
@@ -2168,7 +2160,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const other = new SQL({ url: URL_, max: 1 });
     const admin = new SQL({ url: URL_, max: 1 });
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       let inFlight = 0, most = 0;
       const one = () => modelCall(call(), async () => { inFlight++; most = Math.max(most, inFlight); await Bun.sleep(100); inFlight--; return "ran"; })
@@ -2177,7 +2168,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       let marked = 0;
       for (let i = 0; i < 50 && marked === 0; i++) {
         await Bun.sleep(50);
-        marked = Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
+        marked = await waitingLocks(admin);
       }
       proxy.mode = "close";
       // Read through a function: the setter's value would otherwise narrow the reads after it.
@@ -2242,7 +2233,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => loopSaid.push(l), connectS: 1 });
     const other = new SQL({ url: URL_, max: 1 });
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       proxy.mode = "closeSecond";
       const stopper = new AbortController();
@@ -2273,13 +2263,12 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     const admin = new SQL({ url: URL_, max: 1 });
     const cut = setTimeout(() => proxy.stop(true), 8000);
     try {
-      const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
       await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
       const polling = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
       let marked = 0;
       for (let i = 0; i < 50 && marked === 0; i++) {
         await Bun.sleep(50);
-        marked = Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
+        marked = await waitingLocks(admin);
       }
       const openedBefore = proxy.opened;
       proxy.mode = "stall";
@@ -2294,7 +2283,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       proxy.stop(true);
     }
   }
-  // A stop while the contender's connect hangs — a database that takes the connection and never answers — ends the
+  // A stop while a call's connect hangs — a database that takes the connection and never answers — ends the
   // wait at once, as a stop; and a URL Bun refuses as it builds the client fails open rather than rejecting the call.
   {
     const stall = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open() {}, data() {} } });
@@ -2351,7 +2340,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   // back as that stop; a call idle on the gate or running inside idleWhile — the decider's — is left to finish
   // (review passes 5 and 6).
   {
-    const { inHandCalls, callWaitsFor: waitsFor, StoppedWaiting } = await import("../db/lease.ts");
     const ih = inHandCalls(() => false);
     const running = ih.begin("w1"), onHook = ih.begin("w2");
     running.waiting = true;
@@ -2371,7 +2359,6 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   // A wait on the hook begun before idleWhile — its argument evaluated first, the decider's call queued — ends inside
   // it with the entry still idle: no call N12 aborts (review pass 7: running() set it running again).
   {
-    const { inHandCalls, callWaitsFor: waitsFor, idleWhile } = await import("../db/lease.ts");
     const ih = inHandCalls(() => false);
     const c = ih.begin("w");
     c.since = Date.now() - 10_000;

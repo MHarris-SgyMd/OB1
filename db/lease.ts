@@ -491,7 +491,7 @@ export type InHandAbort = (olderThanMs?: number) => number;
  * the thought taken up, the admit gate last passed or a provider pause ended;
  * whether it has no call to abort now (at the gate, in a pause, in the
  * decider's call); whether it was aborted; whether a wait for a slot aborts
- * it (`abortWaiting`: the pass stopping); and whether its call waits for a
+ * it (`abortWaiting`: the pass stopping); whether its call waits for a
  * slot now — on the hook alone, where `waiting` covers the gate, a pause and
  * the decider's whole call too (review pass 6); and whether it is inside
  * idleWhile, which a slot wait's end leaves idle (review pass 7).

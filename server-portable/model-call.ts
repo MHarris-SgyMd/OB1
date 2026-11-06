@@ -35,11 +35,11 @@
  * call belongs to (`asPass`, which each claim worker's run sets: `extract`,
  * `consolidate`, `reembed`), so a hook can order the passes' calls; and an
  * observer told when a call starts waiting on the hook — the hook says so,
- * through the `waiting` it is handed, where it queues or finds no slot free —
- * and when it runs (`withCallWaits`), so a worker's clocks — N12's call in
- * hand, extraction's stall — do not count a wait for a slot as the call's
- * time (review pass 3), and a stopping pass gives back only a call that
- * waits (PR 2b-1, its review pass 6).
+ * through the `waiting` it is handed, where it queues, defers or finds no slot
+ * free — and when it runs (`withCallWaits`), so a worker's clocks — N12's call
+ * in hand, extraction's stall — do not count a wait for a slot as the call's
+ * time (review pass 3), and a stopping pass gives back only a call that waits
+ * (PR 2b-1, its review pass 6).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -71,8 +71,8 @@ export type CallWaits = { waiting(): void; running(): void };
 
 /**
  * Runs a call: `run` at once, or after whatever the hook waits for, and around it. `waiting` the hook calls as it
- * starts to wait — queued, or its slot not free — so the call's observer counts a wait only where there is one
- * (SMD-3379 PR 2b-1, review pass 6: told before every hook, a stopping pass gave back calls that never waited).
+ * starts to wait — queued, deferring, or its slot not free — so the call's observer counts a wait only where there is
+ * one (SMD-3379 PR 2b-1, review pass 6: told before every hook, a stopping pass gave back calls that never waited).
  */
 export type ModelCallHook = <T>(call: ResolvedModelCall, run: () => Promise<T>, waiting: () => void) => Promise<T>;
 
@@ -119,7 +119,7 @@ export function modelCall<T>(call: ModelCall, run: () => Promise<T>): Promise<T>
   const resolved: ResolvedModelCall = { ...rest, cls: cls ?? store?.cls ?? "background", pass: store?.pass };
   // The wait on the hook told to the worker's observer: waiting when the hook says it waits, running when it runs the
   // call — or, if the call ended without running (refused, stopped), running then, so its clocks start from there
-  // (review pass 3). A call the hook runs at once is told neither (2b-1 review pass 6).
+  // (review pass 3). A call the hook runs at once is told neither (PR 2b-1, its review pass 6).
   const waits = store?.waits;
   let told = false, ran = false;
   const waiting = () => {

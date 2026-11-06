@@ -1627,14 +1627,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (e instanceof AdmitThrow) throw e.error;
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
+                // A first stop that found its call waiting for a slot (review pass 6): as a stop between windows,
+                // those answered kept, no stop counted — not the caller's abort below.
+                if (e instanceof StoppedWaiting) return;
                 // The pass's caller aborted the call in hand (abortInHand): its stop
                 // counted on it, as a wake's (093), its windows answered kept, and
                 // the thought to the back of the queue; the worker goes on with its
                 // next claim. A set-back the database refuses leaves the claim for
                 // the finally's release (SMD-3379 PR 1b-2).
-                // A first stop that found its call waiting for a slot (review pass 6): as a stop between windows,
-                // those answered kept, no stop counted — not the caller's abort below.
-                if (e instanceof StoppedWaiting) return;
                 if (e instanceof AbortedInHand) {
                   // Counted once: out of inHand first, so a hard stop racing the
                   // count finds none to count again (review pass 1).
