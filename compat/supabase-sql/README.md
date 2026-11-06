@@ -17,7 +17,7 @@ changing one import.
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+ — the shim uses Bun's built-in Postgres client
-- A Postgres with the Open Brain schema (see `../../db/`)
+- A Postgres with the Daemonic Brain schema (see `../../db/`)
 - podman or docker to run the tests
 
 ## Steps
