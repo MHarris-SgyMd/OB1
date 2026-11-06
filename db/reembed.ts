@@ -2549,7 +2549,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   /**
    * After a pass a worker halted on the provider's outage: the row says so —
    * failed, then waiting mid-pass — and the follower probes until the provider
-   * answers, a stop ending the wait (extract-entities.ts's waitForProvider).
+   * answers, a stop ending the wait (waitOutProvider, whose rules are this
+   * wait's, SMD-2636 PR 2).
    */
   const waitForProvider = async (): Promise<void> => {
     if (!FOLLOW || outage.reason === null || stopping || configError !== null) return;

@@ -4906,6 +4906,8 @@ if (want("10")) {
   const callScript: number[] = [];
   /** While set, a probe answered (not one the outage turns away) is refused 401, as a key revoked meanwhile (SMD-2636 PR 2). */
   let probeRefuses = false;
+  /** The thoughts of the calls an outage turned away (SMD-2636 PR 2, review pass 2): whose call met it. */
+  const downPrompts: string[] = [];
   /** While above zero, the next calls answer 400 naming the answer budget, as an endpoint that refuses `max_tokens` does (extract's maxTokensFatal). */
   let refuseBudget = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
@@ -4925,6 +4927,7 @@ if (want("10")) {
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
       if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
+        if (!isProbe) downPrompts.push(body.messages?.find((m) => m.role === "user")?.content ?? "");
         if (down === "hang") return neverAnswers();
         if (down === "408") return new Response(JSON.stringify({ error: { message: body408 } }), { status: 408 });
         return down === "404"
@@ -5759,6 +5762,7 @@ if (want("10")) {
       down = "503";
       outage.arm(1);
       probeRefuses = true;
+      downPrompts.length = 0;
       keyNote = await seed("Quinn rotated the provider key while it was down.");
       const armed = Date.now();
       code = await running;
@@ -5771,9 +5775,11 @@ if (want("10")) {
       restorePauses();
     }
     const keyRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${keyNote}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
-           && lines.some((l) => /and OB1_METADATA_MODEL against the provider/.test(l)),
-           `a follower whose wait's probe is refused — a key revoked meanwhile — stops, exit 2, its refusal said once and well before the 30 s backstop, its thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
+    // Pending from its insert as much as from its return: its own call met the outage, so it was claimed and handed back.
+    const keyMet = downPrompts.some((p) => p.includes("Quinn rotated the provider key"));
+    assert(code === 2 && keyMet && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
+           && lines.some((l) => /and OB1_METADATA_MODEL against the provider/.test(l)) && lines.some((l) => /Nothing was marked failed\.$/.test(l)),
+           `a follower whose wait's probe is refused — a key revoked meanwhile — stops, exit 2, its refusal said once and well before the 30 s backstop, its thought's call met the outage and the thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, met ${keyMet}, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     await sql`SELECT delete_thought(${keyNote}::uuid, NULL::jsonb)`;
   }
 
@@ -5787,6 +5793,8 @@ if (want("10")) {
     const ac = new AbortController();
     const backstop = setTimeout(() => ac.abort(), 60_000);
     let soon = "";
+    let later = "";
+    let laterStatus = "";
     let answeredAt = 0;
     let doneAt = 0;
     try {
@@ -5795,6 +5803,11 @@ if (want("10")) {
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 10, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soon}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
+      // Once: the interval comes back after the poll at once — a thought seeded now waits for the next pass, 10 s on
+      // (review pass 2, mutant: a reset dropped polled without end).
+      later = await seed("Ulla checked the interval came back after the poll.");
+      await Bun.sleep(4_000);
+      laterStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${later}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status ?? "none";
       ac.abort();
       await running;
     } finally {
@@ -5803,9 +5816,9 @@ if (want("10")) {
       restoreOutage();
       restorePauses();
     }
-    assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 5_000,
-           `a follower polls again at once after the provider answers a wait, not after its 10 s interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
-    await sql`SELECT delete_thought(${soon}::uuid, NULL::jsonb)`;
+    assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus === "pending",
+           `a follower polls again at once after the provider answers a wait, not after its 10 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+    for (const id of [soon, later]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // A follower whose provider stays down (SMD-2261's heartbeat under
@@ -16603,7 +16616,7 @@ if (want("16")) {
     }
     const keyRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${keySeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
     assert(code === 2 && keyRow === "pending" && lines.filter((l) => /^ {2}the provider answers now, refusing the request itself \(401 /.test(l)).length === 1 && tookMs >= 0 && tookMs < 20_000
-           && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)),
+           && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)) && lines.some((l) => /Nothing was marked failed\.$/.test(l)),
            `a consolidate follower whose wait's probe is refused stops, exit 2, its refusal said once and well before the 30 s backstop, its pair's thought back in the pool, the chat endpoint's remedy (SMD-2636 PR 2; exit ${code} after ${tookMs} ms, ${keyRow}; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of keySeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
@@ -16617,6 +16630,7 @@ if (want("16")) {
     const ac = new AbortController();
     const backstop = setTimeout(() => ac.abort(), 60_000);
     const soonSeeds: string[] = [];
+    let laterStatus = "";
     let answeredAt = 0;
     let doneAt = 0;
     try {
@@ -16626,6 +16640,10 @@ if (want("16")) {
       const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 10, timeout: 5, signal: ac.signal, writer: { out: (l) => { lines.push(l); if (/^ {2}the provider answers again after /.test(l)) answeredAt = Date.now(); }, err: (l) => lines.push(l) } });
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soonSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
+      // Once, as [10]'s: a pair seeded now waits for the next pass (review pass 2, mutant).
+      soonSeeds.push(await seed("The poll log names the judge's interval once more.", 72, 0, ["poll-log"]));
+      await Bun.sleep(4_000);
+      laterStatus = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soonSeeds[2]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status ?? "none";
       ac.abort();
       await running;
     } finally {
@@ -16634,8 +16652,8 @@ if (want("16")) {
       restoreOutage();
       restorePauses();
     }
-    assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 5_000,
-           `a consolidate follower polls again at once after the judge answers a wait, not after its 10 s interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+    assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus !== "succeeded" && laterStatus !== "failed",
+           `a consolidate follower polls again at once after the judge answers a wait, not after its 10 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of soonSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 

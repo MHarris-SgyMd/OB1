@@ -746,6 +746,23 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     providerStamps.length = 0;
     ok((await waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "out", why: "x" }], "waitOutProvider's stop"), wake: stop.signal, sleep: instant })) === null && providerStamps.join() === "true,false",
       `waitOutProvider: a stop ends the wait, null, the stamp turned off (${providerStamps})`);
+    // The caller's stop reaches each probe, so a hung one ends with it; the reason cut at 200 and a refusal's why at
+    // 160; a probe that throws turns the stamp off and is thrown, not waited past (review pass 2, mutant).
+    {
+      const t = new ProviderOutage(() => clock);
+      t.begin("r".repeat(300));
+      const caller = new AbortController();
+      const seen: AbortSignal[] = [];
+      lines.length = 0;
+      const cut = await onTheClock(() => waitOutProvider({ ...base, settled: () => 0, outage: t, wake: caller.signal, probe: async (w) => { seen.push(w); return { state: "refused", why: "w".repeat(300) }; } }));
+      ok(seen.length === 1 && seen[0] === caller.signal && cut !== null && cut !== "answered" && cut.refused.length === 300
+        && (lines[0] ?? "").includes(`(${"r".repeat(200)})`) && !(lines[0] ?? "").includes("r".repeat(201))
+        && (lines[1] ?? "").includes(`(${"w".repeat(160)})`) && !(lines[1] ?? "").includes("w".repeat(161)),
+        `waitOutProvider: the caller's stop reaches the probe; the reason cut at 200, the refusal's at 160, returned whole (${seen.length}, ${seen[0] === caller.signal})`);
+      providerStamps.length = 0;
+      const thrown = await onTheClock(() => waitOutProvider({ ...base, settled: () => 0, outage: t, probe: async () => { throw new Error("probe crashed"); } })).then(() => "returned", (e) => (e as Error).message);
+      ok(thrown === "probe crashed" && providerStamps.join() === "true,false", `waitOutProvider: a probe that throws is thrown, the stamp turned off (${thrown}; ${providerStamps})`);
+    }
   }
   ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
 }

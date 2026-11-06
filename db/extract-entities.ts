@@ -1090,7 +1090,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
-  /** Windows of long thoughts answered and kept, run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2, review pass 1). */
+  /** Windows of long thoughts answered and kept (a brain keeping them: migration 093 and its grant), run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2, review passes 1 and 2). */
   let windowsAnswered = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
@@ -1242,14 +1242,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         return part;
       },
       async save(part, sent, windows) {
-        // An answered window got past the provider: the outage wait's carry reads it (SMD-2636 PR 2, review pass 1).
-        windowsAnswered++;
         // Past the hard stop too: a window saved before the stop's release
         // lands is kept, and the function keeps nothing after (review pass 1
         // — a window answered as the stop came was dropped).
         if (!keeping) return;
         try {
           await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
+          // A window answered and kept got past the provider for good: the outage wait's carry reads it (SMD-2636
+          // PR 2, review passes 1 and 2). One not kept is asked again, so it counts no more than the thought does.
+          windowsAnswered++;
         } catch (e) {
           keepingFailed(e, "keep");
         }

@@ -949,7 +949,7 @@ export async function waitOutProvider(o: {
   calls: string;
   outage: ProviderOutage;
   probe: (wake: AbortSignal) => Promise<Probe>;
-  /** The work that got past the provider so far, counted only up: thoughts finished or recorded failed (re-embed's, one call each), or the worker's answered calls (extract's windows, consolidate's pairs). A carry needs it unmoved since the last answer. */
+  /** The work that got past the provider so far, counted only up: thoughts finished or recorded failed (re-embed's, one call each), extract's windows of a long thought answered and kept too, consolidate's pairs answered (a malformed answer among them) and thoughts recorded failed. A carry needs it unmoved since the last answer. */
   settled: () => number;
   /** The follower's poll, in seconds: the carry's window is a minute and one of these. */
   pollS: number;
