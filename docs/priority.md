@@ -86,10 +86,13 @@ A source added later states its mapping and its default in SMD-3666's table, wit
 | --- | --- | --- |
 | Level | The winning assertion's level; unknown counts as 2 for ordering | 0–5 |
 | Inherited | With no level of its own: the highest effective level among the items it serves (its parent ticket, the spec it names, the ticket a thought is about), minus 1 a hop, at most 2 hops. It counts only where it is above unknown's 2, so linking an item to what it serves never lowers it. A stated level always beats it. | −1 per hop |
-| Urgency | From the winning `due_at`, or else `due_ref`'s: the referenced item's own winning `due_at`, one hop only (its `due_ref` is not followed, and an item may not name itself). Due within 1 day, or within 7 days. Not for an item at level 0. | +2, +1 |
-| Overdue | Past `due_at`, still open: in place of the urgency term above, and shown as overdue. Not for an item at level 0. | +3 |
-| Unblocks | Open items it blocks through active `blocks` links, transitively to depth 3: at least 1, or at least 3. A blocker that is closed doesn't count. | +0.5, +1 |
+| Urgency | From the winning `due_at`, or else `due_ref`'s: the referenced item's own winning `due_at`, one hop only (its `due_ref` is not followed, and an item may not name itself); with neither, an open item's own `due_at`. Due by the end of tomorrow, or by the end of the seventh day, counted in calendar days in UTC: since SMD-3778 a bare date is due by the end of that day, so "tomorrow" is 24 to 48 hours away and a window in hours would miss it. Not for an item at level 0, nor a settled one. | +2, +1 |
+| Overdue | Its due time come, still open: in place of the urgency term above, and shown as overdue. Not for an item at level 0. | +3 |
+| Unblocks | Open items it blocks through active `blocks` / `blocked_by` links, transitively to depth 3: at least 1, or at least 3. A blocker that is closed blocks nothing, and a closed item is neither counted nor walked through. | +0.5, +1 |
+| Inferred | A tier-4 statement (decision 4's inferred tier) isn't counted until SMD-3670's agreement clears its bar: the read lists it as passed over. | off |
 | Not before | Before `not_before` the item isn't startable: the agenda leaves it out, and search doesn't change | – |
+
+SMD-3667 built this table as `effective_priority`'s weights (migration 120), each a setting a read overrides by name (`unknown`, `hop`, `hops`, `soon`, `soon_days`, `week`, `week_days`, `overdue`, `unblocks_one`, `unblocks_many`, `unblocks_many_at`, `depth`, `cap`, `count_inferred`).
 
 On 2026-11-02's board this puts SMD-2908 first among the four Highs: 3 for High, plus 2 for urgency, if its `due_ref` names the v2.0.0 release and the release's due date is 11-03. A Medium bill due tomorrow (2 + 2) passes a High project with no date (3). An overdue Low (1 + 3) still stays below a Critical with no date (5), and an overdue Medium (2 + 3) ties it.
 
@@ -109,11 +112,11 @@ home-maintenance's `maintenance_tasks` row becomes an open item when it's create
 
 ### A read
 
-`node_state` (SMD-3667) returns, for each item, `effective_priority`, its terms, `urgency`, `overdue`, `unblocks` and `inherited_from`. Search blends it in through `priority_weight` and filters through `min_priority` (SMD-3668). `agenda` orders open, startable, unclaimed items by it (SMD-3669). Each of these names the terms, the winning assertion and the ones it passed over.
+`effective_priority(items, weights, now)` (SMD-3667, migration 120) returns, for each item, `effective`, its terms, `urgency`, `overdue`, `unblocks` and `inherited_from`. It is a read of its own beside `priority_of`, not new columns on `node_state` (the maintainer's call of 2026-11-05: `node_state` covers thoughts alone, and reshaping it would drop and recreate it under the reads built on it). Every term is computed when it's read. Search blends it in through `priority_weight` and filters through `min_priority` (SMD-3668). `agenda` orders open, startable, unclaimed items by it (SMD-3669). Each of these names the terms, the winning assertion and the ones it passed over.
 
 ## What this reverses or amends
 
-- **SMD-2074's scope note.** Ticket ranking was left to Linear. It is now in scope as one of four kinds of item (decision 9). `node_state`, which reads thoughts and the tickets they carry, gains the entity and open-item kinds and the priority terms (SMD-3667).
+- **SMD-2074's scope note.** Ticket ranking was left to Linear. It is now in scope as one of four kinds of item (decision 9). The priority terms go in a read of their own, `effective_priority`, which takes all four kinds; `node_state`, which reads thoughts and the tickets they carry, is unchanged (SMD-3667, amended 2026-11-05).
 - **SMD-2653's options.** Decision 8 settles it: the digest stops reading `importance` altogether, so no key's value of it steers the digest. That is close to the ticket's option 2, with nothing left to filter by key.
 - **SMD-1920's "value/priority" field.** The plugin keeps its column, and the brain's reads see only what the plugin states through the core (decision 8).
 - **SMD-2684's board section.** It takes the agenda's order (SMD-3669).
@@ -128,7 +131,7 @@ home-maintenance's `maintenance_tasks` row becomes an open item when it's create
 3. **SMD-3665**, the open item, the fourth kind. It is decided by decision 1 and needed by decision 8's plugin path.
 4. **SMD-3664**, the operations over REST and MCP.
 5. **SMD-3666**, the sources: board-sync with due dates, the ingestion contract, frontmatter and plugins (decisions 3 and 8).
-6. **SMD-3667**, decision 5 in `node_state`.
+6. **SMD-3667**, decision 5 as `effective_priority` (built as a read of its own; see "A read").
 7. **SMD-3668** (search) and **SMD-3669** (agenda), each measured by SMD-3662 before any default changes.
 8. **SMD-3670** (inferred), **SMD-3671** (sleep's review) and **SMD-3672** (the GUI).
 

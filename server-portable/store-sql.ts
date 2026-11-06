@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1163,6 +1163,24 @@ export class SqlStore implements ThoughtStore {
     const r = rows[0];
     if (!r || !(PRIORITY_KINDS as readonly unknown[]).includes(r.kind) || typeof r.key !== "string") throw new Error("ob1_priority_item answered no item this server reads");
     return { item: { kind: r.kind as PriorityItem["kind"], key: r.key }, exists: r.exists === true };
+  }
+
+  // SMD-3667: 120's composed read, one statement (every function it calls STABLE: one snapshot). The items and the
+  // weights ride as JSON text, cast in SQL (Bun binds a JS object as no jsonb); the clock is the database's unless pinned.
+  // Its columns named, never `*`, so a migration adding one re-plans a prepared read rather than failing it (SMD-3302).
+  async effectivePriority(items: { kind: string; key: string }[], opts: { weights?: Partial<PriorityWeights>; now?: string } = {}): Promise<EffectivePriority[]> {
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT item_kind, item_key, effective, level, inherited_from, due_at, due_from, urgency, overdue, unblocks, settled,
+               not_before, waiting, terms, winner, passed_over
+          FROM effective_priority((${JSON.stringify(items)}::text)::jsonb,
+                                         (${opts.weights === undefined ? null : JSON.stringify(opts.weights)}::text)::jsonb,
+                                         COALESCE(${opts.now ?? null}::timestamptz, now()))` as Record<string, unknown>[];
+    } catch (e) {
+      throw priorityRefusedOr(e);
+    }
+    return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
   // SMD-3665 PR 2: 117's writers, the envelope stating the key's scope and the plugin a call came through, and every
