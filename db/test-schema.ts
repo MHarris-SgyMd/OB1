@@ -17494,6 +17494,10 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const tri = await one("ticket", "SMD-9600");
   let wholeDepth: Row | undefined;
   try { wholeDepth = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9420"}]', '{"depth": 3.0}', $1::timestamptz)`, [NOW])).rows[0]; } catch { wholeDepth = undefined; }
+  const capped = await one("ticket", "SMD-9410", { cap: 2, unblocks_many_at: 2 });
+  const capLow = await raisedCode(`SELECT * FROM effective_priority('[]', '{"cap": 2}')`, []);
+  assert(capped?.unblocks === 2 && Number(capped?.effective) === 3 && capLow === "22023",
+    `cap 2 counts two of SMD-9410's three, the larger term reached at unblocks_many_at 2; a cap below unblocks_many_at refused 22023 (${capped?.unblocks}, ${capped?.effective}, ${capLow})`);
   assert(tri?.unblocks === 2 && wholeDepth?.unblocks === 3,
     `an item two paths reach is counted once (${tri?.unblocks}); a whole number written 3.0 reads as 3 (${wholeDepth?.unblocks})`);
 
@@ -17580,7 +17584,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   // a ticket with no statement of its own reads its row's. A served row and a referenced row are their ticket.
   await ticket("SMD-9468"); await ticket("SMD-9469"); await ticket("SMD-9464"); await ticket("SMD-9466", "completed"); await ticket("SMD-9467");
   const [row9468, row9469, row9455, row9456] = [await rowOf("SMD-9468"), await rowOf("SMD-9469"), await rowOf("SMD-9455"), await rowOf("SMD-9456")];
-  await put("ticket", "SMD-9468", 4); await put("thought", row9468, 1, { inferred: true });
+  await put("ticket", "SMD-9468", 4); await put("thought", row9468, 1, { inferred: true, actor: BOT });
   await put("thought", row9469, 2);
   await put("ticket", "SMD-9464", 2, { ref: ["thought", row9401] });
   await put("ticket", "SMD-9466", 2, { due: "2027-03-01T00:00:00Z" }); await put("ticket", "SMD-9467", 2, { ref: ["ticket", "SMD-9466"] });
@@ -17590,7 +17594,7 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   assert(pool[0]?.level === 4 && pool[0]?.passed_over.some((a) => a.level === 1) && pool[1]?.level === 2 && Number(pool[1]?.effective) === 2
          && from(pool[2]) === "ticket:SMD-9455/5-1" && Number(pool[2]?.effective) === 4 && from(pool[3]) === "ticket:SMD-9455/5-2" && Number(pool[3]?.effective) === 3
          && Number(pool[4]?.effective) === 4 && pool[4]?.due_from === "due_ref" && pool[5]?.overdue === true && Number(pool[5]?.effective) === 5,
-    `the operator's Urgent on a ticket beats an inferred Low on its row, counted; a ticket reads its row's Medium; an item from a Critical ticket's row inherits 4 at one hop, from a child's row 3 at two; a reference to a ticket's row takes the ticket's due time; a reference to a completed release keeps its date, overdue (${pool.map((r) => `${r.effective}/${from(r)}/${r.due_from}`).join(" ")})`);
+    `the operator's Urgent on a ticket beats an agent's inferred Low on its row, counted; a ticket reads its row's Medium; an item from a Critical ticket's row inherits 4 at one hop, from a child's row 3 at two; a reference to a ticket's row takes the ticket's due time; a reference to a completed release keeps its date, overdue (${pool.map((r) => `${r.effective}/${from(r)}/${r.due_from}`).join(" ")})`);
   // A row is mapped only in 115's upper-case form, so it is always found in its ticket's pool: a lower-case one reads
   // as itself, its statement kept. A linear source row whose identity is no ticket key falls through to metadata.issue.
   const lower = await thoughtAs("[108] a hand-written row, lower-case", { source: "linear", issue: "smd-9700" });
@@ -17611,6 +17615,14 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
   const [t9702, tn] = await eff([["ticket", "SMD-9702"], ["thought", twoNames]]);
   assert(t9702?.level === null && as(tn) === "SMD-9703" && tn?.level === 5,
     `a statement on SMD-9703's row does not count for SMD-9702, which its metadata names (${t9702?.level}, ${as(tn)}/${tn?.level})`);
+  // Each maker's newest across the pool: the operator's Critical on SMD-9710's row, then its own inferred Medium on the
+  // ticket — its newest stance is the inferred one, not counted, so the ticket reads unknown, both listed; counted, 2.
+  await ticket("SMD-9710");
+  const row9710 = await rowOf("SMD-9710");
+  await put("thought", row9710, 5); await put("ticket", "SMD-9710", 2, { inferred: true });
+  const [newest, newestCounted] = [await one("ticket", "SMD-9710"), await one("ticket", "SMD-9710", { count_inferred: true })];
+  assert(newest?.level === null && newest?.passed_over.length === 2 && newestCounted?.level === 2,
+    `one maker's two statements across a ticket and its row: its newest is its stance (${newest?.level}, ${newest?.passed_over.length} passed over; counted ${newestCounted?.level})`);
   // A malformed metadata.ticket hides neither a valid issue nor a standing subject.
   const badTicket = await thoughtAs("[108] a note with a ticket field that is no key", { ticket: "not a key" });
   await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [108]"}'::jsonb)`, [badTicket]);

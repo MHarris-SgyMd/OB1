@@ -205,7 +205,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_ticket_rows(text) IS
-  'A ticket''s own rows, as thought ids: its linear source row (053), and every row claiming metadata.issue with source linear (by 068''s issue index). The thoughts whose statements count as the ticket''s in effective_priority. Migration 120 / SMD-3667.';
+  'A ticket''s own rows, as thought ids: its linear source row (053), and every row claiming metadata.issue with source linear (by 068''s issue index) that is not another ticket''s row by its linear source identity. The thoughts whose statements count as the ticket''s in effective_priority. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_subject — what an item is read as
@@ -268,21 +268,29 @@ COMMENT ON FUNCTION ob1_priority_open(text, text) IS
 -- ob1_priority_counted — the winner a composed read counts
 -- ---------------------------------------------------------------------------
 -- 116's rule (ob1_priority_winner: the lowest tier, then the later written)
--- over the item's pool (ob1_priority_open), with tier 4 left out unless
--- p_inferred: decision 5 counts inferred assertions only once SMD-3670's
--- agreement clears its bar. All NULL for none.
+-- over the item's pool (ob1_priority_open), each maker's newest statement
+-- alone, with tier 4 left out unless p_inferred: decision 5 counts inferred
+-- assertions only once SMD-3670's agreement clears its bar. All NULL for none.
+--
+-- Each maker's newest: 116 keeps one open statement per maker on one (kind,
+-- key), and a maker's new statement replaces its old whatever the tier of
+-- either. The pool joins a ticket and its rows, where one maker may hold one
+-- open on each; its newest is its stance (the maintainer, review pass 5). A
+-- clear still reaches only the item it names, so a maker's older statement on
+-- the row stands again once its newer one on the ticket is cleared: 116's
+-- writers closing across a ticket and its rows is SMD-4127.
 CREATE OR REPLACE FUNCTION ob1_priority_counted(p_kind text, p_key text, p_inferred boolean)
 RETURNS priority_assertions
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT o.* FROM ob1_priority_open(p_kind, p_key) o
+  SELECT o.* FROM (SELECT DISTINCT ON (p.maker_key) p.* FROM ob1_priority_open(p_kind, p_key) p ORDER BY p.maker_key, p.seq DESC) o
    WHERE p_inferred OR o.tier < 4
    ORDER BY o.tier, o.seq DESC
    LIMIT 1
 $$;
 COMMENT ON FUNCTION ob1_priority_counted(text, text, boolean) IS
-  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written) over its pool (ob1_priority_open: a ticket and its rows as one), tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Migration 120 / SMD-3667.';
+  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written) over its pool (ob1_priority_open: a ticket and its rows as one), each maker''s newest statement alone, tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Migration 120 / SMD-3667.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_item_settled — whether an item is done with
@@ -535,6 +543,15 @@ BEGIN
              OR v::numeric > CASE k WHEN 'cap' THEN 1000 WHEN 'depth' THEN 5 WHEN 'hops' THEN 2 ELSE 366 END
            ELSE v::numeric < 0 OR v::numeric > 10
          END;
+  -- A cap below unblocks_many_at would leave the larger unblocks term
+  -- unreachable (review pass 5).
+  -- Nested, so the casts run only once both values are known numbers.
+  IF v_bad IS NULL THEN
+    IF ((c_defaults || COALESCE(p_weights, '{}'))->>'cap')::numeric < ((c_defaults || COALESCE(p_weights, '{}'))->>'unblocks_many_at')::numeric THEN
+      RAISE EXCEPTION USING MESSAGE = 'a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached',
+                            ERRCODE = 'invalid_parameter_value';
+    END IF;
+  END IF;
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = format('a weight out of range: %s (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)', v_bad),
                           ERRCODE = 'invalid_parameter_value';
