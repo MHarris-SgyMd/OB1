@@ -14,7 +14,9 @@
  * least one call would go through — and never call process.exit or touch the
  * sql client. extract-entities.ts's, consolidate.ts's and reembed.ts's
  * importable run() turn the result into a return code (SMD-2304). Banners are
- * returned as strings for the caller to print with its own label and spacing.
+ * returned as strings for the caller to print with its own label and spacing;
+ * a follower's waits (SMD-2636) and throughOutage say their lines through the
+ * caller's writer, and run the statements the caller hands them.
  */
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
@@ -677,13 +679,17 @@ export class ProviderOutage {
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(
     private readonly now: () => number = Date.now,
-    /** How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15 minutes (the subject sweep's, SMD-3306 PR 6b-1). */
-    private readonly windowMs: number = SUSPECT_WINDOW.ms,
+    /**
+     * How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15
+     * minutes (the subject sweep's, SMD-3306 PR 6b-1), or read at each error, when its calls' limit changes as it runs
+     * (consolidation's beside the sweep, PR 6b-2's review pass 3).
+     */
+    private readonly windowMs: number | (() => number) = SUSPECT_WINDOW.ms,
   ) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.windowMs) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= (typeof this.windowMs === "number" ? this.windowMs : this.windowMs())) {
       this.suspects.delete(thoughtId);
       return "thought";
     }
@@ -797,5 +803,161 @@ export async function throughOutage<T>(run: () => Promise<T>, opts: {
       await sleep(outageWait(step), opts.wake);
       if (opts.wake.aborted) return null;
     }
+  }
+}
+
+// ── A follower's waits (SMD-2636) ────────────────────────────────────────────
+// One copy of what extract-entities.ts, consolidate.ts and reembed.ts each kept of SMD-2599's glue: the start probe's
+// refusal, the wait at the start, the wait for the database and the pass it does not end, and the leases a worker
+// could not return. Each worker passes its own words and probe; the outage wait and a fault's reading are next.
+
+/** A follower's lines: the start's and the waits'. */
+export type FollowerWriter = { out: (line: string) => void; err: (line: string) => void };
+
+/** A start refusal: which it is, for `onStart` (SMD-2752), and the line that says it. */
+export type FollowerRefusal = { kind: StartRefusal; line: string };
+
+/**
+ * A follower's first probe, before it writes anything (SMD-2599): its refusal — a model unserved, the endpoint
+ * refusing, or a worker's own check of what answered (extract's escalation model) — or, through, why it did not
+ * answer, waited for at its start (`waitAtStart`), or null when it did. `refusal` reads only a probe that answered:
+ * no answer refuses nothing at start.
+ */
+export async function probeAtStart(o: {
+  probe: (wake?: AbortSignal) => Promise<Probe>;
+  refusal: (p: Probe, wake?: AbortSignal) => Promise<FollowerRefusal | null>;
+  wake?: AbortSignal;
+}): Promise<{ refused: FollowerRefusal } | { out: string | null }> {
+  const first = await o.probe(o.wake);
+  if (first.state === "out") return { out: first.why };
+  const refused = await o.refusal(first, o.wake);
+  return refused ? { refused } : { out: null };
+}
+
+/**
+ * A follower's wait at its start for a provider whose first probe got no answer (SMD-2599): said, and said through a
+ * caller's stamper while it lasts (the sleep scheduler's, so its row says a pass waits at its start, SMD-2752);
+ * probed on outageWait's schedule until a probe settles — anything but out — and that probe held to `refusal`, the
+ * start's refusals. "up" when it answered and none refuses it, said; null when `wake` ended the wait.
+ */
+export async function waitAtStart(o: {
+  /** The provider in the lines: "the provider", "the embedding provider". */
+  who: string;
+  /** Why the first probe got no answer. */
+  why: string;
+  /** What the follower holds back meanwhile and how it probes: "claims nothing until it does; it calls m at b for one token". */
+  meanwhile: string;
+  probe: (wake: AbortSignal) => Promise<Probe>;
+  refusal: (p: Probe, wake: AbortSignal) => Promise<FollowerRefusal | null>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  stamper?: { startWait?: (on: boolean) => Promise<void> | void } | null;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<"up" | { refused: FollowerRefusal } | null> {
+  const down = Date.now();
+  o.writer.err(`  ${o.who} is not answering at start (${o.why.slice(0, 200)}) — the follower ${o.meanwhile} after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
+  await o.stamper?.startWait?.(true);
+  const answered = await probeUntil(() => o.probe(o.wake), o.wake, (p) => p.state !== "out", o.sleep).finally(() => o.stamper?.startWait?.(false));
+  if (answered === null) return null;
+  const refused = await o.refusal(answered, o.wake);
+  if (refused) return { refused };
+  o.writer.out(`  ${o.who} answers after ${Math.round((Date.now() - down) / 1000)} s`);
+  return "up";
+}
+
+/**
+ * A follower's wait for the database after an error databaseUnavailable reads as its outage (SMD-2599): said once,
+ * waited out on outageWait's schedule until `check` (a SELECT 1) answers, and said again — true; false when `wake`
+ * ended the wait. A check the database refuses otherwise is thrown, the run's end. `firstLine`: the error's first
+ * line alone in the line (re-embed's).
+ */
+export async function waitForDatabase(e: unknown, o: {
+  check: () => Promise<unknown>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  firstLine?: boolean;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<boolean> {
+  const down = Date.now();
+  const message = (e as Error).message;
+  o.writer.err(`  the database is not answering (${o.firstLine ? message.split("\n")[0] : message}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
+  if (!(await waitOut({ check: o.check, outage: databaseUnavailable, wake: o.wake, sleep: o.sleep }))) return false;
+  o.writer.out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+  return true;
+}
+
+/**
+ * A follower's pass, which a database outage does not end (SMD-2599; extract's and consolidate's): an error
+ * databaseUnavailable reads as the database not answering is waited out (waitForDatabase), and the pass runs again at
+ * once, so its counts are read — or a stop ends the wait, and the counts are null. `afterPass` runs after a pass that
+ * returns, inside the same catch: the worker's wait for its provider. Any other error ends the run, and with `follow`
+ * false a database outage too, as a run without --follow always ended.
+ */
+export async function followedPass<C>(o: {
+  pass: () => Promise<C>;
+  afterPass: () => Promise<void>;
+  follow: boolean;
+  check: () => Promise<unknown>;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<C | null> {
+  for (;;) {
+    try {
+      const c = await o.pass();
+      await o.afterPass();
+      return c;
+    } catch (e) {
+      if (!o.follow || !databaseUnavailable(e)) throw e;
+      if (!(await waitForDatabase(e, o))) return null;
+    }
+  }
+}
+
+/**
+ * The workers whose leases could not be returned as they ended — the database not answering — returned at the
+ * follower's next pass or poll rather than left to expire (SMD-2599). A follower's only.
+ */
+export class Unreturned {
+  private readonly workers = new Set<string>();
+  /** `release` returns one worker's leases: release_claims_for_worker. */
+  constructor(private readonly release: (worker: string) => Promise<unknown>) {}
+
+  add(worker: string): void {
+    this.workers.add(worker);
+  }
+
+  get size(): number {
+    return this.workers.size;
+  }
+
+  /** Each returned in turn, before a pass's or a poll's pool; the first the database refuses throws, it and the rest kept. */
+  async returnAll(): Promise<void> {
+    for (const w of this.workers) {
+      await this.release(w);
+      this.workers.delete(w);
+    }
+  }
+
+  /** As returnAll, but one the database refuses ends the returns quietly, it and the rest kept for later (re-embed's before its admit gate, SMD-3379 PR 1b-1 review pass 7). */
+  async returnWhileAnswered(): Promise<void> {
+    for (const w of [...this.workers]) {
+      try {
+        await this.release(w);
+        this.workers.delete(w);
+      } catch {
+        break;
+      }
+    }
+  }
+
+  /** All at once as the run ends; one line when any could not go, which expire within `ttlS` (review passes 3 and 4). */
+  async returnAtEnd(ttlS: number, writer: Pick<FollowerWriter, "err">): Promise<void> {
+    if (this.workers.size === 0) return;
+    const kept = (await Promise.all([...this.workers].map((w) => this.release(w).then(() => 0, () => 1)))).reduce((a: number, b: number) => a + b, 0);
+    if (kept > 0) writer.err(`  ${kept} worker(s)' leases could not be returned as the run ended; they expire within ${ttlS} s`);
   }
 }

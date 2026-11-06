@@ -4,13 +4,13 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-> Chrome MV3 extension that captures conversations from Claude, ChatGPT, and Gemini into your Open Brain through its REST core.
+> Chrome MV3 extension that captures conversations from Claude, ChatGPT, and Gemini into your brain through its REST core.
 
 ## What It Does
 
-A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your Open Brain's REST core. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
+A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your brain's REST core. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
 
-This is a **client-side** integration — unlike the capture integrations in this repo that run as servers or as a plugin's webhook (Slack, Telegram, Readwise), a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own Open Brain.
+This is a **client-side** integration — unlike the capture integrations in this repo that run as servers or as a plugin's webhook (Slack, Telegram, Readwise), a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own brain.
 
 ## Screenshots
 
@@ -23,7 +23,7 @@ Placeholder. See [`docs/screenshots/README.md`](docs/screenshots/README.md) for 
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 - The REST core reachable at `/api` — the stack's opt-in route, on when `deploy/compose.api-public.yaml` is named ([`deploy/README.md`](../../deploy/README.md), "The REST core and its opt-in `/api`")
 - A capture-scoped key for this device: `cd server-portable && bun keygen.ts --name chrome --scope capture`, its line added to `MCP_ACCESS_KEYS` ([`SETUP.md`](../../SETUP.md)). A capture key can add a thought and cannot read, edit or delete one; a write key works too, but gives the browser more than it needs
 - Chrome 120+, or any Chromium-based browser that supports MV3 (Edge 120+, Brave, Arc, Opera)
@@ -36,7 +36,7 @@ Copy this block into a text editor and fill it in as you go.
 CHROME CAPTURE EXTENSION -- CREDENTIAL TRACKER
 --------------------------------------
 
-FROM YOUR OPEN BRAIN SETUP
+FROM YOUR DAEMONIC BRAIN SETUP
   REST core URL:         ____________
     (e.g. https://brain.example.com/api — your brain's public origin,
      or http://127.0.0.1:8000/api for the stack on this machine)
@@ -56,22 +56,22 @@ BROWSER INFO
 3. Toggle **Developer mode** on (top-right)
 4. Click **Load unpacked** and pick the `integrations/chrome-capture-extension/` folder
 5. Pin the extension icon to the toolbar so you can reach it quickly
-6. A new tab opens automatically on first install — the Configure Open Brain screen (see below). Upgrading from a release before 0.7.0, which spoke to the retired `open-brain-rest` gateway: the extension starts unconfigured and asks for the REST core's URL; captures already queued wait for it and send once it is saved
+6. A new tab opens automatically on first install — the Configure Daemonic Brain screen (see below). Upgrading from a release before 0.7.0, which spoke to the retired `open-brain-rest` gateway: the extension starts unconfigured and asks for the REST core's URL; captures already queued wait for it and send once it is saved
 
 ## First-Run Config
 
 The extension ships with **no hardcoded server URLs**. On first install it opens `popup/config.html` and asks for two things:
 
-1. **Open Brain REST core URL** — your brain's origin with `/api`. Examples:
+1. **Daemonic Brain REST core URL** — your brain's origin with `/api`. Examples:
    - On this machine: `http://127.0.0.1:8000/api` (the proxy's port, `SERVER_PORT`)
    - Hosted: `https://brain.example.com/api`
 2. **API Key** — the capture-scoped key minted for this device (Prerequisites). **Test connection** calls `GET /v1/whoami` and says so if the key cannot capture
 
-When you click **Save & Grant Permission**, Chrome shows a native permission prompt asking whether the extension may access the specific origin you entered. Approve it. This is a one-time grant — Chrome remembers it and the extension can now talk to your Open Brain without asking again. You can revoke the grant any time from `chrome://extensions → Open Brain Capture → Details → Site access`.
+When you click **Save & Grant Permission**, Chrome shows a native permission prompt asking whether the extension may access the specific origin you entered. Approve it. This is a one-time grant — Chrome remembers it and the extension can now talk to your brain without asking again. You can revoke the grant any time from `chrome://extensions → Daemonic Brain Capture → Details → Site access`.
 
 **Storage details:**
 - API key → `chrome.storage.local` (per-device only, **never** synced across Chrome profiles)
-- API URL (`apiEndpoint`) → `chrome.storage.local` (per-device only). Rationale: the URL alone isn't a secret, but combining it with your Google-account-wide synced profiles would let anyone signed into the same Google account on a shared or loaner laptop see a pre-filled target for your Open Brain. Treating the endpoint as per-device avoids that surface, and also sidesteps `chrome.storage.sync`'s 8KB-per-item quota, which could silently reject saves for very long URLs.
+- API URL (`apiEndpoint`) → `chrome.storage.local` (per-device only). Rationale: the URL alone isn't a secret, but combining it with your Google-account-wide synced profiles would let anyone signed into the same Google account on a shared or loaner laptop see a pre-filled target for your brain. Treating the endpoint as per-device avoids that surface, and also sidesteps `chrome.storage.sync`'s 8KB-per-item quota, which could silently reject saves for very long URLs.
 - Platform toggles (ChatGPT / Claude / Gemini) → `chrome.storage.sync` (follows your Google account across devices). If `chrome.storage.sync` is unavailable (policy-managed profile, sync disabled, or quota exceeded) the extension transparently falls back to `chrome.storage.local` so saves never silently fail.
 
 ## Usage
@@ -82,7 +82,7 @@ When you click **Save & Grant Permission**, Chrome shows a native permission pro
 2. Click the extension icon in the toolbar
 3. Click **Capture Current Response**
 4. Watch the Activity log on the Overview tab — you should see `captured` and the sent counter tick up
-5. Confirm the thought arrived in your Open Brain (query `search_thoughts` or peek at your database's `thoughts` table)
+5. Confirm the thought arrived in your brain (query `search_thoughts` or peek at your database's `thoughts` table)
 
 **Bulk backfill (Claude, ChatGPT, and Gemini):**
 
@@ -119,7 +119,7 @@ Switch to the Sync tab and click **Sync All** under the platform you want to imp
            │ fetch() with x-brain-key header
            ▼
 ┌──────────────────────────┐
-│ Open Brain REST core     │
+│ Daemonic Brain REST core │
 │ POST /api/v1/thoughts    │
 │ (capture_thought)        │
 └──────────────────────────┘
@@ -137,15 +137,15 @@ Google does not expose a public conversation API for Gemini, so bulk backfill us
 
 - **Sync All History** — enumerates every conversation link in your Gemini sidebar (scrolling to load the full list), opens a dedicated background tab, and drives it through each conversation one at a time. Phase B observes the history-load RPC that Gemini fires on page load and resolves a per-conversation waiter. Fingerprint dedup guarantees that re-running Sync All is safe — already-captured turns return `duplicate_fingerprint` / `existing`.
 - **Sync New** — same enumeration, but filters against a lifetime list of synced conversation IDs so only conversations you've never captured get navigated. Safe for scheduled use.
-- **Auto-sync every 4 hours** — optional. When on, a `chrome.alarms`-driven 4h cadence calls Sync New (capped at 20 conversations per cycle) so new Gemini conversations land in your Open Brain hands-free. Off by default.
+- **Auto-sync every 4 hours** — optional. When on, a `chrome.alarms`-driven 4h cadence calls Sync New (capped at 20 conversations per cycle) so new Gemini conversations land in your brain hands-free. Off by default.
 
 A per-conversation jittered throttle (4–12 s plus a longer "reading pause" every 10 conversations) keeps cadence off Google's bot-detection radar. If Gemini does redirect the sync tab to a CAPTCHA/login page mid-run, the orchestrator detects the unhealthy tab, transitions to a `canceled` paused state, and the Sync All button relabels itself to **Resume Sync**. Solve the challenge in the Gemini tab, then click Resume to pick up where the run left off.
 
 **What this requires at install time:**
 
 - Extra manifest permissions: `debugger` (to attach to Gemini tabs) and `scripting` (to run the sidebar-enumeration helper). Chrome shows a combined permission prompt on install / update — "Read and change your data on gemini.google.com" plus "Debug" language. That is expected.
-- A visible banner while syncing: Chrome shows "Open Brain Capture started debugging this browser" along the top of Chrome whenever `chrome.debugger` is attached. This is mandatory platform UX — dismissing it cancels the debugger session and the extension will flip to the paused state. Leave it open while Sync All is running.
-- No external telemetry, no third-party hosts. Every request that leaves your browser still goes only to your configured Open Brain REST API URL.
+- A visible banner while syncing: Chrome shows "Daemonic Brain Capture started debugging this browser" along the top of Chrome whenever `chrome.debugger` is attached. This is mandatory platform UX — dismissing it cancels the debugger session and the extension will flip to the paused state. Leave it open while Sync All is running.
+- No external telemetry, no third-party hosts. Every request that leaves your browser still goes only to your configured Daemonic Brain REST API URL.
 
 **Why use `chrome.debugger` instead of a content script.** Content scripts can't observe cross-origin response bodies. The Gemini history-load payload is a framed positional-array blob that mixes anti-XSSI prefixes with length-prefixed JSON chunks — parsing it from a `fetch()` interceptor in page context would be fragile and require re-implementing half of Google's `batchexecute` protocol in the page. The debugger path gets the raw response bytes exactly as Gemini's own JS receives them.
 
@@ -167,11 +167,11 @@ The `content_scripts` entries for `claude.ai`, `chatgpt.com`, and `gemini.google
 ## Security
 
 - **API key storage.** The `x-brain-key` lives in `chrome.storage.local`. Chrome encrypts local storage on disk with OS-level keys, and the key is **never** written to `chrome.storage.sync` — meaning it does not propagate to your other Chrome profiles on the same Google account. Rotate by reopening the Configure screen and saving a new value. Uninstalling the extension removes the key along with it.
-- **API URL storage.** The Open Brain API URL (`apiEndpoint`) also lives in `chrome.storage.local` only, alongside the key. The URL itself isn't a secret, but sync-replicating it would leak your brain's location to any Chrome profile signed into the same Google account (shared laptops, family devices, loaner Chromebooks). Keeping the endpoint per-device avoids that pre-fill attack surface.
+- **API URL storage.** The Daemonic Brain API URL (`apiEndpoint`) also lives in `chrome.storage.local` only, alongside the key. The URL itself isn't a secret, but sync-replicating it would leak your brain's location to any Chrome profile signed into the same Google account (shared laptops, family devices, loaner Chromebooks). Keeping the endpoint per-device avoids that pre-fill attack surface.
 - **Transport security.** The Configure screen rejects any API URL that isn't `https://…` or `http://localhost` / `http://127.0.0.1` (with optional port). The manifest's `optional_host_permissions` reflects the same policy: `https://*/*` plus narrow loopback exceptions only. Plaintext `http://` endpoints over the public internet are not accepted — the `x-brain-key` header and captured conversation text would travel in the clear.
 - **Client-side sensitivity filtering.** `data/sensitivity-patterns.json` holds regex patterns for SSNs, passports, bank accounts, API keys, credit cards, passwords-in-URLs, and medical/financial markers. Anything matching a `restricted` pattern is blocked locally before the request is even built — the text never leaves the browser, and the activity log shows a `restricted_blocked` entry. `personal` matches pass through silently and are NOT logged — the intent is to capture them alongside the rest of the conversation, not to separately surface them. Patterns compile once per session and are tested with `String.prototype.match` regex semantics.
 - **Outbound requests.** Only the service worker calls `fetch()`, and only to the user-configured origin. No telemetry, no analytics, no third-party hosts.
-- **Retry queue integrity.** Failed captures live in `chrome.storage.local` with the full payload and a `nextRetryAt` timestamp. Retries honour exponential backoff (1, 2, 4, 8, 16 minutes, capped at 60), max 5 attempts, then a dead-letter entry in the activity log. Fingerprints live across retries so a retry-then-manual-retry doesn't produce duplicates in Open Brain.
+- **Retry queue integrity.** Failed captures live in `chrome.storage.local` with the full payload and a `nextRetryAt` timestamp. Retries honour exponential backoff (1, 2, 4, 8, 16 minutes, capped at 60), max 5 attempts, then a dead-letter entry in the activity log. Fingerprints live across retries so a retry-then-manual-retry doesn't produce duplicates in Daemonic Brain.
 - **CSP.** Manifest V3 service workers run under a strict CSP that forbids `eval` and remote script loading. The lib scripts are all local.
 
 ## Publishing to Chrome Web Store
@@ -181,14 +181,14 @@ The `content_scripts` entries for `claude.ai`, `chatgpt.com`, and `gemini.google
 1. Review the bundled branded icon set (16/32/48/128 PNGs in [`icons/`](icons/)) and refresh the artwork if needed for a 1.0.0 store listing
 2. Fill in the store listing: description, category (Productivity), screenshots, privacy policy URL
 3. Draft the **permission justifications** — the store review team requires a paragraph per declared permission. Suggested text:
-   - `storage` — "Persists user-supplied Open Brain API URL, API key, and per-platform capture toggles."
+   - `storage` — "Persists user-supplied Daemonic Brain API URL, API key, and per-platform capture toggles."
    - `alarms` — "Scheduled retry of failed ingests and optional auto-sync from Claude/ChatGPT (15 min) and Gemini (4 hours)."
    - `activeTab`, `tabs` — "Resolves the active conversation tab when the user clicks Capture and creates a transient background tab to drive Gemini bulk sync."
    - `cookies` — "Reads the `lastActiveOrg` cookie on claude.ai and the session cookie on chatgpt.com to bulk-fetch conversations via each platform's internal API using the user's own session."
    - `debugger` — "Attaches the debugger protocol to gemini.google.com tabs only, and only to observe the one internal history-load RPC (`batchexecute` with `rpcids=hNvQHb`) that Gemini itself calls to load conversation turns. No injected code, no DOM modification, no other origins."
    - `scripting` — "Runs a single sidebar-enumeration helper in the Gemini tab to collect conversation IDs for bulk sync. The helper only reads `a[href*=\"/app/\"]` anchors; it does not mutate the page."
    - Host permissions for `claude.ai`, `chatgpt.com`, `chat.openai.com`, `gemini.google.com` — "Content scripts extract the latest conversation turn from the page DOM when the user clicks Capture."
-   - `optional_host_permissions` — "Runtime-granted by the user to reach their specific Open Brain API URL."
+   - `optional_host_permissions` — "Runtime-granted by the user to reach their specific Daemonic Brain API URL."
 4. Pay the $5 one-time developer registration fee
 5. Submit for review (typically 3–7 business days)
 
@@ -200,14 +200,14 @@ Alternatively, host the packed `.crx` on a maintainer-owned update URL and let u
 - **Bulk sync depends on vendor-internal APIs that are not publicly supported.** Anthropic's `/api/organizations/.../chat_conversations` and OpenAI's `/backend-api/conversations` endpoints are undocumented and subject to change without notice. Expect periodic maintenance PRs. If you rely on auto-sync, monitor the Sync Log tab for sustained errors.
 - **DOM extraction is fragile.** Claude, ChatGPT, and Gemini all ship UI rewrites without notice. When a platform shuffles its selectors, manual capture returns "No conversation turns found" until the extractor is updated. The Gemini extractor is especially exposed — Google ships new Gemini UIs every few months. Expect occasional maintenance PRs. Bulk sync (Claude + ChatGPT) uses stable internal JSON APIs and is far less fragile than DOM extraction.
 - **No passive/ambient capture.** The extension only captures when the user explicitly clicks Capture or runs Sync. A previous "observe every turn" design was retired because keeping up with selector churn on every render was not sustainable. The Settings panel has no Auto/Manual capture-mode toggle — that UI was dropped in the initial public release because it controlled only the ambient path. If ambient capture ever ships, the toggle comes back with it.
-- **Gemini bulk sync relies on the debugger protocol.** Google does not expose a public conversation history API. The extension observes Gemini's own internal `batchexecute` history-load RPC via `chrome.debugger`, which requires Chrome to show the "Open Brain Capture started debugging this browser" banner while a run is live — dismissing the banner detaches the debugger and pauses the sync. See "Gemini bulk history sync (Phase B/C)" for the full flow.
+- **Gemini bulk sync relies on the debugger protocol.** Google does not expose a public conversation history API. The extension observes Gemini's own internal `batchexecute` history-load RPC via `chrome.debugger`, which requires Chrome to show the "Daemonic Brain Capture started debugging this browser" banner while a run is live — dismissing the banner detaches the debugger and pauses the sync. See "Gemini bulk history sync (Phase B/C)" for the full flow.
 - **Large conversations.** Each conversation is one capture, one `POST /v1/thoughts`. A 400-turn Claude thread becomes one very large POST, which the brain chunks for search. If a proxy in front of it caps the request size, the longest conversations are refused (413) and logged as `rejected`, not retried; check the activity log.
 - **Sensitivity filter is regex-only.** It's deliberately conservative — false negatives are possible. Treat it as a guardrail, not a vault. For truly sensitive content, don't paste it into an AI chat in the first place.
 
 ## Troubleshooting
 
 **Issue: Extension icon has a yellow `!` badge and captures fail**
-Solution: The extension is not configured. Click the icon, then click **Open Configure screen** in the yellow banner, and supply your Open Brain REST core URL + API key.
+Solution: The extension is not configured. Click the icon, then click **Open Configure screen** in the yellow banner, and supply your Daemonic Brain REST core URL + API key.
 
 **Issue: "Missing x-brain-key API key" error when I click Capture**
 Solution: Either the API key was never saved, or Chrome's local storage got cleared (this can happen after a browser profile reset). Open the Settings tab → **Reconfigure API URL & Key** and re-enter.
@@ -229,9 +229,9 @@ Solution: Your browser doesn't have host permission for that origin. Open the Co
 
 ## Tool Surface Area
 
-This integration is a **capture source**, not an MCP server — it doesn't expose any tools to your AI. It only writes into Open Brain. The AI-facing tool count of your setup is unchanged by installing this extension.
+This integration is a **capture source**, not an MCP server — it doesn't expose any tools to your AI. It only writes into Daemonic Brain. The AI-facing tool count of your setup is unchanged by installing this extension.
 
-If you're weighing whether to add more MCP-exposing extensions on top, see the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for how to keep your tool count manageable as your Open Brain grows.
+If you're weighing whether to add more MCP-exposing extensions on top, see the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for how to keep your tool count manageable as your brain grows.
 
 ## Changelog
 

@@ -17083,6 +17083,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
     `a due time with a relative word anywhere raises 22023 from both writers; a date, a time with an offset and one with Z are kept, the offset honoured (${isoBad.map((d) => d.code).join(",")}; ${isoGood.map((d) => d.outcome).join(",")}, ${isoGood[1].item?.due_at})`);
 
   // A due time without an offset is UTC whatever the session's time zone, as set_priority reads a bare date (review pass 4).
+  // This is 117's reader, which this section re-applied: 119 makes a bare date the end of its day ([107], SMD-3778).
   let nyEpoch = -1;
   await db.transaction(async (tx) => {
     await tx.exec(`SET LOCAL TimeZone = 'America/New_York'`);
@@ -17348,6 +17349,28 @@ console.log("\n[106] Migration 118: a closed ticket's claims released — every 
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('closed-board', 'closed-agent', 'closed-other')`);
+}
+
+console.log("\n[107] Migration 119: a due date alone is due by the end of that day — ob1_item_due reads 2027-04-01 as the next day's start in UTC whatever the session's time zone, a date and time with no offset as that instant in UTC, a year's end into the next; a relative word still refused 22023; a re-apply a no-op (SMD-3778)");
+{
+  // [105] re-applied 117's reader; 119's is put back first, by name (renumbered when main takes its number).
+  const file = files.find((f) => /^\d{3}_due_date_end_of_day\.sql$/.test(f)) ?? "no NNN_due_date_end_of_day.sql";
+  await reapply(file.slice(0, 4));
+  const epochOf = async (text: string, zone = "UTC") => {
+    let e = -1;
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL TimeZone = '${zone}'`);
+      e = Number((await tx.query<{ e: string }>(`SELECT extract(epoch FROM ob1_item_due($1))::text AS e`, [text])).rows[0].e);
+    });
+    return e;
+  };
+  const [ny, utc, timed, yearEnd] = [await epochOf("2027-04-01", "America/New_York"), await epochOf("2027-04-01"), await epochOf("2027-04-01T17:00:00", "America/New_York"), await epochOf("2027-12-31")];
+  assert(ny === Date.UTC(2027, 3, 2) / 1000 && utc === ny && timed === Date.UTC(2027, 3, 1, 17) / 1000 && yearEnd === Date.UTC(2028, 0, 1) / 1000,
+    `a bare date is due by its day's end, the next day's start in UTC, under a New York session as under UTC; a date and time with no offset that instant in UTC; a year's end the next year's start (${ny} ${utc} ${timed} ${yearEnd})`);
+  let word = "";
+  try { await db.query(`SELECT ob1_item_due('2027-04-01 tomorrow')`); } catch (e) { word = String((e as { code?: string }).code ?? "?"); }
+  await reapply(file.slice(0, 4));
+  assert(word === "22023" && (await epochOf("2027-04-01")) === Date.UTC(2027, 3, 2) / 1000, `a relative word is still refused 22023, and a re-apply is a no-op (${word})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

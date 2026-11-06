@@ -56,7 +56,7 @@ Four tables of its own, in the schema `plugin_professional_crm`, made by `migrat
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add, change, log and link.
 
 ## Turn it on

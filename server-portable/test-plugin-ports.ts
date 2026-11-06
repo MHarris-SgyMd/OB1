@@ -28,7 +28,7 @@ import { PLUGINS as REGISTRY } from "../plugins/registry.ts";
 import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/index.ts";
 import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
-import { hmacSha256Hex, keepRowItem } from "./plugin-sdk.ts";
+import { hmacSha256Hex, keepItemPriority, keepRowItem } from "./plugin-sdk.ts";
 import { BODY_MAX, isoTime, LEASE_S, LIMITS } from "../plugins/readwise/index.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -123,8 +123,8 @@ async function itemsOf(plugin: string): Promise<Map<string, Item>> {
   const r = await rest("GET", `/v1/items?plugin=${plugin}&status=all&limit=1000`, undefined, KEYS.writer);
   return new Map(((r.body.items ?? []) as Item[]).map((i) => [i.plugin?.row ?? "", i]));
 }
-/** Whether an item is due at the start of `day` in UTC. */
-const dueOn = (i: Item | undefined, day: string) => i?.dueAt !== null && i?.dueAt !== undefined && Date.parse(i.dueAt) === Date.parse(`${day}T00:00:00Z`);
+/** Whether an item is due on `day`: by its end, the next day's start in UTC (SMD-3778). */
+const dueOn = (i: Item | undefined, day: string) => i?.dueAt !== null && i?.dueAt !== undefined && Date.parse(i.dueAt) === Date.parse(`${day}T00:00:00Z`) + 86_400_000;
 
 /** Every tool called below, by plugin — the drift guard's set. */
 const driven = new Map<string, Set<string>>();
@@ -737,7 +737,8 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   let taskItems = await itemsOf(P);
   const hvacItem = taskItems.get(ids.hvac), gutterItem = taskItems.get(ids.gutter);
   const hvacLog = await rest("GET", `/v1/items/${hvacItem?.id}`, undefined, KEYS.writer);
-  const hvacEvents = ((hvacLog.body.events ?? []) as { event: string; dueAt: string | null }[]).map((e) => `${e.event}@${e.dueAt?.slice(0, 10)}`);
+  // Each event's due day: the day a date alone is due by the end of, the instant less a day (SMD-3778).
+  const hvacEvents = ((hvacLog.body.events ?? []) as { event: string; dueAt: string | null }[]).map((e) => `${e.event}@${e.dueAt === null ? null : new Date(Date.parse(e.dueAt) - 86_400_000).toISOString().slice(0, 10)}`);
   assert(hvac.body.item?.status === "proposed" && hvac.body.item?.id === hvacItem?.id && hvacItem?.text === "HVAC filter replacement" && hvacItem?.openedBy.name === "writer"
          && dueOn(hvacItem, await dayFromToday(80)) && hvacItem?.status === "proposed" && gutter.body.item?.status === "proposed" && filter.body.item?.status === "proposed"
          && JSON.stringify(hvacEvents) === JSON.stringify([`opened@${await dayFromToday(20)}`, `updated@${await dayFromToday(80)}`]) && logged.body.item?.id === hvacItem?.id,
@@ -774,6 +775,32 @@ console.log("\n[home-maintenance] its tasks and the log of work done");
   const hingeAfter = (await itemsOf(P)).get(hinge);
   assert(hingeLog.body.item?.status === "open" && hingeAfter?.status === "open" && dueOn(hingeAfter, await dayFromToday(30)),
     `…and a log of a recurring task reopens its item a key settled done, at its new due day (${JSON.stringify(hingeLog.body.item)} ${hingeAfter?.dueAt})`);
+
+  // Priorities (SMD-3666 PR 3): a task's own priority stated on its item, mapped by docs/priority.md's table, its word
+  // the reason; the column's default, medium, unknown unless the caller chose it (002's priority_chosen).
+  type Said = { level: number | null; history: { level: number; reason: string | null; closeReason: string | null }[] };
+  const saidOn = async (itemId: string | undefined) => ((await rest("GET", `/v1/priorities/item/${itemId}`, undefined, KEYS.writer)).body) as Said;
+  const pLow = await c("add_maintenance_task", { name: "Priority low", priority: "low" });
+  const pMedium = await c("add_maintenance_task", { name: "Priority medium, chosen", priority: "medium" });
+  const pNone = await c("add_maintenance_task", { name: "Priority not given" });
+  const [low, medium, notGiven, high, urgent] = [await saidOn(pLow.body.item?.id), await saidOn(pMedium.body.item?.id), await saidOn(pNone.body.item?.id),
+    await saidOn(taskItems.get(ids.hvac)?.id), await saidOn(taskItems.get(String(salt.body.task?.id))?.id)];
+  const [chosen] = (await sql`SELECT priority, priority_chosen FROM plugin_home_maintenance.maintenance_tasks WHERE id = ${String(pNone.body.task?.id)}::uuid`) as { priority: string; priority_chosen: boolean }[];
+  assert(low.level === 1 && low.history[0]?.reason === "home-maintenance priority: low" && medium.level === 2 && notGiven.level === null && notGiven.history.length === 0
+         && high.level === 3 && urgent.level === 4 && pNone.body.task?.priority === "medium" && chosen.priority === "medium" && chosen.priority_chosen === false,
+    `a task's priority is stated on its item, low 1, medium chosen 2, high 3, urgent 4, its word the reason; a task given none stays medium in the plugin and unknown in the brain (${JSON.stringify([low.level, medium.level, notGiven.level, high.level, urgent.level])})`);
+  // The sync states a priority changed past the operations: one chosen high, and one set back to the default, unchosen, cleared.
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'high', priority_chosen = true WHERE id = ${String(pNone.body.task?.id)}::uuid`;
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'medium', priority_chosen = false WHERE id = ${String(pLow.body.task?.id)}::uuid`;
+  // …and a task whose item a key dropped keeps its item unstated, whatever its priority (review pass 1).
+  await sql`UPDATE plugin_home_maintenance.maintenance_tasks SET priority = 'urgent', priority_chosen = true WHERE id = ${ids.filter}::uuid`;
+  const prioritySync = await c("sync_open_items", {});
+  const [noneAfter, lowAfter, droppedAfter] = [await saidOn(pNone.body.item?.id), await saidOn(pLow.body.item?.id), await saidOn(taskItems.get(ids.filter)?.id)];
+  const prioritySyncAgain = await c("sync_open_items", {});
+  assert(prioritySync.status === 200 && prioritySync.body.priorities_stated === 2 && JSON.stringify(prioritySync.body.failed) === "[]"
+         && noneAfter.level === 3 && lowAfter.level === null && lowAfter.history.at(-1)?.closeReason === "cleared" && prioritySyncAgain.body.priorities_stated === 0
+         && droppedAfter.level === null && droppedAfter.history.length === 0,
+    `sync_open_items states a task's priority changed past the operations and clears one set back to the unchosen default, and leaves a dropped item unstated whatever its task says (review pass 1); run again it states nothing (${JSON.stringify([prioritySync.body.priorities_stated, noneAfter.level, lowAfter.level, prioritySyncAgain.body.priorities_stated])})`);
 
   // Two logs at once, forced to race: a row lock held around both (FOR NO KEY UPDATE, which the logs' foreign-key
   // checks pass) stops each at its UPDATE after its statement has taken its snapshot, the newer queued first. Released,
@@ -853,6 +880,20 @@ console.log("\n[keepRowItem] a row's item through a stub core: a refusal or a fa
          && fKept.did === "failed" && fKept.code === "ITEM_NOT_FOUND" && f.calls.join() === "open_item,update_item"
          && gKept.did === "settled" && g.calls.join() === "open_item,set_item_status",
     `a row that comes round reopens a done item, then moves its due day; an update refused is failed; a done row settles its item and leaves its due day (${JSON.stringify([eKept, fKept, gKept])} | ${e.calls} | ${g.calls})`);
+
+  // keepItemPriority (SMD-3666 PR 3): a word the scale holds set, the default unchosen and an unknown word cleared, a refusal and a throw failed.
+  const p1 = stub({ set_priority: [okAs("asserted", null)] });
+  const p1Kept = await keepItemPriority(p1.ctx, "item-1", { scale: "home-maintenance", value: "medium", chosen: true });
+  const p2 = stub({ clear_priority: [okAs("nothing_to_clear", null)] });
+  const p2Kept = await keepItemPriority(p2.ctx, "item-1", { scale: "home-maintenance", value: "medium" });
+  const p3 = stub({ set_priority: [refused("ITEM_NOT_YOURS")] });
+  const p3Kept = await keepItemPriority(p3.ctx, "item-1", { scale: "home-maintenance", value: "urgent" });
+  const p4 = stub({ set_priority: [new Error("the store is away")] });
+  console.error = () => {};
+  const p4Kept = await keepItemPriority(p4.ctx, "item-1", { scale: "home-maintenance", value: "high" }).catch((e: unknown) => ({ did: "threw", code: String(e) })).finally(() => (console.error = realError));
+  assert(p1Kept.did === "asserted" && p1.calls.join() === "set_priority" && p2Kept.did === "nothing_to_clear" && p2.calls.join() === "clear_priority"
+         && p3Kept.did === "failed" && "code" in p3Kept && p3Kept.code === "ITEM_NOT_YOURS" && p4Kept.did === "failed" && "code" in p4Kept && p4Kept.code === "fault",
+    `keepItemPriority sets a chosen word, clears the unchosen default, and answers a refusal or a throw as failed, never thrown (${JSON.stringify([p1Kept, p2Kept, p3Kept, p4Kept])})`);
 }
 
 // ── plugins/household-knowledge ──────────────────────────────────────────────

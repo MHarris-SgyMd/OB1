@@ -6,7 +6,7 @@ Each server is one HTTP process reached by URL: never a stdio process a client s
 
 ## Prerequisites
 
-- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
+- A running Daemonic Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
 - [Bun](https://bun.sh) 1.4+ on the machine that will run the server
 - A checkout of this repository: the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
 - The server's README, which names its tables, its environment and what calls it
@@ -36,7 +36,7 @@ These servers run this way, and `integrations/test-auth.ts` starts each one so i
 
 ## Step 1: Apply the Server's Tables
 
-Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/agent-memory` for agent-memory-api, `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your Open Brain database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
+Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/agent-memory` for agent-memory-api, `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your brain's database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
 
 The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 

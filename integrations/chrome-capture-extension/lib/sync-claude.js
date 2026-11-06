@@ -66,7 +66,7 @@
         throw error;
       }
       const delayMs = backoffDelay(i);
-      console.warn(`[Open Brain Capture] Claude API returned ${response.status}, retrying in ${Math.round(delayMs)}ms (attempt ${i + 1}/${attempts})`);
+      console.warn(`[Daemonic Brain Capture] Claude API returned ${response.status}, retrying in ${Math.round(delayMs)}ms (attempt ${i + 1}/${attempts})`);
       await sleep(delayMs);
     }
   }
@@ -136,7 +136,7 @@
       const merged = OBConfig.mergeSettings(stored[OBConfig.STORAGE_KEYS.settings]);
       return merged.enabledPlatforms.claude !== false;
     } catch (err) {
-      console.error('[Open Brain Capture] Claude sync: failed to read settings, assuming enabled', err);
+      console.error('[Daemonic Brain Capture] Claude sync: failed to read settings, assuming enabled', err);
       return true;
     }
   }
@@ -352,11 +352,11 @@
           // Unknown or non-content status (disabled_platform, manual_mode,
           // future additions): count as an error and do NOT advance the
           // cursor, so the conversation is retried once the condition clears.
-          console.warn(`[Open Brain Capture] Claude sync: not advancing cursor for "${conv.name}" (status=${result?.status || 'none'})`);
+          console.warn(`[Daemonic Brain Capture] Claude sync: not advancing cursor for "${conv.name}" (status=${result?.status || 'none'})`);
           errors++;
         }
       } catch (err) {
-        console.error(`[Open Brain Capture] Failed to sync conversation "${conv.name}":`, err);
+        console.error(`[Daemonic Brain Capture] Failed to sync conversation "${conv.name}":`, err);
         errors++;
         if (isAuthError(err)) {
           // Session died mid-run; every remaining fetch will 401 too.

@@ -801,14 +801,14 @@ function selfCheck(): number {
   ];
   const tableMisses = table.filter(([scale, value, level, chosen]) => levelOf(scale, value, { chosen }) !== level).map(([scale, value]) => `${scale} ${JSON.stringify(value)}`);
   ok(tableMisses.length === 0, `the priority mapping table, a row each: Linear's four words, its No priority unknown; home-maintenance's medium unknown unless chosen; P3 to P0; frontmatter none to critical in any case; any other word unknown (${tableMisses.join(", ") || "every row"})`);
-  ok(dueInstant("2026-12-01") === "2026-12-01T00:00:00Z" && dueInstant(" 2026-12-01T17:00:00+02:00 ") === "2026-12-01T17:00:00+02:00" && dueInstant("2026-12-01T17:00Z") === "2026-12-01T17:00Z"
+  ok(dueInstant("2026-12-01") === "2026-12-02T00:00:00.000Z" && dueInstant("2026-12-31") === "2027-01-01T00:00:00.000Z" && dueInstant(" 2026-12-01T17:00:00+02:00 ") === "2026-12-01T17:00:00+02:00" && dueInstant("2026-12-01T17:00Z") === "2026-12-01T17:00Z"
      && dueInstant("2026-02-30") === null && dueInstant("2026-12-01T17:00:00") === null && dueInstant("soon") === null && dueInstant(null) === null,
-    "a due time: a date is the start of its day in UTC, a time with its offset that instant; a day that does not exist, a time with no offset or no time at all is none");
+    "a due time: a date is due by the end of its day, the next day's start in UTC (SMD-3778), across a year's end too; a time with its offset that instant; a day that does not exist, a time with no offset or no time at all is none");
   ok(reasonOf("linear", "High") === "Linear priority: High" && reasonOf("frontmatter", " very\thigh ") === "frontmatter priority: very high", "a statement's reason names the source and its word, a control character a space");
   const ticketDoc = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "High", dueDate: "2026-12-01" }));
   const noPriority = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, priorityLabel: "No priority" }));
   const noDay = docOf(linearAdapter.map({ ...SAMPLE_ISSUE, dueDate: null }));
-  ok(JSON.stringify(ticketDoc.priority) === JSON.stringify({ kind: "ticket", key: SAMPLE_ISSUE.identifier, level: 3, due: "2026-12-01T00:00:00Z", reason: "Linear priority: High" })
+  ok(JSON.stringify(ticketDoc.priority) === JSON.stringify({ kind: "ticket", key: SAMPLE_ISSUE.identifier, level: 3, due: "2026-12-02T00:00:00.000Z", reason: "Linear priority: High" })
      && ticketDoc.meta.due_date === "2026-12-01" && ticketDoc.meta.priority === "High" && noPriority.priority?.level === null && !("due_date" in noPriority.meta) && noDay.meta.due_date === null,
     `a ticket's priority is stated on the ticket, Linear's word and due day kept as facets; No priority is unknown; an issue with no dueDate key (a dump built before it was fetched) writes no due_date, one whose dueDate is null writes null (review pass 1) (${JSON.stringify(ticketDoc.priority)})`);
   const sampleItem = JSON.parse(JSON.stringify(SAMPLE_ITEM)) as Ingested;

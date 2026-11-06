@@ -1,14 +1,14 @@
 (function (global) {
   'use strict';
 
-  // Open Brain Capture — configuration module
+  // Daemonic Brain Capture — configuration module
   //
   // All user-specific values (API base URL, API key, per-platform toggles, etc.)
   // live in chrome.storage. There is deliberately NO hardcoded Supabase project
   // URL in this extension — the user supplies their own brain's REST core URL
   // on the first-run config screen. Until configured, the service
   // worker refuses to make outbound requests and the popup surfaces a
-  // "Configure Open Brain" call to action.
+  // "Configure Daemonic Brain" call to action.
 
   const STORAGE_KEYS = {
     settings: 'ob_capture_settings',
@@ -136,7 +136,7 @@
     const trimmed = String(endpoint || '').replace(/\/+$/, '');
     if (!trimmed) {
       throw new Error(
-        'Open Brain API URL is not configured. Click the extension icon and complete the Configure Open Brain screen.'
+        'Daemonic Brain API URL is not configured. Click the extension icon and complete the Configure Daemonic Brain screen.'
       );
     }
     // The REST core's routes (`/v1/...`) sit under the URL as given.
@@ -218,7 +218,7 @@
           })
         ]);
       } catch (err) {
-        console.warn('[Open Brain Capture] Legacy key migration hit storage error', err);
+        console.warn('[Daemonic Brain Capture] Legacy key migration hit storage error', err);
       }
     }
 
@@ -231,7 +231,7 @@
       try {
         await chrome.storage.local.remove(STORAGE_KEYS.legacyApiEndpoint);
       } catch (err) {
-        console.warn('[Open Brain Capture] Legacy endpoint removal hit storage error', err);
+        console.warn('[Daemonic Brain Capture] Legacy endpoint removal hit storage error', err);
       }
     }
     if (syncSettings.apiEndpoint && !localFallbackActive) {
@@ -244,7 +244,7 @@
           }
         });
       } catch (err) {
-        console.warn('[Open Brain Capture] Legacy endpoint cleanup hit storage error', err);
+        console.warn('[Daemonic Brain Capture] Legacy endpoint cleanup hit storage error', err);
       }
     }
 
@@ -263,7 +263,7 @@
     let baseSettings;
     if (localFallbackActive && localFallbackSettings) {
       console.warn(
-        '[Open Brain Capture] Local fallback active — reading settings from chrome.storage.local (last sync write failed).'
+        '[Daemonic Brain Capture] Local fallback active — reading settings from chrome.storage.local (last sync write failed).'
       );
       baseSettings = mergeSettings(localFallbackSettings);
     } else {
@@ -319,7 +319,7 @@
       // read back (sync reads return an empty/stale value, so settings
       // silently snap to defaults).
       console.warn(
-        '[Open Brain Capture] chrome.storage.sync.set failed, falling back to local-only',
+        '[Daemonic Brain Capture] chrome.storage.sync.set failed, falling back to local-only',
         err
       );
       await chrome.storage.local.set({

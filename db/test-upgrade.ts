@@ -713,13 +713,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // refusing triggers and twenty-nine functions, and redefines three of 116's
   // — refusing by name without 008, 046, 061, 115 or 116 ([20bi]); 118 adds board-sync's release of a closed
   // ticket's claims — two functions, one held from PUBLIC — refusing by name
-  // without 058, 068 or 115 ([20bj]) — all
+  // without 058, 068 or 115 ([20bj]); 119 redefines 117's ob1_item_due, a
+  // bare date due by the end of its day, refusing by name without 117
+  // ([20bk]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 89, `030 is among the last eighty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 90, `030 is among the last ninety migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5396,6 +5398,40 @@ console.log("\n[20bj] Migration 118: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the118 });
   assert((await rows()) === before && (await claims()) === after && !(await publicExec()),
     `a re-apply is a no-op: the thoughts and the claims as they were, EXECUTE still not PUBLIC's`);
+  await sql.close();
+}
+
+console.log("\n[20bk] Migration 119: onto a populated brain at the file before it — an open item due on a date stored at that day's start, as 117 read it; refused by name without 117's ob1_item_due, nothing changed; then applied: the stored due time unmoved, a new bare date due by the end of its day (the next day's start in UTC), a date and time with no offset that instant in UTC; a re-apply a no-op (SMD-3778)");
+{
+  const the119 = MIGRATIONS.find((f) => /^\d{3}_due_date_end_of_day\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the119 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  type Opened = { outcome: string; item: { id: string } | null };
+  const open = async (text: string, due: string) => ((await sql`SELECT open_item(${text}, p_due_at => ${due}, p_actor => ${W}::jsonb) AS r`)[0] as { r: Opened }).r.item?.id ?? "";
+  const dueOf = async (id: string) => String((await sql`SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS d FROM open_items WHERE item_id = ${id}::uuid`)[0]?.d ?? "");
+  const before = await open("upgrade 119: renew the passport", "2027-03-01");
+  const storedBefore = await dueOf(before);
+
+  // Without 117's reader: refused by name, the old reader left as it was.
+  await sql`ALTER FUNCTION ob1_item_due(text) RENAME TO ob1_item_due_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_due_away(text) RENAME TO ob1_item_due`;
+  const stillStart = String((await sql`SELECT to_char(ob1_item_due('2027-04-01') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS d`)[0].d);
+  assert(/^migration 119 needs 117 \(ob1_item_due, open_items\); this schema lacks it/.test(without) && storedBefore === "2027-03-01T00:00:00Z" && stillStart === "2027-04-01T00:00:00Z",
+    `before 119 a bare date is its day's start; without 117's reader the file is refused by name and nothing changes (${without.slice(0, 80)} | ${storedBefore} ${stillStart})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 });
+  const after = await open("upgrade 119: book the vet", "2027-03-01");
+  const timed = await open("upgrade 119: call the dentist", "2027-03-01T17:00:00");
+  const endOfYear = await open("upgrade 119: file the return", "2027-12-31");
+  assert((await dueOf(before)) === "2027-03-01T00:00:00Z" && (await dueOf(after)) === "2027-03-02T00:00:00Z" && (await dueOf(timed)) === "2027-03-01T17:00:00Z" && (await dueOf(endOfYear)) === "2028-01-01T00:00:00Z",
+    `applied: the stored due time unmoved; a new bare date due by its day's end, the next day's start in UTC, across a year's end too; a date and time with no offset that instant in UTC (${await dueOf(before)} | ${await dueOf(after)} | ${await dueOf(timed)} | ${await dueOf(endOfYear)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the119 });
+  const again = await open("upgrade 119: water the ferns", "2027-03-01");
+  assert((await dueOf(again)) === "2027-03-02T00:00:00Z" && (await dueOf(before)) === "2027-03-01T00:00:00Z", `a re-apply is a no-op: the end-of-day reading kept, the stored time unmoved (${await dueOf(again)})`);
   await sql.close();
 }
 

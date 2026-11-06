@@ -138,6 +138,6 @@ Before submitting, verify:
 
 ## Example Prompt for AI Agent
 
-> Create a new Open Brain extension called "Reading List" that tracks books, articles, and papers. Users should be able to add items with title, author, URL, status (to-read, reading, finished), notes, and a rating. Include operations for adding items, searching by title/author/status, changing an item's status, and getting stats on reading habits. Follow extensions/_template/AGENT_SPEC.md.
+> Create a new Daemonic Brain extension called "Reading List" that tracks books, articles, and papers. Users should be able to add items with title, author, URL, status (to-read, reading, finished), notes, and a rating. Include operations for adding items, searching by title/author/status, changing an item's status, and getting stats on reading habits. Follow extensions/_template/AGENT_SPEC.md.
 
 This prompt, combined with this spec, should produce every file above, ready for a PR.
