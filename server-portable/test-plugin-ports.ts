@@ -29,7 +29,7 @@ import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/i
 import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hmacSha256Hex, keepRowItem } from "./plugin-sdk.ts";
-import { isoTime, LEASE_S } from "../plugins/readwise/index.ts";
+import { BODY_MAX, isoTime, LEASE_S, LIMITS } from "../plugins/readwise/index.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -2746,7 +2746,8 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   assert(all.status === 200 && ids(all) === "9002,9004,9001,9003" && all.body.truncated === false, `a read key lists them newest highlighted first, a tie by the higher id, none last (${ids(all)})`);
   const one9001 = ((all.body.highlights ?? []) as Body[]).find((h) => h.highlight_id === 9001);
   assert(one9001?.thought_id === id && one9001.book_id === 42 && one9001.note === NOTE && JSON.stringify(one9001.tags) === '["stoicism","attention"]'
-    && one9001.highlighted_at === "2026-09-01T10:00:00.000Z" && one9001.updated_at === "2026-09-02T00:00:00.000Z" && typeof one9001.captured_at === "string" && new Date(one9001.captured_at as string).toISOString() === one9001.captured_at,
+    && one9001.highlighted_at === "2026-09-01T10:00:00.000Z" && one9001.updated_at === "2026-09-02T00:00:00.000Z" && typeof one9001.captured_at === "string" && new Date(one9001.captured_at as string).toISOString() === one9001.captured_at
+    && ((all.body.highlights ?? []) as Body[]).every((h) => h.trust === "ingested"),
     `each names its thought, its book and what Readwise sent (${JSON.stringify(one9001)})`);
   const book = await call(P, "list_highlights", { book_id: 43 });
   assert(book.status === 200 && ids(book) === "9002", `book_id lists that book's alone (${ids(book)})`);
@@ -2784,8 +2785,8 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   assert(busyAgain.status === 200 && UUID.test(String(busyAgain.body.id)) && busyDup.body.duplicate === true && busyDup.body.id === busyAgain.body.id,
     `once the claim in flight is gone, a resend captures, and the next is its duplicate (${JSON.stringify(busyAgain.body)}; ${JSON.stringify(busyDup.body)})`);
   // A time is metadata beside the passage: one the hook cannot read is stored as none, and the highlight captured (review pass 2).
-  for (const [hid, label, times] of [[9011, "times that are no times", { highlighted_at: "around lunch", updated: "soon" }], [9012, "30 February and a year Postgres refuses", { highlighted_at: "2026-02-30T00:00:00Z", updated: "+010000-01-01T00:00:00Z" }],
-    [9013, "a time Date.parse reads and Postgres does not, and a NUL", { highlighted_at: "12/31/99999", updated: "2026-01-01T00:00:00Z\u0000" }]] as const) {
+  for (const [hid, label, times] of [[9011, "times that are no times", { highlighted_at: "around lunch", updated: "soon" }], [9015, "times that are not strings", { highlighted_at: 1693000000, updated: { at: "2026-01-01" } }], [9012, "30 February and a year Postgres refuses", { highlighted_at: "2026-02-30T00:00:00Z", updated: "+010000-01-01T00:00:00Z" }],
+    [9013, "a time that is not ISO 8601, and a NUL", { highlighted_at: "12/31/99999", updated: "2026-01-01T00:00:00Z\u0000" }]] as const) {
     const r = await send({ id: hid, text: `A highlight with ${label}.`, ...times });
     const row = await keptRow(hid);
     assert(r.status === 200 && UUID.test(String(r.body.id)) && row?.highlighted_at === null && row.updated_at === null, `${label}: captured, its times stored as none (${r.status} ${JSON.stringify(row)})`);
@@ -2795,6 +2796,41 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const spacedThought = await one<{ content: string }>(sql`SELECT content FROM thoughts WHERE id = ${UUID.test(String(spaced.body.id)) ? String(spaced.body.id) : NO_ROW}`);
   assert(spaced.status === 200 && spacedThought?.content === "Waste no time." && spacedRow?.note === null && at(spacedRow.highlighted_at) === "2026-09-04T08:00:00.000Z",
     `a note of whitespace alone is none, in the thought and the row, and a time with a space and an hours offset is read (${JSON.stringify(spacedThought)}; ${JSON.stringify(spacedRow)})`);
+
+  // Each field's bound (review pass 3): at it, captured; past it, refused before any capture or claim.
+  const atBounds = await send({ id: 9030, text: "t".repeat(LIMITS.text - 1) + ".", note: "n".repeat(LIMITS.note), url: "u".repeat(LIMITS.url), color: "c".repeat(LIMITS.short),
+    location_type: "l".repeat(LIMITS.short), tags: Array.from({ length: LIMITS.tags }, (_, i) => ({ id: i, name: `${i}`.padEnd(LIMITS.tag, "x") })) });
+  assert(atBounds.status === 200 && UUID.test(String(atBounds.body.id)), `a highlight with every field at its bound is captured (${atBounds.status} ${JSON.stringify(atBounds.body).slice(0, 120)})`);
+  const thoughtsBeforeLong = await thoughtsNow();
+  for (const [field, over, named] of [["text", { text: "t".repeat(LIMITS.text + 1) }, "text"], ["note", { note: "n".repeat(LIMITS.note + 1) }, "note"], ["url", { url: "u".repeat(LIMITS.url + 1) }, "url"],
+    ["colour", { color: "c".repeat(LIMITS.short + 1) }, "color"], ["location type", { location_type: "l".repeat(LIMITS.short + 1) }, "location_type"],
+    ["a tag", { tags: [{ id: 1, name: "x".repeat(LIMITS.tag + 1) }] }, "tags.0.name"], ["the tags", { tags: Array.from({ length: LIMITS.tags + 1 }, (_, i) => ({ id: i, name: `t${i}` })) }, "tags"]] as const) {
+    const r = await send({ id: 9031, ...over });
+    assert(r.status === 400 && r.body.code === "BAD_HIGHLIGHT" && (r.body.fields as string[] | undefined)?.includes(named), `${field} past its bound: 400 BAD_HIGHLIGHT naming ${named} (${r.status} ${JSON.stringify(r.body).slice(0, 120)})`);
+  }
+  assert((await thoughtsNow()) === thoughtsBeforeLong && (await keptRow(9031)) === undefined, "…none of them captured or kept");
+  // A body past BODY_MAX is refused before it is parsed, so before the secret is read: a stranger's large body costs no parse.
+  const big = await post(JSON.stringify({ ...event({ id: 9032, secret: "not-the-secret" }), pad: "p".repeat(BODY_MAX) }));
+  const bigJunk = await post("[".repeat(BODY_MAX + 1));
+  assert(big.status === 413 && big.body.code === "TOO_LARGE" && big.body.retryable === false && bigJunk.status === 413,
+    `a body past ${BODY_MAX} bytes: 413 TOO_LARGE before the secret or the JSON is read (${big.status} ${JSON.stringify(big.body)}; ${bigJunk.status})`);
+
+  // The README's leak check (its step 4), as the README gives it, against the thoughts above (review pass 3).
+  const check = /```\n(   SELECT a\.actor_name[\s\S]*?)```/.exec(readFileSync(join(import.meta.dir, "../plugins/readwise/README.md"), "utf8"))?.[1] ?? "";
+  assert(check.includes("<thought id>") && check.includes("AS others"), "the README gives the leak check's query, with its others count");
+  type Check = { actor_name: string | null; highlights: number; others: number };
+  const checkOf = async (thought: string) => ((await sql.unsafe(check.replace("<thought id>", thought))) as Check[])[0];
+  const forgerOnly = await checkOf(String(bare.body.id));
+  const shared = await checkOf(id);
+  const OWNED = "A passage the owner saves after the hook captured it.";
+  const hooked = await send({ id: 9033, text: OWNED, note: null });
+  const ownerSave = await rest("POST", "/v1/thoughts", { content: OWNED, metadata: { important: true } }, KEYS.writer);
+  const owned = await checkOf(String(hooked.body.id));
+  assert(forgerOnly?.actor_name === "hook:readwise" && Number(forgerOnly.highlights) === 1 && Number(forgerOnly.others) === 0,
+    `a thought the hook alone captured and one highlight names: the check says hook:readwise, 1 highlight, 0 others (${JSON.stringify(forgerOnly)})`);
+  assert(Number(shared?.highlights) === 2, `a thought two highlights name: the check counts both, so it is kept (${JSON.stringify(shared)})`);
+  assert(ownerSave.body.existed === true && ownerSave.body.id === hooked.body.id && owned?.actor_name === "hook:readwise" && Number(owned.highlights) === 1 && Number(owned.others) >= 1,
+    `a thought the hook captured and a key saved again since: the check counts the key, so it is kept (${JSON.stringify(owned)})`);
 
   // isoTime, the times' reading: ISO 8601 as Readwise sends them, each bound on its own (review pass 2).
   const times: [string, string | null][] = [
@@ -2846,7 +2882,7 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   const [oldTwin] = (await old("The same highlight id on a later thought.", { source: "readwise", readwise_highlight_id: 8001, readwise_book_id: 7 })) as { id: string }[];
   await sql`UPDATE thoughts SET created_at = created_at + interval '1 second' WHERE id = ${oldTwin.id}`;
   // As the old server wrote what Readwise sent empty: "" for a note or colour it did not have.
-  const [oldBare] = (await old("An old highlight with nothing beside it.", { source: "readwise", readwise_highlight_id: 8002, readwise_book_id: 7, note: "", color: "", location_type: "", url: "" })) as { id: string }[];
+  const [oldBare] = (await old("An old highlight with nothing beside it.", { source: "readwise", readwise_highlight_id: 8002, readwise_book_id: 7, note: "   ", color: "", location_type: "", url: "" })) as { id: string }[];
   await old("Another source's thought that names a highlight id.", { source: "mcp", readwise_highlight_id: 8003, readwise_book_id: 7 });
   await old("A readwise thought whose id is not a number.", { source: "readwise", readwise_highlight_id: "x8004", readwise_book_id: 7 });
   // Any capture key may label a capture readwise: the block copies only thoughts first captured by no key, as the old server's and readwise-import's were.
