@@ -25,16 +25,21 @@
 --   effective_priority(p_items jsonb, p_weights jsonb, p_now timestamptz):
 --   for a JSON array of {kind, key} (at most 1000, as priority_of), one row
 --   per item in the order asked, an item asked twice answered once:
---   * level — the counted winner's level: 116's rule (tier, then the newest),
---     tier 4 left out unless the weights say count_inferred (decision 5:
---     inferred assertions count only once SMD-3670's agreement clears its
---     bar). NULL is unknown.
---   * A TICKET'S OWN ROW (its linear source row, or a pre-053 row claiming
---     metadata.issue), asked as a thought, reads as its ticket — level, due
---     time, settledness, links, inheritance — and its first term names the
---     ticket (`as`). The maintainer's call, review pass 1: search over
---     thoughts must not rank a ticket's row below it. A served item or a
---     due reference that is a ticket's row is read as the ticket too.
+--   * level — the counted winner's level: 116's rule (tier, then the newest)
+--     over the item's open statements, each maker's newest alone, tier 4 left
+--     out unless the weights say count_inferred (decision 5: inferred
+--     assertions count only once SMD-3670's agreement clears its bar). NULL
+--     is unknown.
+--   * A TICKET AND ITS OWN ROWS ARE ONE ITEM (the maintainer, review passes
+--     1, 2 and 5). A row is its linear source row when that identity is an
+--     upper-case ticket key, else a row claiming metadata.issue with source
+--     linear, and a row of one ticket is never another's. The statements on
+--     the ticket and its rows are one pool. A row asked as a thought reads as
+--     its ticket — level, due time, settledness, links, inheritance — and its
+--     first term names the ticket (`as`), so search over thoughts never ranks
+--     a ticket's row below it; a served item or a due reference that is a row
+--     is read as the ticket too. A clear reaches only the item it names:
+--     116's writers closing across a ticket and its rows is SMD-4127.
 --   * inherited_from — with no level of its own: the highest effective level
 --     among the items it serves, less `hop` a hop, at most `hops` hops,
 --     counted only above unknown's value, so a link never lowers an item. A
@@ -51,8 +56,6 @@
 --     says which. A referenced item since settled keeps its date (the
 --     maintainer, review pass 2): an item that took a release's due time
 --     reads overdue until it is restated.
---   * A ticket and its own rows are ONE item: the statements on each compete
---     by 116's rule as one pool (the maintainer, review pass 2).
 --   * urgency — in CALENDAR DAYS in UTC (SMD-3778's review pass 2: a bare
 --     date is due by the end of that day, so "tomorrow" is 24 to 48 hours
 --     away and hours would miss it): `soon` (2) when due by the end of
@@ -61,10 +64,10 @@
 --     item at a stated level 0, nor a settled one.
 --   * unblocks — the open items it blocks through active blocks / blocked_by
 --     links in a gating system (node_dependencies()' reading), transitively to
---     `depth` hops, at most `cap` counted: `unblocks_one` (0.5) for at least
---     one, `unblocks_many` (1) for at least `unblocks_many_at` (3). A settled
---     item blocks nothing; a settled blocked item is not counted, nor walked
---     through.
+--     `depth` hops, at most `cap` (50) counted: `unblocks_one` (0.5) for at
+--     least one, `unblocks_many` (1) for at least `unblocks_many_at` (3). A
+--     settled item blocks nothing; a settled blocked item is not counted, nor
+--     walked through.
 --   * effective — the level (else the inherited value, else `unknown`, 2)
 --     plus urgency plus the unblocks term.
 --   * settled — a ticket whose status type node_settled_types() names
@@ -90,14 +93,14 @@
 -- WHO READS
 --   No actor, as priority_of: any role with EXECUTE reads every item's terms.
 --   It reads priority_assertions and open_items (the priority group grants
---   both), thoughts, thought_facets, ob1_ticket_head and, through
---   ob1_system_gates, ob1_source_gate (the capture group's), and
+--   both); thoughts, thought_facets, ob1_ticket_head and, through
+--   ob1_system_gates, ob1_source_gate (the capture group's); and
 --   thought_sources (the server group's, which the structure group grants
---   too; review pass 7: thought_facets is the capture group's). The server's role holds all of them. A role
---   short of one gets 42501 naming the table: one without thought_sources on
---   any ticket or thought, and on an open item that inherits through its
---   origin thought, since a thought is asked whether it is a ticket's
---   row (review pass 2: this said the reverse). No grant changes.
+--   too). The server's role holds all of them. A role short of one gets
+--   42501 naming the table. Every thought is asked whether it is a ticket's
+--   row, so a role without thought_sources gets it on any ticket or thought,
+--   and on an open item that inherits through its origin thought. No grant
+--   changes.
 --
 -- SAFETY
 --   Ten new functions; no table, and nothing existing changed. Every function
@@ -252,10 +255,11 @@ BEGIN
        WHERE a.closed_at IS NULL AND a.item_kind = 'ticket' AND a.item_key = s.key
       UNION ALL
       -- Probed by key (priority_assertions_item), the rows read first as an
-      -- array; the asked thought itself always counts.
+      -- array. An asked row is among them: ob1_ticket_row_of maps a thought
+      -- only as ob1_ticket_rows finds it.
       SELECT a.* FROM priority_assertions a
        WHERE a.closed_at IS NULL AND a.item_kind = 'thought'
-         AND a.item_key = ANY(ARRAY(SELECT r FROM ob1_ticket_rows(s.key) r) || CASE WHEN p_kind = 'thought' THEN ARRAY[p_key] ELSE '{}'::text[] END);
+         AND a.item_key = ANY(ARRAY(SELECT r FROM ob1_ticket_rows(s.key) r));
   ELSE
     RETURN QUERY
       SELECT a.* FROM priority_assertions a WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = p_key;
@@ -422,7 +426,6 @@ DECLARE
   v_id       text[];
   v_next_sys text[];
   v_next_id  text[];
-  d          int;
 BEGIN
   IF p_kind NOT IN ('ticket', 'thought') OR p_depth < 1 OR p_cap < 1 THEN
     RETURN 0;
@@ -625,7 +628,9 @@ BEGIN
         -- Each served item read as its subject: an origin thought that is a
         -- ticket's own row is that ticket, one hop off (review pass 2).
         FOR h1 IN SELECT DISTINCT m.kind, m.key FROM ob1_item_serves(s_kind, s_key) x CROSS JOIN LATERAL ob1_priority_subject(x.kind, x.key) m ORDER BY 1, 2 LOOP
-          CONTINUE WHEN (h1.kind = s_kind AND h1.key = s_key) OR ob1_item_settled(h1.kind, h1.key);
+          -- The item itself, reached round a cycle, has no counted level
+          -- here and so passes nothing: no test for it is needed.
+          CONTINUE WHEN ob1_item_settled(h1.kind, h1.key);
           v_lvl := (ob1_priority_counted(h1.kind, h1.key, w_inferred)).level;
           IF v_lvl IS NOT NULL THEN
             IF v_lvl - w_hop > w_unknown
@@ -637,7 +642,7 @@ BEGIN
           END IF;
           CONTINUE WHEN w_hops < 2;
           FOR h IN SELECT DISTINCT m.kind, m.key FROM ob1_item_serves(h1.kind, h1.key) x CROSS JOIN LATERAL ob1_priority_subject(x.kind, x.key) m ORDER BY 1, 2 LOOP
-            CONTINUE WHEN (h.kind = s_kind AND h.key = s_key) OR ob1_item_settled(h.kind, h.key);
+            CONTINUE WHEN ob1_item_settled(h.kind, h.key);
             v_lvl := (ob1_priority_counted(h.kind, h.key, w_inferred)).level;
             CONTINUE WHEN v_lvl IS NULL OR v_lvl - 2 * w_hop <= w_unknown;
             IF v_inh_kind IS NULL OR v_lvl - 2 * w_hop > v_inh_value

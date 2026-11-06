@@ -2511,7 +2511,7 @@ winner, an inferred statement left out unless the weights count it), else a leve
 inherited from what the item serves (a parent ticket, the ticket a thought is
 about, an open item's origin thought; one less a hop, two hops, only above
 unknown's 2), else unknown's 2; urgency from its due time in calendar days in UTC
-(+2 by the end of tomorrow, +1 within seven days, +3 overdue in their place, none
+(+2 by the end of tomorrow, +1 by the end of the seventh day, +3 overdue in their place, none
 at level 0 or once settled); and +0.5 or +1 for the open items it blocks,
 transitively to depth 3. The weights are docs/priority.md's, overridden by name.
 It reads; nothing is stored, and `node_state` is unchanged. The agenda (SMD-3669)
