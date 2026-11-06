@@ -1,0 +1,80 @@
+# 463. Priority assertions in the core — a key states how much an item matters, the maker and its tier stamped from the key, every statement kept, one winner per item (SMD-3663)
+
+**What changed.** Migration 116 builds docs/priority.md's decisions 1, 2, 4 and 10.
+- **The tables:**
+  - `priority_assertions`, one row per statement: the item `(kind, key)`, the level (0–5), `due_at`, `not_before`, a due reference, a reason, `inferred`, the maker stamped from the envelope and the registry (name, agent id, kind, trust, scope, declared source), its tier, and its window. Append-only: a trigger refuses every change but an open row closing once, and every DELETE and TRUNCATE.
+  - `priority_current`, the projection: each item's winner, kept current in the write's transaction, with a drift check (`ob1_priority_projection_drift`, its own copy of the rule) and a rebuild.
+  - `priority_sources`, the keys the operator declared priority sources, through `declare_priority_source`. Server roles can read it and not write it.
+- **The rules:**
+  - **Tier:** 1 operator trust, 2 a declared source, 3 agent trust, 4 inferred (flagged so, ingested from an undeclared key, or no trust). The lowest tier wins, then the newest within it (the later written, `seq`).
+  - **Replace and clear:** a key's new statement closes its open one as replaced; `clear_priority` closes the caller's own and no other key's.
+  - **Who may, failing closed:** the envelope must state `write` or `capture`, so a read key or an envelope with no scope is refused; a capture-only key states a priority only on a thought its agent captured and nobody took (by agent id, 082), and a due time only from another such thought, refused alike whether the item exists or not; every item is checked to exist; open items are refused until SMD-3665.
+  - **The maker and its order:** the maker is the key, its agent id read by name when the envelope carries none; `seq` is the order, so "newest" is the later written; the same statement again is `unchanged` and writes nothing; `not_before` after `due_at` is refused.
+- **The calls:** `assert_priority`, `clear_priority`, `priority_of` (up to 1000 items in one query) and `priority_history`. The REST and MCP operations are SMD-3664's.
+- **Grants:** the **priority** group, `SELECT, INSERT, UPDATE` on the assertions, all four on the projection, and `SELECT` on the sources and on `ob1_entities`.
+- **Registered:** `db/README.md`, `db/test-support.ts`'s drop lists, test-upgrade's window.
+
+**Why.** No table held a priority. `metadata.priority` and `metadata.importance` were free keys on a thought, written by whoever wrote the row, with nothing recording who said so; a capture-only key could set them on its own captures to steer a shared read (SMD-2653). An item that isn't a thought had nowhere to put one.
+
+**Held.**
+- test-schema [104]: the ticket's three Verify cases — an operator's High and an agent's Urgent on one item (the operator's wins, both listed); a capture-only key refused on a writer's thought and stored on its own at its own trust; a replace, with both statements in the history and the first's window closed — and the tier ladder, the item kinds, the refusals, the append-only trigger, the projection's drift and rebuild, the isolation rule, the grant group as a real role, `priority_of`'s order and caps, a withdrawn source and a re-apply.
+- test-upgrade [20bh]: onto a populated brain at 115, refused by name without 115, then applied with the thoughts unmoved, the grant group, and a re-apply.
+
+**Review pass 1** (10 findings, 9 fixed, one in part):
+- The read and capture refusals read the envelope's scope, which the server sends only for a capture key, so a read key's envelope or a capture key's without the field could assert on anything. The rule fails closed: `write` or `capture` must be stated.
+- One key seen with its agent id and without it was two makers, with two open statements. The maker's id is read from the registry by name when the envelope has none.
+- A capture key was told ITEM_NOT_FOUND before it was refused, so it could list which tickets and thoughts exist, and its due reference wasn't checked at all. The capture rule now comes first, covers the due reference, and gives one answer whether the item exists or not. Its first version leaked again through a NULL for a missing thought; the test caught it, and ownership now never returns NULL.
+- A capture key's own thought was matched by name; it is the capturer's agent id now, and a thought another key took is no longer its own (082).
+- The ticket check scanned ob1_ticket_head by `issue`; it uses the key, as 068 does.
+- The same statement again closed and re-wrote a row, so a source restating every pass would grow the history without end. It answers `unchanged`.
+- "Newest" ordered by the clock before `seq`; a clock stepping back could reorder the winner or trip the window CHECK. `seq` decides, and the CHECK is gone.
+- The winner was computed twice per write; the projection returns it.
+- `not_before` after `due_at` was accepted; it raises, and a CHECK holds it.
+
+In part: the rebuild calls the one isolation check. Declined: reusing 115's actor helper, whose rules (a holder, an ingested key refused) differ from the maker's (scope, source, the id by name).
+
+**Known follow-up.** An assertion on an entity that `merge_entities` later folds into another keeps the old id. SMD-3667, which reads assertions into the composed order, is where the merge should be followed.
+
+**Review pass 2** (10 findings, 6 fixed, 2 in part, 2 declined):
+- A key that asserted by name before the registry knew it, and then with an id, could no longer replace or clear its first statement, and held two open. A maker's own rows are those made under its id, or by its name before it had one (115's `is_holder` rule).
+- `clear_priority` showed a capture key the item's winner — another key's reason and maker, and that the item exists. A capture key is never shown a winner.
+- Pass 1's lookup of a maker's id by name also fed the capture key's ownership, so ownership was guessed from a name. It uses the envelope's own agent id alone.
+- `config.d.mts`'s `RoleGrantGroup` lacked `"priority"`.
+- A source was matched by label: renamed, it lost tier 2, and a new key given the old name gained it. A declaration names the agent's id and is matched by it.
+- The `unchanged` reply read a missing or stale projection row as an all-null winner. It reads the rule's winner.
+- In part: ownership is asked again under a share lock on the thought, so a take committing meanwhile is seen. A capture key's statement made before another key takes its thought stays open: decision 10 checks ownership at the write, and the taker's own statement outranks it or ties at the agent tier. That is SMD-3671's to review.
+- In part: re-declaring a withdrawn source rewrote its row. Each declaration is a row of its own.
+
+Declined: matching a ticket's key in another case or with white space around it (board-sync writes Linear's identifiers as Linear gives them, and matching other forms brings back the scan pass 1 removed); and the two helpers 115 has near copies of, again (115's isolation text speaks of claims, and its actor rules differ from a maker's).
+
+**Review pass 3** (10 findings, 4 fixed, 1 documented, 1 filed, 4 declined):
+- `declare_priority_source` found a standing declaration by label while makers were matched by agent id: after a rename, withdrawing by the new name did nothing, and declaring a new key given the old name was answered as already declared. Declarations and withdrawals are matched by the key's id now, one standing per key.
+- `assert_priority`'s replies showed a capture key the item's winner, which `clear_priority`'s had stopped. Both writers show a capture key its own statement alone.
+- Declaring an operator-trust key a source lowered it from tier 1 to tier 2 — on a default install with one key, the person's own statements. Operator trust is checked before a declaration, which only raises. Decision 4's list orders it so; docs/priority.md's "A statement over MCP" puts the source first.
+- `due_at` and a due reference together had no stated precedence; the item's own `due_at` wins (decision 5).
+- Documented: `priority_of` and `priority_history` take no actor; who may read them is SMD-3664's read tools, which a capture-only key is never given. This is where the hiding of another key's statement belongs; the writers keep their own replies to the rule.
+- Filed as SMD-3711: deleting a thought leaves its assertions open and `priority_of` answering for it, the reasons kept; closing them belongs beside SMD-1723, which has to relax the append-only trigger anyway.
+
+Declined: a statement made by name before the key had an id matched by its name after a rename (115's `is_holder` rule, as built there); a ticket key in another case and the two helpers 115 has near copies of, a third time; merging the replace's four reads (Postgres refuses FOR UPDATE beside the window count, and an item's open rows are a handful on an index).
+
+**Review pass 4** (10 findings, 6 fixed, 4 declined). The source declaration drew findings in a third pass running, so the mechanism changed rather than another patch: a declaration always names the key's agent id, making the registry row for a label the registry doesn't know yet (as `set_agent_kind` does), and a maker is matched by that id alone. The by-label fallback is gone, and with it a declaration left bound to a name after the key registered, and a withdrawal that could miss one of two standing rows. Also fixed:
+- A `p_actor` that was a JSON string replaced the transaction's actor with one naming nobody; it raises 22023.
+- `unchanged` ignored the maker's stamp, so a key that had since gained an id kept its name-only row for good; the stamp counts.
+- The header said an item has no foreign key because it may be a ticket not yet synced, which the existence check refuses; it says what is built.
+- `priority_of` took the level and winner from the projection and the list live, so a lagging projection contradicted the list in one reply; the rule answers all three.
+- The rebuild counted items a writer had fixed since the drift was read; it counts only what it changed under each item's lock.
+
+Declined: refusing due-reference cycles (decision 5 follows a reference one hop, so a cycle is harmless; documented); reporting every row a replace closed when a maker had two (only after a key gained an id with a statement open; both close, the newest is reported); and ownership for open items (SMD-3665's, when they exist).
+
+**Review pass 5** (8 findings, 7 fixed, 1 declined):
+- The header and `declare_priority_source`'s comment said only an operator's role could declare a source, while the server group can classify a key and the priority group can write the tables; they say the rules hold for callers of the functions, as 115's do.
+- The append-only guard listed the row's columns by hand, so a column a later migration added would be editable while closing; it compares the whole row but the closing columns.
+- The header predated pass 4: `unchanged` was missing from `assert_priority`'s outcomes, the maker's stamp from "the same statement again", and `priority_of` still read the projection.
+- A capture key's ownership was asked twice, once before the lock; it is asked once, under the lock, before any existence answer.
+- `priority_of` read each item's assertions twice; the winner and level are the list's first.
+- Two declarations of one key at once could both insert, one failing on the unique index; a declaration takes an advisory lock on its key first.
+- The Changelog did not tell an operator to re-run `--grant`.
+
+Declined: reading the projection's drift in one scan rather than two (an operator check; the cost is small).
+
+**Tidied while the files were open.** Stale comments brought level with the code, the tier and the declaration flag read once, the header and the README paragraph rewrapped, and test-schema [104]'s repeated count queries and envelope shared.

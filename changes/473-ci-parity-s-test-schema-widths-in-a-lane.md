@@ -1,0 +1,55 @@
+# 473. ci-parity's test-schema widths in a lane of their own — ~370–430 → ~300 s (SMD-3715)
+
+**What changed.**
+- **The schema lane.** `schema_rows` runs test-schema at the default width, then at 768, each as CI's db-schema job runs it (CI runs the two at once). It's started, watched and stopped as every other lane is. Its block prints after the pair lane's, as "test-schema at its two widths, on PGlite". `free_rows` keeps every other database-free suite, self-check and typecheck.
+- **Where the time went.** Since SMD-3688 started every lane at once, the database-free lane had set a run's length. In seventeen full runs from the two tickets before this one, the database-free lane took a median 424 s against a median run of 425 s, many of them beside another session's run. test-schema's two widths were 168 s of it (97 and 71), test-server 54, test-thoughts 34, test-connect 33, test-engines 25 and the ten typechecks about 26 together.
+- **One new lane, not three.** Without test-schema the lane takes about 260 s, inside test-live's sleep shard (~292 s) and about as long as the pair lane (252–272 s, bar run four's 356). The two widths take about 120 s together, so a lane each, or the typechecks in another, would end no run sooner. Each lane more adds load to every lane's timing rows (SMD-3706, SMD-3712).
+- **Docs:** ci-parity's header and comments. FORK.md's two paragraphs on what it runs stay true as written (test-schema is one of the database-free suites beside the database lane, its widths still one after the other), and FORK.md is 6 bytes under its 64 KiB cap (65,530 of 65,536 outside its generated index), where saying so took 98, so they're left as they are; making room is SMD-3768.
+
+**Held.**
+- **Wall time,** one run at a time on the maintainer's Mac, main and this change interleaved, each started once no other ci-parity was running. A sampler recorded any other session's run that started meanwhile (\*). In run one it saw only another worktree's grep and typecheck, whose command named ci-parity.sh, not a run:
+
+  | | Runs | Median |
+  |---|---|---|
+  | main at 679d1b57 | 651\*, 431\*, 372 s | 431 s (372 s with no overlap) |
+  | this change at 0c9b23fa | 301, 301\*, 310, 371, 301\* s | 301 s |
+
+  The commits after 0c9b23fa change only ci-parity's comments and this record.
+
+  - **Run four** ran slow from its start: test-upgrade took 220 s against about 101, and the shared lane's first rows twice their usual time. No other ci-parity was running, so the load was something else on the Mac. The lanes this change touches grew less: test-schema 148 s against 116–125 in the other runs, the database-free lane 263 against 260–267.
+  - **Lanes after:** the database-free lane took 260–267 s and test-schema's 116–148 s. The widths took 65 + 58 s (medians), a little slower than the 60 + 53 they took in the database-free lane in main's run with none beside it: apart, they share the CPU with that lane's rows. test-live's sleep shard, 291–296 s, now sets the length.
+- **Every row passed** in all five runs of this change, interleaved with main's.
+- **Ctrl-C** to the run's process group 40 s in, test-schema in hand, twice: exit 130 in 5.0 and 8.2 s, with no process of the run left at the exit or 5 s on, and no container of its. The second time, a container appeared 5 s on; it was another session's mutant run's, started after ci-parity had exited.
+- **Not held:** a lane function neither started nor waited for. Its rows pass check 35, which reads lines, and run nowhere; the database-free lane had the same exposure before. A start dropped with its wait kept fails the run, since bash's `wait ""` returns 1.
+- **Planted failures:**
+  - a failing row in the schema lane and one in the database-free lane, in one run: each was named in its lane's block, with its excerpt and the path of its full output, and the run ended FAILURES;
+  - the schema lane's alone: its ✗ row the only one, and the run ended FAILURES, so its own verdict fails the run;
+  - the same with schema_rows' `return "$FAILED"` dropped: its ✗ row under "all suites passed", so the run before had teeth.
+- **Two flakes under load,** in a first run of the schema lane's plant alone, which therefore showed nothing about its verdict. The shared lane, the pair lane and test-schema took about twice their time (252, 582 and 270 s), the test-live shards and the database-free lane 6–70% more, and the run 616 s. Each is a fixed sleep racing a SIGTERM, with a ticket under SMD-2095; neither suite's rows depend on its lane:
+  - test-server [13d]'s "a mirror whose client left, at a drained stop": the stop's log counted the request in flight, but the line was the stop's cut (status 0), not its handler's (200), 50 ms after the abort (SMD-3754);
+  - test-mcp [8f]'s "SIGTERM with a tool call running": the cut line was there, and a clause the row doesn't print failed, most likely "1 tool call running" in the stop's log 300 ms after the call was sent (SMD-3755).
+- **Check 35's mutants,** each failing it with its own message: either width dropped, the 768 row's model dropped, test-server dropped, a typecheck dropped. Check 35 reads `nodb` and `typecheck` lines anywhere in the file, so it needed no change.
+
+**Tidied while the files were open.** The row limit's note gives the sleep shard's ~290 s, not ~270; the lane still ending after 30 s says a container shows in podman ps "if any", since the schema and database-free lanes hold none; the schema lane's comment points to the database-free lane's below.
+
+**Review passes.**
+
+| Pass | Finding | Caught by | Fix |
+|---|---|---|---|
+| 1 | The record put test-schema's widths at 60 + 63 s apart, and compared them with medians from runs beside other sessions' | cold read | numbers from the logs, two of them wrong until pass 4 |
+| 1 | The schema lane's comment carried timings that drift and an "each of the two" that read as either the lanes or the widths | cold read | reworded without the timings |
+| 1 | main()'s comment on the lanes ran past the file's width after the edit | cold read | rewrapped |
+| 1 | The record said the lane runs the widths one after the other as db-schema does; CI runs them at once | cold read | says so |
+| 2 | Both lanes' plants were in one run, so the database-free lane's would have failed it even had the schema lane's verdict never reached the summary | mutant | the schema lane's plant alone, then with its `return "$FAILED"` dropped |
+| 2 | The Changelog's "which had run them first" read as the suites, not the lane; "one split, not three" said neither what nor three of what; SMD-3688's bullet stood apart from the timings it explains | cold read | reworded, the bullet folded in |
+| 3 | The record called run four's test-schema, 148 s against 116–125, near its length in the other runs | walkthrough | says it grew less than the database lanes |
+| 4 | Pass 1's fix read main's quiet run from the wrong log: its widths took 60 + 53 s, not 75 + 65 (that run had another beside it), so apart they are a little slower, not faster; and the first width's median is 65 s, not 64 | cold read | the comparison turned round, the median corrected |
+| 4 | The schema plant's run alone also failed two flaky rows, so it couldn't show the schema lane's verdict failing the run | cold read | a run with the plant the only ✗ row: FAILURES |
+| 4 | The Ctrl-C result and the typecheck mutant's message were in no saved file | cold read | both run again, their output kept |
+| 4 | "Every lane about twice its time", "back to back" and "inside the pair lane" overstated; the table named no commit for this change, and run one's sampler hits went unexplained | cold read | each said as measured |
+| 5 | "Within 100 bytes of its cap" undersold FORK.md's headroom: 6 bytes on main | walkthrough | the bytes counted |
+
+**Verify.**
+- [x] Median wall time over three full runs on one commit ~330 s or less: 301 s (runs one to three), 310 s over the three with no other run beside them; main's run with none beside it took 372 s.
+- [x] All rows pass in five consecutive full runs.
+- [x] Check 35 passes, and a mutant dropping one moved row fails it; a planted failure in each new lane is named in the summary.

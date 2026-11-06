@@ -39,6 +39,15 @@
 # SHA (the tag in a trailing comment), and its runner image is named;
 # brain-checks.yml's header has the rule and what holds it (SMD-2093).
 #
+# A tag whose run pushed its images but failed before the release was created
+# (v2.0.0's notes were over GitHub's limit on a release's body, SMD-4130)
+# can't be re-run into a release: a tag's run is the workflow and scripts at
+# the tagged commit. Fix the cause on main, then dispatch this workflow from
+# main with `publish_tag` set to the tag: the PUBLISH-EXISTING job runs main's
+# workflow and release script on the tag's tree, reads the images' digests
+# from GHCR instead of building, brings the stack up from them, and creates
+# the release, with a token that writes the release and nothing else.
+#
 # scripts/release-artifacts.ts is the reader and renderer; the bash in
 # release-steps.yml only runs docker and gh. It refuses a tag that does not
 # name releases.json's last entry, a BRAIN_VERSION that was not bumped, a
@@ -87,6 +96,11 @@ on:
       - "deploy/**"
       - "releases.json"
   workflow_dispatch:
+    inputs:
+      publish_tag:
+        description: "A tag already pushed whose run published its images but no release (v<X.Y.Z>): publish that release. Empty: a rehearsal."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -94,9 +108,10 @@ permissions:
 # A tag's run is never cancelled: one stopped half-way would leave images
 # published with no release naming them. A newer push to a pull request cancels
 # the rehearsal it supersedes, and a dispatched rehearsal is a group of its own,
-# never queued behind another run or cancelled (SMD-3173).
+# never queued behind another run or cancelled (SMD-3173). A dispatch that
+# publishes a tag's release queues behind another for the same tag.
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && (inputs.publish_tag != '' && format('publish-{0}', inputs.publish_tag) || github.run_id) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -104,7 +119,7 @@ jobs:
   # publish nothing.
   rehearsal:
     name: Rehearsal
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && (github.event_name != 'workflow_dispatch' || inputs.publish_tag == '')
     permissions:
       contents: read
     uses: ./.github/workflows/release-steps.yml
@@ -122,3 +137,22 @@ jobs:
     uses: ./.github/workflows/release-steps.yml
     with:
       publish: true
+
+  # A dispatch naming a tag already pushed (SMD-4130): the release that tag's
+  # own run failed to create after it had pushed the images, as v2.0.0's did on
+  # a notes body over GitHub's limit. A tag's run uses the workflow and the
+  # scripts at the tagged commit, so re-running it fails the same way; this runs
+  # main's workflow and main's scripts/release-artifacts.ts on the tag's tree.
+  # It builds and pushes nothing: it reads the images' digests from GHCR,
+  # brings the stack up from them and smokes it, as a tag's run does, and
+  # creates the release. Its token writes the release alone. Dispatched from
+  # main only, so what runs with that token is main's.
+  publish-existing:
+    name: Publish an existing tag's release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_tag != '' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write   # gh release create
+    uses: ./.github/workflows/release-steps.yml
+    with:
+      publish: true
+      existing_tag: ${{ inputs.publish_tag }}

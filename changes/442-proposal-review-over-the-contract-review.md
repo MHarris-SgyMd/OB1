@@ -1,0 +1,54 @@
+# 442. Proposal review over the contract: `review_supersession_proposal` (SMD-3338)
+
+**What changed.**
+- **One decision for both doors** (`server-portable/proposal-review.ts`): the lineage-pair guard (070), the WRITER guard (094), 029's `review_supersession_proposal`, the read of what its lapse cleared (082) and of who decided (114).
+  - Both doors run it: `db/consolidate.ts --accept`/`--reject`, and the store's `reviewProposal`, which the REST core's operation calls.
+  - One transaction holds it all, taking 029's review lock and then the proposal's row before the first read. So the row checked is the row decided: the pass's in-place re-judge of a stale row (063), which takes the row alone, waits for the decision instead of landing between its guard and 029. The CLI used to read the lineage and writer guards before its transaction, so a write landing in between was judged on the old read.
+  - A reject says what it undid of an accept (not a pointer that was there before it, nor a capture-only pointer its lapse cleared), names the pair, and says when it replaces an earlier reject.
+  - A brain short of 094 is found by a probe of its functions before the writers' read: the decision goes on, saying its WRITER check did not run (the CLI's words as before).
+- **The tool `review_supersession_proposal`.** Write scope, `POST /v1/proposals/{id}/review`, projected to MCP.
+  - Refusals:
+    - `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR` and `REFUSED_WRITER`: 409, each waived by `force` on an accept alone.
+    - `REFUSED_DIRECTION_REQUIRED`: 400.
+    - `REFUSED_ALREADY_ACCEPTED`, `REFUSED_ALREADY_SUPERSEDES` and `REFUSED_PROPOSAL_WOULD_CYCLE`: 409.
+    - `REFUSED_SUPERSEDED_GONE`: 422.
+    - `NOT_FOUND`: 404.
+    - `REFUSED_REVIEW_ARGUMENT`: 400, for what the CLI's `reviewProblem` refuses (a direction or force on a reject, a note beginning with 067's marker).
+  - The reply carries what the decision wrote or cleared, each lapsed pointer, and the reviewer the row records. The reviewer is shown with the kind the key had then, else the registry's kind now ("classified after it decided"), as `--list` shows it.
+- **The grant:** the server group's row on `supersession_proposals` is `SELECT, UPDATE` (`db/config.mjs`, db/README.md's grant table).
+  - It is soft, as the rest of the group is. Without it the decision faults, and the MCP reply's hint names `--grant <role> --groups server`.
+  - Recording a proposal (`INSERT`) stays the worker group's.
+- **The amended rule:**
+  - The maintainer's call of 2026-10-26 is that any write key may decide, agents included. db/README.md records it, in a new "Deciding over the contract" paragraph.
+  - 029's comment, "the machine proposes, someone confirms", stays as written; the file is frozen.
+  - The listing's tool description names the tool beside the CLI.
+- **Docs:** server-portable/README.md's new section and refusal list.
+
+**Decided.**
+- **One tool with a `decision`, not an accept and a reject.** 029 takes the decision as an argument, and the two share the id, the note and the reviewer record. A route per decision would split one operation's refusals across two.
+- **The guards move, not copy.** A second spelling of the lineage and WRITER reads in the server would drift from the CLI's. Both doors now run one function, and test-live [16]'s CLI cells hold it.
+- **No reviewer in the listing yet.** `list_supersession_proposals` showing who decided is this ticket's second PR (its plan, on the ticket). 110 is not widened; the reviewer is read by the page's ids.
+
+**PR 2: the listing names who decided.**
+- `list_supersession_proposals` (REST's `GET /v1/proposals`, the MCP tool) carries each accepted or rejected row's `reviewer`: the key's name, whether an agent was recorded (not its id, which no other read shows another key), the kind it had when it decided and the registry's kind now. The page carries `reviewersRead`, false when it lists a decided row on a brain short of 114.
+- A read key now learns the name and kind of a key that only ever rejected (no thought write, so absent from `thought_changes`); a name read scope sees elsewhere. Not the agent id.
+- The store reads 114's columns by the page's decided ids (`reviewersOf`, `--list`'s read), beside the writers; the listing function (110) is not widened, since 110 re-applied after a wider form fails.
+- The MCP reply prints `decided by:` under a decided row — the decision reply's words where they hold, and its own for rows the server did not decide (a keyless run, a raw call, a row from before 114, an agent with no name) — and says once when a brain short of 114 records none. Its value carries whether an agent was recorded and the kinds; the name is in the text, as the writers' are.
+- Docs: db/README.md, deploy/README.md, dashboard/README.md and server-portable/README.md no longer say only `--list` shows it; the GUI's page is SMD-3322's.
+
+**Tidied while the files were open.** PR 2: the listing's decided-row test named once, reviewerText typed by the two reviewers it reads, the CLI's short-of-114 sentence taken from render.ts rather than copied. PR 1: A reject's undone pair computed once in the core op, an unread field dropped from the guard's result, the grant row's re-grant naming its group, three new paragraphs wrapped as their files are.
+
+**Verify.**
+- PR 2: test-rest-sql [3a] lists the decided rows through REST and MCP with their reviewer, and none on a pending row; test-live [16] lists a brain short of 114 as before, the page reading no reviewer; test-server [34] renders the line, the value and the short-of-114 note.
+- test-rest-sql [3a] covers:
+  - an accept through REST, the pointer audited under the caller's key and the row recording it, with the same reply through MCP and the in-process core;
+  - a reject clearing an accepted pointer, and one recording its reviewer on a pending row;
+  - `REFUSED_ALREADY_ACCEPTED`;
+  - an edited text, a stale row, a lineage pair and a WRITER flag, each refused by name with nothing written, then accepted under force;
+  - the argument refusals;
+  - an undirected verdict, accepted with a direction;
+  - `NOT_FOUND`;
+  - a read and a capture key refused 403;
+  - an agent-kind key refused the WRITER accept as an operator's is, with its accept recorded as kind agent.
+- test-rest-sql [5] carries three of its refusals through both doors.
+- test-live [16]: a role holding the capture and server groups alone decides, and without `UPDATE` it is refused whole, the hint naming the grant. The CLI's decision cells run through the shared function.

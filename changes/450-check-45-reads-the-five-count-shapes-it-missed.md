@@ -1,0 +1,41 @@
+# 450. Check 45 reads the five count shapes it missed, and prose by paragraph (SMD-3655)
+
+**What changed.** Check 45 in `scripts/check-fork-consistency.ts` (SMD-3614):
+- **Its rule.** It used to fail a line naming a suite beside `# N —`, `N assertions` or `N passed`, or a summary line with digits. Now it fails:
+  - a suite beside `N assertions` or `N passed`, and beside `N checks`, `N cases` or `N tests` of two digits or more;
+  - `N assertions` of two digits or more with no suite named (`the live suite has 1932 assertions`);
+  - a suite followed within 40 characters by a tally of two digits a side at least, with no third part (`1932/1932`);
+  - on a code-block line, a suite followed by a comment that opens with a number (`# 1932`). In prose, where `#123:` is an issue, it still needs the dash (`# 1932 —`).
+- **Prose by paragraph.** It reads prose by paragraph and list item, their lines joined, so a count wrapped onto the line after its suite is seen. A code-block line, a table row and a heading are each read alone. A unit that fails is reported at its first line.
+- **Records.** FORK.md's numbered change rows (`| 9 | …`) join changes/, CHANGELOG.md and the two dated analyses as records. Change 9's row keeps the "49 assertions" it measured.
+
+**Why each form is as it is.** Each candidate was measured against the tree before it went in:
+- A bare `N/N` after a suite hit migration numbers (`015/018/021/034`) and `phase-1/2/3`. Two digits a side and no third part leave neither.
+- `N assertions` anywhere hits only FORK.md's change-9 row, now a record.
+- The other forms hit nothing.
+
+**Held.**
+- Each shape the ticket lists, planted in an untracked `db/*.md`, fails the checker at its line (the wrapped one at its paragraph's first). The tree passes.
+- The probe gains both kinds of case:
+  - the shapes, and a count wrapped in prose and in a list item;
+  - lines that pass: `# 14 labelled captures`, `(115) migrations`, `phase-1/2/3`, `015/018/021/034`, a `#123:` issue in prose, two list items kept apart, and FORK.md's change row (the same row in another file fails).
+- Nine mutants, each refused by the probe:
+  - `N assertions` bound to a suite again;
+  - checks/cases/tests dropped;
+  - the tally dropped;
+  - the code comment needing a dash;
+  - prose read by line;
+  - list items joined;
+  - a one-digit tally;
+  - the code-comment form in prose;
+  - FORK.md's rows not records. This one also fails at FORK.md:267.
+
+**Review pass 1.**
+- **False positives on small numbers.** `N assertions` anywhere refused prose about tests, such as `a suite that makes 0 assertions fails` and `each case makes 3 assertions`. `N cases/tests` beside a suite refused `[38] covers 4 cases`.
+  - With no suite named, a count now needs two digits, as does `N checks/cases/tests` beside a suite.
+  - `N assertions` or `N passed` beside a named suite keeps any number, so `test-replay.ts: 2 assertions` still fails.
+  - Three more mutants are each refused: any of those thresholds loosened, or tightened.
+- **The rule's description was wrong.** It said a bare `# 1334` after a suite fails on any line. It fails on a code-block line alone; in prose it needs the dash.
+- **Left alone, as rare in this tree, which fences its code:**
+  - a bare `# 1932` in an indented code block or a table row is not caught;
+  - a four-backtick fence holding a three-backtick line confuses the fence tracking, though the line it holds is caught anyway.

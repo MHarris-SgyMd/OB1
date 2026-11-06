@@ -1,0 +1,17 @@
+# 486. A due date alone is the end of that day, for open items and priorities alike — an item is not overdue on its own due day (SMD-3778)
+
+The maintainer chose option 3 of SMD-3778's four on 2026-11-05: the end of the day, everywhere, one reading of one string. It comes before SMD-3667, whose overdue term reads these due times.
+
+**What changed.**
+- **Migration 119** replaces 117's `ob1_item_due`, its signature and other rules unchanged: a bare date is the next day's start in UTC; a date and time with no offset is that instant in UTC; with an offset, that instant. It refuses by name without 117. `open_item` and `update_item` take the new reading through it. Due times stored before are not moved: nothing records which came from a bare date.
+- **`set_priority`** (`core/priority.ts`): a bare `due_at` is the end of its day (`dueBy`); a bare `not_before` stays the start of its day (`startOf`), a start being a start.
+- **`server-portable/priority-scale.ts`**: `dueInstant` reads a bare date as the end of its day (`endOfDay`, exported), so the ingestion pipeline and board-sync state Linear's due date and a note's `due:` the same way; the plugin SDK's `keepRowItem` compares a row's day through it.
+- **Descriptions and docs**: `set_priority`'s and `open_item`'s `due_at`, `not_before`'s, the REST client regenerated, server-portable/README.md's priority and Open items text, db/README.md (119, the count, the map), home-maintenance's README, the items reader's refusal.
+
+**Held.**
+- **test-upgrade [20bk]:** before 119, a bare date is its day's start; without 117's reader, the file is refused by name and nothing changes; applied, a stored due time is unmoved, a new bare date is the next day's start (and across a year's end), a date and time with no offset is that instant; a re-apply is a no-op.
+- **test-schema [107]:** under a New York session as under UTC, a bare date is the next day's start in UTC; a date and time with no offset is that instant; a year's end is the next year's start; a relative word is still refused 22023; a re-apply is a no-op. [105]'s session row re-applies 117 and so holds 117's reader, which its comment says (review pass 1: test-schema had no row for 119, its [105] passing on 117's rule).
+- **Review pass 2:** the Changelog says the one restatement an upgrade brings (board-sync, `sync_open_items` and a re-ingest compare their rows' days at the day's end, find the stored start-of-day times a day off, and restate them once). For SMD-3667: its urgency windows count calendar days, since a bare "tomorrow" is now 24 to 48 hours away, and docs/priority.md's example, a Medium due tomorrow passing a High with no date, needs "within 1 day" read as "by the end of tomorrow".
+- **Review pass 3:** the MCP replies printed a bare date's due time as the instant, so "due 2027-03-01" came back `due 2027-03-02T00:00:00.000Z`, read as the 2nd. `render.ts`'s `dueText` says a due time at midnight UTC as "by the end of 2027-03-01 (UTC)", the same instant, and any other as the instant; the REST JSON keeps the instant. Held by test-server's set_priority render and a 17:00 row beside it, and test-rest-sql's priority history over MCP.
+- **Tidied while the files were open:** two of migration 119's comments reworded.
+- **The suites' due expectations** follow: the pipeline's and board-sync's self-checks, test-live [23d] and [23e], test-plugin-ports' `dueOn`, and the items and priority sections that read a bare date.
