@@ -484,7 +484,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
@@ -2554,38 +2554,26 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const waitForProvider = async (): Promise<void> => {
     if (!FOLLOW || outage.reason === null || stopping || configError !== null) return;
     await stamper?.stamp("failed");
-    const down = Date.now();
-    // The probe's schedule carried across outages that come back at once, nothing settled between: a rate
-    // limit the probe passes and no row gets past waits longer each time, to the cap (ProviderOutage's
-    // resumeFrom; review pass 2: every 5 s for as long as it lasted; pass 3: a limit some rows get past
-    // starts over; pass 4: a row recorded failed is settled too).
-    const from = outage.resumeFrom(done + failed, 60_000 + FOLLOW * 1000);
-    const schedule = outageWait(from) >= OUTAGE_MS.max
-      ? `every ${OUTAGE_MS.max / 60_000} min`
-      : `after ${outageWait(from) / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`;
-    err(`  the embedding provider is not answering (${outage.reason.slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)} ${schedule}${from > 0 ? " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)" : ""}`);
-    const waited = (async () => {
-      await stamper?.providerWait?.(true);
-      try {
-        const subject = probeGate.allowed ? probeSubject : outageSubject ?? probeSubject;
-        let step = from;
-        const probe = () => { step++; return embedProbe(onStop.signal, subject); };
-        const answered = await probeUntil(probe, onStop.signal, (p) => !isOut(p), sleepUnless, from);
-        if (answered !== null && answered.state === "refused") {
-          // Answered with a refusal — a key revoked while it was away: the request's, not the provider back (review pass 3).
-          configError = answered.why;
-          err(`  the embedding provider answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
-        } else if (answered !== null) {
-          outage.end(step, done + failed);
-          outageSubject = null;
-          pollNow = true;
-          out(`  the embedding provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-        }
-      } finally {
-        await stamper?.providerWait?.(false);
-      }
-    })();
-    await (stamper ? stamper.during(waited) : waited);
+    // The probe's schedule carried across outages that come back at once, nothing settled between (waitOutProvider:
+    // review pass 2, every 5 s for as long as it lasted; pass 3, a limit some rows get past starts over; pass 4, a
+    // row recorded failed is settled too); a refusal — a key revoked while it was away — the request's (pass 3).
+    const subject = probeGate.allowed ? probeSubject : outageSubject ?? probeSubject;
+    const waited = waitOutProvider({
+      who: "the embedding provider",
+      calls: `${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)}`,
+      outage,
+      probe: (wake) => embedProbe(wake, subject),
+      settled: () => done + failed,
+      pollS: FOLLOW,
+      wake: onStop.signal,
+      writer: { out, err },
+      stamper,
+    });
+    const back = await (stamper ? stamper.during(waited) : waited);
+    if (back === "answered") {
+      outageSubject = null;
+      pollNow = true;
+    } else if (back !== null) configError = back.refused;
   };
   // The admit gate before the start's drain (SMD-3379 PR 1b), under the follower's stamp, so a long wait does not
   // read as a stale row (review pass 1); a stop while it waits ends the run there.

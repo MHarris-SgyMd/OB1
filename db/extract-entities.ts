@@ -192,7 +192,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeAtStart, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, probeAtStart, probeChat, probeRefusal, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -661,22 +661,31 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * this ticket (review pass 4: it stalled the follower for good).
    */
   let escalationSeen = false;
-  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  /**
+   * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2): the outage's model by name, said on the row it
+   * stamps — the sleep scheduler's, or this follower's own — so preflight names the provider (SMD-2905). The schedule
+   * carries on from the last outage's when this one comes back within a minute, a poll and the pauses of its answer
+   * with no thought settled since; an answer polls again at once; a refusal ends the follower, exit 2.
+   */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
-    const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said on the row it stamps — the sleep scheduler's, or this follower's
-    // own — so preflight names the provider, not "running a pass"; a stop
-    // wakes the probes, so the end is said before the pass settles (SMD-2905).
-    await stamper?.providerWait?.(true);
-    try {
-      if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
-        outage.end();
-        outageModel = cfg.metadataModel;
-        out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-      }
-    } finally {
-      await stamper?.providerWait?.(false);
+    const back = await waitOutProvider({
+      who: "the provider",
+      calls: `${outageModel} at ${cfg.chat.base} for one token`,
+      outage,
+      probe: (w) => probe(undefined, w, outageModel),
+      settled: () => done + failed,
+      pollS: FOLLOW,
+      pausesBefore: true,
+      wake,
+      writer: { out, err },
+      stamper,
+    });
+    if (back === "answered") {
+      outageModel = cfg.metadataModel;
+      pollNow = true;
+    } else if (back !== null) {
+      configError = back.refused;
+      stopping = true;
     }
   }
   /** The start's refusal of what a probe found — a model unserved, or the endpoint refusing — or null. */
@@ -2128,6 +2137,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     writer: { out, err },
   });
 
+  /** The provider answered after a wait: the next pass runs at once, not after an interval (re-embed's rule, SMD-2636 PR 2). */
+  let pollNow = false;
   let after = await followed();
   if (FOLLOW) {
     // Only a block it will poll after: the last pass's — the limit reached, or
@@ -2142,7 +2153,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     await stamper?.stamp(passOutcome, lastBlock);
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
-      await sleepUnless(FOLLOW * 1000, onStop.signal);
+      if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
+      pollNow = false;
       if (stopping) break;
       after = await followed();
       say();

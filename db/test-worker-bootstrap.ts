@@ -16,7 +16,7 @@
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -648,6 +648,66 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   allBack.add("a1");
   await allBack.returnAtEnd(45, writer);
   ok(lines.length === 0, `Unreturned.returnAtEnd: nothing said when every lease went back (review pass 4; ${lines.join(" | ")})`);
+  // waitOutProvider (SMD-2636 PR 2): one outage wait, on re-embed's rules — said, stamped, the schedule carried when
+  // the outage comes back within the window with nothing settled, an answer ending the outage at its step, a refusal
+  // the request's, a stop null.
+  {
+    const providerStamps: boolean[] = [];
+    const stamper = { providerWait: async (on: boolean) => { providerStamps.push(on); } };
+    let settledNow = 0;
+    const base = { who: "the provider", calls: "m at b for one token", settled: () => settledNow, pollS: 0, pausesBefore: true, wake, writer, stamper, sleep: ticking };
+    const o = new ProviderOutage(() => clock);
+    o.begin("503 busy", "t1");
+    lines.length = 0;
+    const first = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "out", why: "503" }, { state: "up" }], "waitOutProvider's first") }));
+    ok(first === "answered" && o.reason === null && providerStamps.join() === "true,false"
+      && /^err {3}the provider is not answering \(503 busy\) — unfinished thoughts are back in the pool, recorded nothing; the follower calls m at b for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "")
+      && /^out {3}the provider answers again after 15 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: said, stamped, probed until it answers, the outage ended, said again (${first}; ${providerStamps}; ${lines.join(" | ").slice(0, 300)})`);
+    // Back at once, nothing settled: the schedule goes on from the last outage's step, said so. Another thought's
+    // error begins it: t1's own again, right after the answer, is the thought's, not an outage.
+    o.begin("429 limited", "t3");
+    lines.length = 0;
+    const carried = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's carried") }));
+    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute, a poll and its pauses of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
+      `waitOutProvider: an outage back within the window, nothing settled, carries the last schedule on, said (${lines[0]})`);
+    // A thought settled since: the first wait again, no carry said.
+    settledNow = 1;
+    o.begin("429 limited", "t4");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's settled") }));
+    ok(/for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? ""), `waitOutProvider: a thought settled since starts the schedule over (${lines[0]})`);
+    // A refusal at the end of the wait is the request's: said, returned, the outage left standing.
+    o.begin("503 busy", "t5");
+    lines.length = 0;
+    providerStamps.length = 0;
+    const refused = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "refused", why: "401 invalid api key" }], "waitOutProvider's refused") }));
+    ok(refused !== null && refused !== "answered" && refused.refused === "401 invalid api key" && o.reason !== null && providerStamps.join() === "true,false"
+      && /^err {3}the provider answers now, refusing the request itself \(401 invalid api key\) — the follower stops; nothing is marked failed$/.test(lines[1] ?? ""),
+      `waitOutProvider: a refusal is the request's, said, the follower to stop (${JSON.stringify(refused)}; ${lines[1]})`);
+    // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
+    // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
+    const pausesMs = TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0);
+    const carriesAfter = async (afterMs: number, pausesBefore: boolean): Promise<string> => {
+      const e = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        e.end(1, 0);
+        clock += afterMs;
+        e.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, pollS: 5, pausesBefore, outage: e, probe: scripted([{ state: "up" }], `waitOutProvider's edge at ${afterMs} ms`) });
+      });
+      return lines[0] ?? "";
+    };
+    const edges = [await carriesAfter(65_000 + pausesMs - 1, true), await carriesAfter(65_000 + pausesMs, true), await carriesAfter(64_999, false), await carriesAfter(65_000, false)];
+    ok(/for one token after 10 s and then .*its pauses of its last answer/.test(edges[0]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[1])
+      && /for one token after 10 s and then .*\(back within a minute and a poll of its last answer/.test(edges[2]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[3]),
+      `waitOutProvider: the carry's window is a minute and the poll, and the pauses for a follower that spends them first, strictly within (${edges.map((l) => l.slice(-110)).join(" | ")})`);
+    // A stop ends the wait: null, the stamp off.
+    providerStamps.length = 0;
+    ok((await waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "out", why: "x" }], "waitOutProvider's stop"), wake: stop.signal, sleep: instant })) === null && providerStamps.join() === "true,false",
+      `waitOutProvider: a stop ends the wait, null, the stamp turned off (${providerStamps})`);
+  }
   ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
 }
 
