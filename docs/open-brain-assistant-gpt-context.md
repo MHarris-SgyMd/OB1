@@ -54,7 +54,7 @@ The core user journey is:
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
 - `schemas/`: Database extensions that add tables, columns, sidecars, and RPCs.
-- `integrations/`: MCP extensions, capture sources, the OpenClaw and Hermes plugins, and the agent memory API (the REST gateways retired with SMD-1931).
+- `integrations/`: MCP extensions, capture sources, and the OpenClaw and Hermes plugins (the REST gateways retired with SMD-1931; the agent memory API is the `agent-memory` plugin since SMD-2690).
 - `primitives/`: Reusable concept guides such as remote MCP, RLS, shared MCP, deployment, and troubleshooting.
 - `docs/assets/agent-memory/`: Diagrams, screenshots, brand assets, and promotional material for Agent Memory.
 

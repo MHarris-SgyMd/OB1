@@ -147,10 +147,7 @@ MCP server extensions, capture sources beyond Slack, and the workers and APIs be
 
 ### [`/schemas`](schemas/) — Database Extensions
 
-Tables and sidecars that extend the base `thoughts` model without replacing it.
-
-| Schema | What It Does | Contributor |
-| ------ | ------------ | ----------- |
+Tables and sidecars that extend the base `thoughts` model without replacing it. Each is a folder under [`schemas/`](schemas/) with a README saying what it adds and how to apply it.
 
 ## Using a Contribution
 

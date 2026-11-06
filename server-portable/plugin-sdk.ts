@@ -32,7 +32,8 @@ export type Shape = Record<string, z.ZodType>;
  * JSON a caller can act on. 400, 403, 404, 409 and 422 say this input will not
  * do and are never retryable. 503 is the one retryable refusal (SMD-1992): a
  * service the plugin needs did not answer — the core's embedding provider, a
- * search's `vectorFailed` or a capture's — so the same call may succeed later.
+ * search's `vectorFailed` — so the same call may succeed later. (A capture with
+ * no vector is no reason: the thought is saved, and the vector mender fills it.)
  */
 export type PluginRefusal = { status: 400 | 403 | 404 | 409 | 422 | 503; code: string; message?: string } & Record<string, unknown>;
 

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS memories (
   last_confirmed_at TIMESTAMPTZ,
   stale_after TIMESTAMPTZ,
   idempotency_key TEXT,
+  -- The write-back's hash of its type and text, kept through an edit: the same write-back sent again answers the memory.
   content_hash TEXT,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -56,7 +57,9 @@ CREATE TABLE IF NOT EXISTS memories (
   CHECK (can_use_as_instruction = false OR provenance_status IN ('user_confirmed', 'imported'))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS memories_idempotency_key ON memories (idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- A workspace's own: the same key in another workspace is another memory (the old schema's index was global, so a
+-- write-back to one workspace was answered another's memory, or refused, by a key the two happened to share).
+CREATE UNIQUE INDEX IF NOT EXISTS memories_idempotency_key ON memories (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS memories_scope ON memories (workspace_id, project_id, visibility);
 CREATE INDEX IF NOT EXISTS memories_review ON memories (review_status, lifecycle_status, created_at DESC);
 CREATE INDEX IF NOT EXISTS memories_runtime_task ON memories (runtime_name, task_id, flow_id);

@@ -32,7 +32,7 @@ import { INGESTED_NOTICE } from "./core/filter.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hmacSha256Hex, keepItemPriority, keepRowItem } from "./plugin-sdk.ts";
 import { BODY_MAX, isoTime, LEASE_S, LIMITS } from "../plugins/readwise/index.ts";
-import { LIMITS as AM_LIMITS } from "../plugins/agent-memory/index.ts";
+import { coreRefused as amCoreRefused, LIMITS as AM_LIMITS, rankMemory as amRank, unsafeReasons as amUnsafe } from "../plugins/agent-memory/index.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -75,6 +75,8 @@ console.log(`\n[1] The migrator makes each ported plugin's tables in its own sch
 const STUB_BASE = "https://stub.invalid/v1";
 /** The embedding provider answering 503, as one that is down (agent-memory's section sets it). */
 let embedDown = false;
+/** How long the chat stub waits before it answers, in ms: agent-memory's race widens its window with it. */
+let chatDelayMs = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
@@ -85,6 +87,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       v[0] = 1;
       return Response.json({ data: [{ embedding: v }] });
     }
+    if (chatDelayMs > 0) await Bun.sleep(chatDelayMs);
     return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea" }) } }] });
   }
   return realFetch(input as RequestInfo, init);
@@ -3024,8 +3027,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const mems = (r: { body: Body }) => (r.body.memories ?? []) as Mem[];
   const ids = (r: { body: Body }) => mems(r).map((m) => m.memory_id);
   const rows = async (table: string) => (await one<{ n: number }>(sql.unsafe(`SELECT count(*)::int AS n FROM plugin_agent_memory.${table}`))).n;
-  const thoughtOf = (id: string | null) => one<{ source: string; ws: string; type: string; runtime: string; actor: string | null; vector: boolean } | undefined>(sql`
-    SELECT t.metadata->>'source' AS source, t.metadata->>'agent_memory_workspace' AS ws, t.metadata->>'agent_memory_type' AS type,
+  const thoughtOf = (id: string | null) => one<{ source: string; ws: string; type: string; runtime: string; task: string | null; actor: string | null; vector: boolean } | undefined>(sql`
+    SELECT t.metadata->>'source' AS source, t.metadata->>'agent_memory_workspace' AS ws, t.metadata->>'agent_memory_type' AS type, t.metadata->>'agent_memory_task' AS task,
            t.metadata->>'agent_memory_runtime' AS runtime, t.embedding IS NOT NULL AS vector,
            (SELECT a.actor_name FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.seq LIMIT 1) AS actor
       FROM thoughts t WHERE t.id = ${id}::uuid`);
@@ -3091,6 +3094,27 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   assert(alpha.status === 200 && beta.status === 409 && beta.body.code === "IDEMPOTENCY_KEY_REUSED" && beta.body.retryable === false && beta.body.idempotency_key === "am-key-1:0"
     && !JSON.stringify(beta.body).includes("alpha") && alphaAgain.status === 200 && ids(alphaAgain).join() === ids(alpha).join(),
     `an idempotency key holding other text is refused, naming the key and not the text; the same text answers its memory (${beta.status} ${JSON.stringify(beta.body)})`);
+  const gamma = await am("writeback", { ...idem, workspace_id: "ws-idem-2", memory_payload: { decisions: ["am_ledger beta."] } }, { as: KEYS.capture });
+  const gammaAgain = await am("writeback", { ...idem, workspace_id: "ws-idem-2", memory_payload: { decisions: ["am_ledger alpha."] } }, { as: KEYS.capture });
+  assert(gamma.status === 200 && mems(gamma)[0]?.content === "am_ledger beta." && ids(gamma)[0] !== ids(alpha)[0]
+    && gammaAgain.status === 409 && gammaAgain.body.code === "IDEMPOTENCY_KEY_REUSED",
+    `a key is the workspace's own: the same key in another workspace is another memory, never answered or refused by the first's (${gamma.status} ${JSON.stringify(gamma.body).slice(0, 160)}; ${gammaAgain.status})`);
+  // Two write-backs racing with one key and other texts: both pass the first check before either inserts (the chat stub
+  // waits), so the loser meets the winner at the insert and is refused as above, never answered the winner's memory.
+  chatDelayMs = 300;
+  let raced: Called[];
+  try {
+    raced = await Promise.all(["am_ledger race one.", "am_ledger race two."].map((text) =>
+      am("writeback", { ...base, workspace_id: "ws-race", idempotency_key: "race-key", memory_payload: { decisions: [text] } }, { as: KEYS.capture })));
+  } finally {
+    chatDelayMs = 0;
+  }
+  const won = raced.find((r) => r.status === 200);
+  const lost = raced.find((r) => r.status !== 200);
+  const raceRows = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.memories WHERE workspace_id = 'ws-race'`);
+  assert(won !== undefined && lost?.status === 409 && lost.body.code === "IDEMPOTENCY_KEY_REUSED" && raceRows.n === 1
+    && mems(won)[0]?.content === (raced.indexOf(won) === 0 ? "am_ledger race one." : "am_ledger race two."),
+    `two write-backs racing on one key with other texts: one memory, its own text answered to its sender, the other refused (${raced.map((r) => r.status).join(", ")}; ${raceRows.n} row)`);
   const beforeUnsafe = await rows("memories");
   const unsafe = await am("writeback", { ...base, memory_payload: { decisions: ["am_ledger is fine."], lessons: [`am_ledger uses sk-${"a".repeat(24)}`] } });
   const rejected = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_rejected' AND workspace_id = 'ws-am'`);
@@ -3121,7 +3145,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     `…max_items caps it; another workspace recalls its own memory of the shared thought, OpenClaw's alias answered in kind (${ids(capped).length}, ${ids(elsewhere).join()})`);
   const traced = await rest("POST", "/v1/plugins/agent-memory/recall", rq({ scope: { include_unconfirmed: true } }), KEYS.writer);
   const requestId = String(traced.body.request_id);
-  const items = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.recall_items i JOIN plugin_agent_memory.recall_traces t ON t.id = i.trace_id WHERE t.request_id = ${requestId}::uuid`);
+  const items = !UUID.test(requestId) ? { n: -1 } : await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.recall_items i JOIN plugin_agent_memory.recall_traces t ON t.id = i.trace_id WHERE t.request_id = ${requestId}::uuid`);
   assert(traced.status === 200 && UUID.test(requestId) && ids(traced).join() === ids(all).join() && items.n === ids(all).length,
     `recall under a write key is traced: its request_id, an item per memory returned (${traced.status} ${requestId}, ${items.n})`);
 
@@ -3170,6 +3194,15 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     && (await thoughtOf(w[0]!.thought_id))?.source === "agent-memory" && ids(await am("list_memories", { workspace_id: "ws-other" }, { as: KEYS.reader })).length === 1
     && mems(await am("list_memories", { workspace_id: "ws-other" }, { as: KEYS.reader }))[0]?.thought_id === w[0]?.thought_id,
     `edit: the new text captured as a thought of its own the memory now names; the old thought, another workspace's memory's too, left as it was (${JSON.stringify(em).slice(0, 160)})`);
+  const editedThought = await thoughtOf(em?.thought_id ?? null);
+  const resent = await am("writeback", firstBody);
+  assert(editedThought?.task === "task-1" && editedThought.ws === "ws-am" && resent.status === 200 && ids(resent).join() === ids(first).join()
+    && mems(resent)[0]?.content === "am_ledger keeps the ledger in Postgres, replayed hourly.",
+    `…the new thought keeps the memory's agent_memory_* keys, its task among them; the first write-back sent again still answers its memories, the edited one as it stands (${JSON.stringify(editedThought)}; ${resent.status} ${JSON.stringify(resent.body).slice(0, 120)})`);
+  const unsafeEdit = await review(w[1]!.memory_id, { action: "edit", content: "user: a\nassistant: b\n".repeat(5) });
+  const keptLesson = await am("get_memory", { memory_id: w[1]!.memory_id }, { as: KEYS.reader });
+  assert(unsafeEdit.status === 422 && unsafeEdit.body.code === "UNSAFE_WRITEBACK" && unsafeEdit.body.unsafe?.[0]?.reason === "raw_transcript_like" && keptLesson.body.memory?.content === "am_ledger replays nightly.",
+    `an edit whose text looks like a transcript is refused as a write-back is, the memory left as it was (${unsafeEdit.status} ${JSON.stringify(unsafeEdit.body)})`);
   const nothing = await review(w[0]!.memory_id, { action: "edit" });
   const self = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[2]!.memory_id });
   const missing = await review(w[2]!.memory_id, { action: "merge", related_memory_id: NO_ROW });
@@ -3193,6 +3226,167 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const disputed = await review(w[1]!.memory_id, { action: "dispute" });
   assert(disputed.body.memory?.lifecycle_status === "disputed" && disputed.body.memory?.provenance?.status === "disputed" && disputed.body.memory?.use_policy?.can_use_as_instruction === false,
     "dispute: disputed, never an instruction");
+
+  // ── Each rule on its own (review pass 1's mutants): the exported rules as tables, then a workspace of its own ──
+  {
+    const UNSAFE: [string, string[]][] = [
+      ["a plain lesson", []],
+      ["-----BEGIN RSA PRIVATE KEY-----\nabc", ["private_key"]],
+      ["-----BEGIN OPENSSH PRIVATE KEY-----", ["private_key"]],
+      [`key sk-${"a".repeat(20)}`, ["api_key"]],
+      [`key sk-${"a".repeat(19)}`, []],
+      [`password: ${"x".repeat(12)}`, ["credential_like_string"]],
+      [`TOKEN=${"x".repeat(12)}`, ["credential_like_string"]],
+      [`password: ${"x".repeat(11)}`, []],
+      ["```a``` and ```b```", ["large_code_block"]],
+      ["```a``` and ```b", []],
+      [Array(21).fill("y".repeat(121)).join("\n"), ["large_code_block"]],
+      [Array(20).fill("y".repeat(121)).join("\n"), []],
+      ["z".repeat(15001), ["raw_transcript_like"]],
+      ["z".repeat(15000), []],
+      [Array(9).fill("user: hi").join("\n"), ["raw_transcript_like"]],
+      [Array(8).fill("Assistant: hi").join("\n"), []],
+    ];
+    const unsafeMiss = UNSAFE.filter(([t, want]) => JSON.stringify(amUnsafe(t)) !== JSON.stringify(want)).map(([t]) => t.slice(0, 40));
+    assert(unsafeMiss.length === 0, `unsafeReasons: each rule at its edge, ${UNSAFE.length} cases (missed: ${unsafeMiss.join(" | ") || "none"})`);
+    const m = (provenance_status: string, can_use_as_instruction: boolean, can_use_as_evidence: boolean, review_status: string, confidence: number) =>
+      ({ provenance_status, can_use_as_instruction, can_use_as_evidence, review_status, confidence });
+    const RANK: [ReturnType<typeof m>, number, number][] = [
+      [m("user_confirmed", true, true, "confirmed", 1), 0.5, 1.3],
+      [m("imported", false, true, "evidence_only", 0), 0, 0.35],
+      [m("observed", false, false, "pending", 0.5), 0, -0.055],
+      [m("generated", false, true, "rejected", 0), 0, -0.12],
+      [m("inferred", false, true, "stale", 0), 0.25, 0.08],
+      [m("disputed", false, true, "restricted", 0.2), 0, -0.14],
+    ];
+    const rankMiss = RANK.filter(([row, sim, want]) => Math.abs(amRank(row as never, sim) - want) > 1e-9).map(([row, sim, want]) => `${row.provenance_status}@${sim}: ${amRank(row as never, sim)} ≠ ${want}`);
+    assert(rankMiss.length === 0, `rankMemory: similarity plus each weight, ${RANK.length} cases (missed: ${rankMiss.join(" | ") || "none"})`);
+    const shape = (o: { ok: boolean; refusal?: Record<string, unknown> }) => JSON.stringify([o.ok, o.refusal?.status, o.refusal?.code, o.refusal?.refused, Object.keys(o.refusal ?? {}).length]);
+    assert(shape(amCoreRefused({ code: "X", retryable: true }) as never) === JSON.stringify([false, 503, "CORE_REFUSED", "X", 3])
+      && shape(amCoreRefused({ code: "Y", retryable: false }) as never) === JSON.stringify([false, 422, "CORE_REFUSED", "Y", 3]),
+      "coreRefused: a core refusal worth retrying is a 503, any other a 422, naming it");
+
+    const X = { schema_version: WB, workspace_id: "ws-x", project_id: "px", task_id: "tx-1", step_id: "s1", runtime: { name: "rx" } };
+    const body = (r: { body: Body }) => (r.body.memories ?? []) as Body[];
+    const confirmedX = { default_status: "user_confirmed", requires_review: false };
+    const one_ = async (text: string, over: Body = {}) => body(await am("writeback", { ...X, memory_payload: { decisions: [text] }, ...over }))[0]!;
+
+    // requires_review keeps even a person's word waiting; a generated memory is an agent's.
+    const held = await one_("xmem_held decision.", { provenance: { default_status: "user_confirmed", requires_review: true } });
+    const heldImported = await one_("xmem_held import.", { provenance: { default_status: "imported", requires_review: true } });
+    const generated = await one_("xmem_generated decision.");
+    assert(held.review_status === "pending" && held.use_policy.can_use_as_instruction === false && heldImported.review_status === "pending"
+      && generated.provenance.created_by === "agent" && held.provenance.created_by === "agent" && heldImported.provenance.created_by === "import",
+      `requires_review keeps a user_confirmed or imported memory waiting, evidence alone; created_by is import for an import, else agent (${JSON.stringify([held.review_status, heldImported.review_status, held.provenance.created_by])})`);
+
+    // The columns a write-back sets.
+    const before = Date.now();
+    const lesson = `xmem_cols   ${"word ".repeat(60)}`;
+    const col = body(await am("writeback", { ...X, models_used: [{ provider: "acme", model: "m-1", role: "r" }, { provider: "other", model: "m-2", role: "r" }],
+      provenance: { default_status: "imported", confidence: 0.8, requires_review: false }, retention: { stale_after_days: 30 }, memory_payload: { lessons: [lesson] } }))[0]!;
+    assert(col.provenance.model === "m-1" && col.provenance.confidence === 0.8 && col.summary === lesson.replace(/\s+/g, " ").slice(0, 140)
+      && Date.parse(col.freshness.last_confirmed_at) >= before - 1000 && Math.abs(Date.parse(col.freshness.stale_after) - (before + 30 * 86_400_000)) < 120_000
+      && generated.freshness.last_confirmed_at === null && generated.freshness.stale_after === null,
+      `a write-back's columns: the first model, the confidence, the summary's 140 characters, confirmed now when confirmed, stale after its days (${JSON.stringify([col.provenance, col.summary.length, col.freshness])})`);
+
+    // The trust a runtime declares reaches its thought, lowering the key's (the writer classified operator for this).
+    const kindBefore = await one<{ kind: string | null } | undefined>(sql`SELECT kind FROM ob1_agents WHERE label = 'writer'`);
+    await sql`SELECT set_agent_kind('writer', 'operator')`;
+    try {
+      await am("writeback", { ...X, trust: "ingested", memory_payload: { decisions: ["xmem_trust declared."] } });
+      await am("writeback", { ...X, memory_payload: { decisions: ["xmem_trust undeclared."] } });
+      const trustOf = async (text: string) => (await one<{ t: string | null } | undefined>(sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE content = ${text}`))?.t ?? null;
+      const [declared, undeclared] = [await trustOf("xmem_trust declared."), await trustOf("xmem_trust undeclared.")];
+      assert(declared === "ingested" && undeclared === "operator", `the runtime's trust is each memory's thought's, the key's when it declares none (${declared}, ${undeclared})`);
+    } finally {
+      if (kindBefore?.kind) await sql`SELECT set_agent_kind('writer', ${kindBefore.kind})`;
+      else await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+    }
+
+    // The default idempotency key: the workspace, runtime, task, step and the memory's type and text.
+    const same = { decisions: ["xmem_key same text."] };
+    const k0 = await one_("", { memory_payload: same });
+    const kTask = await one_("", { task_id: "tx-2", memory_payload: same });
+    const kStep = await one_("", { step_id: "s2", memory_payload: same });
+    const kRuntime = await one_("", { runtime: { name: "ry" }, memory_payload: same });
+    const kType = await one_("", { memory_payload: { lessons: ["xmem_key same text."] } });
+    const kAgain = await one_("", { memory_payload: same });
+    assert(new Set([k0, kTask, kStep, kRuntime, kType].map((x) => x.memory_id)).size === 5 && kAgain.memory_id === k0.memory_id && kType.memory_type === "lesson",
+      "the default key holds the task, the step, the runtime and the type: each a memory of its own, the same write-back the same memory");
+
+    // Newest first, and an id in any case.
+    const queue = (await am("review_queue", { workspace_id: "ws-x" }, { as: KEYS.reader })).body.memories as Body[];
+    const listed = (await am("list_memories", { workspace_id: "ws-x" }, { as: KEYS.reader })).body.memories as Body[];
+    const newestFirst = (xs: Body[]) => xs.length > 2 && xs.every((x, i) => i === 0 || Date.parse(xs[i - 1].freshness.created_at) >= Date.parse(x.freshness.created_at));
+    assert(newestFirst(queue) && queue[0].memory_id === kType.memory_id && newestFirst(listed) && listed[0].memory_id === kType.memory_id && listed.at(-1)?.memory_id === held.memory_id,
+      `review_queue and list_memories answer newest first (${queue.length}, ${listed.length})`);
+    const upper = await am("get_memory", { memory_id: held.memory_id.toUpperCase() }, { as: KEYS.reader });
+    assert(upper.status === 200 && upper.body.memory?.memory_id === held.memory_id, `a memory id in upper case finds its memory (${upper.status})`);
+
+    // Recall's filters, each on its own.
+    const xr = async (scope: Body = {}) => ids(await am("recall", { schema_version: RC, workspace_id: "ws-x", project_id: "px", query: "what xmem_scope says", scope }, { as: KEYS.reader }));
+    const toReject = await one_("xmem_scope rejected one.", { provenance: confirmedX });
+    const toDispute = await one_("xmem_scope disputed one.", { provenance: confirmedX });
+    const toStale = await one_("xmem_scope stale one.", { provenance: confirmedX });
+    const personalX = await one_("xmem_scope personal one.", { project_id: null, provenance: confirmedX });
+    const shown = await xr();
+    const wideNoPersonal = await xr({ project_only: false });
+    assert([toReject, toDispute, toStale].every((x) => shown.includes(x.memory_id)) && !shown.includes(personalX.memory_id) && !wideNoPersonal.includes(personalX.memory_id),
+      `a personal memory is left out unless asked for, project_only or not (${shown.length}, ${wideNoPersonal.length})`);
+    const review = (memory_id: string, f: Body) => am("review_memory", { memory_id, ...f });
+    await review(toReject.memory_id, { action: "reject" });
+    await review(toDispute.memory_id, { action: "dispute" });
+    const staled = (await review(toStale.memory_id, { action: "mark_stale" })).body.memory as Body;
+    const afterReviews = await xr();
+    const withStale = await xr({ include_stale: true });
+    assert([toReject, toDispute, toStale].every((x) => !afterReviews.includes(x.memory_id) && withStale.includes(x.memory_id))
+      && staled.use_policy.can_use_as_instruction === false && staled.review_status === "stale",
+      `rejected, disputed and stale memories each left out unless include_stale; mark_stale ends instruction use (${afterReviews.length}, ${withStale.length})`);
+    const rejectedList = ids(await am("list_memories", { workspace_id: "ws-x", lifecycle_status: "rejected" }, { as: KEYS.reader }));
+    assert(rejectedList.join() === toReject.memory_id, `list_memories by lifecycle status (${rejectedList.length})`);
+
+    // The review actions not driven above.
+    const ev = (await review(held.memory_id, { action: "evidence_only" })).body.memory as Body;
+    assert(ev.review_status === "evidence_only" && ev.use_policy.can_use_as_instruction === false && ev.use_policy.can_use_as_evidence === true && ev.use_policy.requires_user_confirmation === false,
+      `evidence_only: evidence, never an instruction, no longer waiting (${JSON.stringify(ev.use_policy)})`);
+    const conf = (await review(generated.memory_id, { action: "confirm" })).body.memory as Body;
+    assert(conf.use_policy.requires_user_confirmation === false && Date.parse(conf.freshness.last_confirmed_at) >= before - 1000,
+      `confirm: no longer waiting, confirmed now (${JSON.stringify(conf.freshness)})`);
+    const sup = await review(kTask.memory_id, { action: "supersede", related_memory_id: kStep.memory_id });
+    const supRel = (await am("get_memory", { memory_id: kTask.memory_id }, { as: KEYS.reader })).body.relations as Body[];
+    assert(sup.status === 200 && JSON.stringify(supRel) === JSON.stringify([{ from_memory_id: kTask.memory_id, to_memory_id: kStep.memory_id, relation: "supersedes" }]),
+      `supersede: the relation recorded as supersedes (${JSON.stringify(supRel)})`);
+    const events = (await sql`SELECT event_type FROM plugin_agent_memory.audit_events WHERE memory_id = ${generated.memory_id}::uuid ORDER BY created_at, id`).map((r: { event_type: string }) => r.event_type);
+    assert(events.join() === "memory_written,memory_confirmed", `the audit: each memory written, each review by its event (${events.join()})`);
+
+    // Usage is the trace's own: a second recall's items untouched, a memory the recall did not return not counted.
+    const recallX = { schema_version: RC, workspace_id: "ws-x", project_id: "px", query: "what xmem_cols says", scope: { include_unconfirmed: true } };
+    const t1 = await rest("POST", "/v1/plugins/agent-memory/recall", recallX, KEYS.writer);
+    const t2 = await rest("POST", "/v1/plugins/agent-memory/recall", recallX, KEYS.writer);
+    const target = (t1.body.memories as Body[]).find((x) => x.memory_id === col.memory_id);
+    const other = (t1.body.memories as Body[]).find((x) => x.memory_id !== col.memory_id && (t2.body.memories as Body[]).some((y) => y.memory_id === x.memory_id));
+    const marked = await am("record_usage", { request_id: t1.body.request_id, used_memory_ids: [col.memory_id],
+      ignored: [{ memory_id: other?.memory_id, reason: "not needed" }, { memory_id: personalX.memory_id, reason: "never returned" }] });
+    const second = ((await am("get_recall", { request_id: t2.body.request_id }, { as: KEYS.reader })).body.items ?? []) as Body[];
+    const firstItems = ((await am("get_recall", { request_id: t1.body.request_id }, { as: KEYS.reader })).body.items ?? []) as Body[];
+    assert(target !== undefined && other !== undefined && JSON.stringify(marked.body.recorded) === JSON.stringify({ used: 1, ignored: 1 })
+      && second.find((i) => i.memory.memory_id === col.memory_id)?.used === null && second.find((i) => i.memory.memory_id === other?.memory_id)?.ignored_reason === null
+      && firstItems.find((i) => i.memory.memory_id === other?.memory_id)?.ignored_reason === "not needed",
+      `record_usage marks its own trace's items alone, used or ignored, counting only memories it returned (${JSON.stringify(marked.body)}; second ${JSON.stringify(second.map((i) => i.used))})`);
+    // Each item's score is its similarity plus what the memory's provenance, policy, review and confidence add, as it stood.
+    const scoreMiss = firstItems.filter((i) => typeof i.similarity !== "number" || i.similarity <= 0 || Math.abs(i.ranking_score - amRank({ provenance_status: i.memory.provenance.status,
+      can_use_as_instruction: i.memory.use_policy.can_use_as_instruction, can_use_as_evidence: i.memory.use_policy.can_use_as_evidence, review_status: i.memory.review_status,
+      confidence: i.memory.provenance.confidence } as never, i.similarity)) > 1e-3);
+    assert(firstItems.length > 0 && scoreMiss.length === 0, `a traced recall's scores are rankMemory over each hit's similarity (${firstItems.length} items, ${scoreMiss.length} off)`);
+    const ev2 = (await review(col.memory_id, { action: "evidence_only" })).body.memory as Body;
+    assert(col.use_policy.can_use_as_instruction === true && ev2.use_policy.can_use_as_instruction === false && ev2.review_status === "evidence_only",
+      "evidence_only takes a confirmed memory's instruction use away");
+    const farYear = body(await am("writeback", { ...X, source_refs: [{ kind: "doc", timestamp: "+010000-01-01T00:00:00Z" }, { kind: "doc2", timestamp: "9999-12-31T23:59:59Z" }],
+      memory_payload: { decisions: ["xmem_far year."] } }))[0];
+    const farRefs = (await am("get_memory", { memory_id: farYear?.memory_id }, { as: KEYS.reader })).body.source_refs as Body[] | undefined;
+    assert(farRefs?.find((r) => r.kind === "doc")?.timestamp === null && farRefs?.find((r) => r.kind === "doc2")?.timestamp === "9999-12-31T23:59:59.000Z",
+      `a source time past year 9999 is stored as none, year 9999 kept (${JSON.stringify(farRefs)})`);
+  }
 
   // ── The embedding provider down ──
   embedDown = true;

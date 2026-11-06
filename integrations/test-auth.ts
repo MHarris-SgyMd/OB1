@@ -107,8 +107,9 @@ const LEGACY_KEY = "old-style-key";
 const FORWARD_KEY = "f".repeat(64);
 const KEYS = [`laptop:write:${hashKey(WRITE_KEY)}`, `chatgpt:read:${hashKey(READ_KEY)}`].join(",");
 
-// The HTTP APIs' kind, its routes and its read probe, left with the last of them, agent-memory-api, which is the
-// agent-memory plugin since SMD-2690; its route classifier (RPC_READS, LOG_TABLES) went with it.
+// The HTTP APIs' kind, its routes and its read probe, left with the last behind this module, agent-memory-api, which
+// is the agent-memory plugin since SMD-2690 (smart-ingest checks its one key itself, below); its route classifier
+// (RPC_READS, LOG_TABLES) went with it.
 type Kind = "worker";
 type Server = {
   /** Relative to the repository root. */

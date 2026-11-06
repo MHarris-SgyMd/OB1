@@ -78,7 +78,7 @@ type Row = {
   lifecycle_status: (typeof LIFECYCLE)[number]; provenance_status: string; confidence: number; created_by: string;
   runtime_name: string | null; model: string | null; can_use_as_instruction: boolean; can_use_as_evidence: boolean;
   requires_user_confirmation: boolean; review_status: (typeof REVIEW)[number]; last_confirmed_at: Date | null; stale_after: Date | null;
-  created_at: Date; content_hash: string | null; metadata: Record<string, unknown>;
+  created_at: Date; task_id: string | null; content_hash: string | null; metadata: Record<string, unknown>;
 };
 const iso = (d: Date | string | null) => (d === null ? null : new Date(d).toISOString());
 /** A JSON list as a bound parameter: Postgres reads it back as a set of rows. */
@@ -122,7 +122,7 @@ const asMemories = async (sql: PluginSql, rows: Row[]) => {
 };
 
 /** A core operation's refusal, as this plugin's: retryable stays retryable (503), anything else is 422. */
-const coreRefused = (r: { code: string; retryable: boolean }): PluginOutcome<never> =>
+export const coreRefused = (r: { code: string; retryable: boolean }): PluginOutcome<never> =>
   refuse(r.retryable ? 503 : 422, "CORE_REFUSED", { refused: r.code });
 
 /** What makes a write-back unsafe to keep, the old server's tests unchanged: a key, a credential, a large code block, a transcript. */
@@ -210,7 +210,7 @@ const WritebackInput = {
   task_id: Id.nullish().describe("The runtime's task"),
   flow_id: Id.nullish().describe("The runtime's flow"),
   step_id: Id.nullish().describe("The task's step, part of the default idempotency key"),
-  idempotency_key: Id.nullish().describe("The write-back's key: each memory's is it with its index. Absent: one made of the workspace, runtime, task, step and the memory's hash"),
+  idempotency_key: Id.nullish().describe("The write-back's key, the workspace's own: each memory's is it with its index. Absent: one made of the workspace, runtime, task, step and the memory's hash"),
   content_hash: Id.nullish().describe("Accepted for the old clients; each memory's hash is computed"),
   trust: z.enum(["operator", "agent", "ingested"]).nullish().describe("What the memories are, forwarded to each capture: it can lower your key's trust, never raise it. Absent or null: your key's"),
   channel: Channel.describe("Where the task ran: kind, id, thread_id"),
@@ -262,6 +262,7 @@ const MemoryId = z.string().uuid().describe("The memory's id");
 const RequestId = z.string().uuid().describe("The recall's request_id");
 const noSuchMemory = (memory_id: string) => refuse(404, "NO_SUCH_MEMORY", { memory_id });
 const noSuchRecall = (request_id: string) => refuse(404, "NO_SUCH_RECALL", { request_id });
+const keyReused = (idempotency_key: string) => refuse(409, "IDEMPOTENCY_KEY_REUSED", { idempotency_key, message: "this key already holds another memory in this workspace" });
 
 /** MCP hints: every operation reaches the plugin's own tables, and the core's thoughts through ctx.call. */
 const ADDS = { destructiveHint: false, openWorldHint: false } as const;
@@ -288,7 +289,7 @@ async function memoriesOf(sql: PluginSql, ids: string[]): Promise<Row[]> {
   const rows = await sql<Row>`
     SELECT id, thought_id, workspace_id, project_id, channel_id, visibility, memory_type, summary, content, lifecycle_status, provenance_status,
            confidence::float8 AS confidence, created_by, runtime_name, model, can_use_as_instruction, can_use_as_evidence, requires_user_confirmation,
-           review_status, last_confirmed_at, stale_after, created_at, content_hash, metadata
+           review_status, last_confirmed_at, stale_after, created_at, task_id, content_hash, metadata
       FROM memories WHERE id IN (SELECT jsonb_array_elements_text((${json(ids)}::text)::jsonb)::uuid)`;
   const by = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
   return ids.flatMap((id) => by.get(id.toLowerCase()) ?? []);
@@ -386,10 +387,12 @@ export default definePlugin({
           const contentHash = await sha256Hex(`${row.memory_type}:${row.content}`);
           const base = req.idempotency_key || `${req.workspace_id}:${req.runtime.name}:${req.task_id || "taskless"}:${req.step_id || "step"}:${contentHash}`;
           const key = `${base}:${index}`;
-          const [held] = await ctx.db.tx((sql) => sql<{ id: string; content_hash: string | null }>`SELECT id::text AS id, content_hash FROM memories WHERE idempotency_key = ${key}`);
+          const [held] = await ctx.db.tx((sql) => sql<{ id: string; content_hash: string | null }>`
+            SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND idempotency_key = ${key}`);
           if (held) {
-            // The same memory sent again. A key holding other text is not answered with it: a key that can only capture reads no memory it did not send.
-            if (held.content_hash !== contentHash) return refuse(409, "IDEMPOTENCY_KEY_REUSED", { idempotency_key: key, message: "this key already holds another memory" });
+            // The same memory sent again. A key holding other text is refused, never answered with that text. (A key that
+            // can only capture and sends a memory's key and its text is answered that memory as it stands now, reviewed or not.)
+            if (held.content_hash !== contentHash) return keyReused(key);
             ids.push(held.id);
             continue;
           }
@@ -399,7 +402,7 @@ export default definePlugin({
           // its memory with it: the brain's vector mender fills the vector in, and recall finds it from then on.
           if (!captured.ok) return coreRefused(captured.refusal);
           const thoughtId = captured.value.id;
-          const id = await ctx.db.tx(async (sql) => {
+          const id = await ctx.db.tx(async (sql): Promise<string | null> => {
             const [made] = await sql<{ id: string }>`
               INSERT INTO memories (thought_id, workspace_id, project_id, channel_kind, channel_id, channel_thread_id, visibility, memory_type, summary, content,
                                     provenance_status, confidence, created_by, runtime_name, runtime_version, provider, model, task_id, flow_id,
@@ -412,10 +415,14 @@ export default definePlugin({
                       ${confirmed}, true, ${!confirmed}, ${confirmed ? "confirmed" : "pending"}, ${confirmed ? new Date().toISOString() : null}::timestamptz, ${staleAfter}::timestamptz,
                       ${key}, ${contentHash},
                       (${json({ source_refs: req.source_refs, models_used: req.models_used, retention: req.retention, writeback_schema_version: req.schema_version })}::text)::jsonb)
-              ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+              ON CONFLICT (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
               RETURNING id::text AS id`;
-            // Another write-back with this key landed first: its memory is this one.
-            if (!made) return (await sql<{ id: string }>`SELECT id::text AS id FROM memories WHERE idempotency_key = ${key}`)[0].id;
+            if (!made) {
+              // Another write-back with this key landed first: its memory is this one if it holds this text, as above.
+              const [first] = await sql<{ id: string; content_hash: string | null }>`
+                SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND idempotency_key = ${key}`;
+              return first.content_hash === contentHash ? first.id : null;
+            }
             for (const s of req.source_refs) {
               await sql`
                 INSERT INTO source_refs (memory_id, source_kind, uri, title, source_timestamp)
@@ -431,6 +438,8 @@ export default definePlugin({
               { provenance_status: req.provenance.default_status, review_status: confirmed ? "confirmed" : "pending" });
             return made.id;
           });
+          // The race's loser with other text: its thought stays, as any captured thought does, and no memory names it.
+          if (id === null) return keyReused(key);
           ids.push(id);
         }
         return ctx.db.tx(async (sql) => {
@@ -563,7 +572,7 @@ export default definePlugin({
     }),
     review_memory: operation({
       title: "Review an agent memory",
-      description: "A person's verdict on a memory: confirm (user_confirmed, usable as an instruction), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
+      description: "A person's verdict on a memory: confirm (user_confirmed, usable as an instruction), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), an edit's text that looks like a key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -585,6 +594,9 @@ export default definePlugin({
         if (related && related.toLowerCase() === r.memory_id.toLowerCase()) return refuse(400, "SAME_MEMORY", { memory_id: r.memory_id });
         const first = await ctx.db.tx((sql) => memoryById(sql, r.memory_id));
         if (!first) return noSuchMemory(r.memory_id);
+        // An edit's text is held to the write-back's rule: it becomes a thought every key's search finds.
+        const unsafe = r.action === "edit" && r.content !== undefined ? unsafeReasons(r.content).map((reason) => ({ reason, memory_type: first.memory_type })) : [];
+        if (unsafe.length > 0) return refuse(422, "UNSAFE_WRITEBACK", { unsafe });
         // The new text's thought first, so a refused capture changes nothing here. Captured, not edited in place: the old
         // thought may be another memory's too. It stays, as any captured thought does.
         let thoughtId: string | null = null;
@@ -598,7 +610,6 @@ export default definePlugin({
           if (!before) return noSuchMemory(r.memory_id);
           if (related && !(await memoryById(sql, related))) return noSuchMemory(related);
           const a = r.action;
-          const contentHash = a === "edit" && r.content !== undefined ? await sha256Hex(`${first.memory_type}:${r.content}`) : null;
           await sql`
             UPDATE memories SET
               review_status = CASE ${a} WHEN 'confirm' THEN 'confirmed' WHEN 'evidence_only' THEN 'evidence_only' WHEN 'reject' THEN 'rejected'
@@ -611,7 +622,6 @@ export default definePlugin({
               last_confirmed_at = CASE ${a} WHEN 'confirm' THEN now() ELSE last_confirmed_at END,
               visibility = CASE ${a} WHEN 'restrict_scope' THEN ${r.visibility ?? "personal"} ELSE visibility END,
               content = coalesce(${a === "edit" ? r.content ?? null : null}::text, content),
-              content_hash = coalesce(${contentHash}::text, content_hash),
               thought_id = coalesce(${thoughtId}::uuid, thought_id),
               summary = coalesce(${a === "edit" ? r.summary ?? null : null}::text, summary),
               updated_at = now()

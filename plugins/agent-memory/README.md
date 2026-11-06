@@ -13,7 +13,7 @@ An agent runtime (OpenClaw, Hermes, Codex, Claude Code, an n8n flow) asks the br
   - Its provenance, scope, review state and use policy, the models that made it and where it came from are kept in the plugin's own tables.
   - A memory is confirmed at once, usable as an instruction, only when the request says `user_confirmed` or `imported` and `requires_review: false`. Any other waits for review, usable as evidence only.
   - It is refused as a whole, with nothing written, when any memory looks like a private key, an API key, a credential, a large code block or a transcript (`UNSAFE_WRITEBACK`, which lists why).
-  - Each memory has an idempotency key, so the same write-back sent again answers the memories it wrote and writes nothing.
+  - Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing, even after a person edited one.
 - **`agent_memory_recall`** (read) searches the brain by meaning, keeps the hits that are this workspace's memories and in scope, and ranks them by similarity and by what their provenance, use policy, review and confidence add. Under a write key the recall is traced, and its `request_id` is the one to report usage against. Under a read key nothing is stored.
 - **`agent_memory_record_usage`** (write) marks the memories a traced recall returned as used, or ignored with a reason.
 - **`agent_memory_review_queue`**, **`agent_memory_list_memories`** and **`agent_memory_get_memory`** (read) list what waits for review, list a workspace's memories by status, runtime, kind or task, and show one memory with its sources, models and relations.
@@ -41,15 +41,21 @@ The request and answer bodies keep the old server's contract: the `openbrain.age
 - **The embedding provider** is the brain's, through the core. While it does not answer, a recall is refused `PROVIDER_UNAVAILABLE` (503, retryable): send it again. A write-back keeps its memories all the same, and recall finds them once the brain's vector mender has filled their thoughts' vectors in. The old server failed either with a 500.
 - **A recall that finds nothing** answers no memories. The old server answered the workspace's newest memories when the search found no thought at all.
 - **An edit's text** is captured as a thought of its own, which the memory then names. The old server changed the memory row alone, so a recall kept finding it by its old text. The old thought stays: the core keeps one thought per text, so it may be another memory's too.
-- **Answers.** Every memory carries its `memory_type`, `thought_id`, `review_status` and `lifecycle_status` beside the old fields, and `related_artifacts` lists its artifact. `get_memory` and `review_memory` answer that shape too, where the old server answered the raw row. A refusal is the plugin's code (`NO_SUCH_MEMORY`, `UNSAFE_WRITEBACK`, …), not an `error` string.
+- **Answers.** Every memory carries its `memory_type`, `thought_id`, `review_status` and `lifecycle_status` beside the old fields, and `related_artifacts` lists its artifact. `get_memory` and `review_memory` answer that shape too, where the old server answered the raw row. `record_usage` answers `{"recorded": {"used", "ignored"}}`, the memories it marked, where the old server answered `{"ok": true}`. `get_recall`'s trace has no internal `id`, and each item carries its memory as `memory`, where the old server's carried `agent_memories`.
+- **Refusals.** A refusal is the plugin's code (`NO_SUCH_MEMORY`, `UNSAFE_WRITEBACK`, …), not an `error` string. New ones: an idempotency key holding other text (`IDEMPOTENCY_KEY_REUSED`), an edit with nothing to change (`NOTHING_TO_CHANGE`), a merge or supersede naming the memory itself (`SAME_MEMORY`) or a memory that is not there, and a `restrict_scope` to anything but the five visibilities. A memory id or a `request_id` that is not a UUID is a 400, where it was a 404. An edit's text is held to the write-back's unsafe check.
+- **The reviewer.** A review records your key's name as its `actor_id`. A body's `actor_id` is ignored; `actor_label` is kept.
+- **The source.** A new memory's thought has `source: agent-memory` (a source takes hyphens, not underscores). The old server's thoughts keep `agent_memory`, so a filter on the source sees both.
+- **CORS.** The old server answered any origin and `OPTIONS`. The plugin's routes are the REST core's, which answers a browser as the core does.
+- **Source refs.** A source ref's `timestamp` that is no time is stored as none. The old server failed the write-back on it.
 - **Artifacts.** An `artifact_reference` memory keeps its own artifact. The old server gave each one every artifact of its write-back.
-- **The thought's metadata** is six flat `agent_memory_*` keys. The old server wrote `source_type`, `topics`, `people` and a nested `agent_memory` object, which a capture through the core does not take: the core's extractor gives the thought its topics and people.
-- **Bounds.** Each memory is at most 16,384 characters (over 15,000 is refused as transcript-like, as before), a label or id 200, a uri 4,096, and each list 50 items.
+- **Idempotency keys** are a workspace's own: the same key in two workspaces is two memories. The old server's were global, so a write-back to one workspace could be answered another's memory.
+- **The thought's metadata** is six flat `agent_memory_*` keys. The old server wrote `source_type`, `topics`, `people` and a nested `agent_memory` object, which a capture through the core does not take: the core's extractor gives the thought its topics and people. A text the brain already holds is one thought: a write key's write-back merges its keys into it, so they name the last write-back's workspace and type (a capture key's leaves them), while each memory's own row keeps its own.
+- **Bounds.** Each memory is at most 16,384 characters (over 15,000 is refused as transcript-like, as before), a recall's query 4,000, a label or id 200, a uri 4,096, and each list 50 items.
 
 ## Prerequisites
 
 - A working brain stack (`deploy/compose.yaml`), as [SETUP.md](../../SETUP.md) brings it up.
-- A key for each runtime: `bun keygen.ts --name <runtime> --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env`. Add it before step 2, which recreates the servers that read it. A capture key can write back alone; a read key can recall and list alone.
+- A key for each runtime: `bun keygen.ts --name <runtime> --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env`. Add it before step 2, which recreates the servers that read it. A capture key can write back alone; a read key can recall and list alone. Once the stack is up (step 2), give each runtime's key its kind, so its writes are recorded as an agent's and the trust a write-back declares is weighed against it: from `deploy/`, `docker compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('<runtime>', 'agent');"`.
 
 ## Turn it on
 
@@ -61,18 +67,18 @@ The request and answer bodies keep the old server's contract: the `openbrain.age
    ```
 
    With a model provider that is not local, the egress policy decides whether a capture's or a search's text may leave for it, and the default (`deny`) lets nothing out that no term allows. Allow each runtime's key by its name, beside any terms already there: `OB1_EGRESS_ALLOW=actor:<key name>`. Without it a recall is refused (`422 CORE_REFUSED`, `refused: REFUSED_EGRESS`), and a write-back's memories are kept with no vector, which the vector mender fills in once the term is there ([deploy/.env.example](../../deploy/.env.example), "What may leave the box").
-2. **Recreate the services so they read it.** From `deploy/`, run `docker compose up -d migrate api mcp`, then `docker compose up -d --force-recreate --no-deps app`, each with the stack's other `-f` files.
+2. **Recreate the services so they read it.** From `deploy/`, run `docker compose up -d migrate api mcp`, then `docker compose up -d --force-recreate --no-deps app`, each with the stack's other `-f` files. A runtime that calls the REST routes needs `/api` published: name `compose.api-public.yaml` too and bring the proxy up with it (`docker compose -f compose.yaml -f compose.api-public.yaml up -d proxy`). A runtime on the MCP connector needs no overlay.
    - The migrator makes the plugin's role, its schema and its login role `ob1_plugins_agent_memory`, and applies `001_memories.sql`.
    - Recreating `app` signs everyone out of the GUI: its sessions live in its memory.
 3. **Check it.**
    - The REST core's preflight, at the top of its log (`docker compose logs api`): its `plugin tables` row says the role, schema and migrations are in place.
-   - Write a memory back, then recall it with `include_unconfirmed`:
+   - Write a memory back to a project, then recall it with `include_unconfirmed`, through `/api` (step 2's overlay). Give both a project: a memory with no project is personal, and a recall leaves personal memories out unless it asks for `scope.visibility: "personal"`.
 
      ```bash
      curl -sS -X POST "https://<host>/api/v1/plugins/agent-memory/writeback" -H "x-brain-key: $KEY" -H 'content-type: application/json' \
-       -d '{"schema_version":"openbrain.agent_memory.writeback.v1","workspace_id":"demo","memory_payload":{"lessons":["Run the migrator before the REST core."]}}'
+       -d '{"schema_version":"openbrain.agent_memory.writeback.v1","workspace_id":"demo","project_id":"setup","memory_payload":{"lessons":["Run the migrator before the REST core."]}}'
      curl -sS -X POST "https://<host>/api/v1/plugins/agent-memory/recall" -H "x-brain-key: $KEY" -H 'content-type: application/json' \
-       -d '{"schema_version":"openbrain.agent_memory.recall.v1","workspace_id":"demo","query":"what runs first","scope":{"include_unconfirmed":true}}'
+       -d '{"schema_version":"openbrain.agent_memory.recall.v1","workspace_id":"demo","project_id":"setup","query":"run the migrator","scope":{"include_unconfirmed":true}}'
      ```
 
 Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off. The plugin's tables and rows stay, and come back when it is turned on again; the memories' thoughts stay in the brain either way.
@@ -81,7 +87,7 @@ Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off
 
 The standalone server (`integrations/agent-memory-api`) kept its memories in eight public tables, `agent_memories` and seven `agent_memory_*` beside it (`schemas/agent-memory`). Their thoughts stay as they are, and recall finds them once the memories are copied across: the plugin starts with empty tables. Stop the old server first, and point each runtime at the plugin's routes.
 
-The block below copies the old tables into the plugin's, column for column. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing and the block can be run again. A row already in the plugin's tables, by id or by idempotency key, is left as it is, and so is anything hanging off a memory that was left:
+The block below copies the old tables into the plugin's, column for column. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing and the block can be run again. A row already in the plugin's tables, by id, or by workspace and idempotency key, is left as it is, and so is anything hanging off a memory that was left:
 
 ```sql
 \set ON_ERROR_STOP on
@@ -128,17 +134,17 @@ COMMIT;
 ```
 
 - **Which memories.** All of them. A memory whose thought was deleted (its `thought_id` null) is copied too, and listed, but never recalled: a recall finds memories through their thoughts.
-- **Left as it is.** A memory the plugin already holds, by id or by idempotency key (a runtime that wrote the same memory back to the plugin first), is not copied, and nor are its sources, artifacts, relations, reviews or recall items. Its audit rows are copied without the memory's id.
+- **Left as it is.** A memory the plugin already holds, by id, or by workspace and idempotency key (a runtime that wrote the same memory back to the plugin first), is not copied, and nor are its sources, artifacts, relations, reviews or recall items. Its audit rows are copied without the memory's id.
 - **The old tables** stay, and nothing reads them once the server is stopped. Drop them by hand once the copy is checked; `db/config.mjs` no longer grants them to a `--grant` role, and a grant made before stays until they are dropped.
 
 ## Troubleshooting
 
 - **`400 NO_MEMORIES`.** `memory_payload` held no memory: every list was empty.
-- **`400 REFUSED_INPUT`.** The body was not the contract's: `issues` names each field. The versions are the four `schema_version` strings above; a field past its bound is named too.
+- **`400 REFUSED_INPUT`.** The body was not the contract's: `issues` names each field. The versions are four: `openbrain.agent_memory.recall.v1` and `openbrain.openclaw.recall.v1` for a recall, `openbrain.agent_memory.writeback.v1` and `openbrain.openclaw.writeback.v1` for a write-back; a field past its bound is named too.
 - **`403 FORBIDDEN`.** The key's scope does not reach the operation: recall and the lists read (a capture key cannot), and usage and review write (a read or capture key cannot).
 - **`404 NO_SUCH_MEMORY` or `NO_SUCH_RECALL`.** No memory has that id, or no traced recall that `request_id`. A recall made under a read key is never traced, and its `request_id` is null.
-- **`409 IDEMPOTENCY_KEY_REUSED`.** The write-back's `idempotency_key` already holds a memory with other text. Give each write-back its own key, or none (a key is then made from the workspace, runtime, task, step and the memory's text).
-- **`422 UNSAFE_WRITEBACK`.** A memory looked like a private key, an API key, a credential, a large code block or a transcript; `unsafe` says which and why. Nothing was written. Write back a compact summary and artifact links instead.
+- **`409 IDEMPOTENCY_KEY_REUSED`.** The write-back's `idempotency_key` already holds a memory with other text in this workspace, or another write-back with that key and other text landed first. Give each write-back its own key, or none (a key is then made from the workspace, runtime, task, step and the memory's text).
+- **`422 UNSAFE_WRITEBACK`.** A memory looked like a private key, an API key, a credential, a large code block or a transcript; `unsafe` says which and why. No memory or thought was written; the refusal is audited (`memory_rejected`). Write back a compact summary and artifact links instead.
 - **`422 CORE_REFUSED`.** The core refused a capture or the search, and `refused` names its code: `REFUSED_EGRESS` is the egress policy keeping a recall's query in ("Turn it on", step 1). A refusal the core says is worth retrying is answered `503` instead. A write-back refused part way keeps the memories before the refused one, so the same write-back sent again once the cause is fixed finishes it.
 - **`503 PROVIDER_UNAVAILABLE`** (retryable). The brain's embedding provider did not answer a recall's query (`reason` and `base` say why and where). Send the recall again.
 - **A recall answers no memories.** The memories are still waiting for review (send `scope.include_unconfirmed: true`, or confirm them), are another project's (`scope.project_only: false`), are personal (`scope.visibility: "personal"`), or are stale, rejected, superseded or disputed (`scope.include_stale: true`).

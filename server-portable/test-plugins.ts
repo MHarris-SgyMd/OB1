@@ -404,6 +404,13 @@ console.log("\n[5] ctx.call: a core operation as the caller, behind the caller's
   thrown = "";
   try { await runOperation(ops.find((o) => o.key === "bad_refusal")!, { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
   assert(/refused with status 500 and code "lower case"/.test(thrown), `a refusal at no refusal status, or with no code, is the plugin's fault (${thrown})`);
+  // Each half of that rule alone: a refusal status with a bad code, and a good code at a status no refusal has.
+  for (const [status, code] of [[500, "VALID_CODE"], [502, "VALID_CODE"], [404, "lower case"]] as const) {
+    thrown = "";
+    const oneOff = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "write", method: "POST", path: "/x", input: {}, output: {}, async handler() { return refuse(status as never, code); } }) } });
+    try { await runOperation(loadPlugins("probe-kit", [oneOff])[0].operations[0], { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
+    assert(thrown.includes(`refused with status ${status} and code "${code}"`), `a refusal at ${status} with code ${JSON.stringify(code)} is the plugin's fault (${thrown || "answered"})`);
+  }
   thrown = "";
   const ctxProbe = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "write", method: "POST", path: "/x", input: {}, output: {}, async handler(ctx) { await ctx.call("drop_everything" as never, {} as never); return ok({}); } }) } });
   try { await runOperation(loadPlugins("probe-kit", [ctxProbe])[0].operations[0], { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
@@ -431,9 +438,13 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
   assert(r.status === 403 && r.body.needs === "write", "a write operation refuses a read key: 403 needs write");
   r = await json(await hit(app, "/v1/plugins/probe-kit/busy", { key: "read-raw", method: "POST" }));
   assert(r.status === 409 && r.body.code === "TRY_AGAIN" && r.body.retryable === false && r.body.message === "later", `a refusal at 400–422 is never retryable, whatever the plugin's facts say (${JSON.stringify(r.body)})`);
-  r = await json(await hit(app, "/v1/plugins/probe-kit/outage", { key: "read-raw", method: "POST" }));
+  const outage = await hit(app, "/v1/plugins/probe-kit/outage", { key: "read-raw", method: "POST" });
+  const busyAgain = await hit(app, "/v1/plugins/probe-kit/busy", { key: "read-raw", method: "POST" });
+  r = await json(outage);
   assert(r.status === 503 && r.body.code === "PROVIDER_UNAVAILABLE" && r.body.retryable === true && r.body.base === "http://provider.invalid/v1" && !("status" in r.body),
     `a 503 is the plugin's one retryable refusal, whatever its facts say, its facts beside it (${JSON.stringify(r.body)})`);
+  assert(/^[1-9][0-9]*$/.test(outage.headers.get("retry-after") ?? "") && busyAgain.headers.get("retry-after") === null,
+    `…sent with Retry-After, as the OpenAPI document's 503 says; a 409 with none (${outage.headers.get("retry-after")}, ${busyAgain.headers.get("retry-after")})`);
   lines.length = 0;
   await hit(app, "/v1/plugins/probe-kit/nothing-here", { key: "read-raw" });
   const unrouted = JSON.parse(lines.at(-1) ?? "{}");
