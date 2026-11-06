@@ -494,24 +494,29 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const writer = { out: (l: string) => lines.push(`out ${l}`), err: (l: string) => lines.push(`err ${l}`) };
   const instant = async () => {};
   const wake = new AbortController().signal;
-  /** Probes answered in order; asked past the script it throws, so a helper that probes too often is reported, not looped (review pass 4). */
-  const scripted = (states: Probe[]) => async () => {
+  /** Probes answered in order; asked past the script it answers refused and says so, so a helper that probes too often ends and is reported by name, not looped (review passes 4 and 5). */
+  const overran: string[] = [];
+  const scripted = (states: Probe[], cell = "a cell") => async (): Promise<Probe> => {
     const next = states.shift();
-    if (!next) throw new Error("probed past the script");
-    return next;
+    if (next) return next;
+    // Once refused, so a wait that settles on it ends and the last cell names it; again thrown, naming the cell, so
+    // a wait that would probe on for ever ends the suite instead of looping (review pass 5).
+    if (overran.includes(cell)) throw new Error(`probed past the script, again: ${cell}`);
+    overran.push(cell);
+    return { state: "refused", why: "probed past the script" };
   };
   const refuseMissing = async (p: Probe) => (p.state === "missing" ? { kind: "model" as const, line: "unserved" } : null);
 
   // probeAtStart: a refusal only of a probe that answered; no answer is the start's wait, not its refusal.
-  ok("refused" in (await probeAtStart({ probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing })), "probeAtStart: a model unserved at the first probe is refused");
+  ok("refused" in (await probeAtStart({ probe: scripted([{ state: "missing", why: "404" }], "probeAtStart's unserved"), refusal: refuseMissing })), "probeAtStart: a model unserved at the first probe is refused");
   let refusalsAsked = 0;
-  const outFirst = await probeAtStart({ probe: scripted([{ state: "out", why: "ECONNREFUSED" }]), refusal: async () => { refusalsAsked++; return { kind: "provider", line: "never asked" }; } });
+  const outFirst = await probeAtStart({ probe: scripted([{ state: "out", why: "ECONNREFUSED" }], "probeAtStart's no answer"), refusal: async () => { refusalsAsked++; return { kind: "provider", line: "never asked" }; } });
   ok("out" in outFirst && outFirst.out === "ECONNREFUSED" && refusalsAsked === 0, `probeAtStart: no answer refuses nothing and asks no refusal — extract's is a GET /models to a provider that is down (review pass 4) — its why kept for the wait (${JSON.stringify(outFirst)}, ${refusalsAsked} asked)`);
   const startStop = new AbortController().signal;
   const signalsSeen: (AbortSignal | undefined)[] = [];
   await probeAtStart({ probe: async (w) => { signalsSeen.push(w); return { state: "up" }; }, refusal: async (_p, w) => { signalsSeen.push(w); return null; }, wake: startStop });
   ok(signalsSeen.length === 2 && signalsSeen.every((w) => w === startStop), "probeAtStart: the caller's stop reaches the probe and the refusal (review pass 4)");
-  const upFirst = await probeAtStart({ probe: scripted([{ state: "up" }]), refusal: refuseMissing });
+  const upFirst = await probeAtStart({ probe: scripted([{ state: "up" }], "probeAtStart's answer"), refusal: refuseMissing });
   ok("out" in upFirst && upFirst.out === null, "probeAtStart: an answer through its refusals is no wait");
 
   // waitAtStart: said, the stamper's startWait on then off, probed until anything but out, held to the refusals.
@@ -519,19 +524,26 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   const startStates: Probe[] = [{ state: "out", why: "503" }, { state: "up" }];
   const waitSignals: AbortSignal[] = [];
-  const nextStart = scripted(startStates);
+  const nextStart = scripted(startStates, "waitAtStart's out then up");
   const up = await waitAtStart({ who: "the provider", why: "503 busy", meanwhile: "claims nothing until it does; it calls m at b for one token", probe: (w) => { waitSignals.push(w); return nextStart(); }, refusal: (p, w) => { waitSignals.push(w); return refuseMissing(p); }, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant });
   // Both probes asked: an out probe is waited past, not taken for the answer (review pass 3).
-  ok(up === "up" && startStates.length === 0 && waitSignals.length === 3 && waitSignals.every((w) => w === wake) && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after \d+ s and then twice as long each time, up to \d+ min$/.test(lines[0] ?? "") && /^out {3}the provider answers after [01] s$/.test(lines[1] ?? ""),
+  ok(up === "up" && startStates.length === 0 && waitSignals.length === 3 && waitSignals.every((w) => w === wake) && stamps.join() === "true,false" && /^err {3}the provider is not answering at start \(503 busy\) — the follower claims nothing until it does; it calls m at b for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the provider answers after [01] s$/.test(lines[1] ?? ""),
     `waitAtStart: said, stamped through, and the answer said (${up}; ${stamps}; ${lines.join(" | ").slice(0, 300)})`);
+  stamps.length = 0;
+  let thrownThrough = "";
+  await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: async () => { throw new Error("the probe threw"); }, refusal: refuseMissing, wake, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant }).catch((e: Error) => { thrownThrough = e.message; });
+  ok(thrownThrough === "the probe threw" && stamps.join() === "true,false", `waitAtStart: a probe that throws still turns the stamp off (review pass 5; ${stamps})`);
   lines.length = 0;
-  const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }]), refusal: refuseMissing, wake, writer, sleep: instant });
+  await waitAtStart({ who: "the provider", why: `${"w".repeat(250)}TAIL`, meanwhile: "m", probe: scripted([{ state: "up" }], "the long why"), refusal: refuseMissing, wake, writer, sleep: instant });
+  ok(lines[0]?.includes(`(${"w".repeat(200)}) — `) === true && !lines[0]?.includes("TAIL"), "waitAtStart: the first probe's why cut at 200 characters in the line (review pass 5)");
+  lines.length = 0;
+  const unserved = await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "missing", why: "404" }], "waitAtStart's unserved"), refusal: refuseMissing, wake, writer, sleep: instant });
   ok(unserved !== null && unserved !== "up" && unserved.refused.kind === "model", "waitAtStart: what answers is held to the start's refusals");
   ok(!lines.some((l) => / answers after /.test(l)), "waitAtStart: a refused answer is not said to answer — the refusal is checked first (review pass 1)");
   const stop = new AbortController();
   stop.abort();
   stamps.length = 0;
-  ok((await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "out", why: "x" }]), refusal: refuseMissing, wake: stop.signal, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant })) === null && stamps.join() === "true,false",
+  ok((await waitAtStart({ who: "the provider", why: "x", meanwhile: "m", probe: scripted([{ state: "out", why: "x" }], "waitAtStart's stop"), refusal: refuseMissing, wake: stop.signal, writer, stamper: { startWait: async (on) => { stamps.push(on); } }, sleep: instant })) === null && stamps.join() === "true,false",
     `waitAtStart: a stop ends the wait, null, and the stamper's startWait is turned off still (review pass 1; ${stamps})`);
 
   // waitForDatabase and followedPass: the outage said and waited out, the pass run again at once; anything else thrown.
@@ -539,7 +551,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   lines.length = 0;
   let checks = 0;
   ok((await waitForDatabase(pgDown(), { check: async () => { if (checks++ === 0) throw pgDown(); }, wake, writer, sleep: instant, firstLine: true })) && checks === 2
-    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after/.test(lines[0] ?? "") && /^out {3}the database answers again after [01] s; polling resumes$/.test(lines[1] ?? ""),
+    && /^err {3}the database is not answering \(Connection closed\) — the follower waits for it, checking after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "") && /^out {3}the database answers again after [01] s; polling resumes$/.test(lines[1] ?? ""),
     `waitForDatabase: said with the error's first line, checked until it answers, said again (${checks} checks; ${lines.join(" | ").slice(0, 200)})`);
   lines.length = 0;
   await waitForDatabase(pgDown(), { check: async () => {}, wake, writer, sleep: instant });
@@ -596,10 +608,19 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   await leases.returnAtEnd(30, writer.err);
   ok(released.join() === "w1,w3" && /^err {3}1 worker\(s\)' leases could not be returned as the run ended; they expire within 30 s$/.test(lines[0] ?? ""), `Unreturned.returnAtEnd: all at once, one line for those that could not go (${released}; ${lines[0]})`);
   lines.length = 0;
+  let inFlight = 0;
+  let peak = 0;
+  const twoRefused = new Unreturned(async () => { inFlight++; peak = Math.max(peak, inFlight); await Promise.resolve(); inFlight--; throw new Error("refused"); });
+  twoRefused.add("r1");
+  twoRefused.add("r2");
+  await twoRefused.returnAtEnd(45, writer.err);
+  ok(peak === 2 && /^err {3}2 worker\(s\)' leases could not be returned as the run ended; they expire within 45 s$/.test(lines[0] ?? ""), `Unreturned.returnAtEnd: all at once, each refusal counted (review pass 5; ${peak} in flight; ${lines[0]})`);
+  lines.length = 0;
   const allBack = new Unreturned(async () => {});
   allBack.add("a1");
   await allBack.returnAtEnd(45, writer.err);
   ok(lines.length === 0, `Unreturned.returnAtEnd: nothing said when every lease went back (review pass 4; ${lines.join(" | ")})`);
+  ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);
