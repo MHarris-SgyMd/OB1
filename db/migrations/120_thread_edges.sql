@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration 120: a work thread's edges stand — the thoughts holding one
---                subject key, in capture order, each linked to the one before
+--                subject key, in created_at order, each linked to the one before
 --                it by an `evolves` relation the database keeps as subjects
 --                land and leave (SMD-3306 PR 7a-1)
 -- =============================================================================
@@ -15,7 +15,9 @@
 --
 -- WHAT
 --   * A thread is the thoughts holding one standing subject key (111), in
---     capture order: created_at, then id.
+--     created_at order, ties broken by id — stable, not meaningful: two
+--     ingesters stamp a day's items at midnight, which then sit in id order
+--     (SMD-4094 gives them times from their sources).
 --   * thought_facets_validate takes a thread's edge in its relation branch
 --     (111's body verbatim but that): a relation naming a subject key is the
 --     thread's — relation evolves, the key a subject key, judge_key
@@ -289,7 +291,7 @@ BEGIN
     -- A relation naming a subject key is a thread's edge (SMD-3306 PR 7a-1), written by
     -- thread_relink: the next thought on the key's thread goes on from the one before it, so
     -- evolves, under the threads' judge key, thread:<version>, with no confidence — its order is
-    -- the capture order, not a judgement. Any other relation is the judge's: no key, and no
+    -- the subjects' order, not a judgement. Any other relation is the judge's: no key, and no
     -- thread's judge key. The validator, not the writer, says which (its origin below).
     IF NEW.payload ? 'key' THEN
       v_key := NEW.payload->>'key';
@@ -307,7 +309,7 @@ BEGIN
       END IF;
       IF v_conf IS NOT NULL AND jsonb_typeof(v_conf) <> 'null' THEN
         RAISE EXCEPTION USING ERRCODE = 'check_violation',
-          MESSAGE = 'a thread''s edge carries no confidence: its order is the capture order, not a judgement';
+          MESSAGE = 'a thread''s edge carries no confidence: its order is the subjects'' order, not a judgement';
       END IF;
     ELSIF NEW.payload->>'judge_key' LIKE 'thread:%' THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
@@ -756,7 +758,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thread_relink(text, boolean) IS
-  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in capture order (created_at, then id), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each edge the thread has that does not stand is written first, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1, its recipe deterministic and naming the key) in the same transaction, its two thoughts locked FOR KEY SHARE before the write — a delete in flight is waited out, a pair it took a thought from is passed over, and the thread is read again once the round is through, each read again following a delete — then each standing edge of the key''s that the thread no longer has is closed, the two sides read once each and set against each other (EXCEPT), each close counted as it lands. p_dry counts and writes nothing. READ COMMITTED alone (feature_not_supported above it, 115''s rule): its reads must postdate the key''s lock. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT and UPDATE on thoughts (the row locks), and INSERT, UPDATE and SELECT on derivations (the capture group). Called by the triggers on subjects, at their writer''s commit, and by db/threads.ts. Migration 120 / SMD-3306.';
+  'Makes one subject key''s work thread stand as its subjects say (SMD-3306 PR 7a-1): the thoughts holding the key standing, in created_at order (ties by id, stable, not meaningful), each linked to the one before it by a standing `relation` facet — relation evolves, judge_key thread:v1, the key, origin thread — on the newer thought. Under an advisory lock on the key, each edge the thread has that does not stand is written first, with its lineage row (artifact_kind relation, the older and the newer thought at their fingerprints now, produced_by thread:v1, its recipe deterministic and naming the key) in the same transaction, its two thoughts locked FOR KEY SHARE before the write — a delete in flight is waited out, a pair it took a thought from is passed over, and the thread is read again once the round is through, each read again following a delete — then each standing edge of the key''s that the thread no longer has is closed, the two sides read once each and set against each other (EXCEPT), each close counted as it lands. p_dry counts and writes nothing. READ COMMITTED alone (feature_not_supported above it, 115''s rule): its reads must postdate the key''s lock. Returns {ok, key, thoughts, closed, added, dry}. SECURITY INVOKER: the caller needs SELECT, INSERT and UPDATE on thought_facets (the structure and capture groups), SELECT and UPDATE on thoughts (the row locks), and INSERT, UPDATE and SELECT on derivations (the capture group). Called by the triggers on subjects, at their writer''s commit, and by db/threads.ts. Migration 120 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The triggers that keep the threads

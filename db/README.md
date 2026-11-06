@@ -2535,40 +2535,41 @@ left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
 (onto a populated brain at 117).
 
 Migration 120 links each work thread (SMD-3306 PR 7a-1). A thread is the
-thoughts holding one standing subject key (111), in capture order (`created_at`,
-then id), and each thought after the first carries a standing `relation` facet
-on it: relation `evolves`, its target the thought before it, judge key
-`thread:v1`, the thread's `key`, no confidence, origin `thread`, with its
-lineage row (the older and the newer thought at their fingerprints, produced by
-`thread:v1`). `thread_relink(key, dry)` makes one thread stand as its subjects
-say, under a lock on the key: it writes each edge the thread lacks, the edge's
-two thoughts locked first, so a delete in flight is waited out and the thread
-read again past the thought it took, then closes each edge the thread no longer
-has (a closed edge is history, never re-opened); dry, it counts and writes
-nothing. Three constraint triggers on `thought_facets`, deferred to the writer's
-commit, call it as a subject is written, closed (`close_thought_subject`
-included, which since 120 needs the door's writes), or deleted with its thought,
-so a subject recorded again under the same key moves no edge, and one moved to
-another key locks both keys first, in key order, as `threads.ts` locks its
-batches' keys, so two writers moving thoughts across one pair of keys queue. The
-last re-links only when the deleting role can make a re-link's writes (INSERT
-and UPDATE on `thought_facets`, UPDATE on `thoughts` for the row locks, and
-INSERT, UPDATE and SELECT on `derivations`), under READ COMMITTED, and while no
-other transaction holds the key's lock, since a delete's own re-link never waits
-on that lock: a server role cannot, so a thought it deletes leaves its
-neighbours unlinked until their key's next re-link. `thread_relink` runs under
-READ COMMITTED alone and refuses a transaction above it, so a subject written in
-one is refused at its commit. The validator says a relation's origin: one naming
-a subject key is a thread's edge, `evolves` under a `thread:` judge key with no
-confidence; any other is the judge's, `judged`, under 084's index, which now
-keeps to the judge's edges, so a judged `related` and a thread's `evolves` stand
-side by side on one pair. `record_thought_relation` reads, keeps, replaces and
-closes the judge's edge alone, and `brain_info`, board-sync's findings and
-`consolidate.ts --status` count the judge's alone. The upgrade writes no edge:
-run `threads.ts` once after it, which links every thread, a batch of at most 200
-keys a transaction, a key that writes ending its batch and the next batch taking
-the page's rest (on the compose stack, from a checkout, reaching its Postgres
-through deploy/README's host-ports file):
+thoughts holding one standing subject key (111), in `created_at` order (ties by
+id: stable, not meaningful), and each thought after the first carries a standing
+`relation` facet on it: relation `evolves`, its target the thought before it,
+judge key `thread:v1`, the thread's `key`, no confidence, origin `thread`, with
+its lineage row (the older and the newer thought at their fingerprints, produced
+by `thread:v1`). `thread_relink(key, dry)` makes one thread stand as its
+subjects say, under a lock on the key: it writes each edge the thread lacks, the
+edge's two thoughts locked first, so a delete in flight is waited out and the
+thread read again past the thought it took, then closes each edge the thread no
+longer has (a closed edge is history, never re-opened); dry, it counts and
+writes nothing. Three constraint triggers on `thought_facets`, deferred to the
+writer's commit, call it as a subject is written, closed
+(`close_thought_subject` included, which since 120 needs the door's writes), or
+deleted with its thought, so a subject recorded again under the same key moves
+no edge, and one moved to another key locks both keys first, in key order, as
+`threads.ts` locks its batches' keys, so two writers moving thoughts across one
+pair of keys queue. The last re-links only when the deleting role can make a
+re-link's writes (INSERT and UPDATE on `thought_facets`, UPDATE on `thoughts`
+for the row locks, and INSERT, UPDATE and SELECT on `derivations`), under READ
+COMMITTED, and while no other transaction holds the key's lock, since a delete's
+own re-link never waits on that lock: a server role cannot, so a thought it
+deletes leaves its neighbours unlinked until their key's next re-link.
+`thread_relink` runs under READ COMMITTED alone and refuses a transaction above
+it, so a subject written in one is refused at its commit. The validator says a
+relation's origin: one naming a subject key is a thread's edge, `evolves` under
+a `thread:` judge key with no confidence; any other is the judge's, `judged`,
+under 084's index, which now keeps to the judge's edges, so a judged `related`
+and a thread's `evolves` stand side by side on one pair.
+`record_thought_relation` reads, keeps, replaces and closes the judge's edge
+alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
+count the judge's alone. The upgrade writes no edge: run `threads.ts` once after
+it, which links every thread, a batch of at most 200 keys a transaction, a key
+that writes ending its batch and the next batch taking the page's rest (on the
+compose stack, from a checkout, reaching its Postgres through deploy/README's
+host-ports file):
 
 ```bash
 bun threads.ts --url … --status                # the threads, and the keys whose edges differ
