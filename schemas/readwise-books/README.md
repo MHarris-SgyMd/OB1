@@ -17,8 +17,9 @@ The table stays small (one row per book, typically a few hundred rows per user),
 
 This schema is required by:
 
-- [plugins/readwise](../../plugins/readwise/) — the brain's webhook for live highlight capture. It keeps Readwise's book id alone and writes nothing here, and `get_book_highlights` does not find its highlights (it sets no `source_type`): its own `readwise_list_highlights` lists them
 - [recipes/readwise-import](../../recipes/readwise-import/) — one-shot backfill of your Readwise history
+
+The [readwise plugin](../../plugins/readwise/), the brain's webhook for live highlight capture since SMD-2690, does not use this table: it keeps Readwise's book id alone and writes nothing here, and `get_book_highlights` does not find its highlights (it sets no `source_type`); its own `readwise_list_highlights` lists them.
 
 ## Prerequisites
 

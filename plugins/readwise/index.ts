@@ -13,18 +13,18 @@ const HIGHLIGHT_CREATED = "readwise.highlight.created";
 /**
  * How long a claim whose capture never finished holds its id, in seconds: an
  * hour. Past it a resend may take the claim and capture again. Readwise
- * documents no retries, so a long lease costs little; the SDK's default (one
- * capture's model calls and a minute) let a capture held up past it, on a lock
- * say, be captured twice (review pass 2).
+ * documents no retries, so a long lease costs little, where the SDK's default
+ * (one capture's model calls and a minute) lets a capture held up on a lock be
+ * captured twice.
  */
 export const LEASE_S = 3600;
 
 /**
- * A text the hook can store: no NUL, which Postgres will not keep, and no lone
- * surrogate (half of a character such as an emoji). The tags reach Postgres as
- * JSON, whose jsonb cast refuses one after the thought is captured; the passage
- * and note go to the capture; the other fields would land as U+FFFD, refused
- * here all the same. encodeURIComponent throws on one.
+ * A text the hook can store: no NUL (Postgres text refuses it) and no lone
+ * surrogate, half of a character such as an emoji (the tags' jsonb cast
+ * refuses one; elsewhere it would be stored as U+FFFD). Checked before the
+ * capture, so no captured thought is left with a row that cannot be written.
+ * encodeURIComponent throws on a lone surrogate.
  */
 const stored = (s: string) => {
   if (s.includes("\u0000")) return false;
@@ -48,8 +48,7 @@ const leap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
  * null for one that is no real clock time (30 February, hour 24, second 60, an
  * offset beyond 14 hours either way) or whose year, once in UTC, is outside 1
  * to 9999, which toISOString would write in a form Postgres refuses ("0000-",
- * "+010000-"). Date.parse alone took "2026-02-30" as 2 March and gave such
- * years, after the thought was captured (review pass 1).
+ * "+010000-"). Date.parse alone reads "2026-02-30" as 2 March.
  */
 export function isoTime(s: string): string | null {
   const m = ISO_TIME.exec(s);
@@ -68,35 +67,37 @@ export function isoTime(s: string): string | null {
 }
 
 /**
- * Each field's bound, in UTF-16 code units (zod's count: an emoji is two):
- * room for any highlight Readwise makes (its API keeps a passage and a note to
- * 8,191 characters and a highlight's url to 4,095), and little more. Without
- * them a leaked secret posted 1 MB texts (a capture's model calls over all of
- * it) and 1 MB notes and urls, every list of them answered whole to a reader
- * (review pass 3).
+ * Each field's bound, in characters (code points: an emoji is one): room for
+ * any highlight Readwise makes (its API keeps a passage and a note to 8,191
+ * characters, a url to 4,095 and a tag to 127). Without them one delivery may
+ * carry a 1 MB passage, a capture's model calls over all of it, and every list
+ * of such rows is answered whole to a reader.
  */
 export const LIMITS = { text: 16_384, note: 8_192, url: 4_096, short: 64, tag: 128, tags: 100 } as const;
+/** At most `max` characters, counted as code points (zod's .max counts UTF-16 units, an emoji two). */
+const chars = (max: number) => (s: string) => [...s].length <= max;
 /**
  * The most a delivery's body may be, in bytes, before it is parsed: a highlight
- * with every field at its bound, each character escaped as \uXXXX (six bytes,
- * as a JSON encoder that escapes everything past ASCII writes it), fits.
+ * with every field at its bound, each character one past the BMP and escaped as
+ * two \uXXXX (twelve bytes, as an encoder that escapes everything past ASCII
+ * writes it), fits.
  */
-export const BODY_MAX = 256 * 1024;
+export const BODY_MAX = 512 * 1024;
 /** A highlight-created event's fields the hook reads; anything else Readwise sends is left. */
 const HighlightEvent = z.object({
   id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  text: z.string().max(LIMITS.text).refine((s) => s.trim().length > 0, "no text").refine(stored, "a NUL or a lone surrogate"),
-  note: z.string().max(LIMITS.note).refine(stored, "a NUL or a lone surrogate").nullish(),
+  text: z.string().refine(chars(LIMITS.text), `over ${LIMITS.text} characters`).refine((s) => s.trim().length > 0, "no text").refine(stored, "a NUL or a lone surrogate"),
+  note: z.string().refine(chars(LIMITS.note), `over ${LIMITS.note} characters`).refine(stored, "a NUL or a lone surrogate").nullish(),
   location: z.number().nullish(),
-  location_type: z.string().max(LIMITS.short).refine(stored, "a NUL or a lone surrogate").nullish(),
+  location_type: z.string().refine(chars(LIMITS.short), `over ${LIMITS.short} characters`).refine(stored, "a NUL or a lone surrogate").nullish(),
   // A time is metadata beside the passage: one the hook cannot read, a string or not, is stored as none, never a
-  // reason to lose the highlight (review passes 2 and 3).
+  // reason to lose the highlight.
   highlighted_at: z.unknown().optional(),
-  url: z.string().max(LIMITS.url).refine(stored, "a NUL or a lone surrogate").nullish(),
-  color: z.string().max(LIMITS.short).refine(stored, "a NUL or a lone surrogate").nullish(),
+  url: z.string().refine(chars(LIMITS.url), `over ${LIMITS.url} characters`).refine(stored, "a NUL or a lone surrogate").nullish(),
+  color: z.string().refine(chars(LIMITS.short), `over ${LIMITS.short} characters`).refine(stored, "a NUL or a lone surrogate").nullish(),
   updated: z.unknown().optional(),
   book_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  tags: z.array(z.object({ name: z.string().max(LIMITS.tag).refine(stored, "a NUL or a lone surrogate") })).max(LIMITS.tags).nullish(),
+  tags: z.array(z.object({ name: z.string().refine(chars(LIMITS.tag), `over ${LIMITS.tag} characters`).refine(stored, "a NUL or a lone surrogate") })).max(LIMITS.tags).nullish(),
 });
 type HighlightEvent = z.output<typeof HighlightEvent>;
 
@@ -144,7 +145,7 @@ export default definePlugin({
       async handler(ctx, request) {
         // Readwise's Test Endpoint posts nothing; webhook creation waits on its 2xx. Nothing is read or written.
         if (request.text.trim() === "") return { status: 200, body: { test: true } };
-        // Before JSON.parse, which would otherwise spend the event loop on a stranger's 1 MiB body (review pass 3).
+        // Before JSON.parse, which would otherwise spend the event loop on a stranger's 1 MiB body.
         if (request.body.length > BODY_MAX) return { status: 413, body: { code: "TOO_LARGE", retryable: false, limit: BODY_MAX } };
         let body: unknown;
         try {
@@ -180,7 +181,7 @@ export default definePlugin({
                     ${timeOf(e.highlighted_at)}::timestamptz, ${timeOf(e.updated)}::timestamptz)
             ON CONFLICT (highlight_id) DO UPDATE SET thought_id = excluded.thought_id, book_id = excluded.book_id, note = excluded.note, location = excluded.location,
               location_type = excluded.location_type, color = excluded.color, url = excluded.url, tags = excluded.tags, highlighted_at = excluded.highlighted_at,
-              updated_at = excluded.updated_at`);
+              updated_at = excluded.updated_at, captured_at = now()`);
           return { value: captured, thoughtId };
         }, { keepSeconds: Infinity, leaseSeconds: LEASE_S });
         if ("duplicate" in once) return { status: 200, body: { id: once.duplicate, duplicate: true } };

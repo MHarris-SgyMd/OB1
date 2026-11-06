@@ -14,7 +14,7 @@ Readwise posts each new highlight to a webhook the brain serves, and the plugin 
   - It records the rest of what Readwise sent in the plugin's own table: the note, location, colour, url, tags and times. A time that is not an ISO 8601 string (as Readwise sends them) is stored as none; the highlight is captured all the same.
 - **Each highlight is captured once.** A highlight Readwise sends again is answered with the thought the first delivery captured, and nothing runs. Its id is kept for good, because Readwise signs no time.
 - **Other events are ignored.** An empty body (Readwise's **Test Endpoint** button) is answered 200, and so is any other event type that carries the secret. Neither changes anything.
-- **`readwise_list_highlights`** (read) lists the highlights the webhook captured, each one marked `trust: ingested`, its fields being what the sender posted: an MCP tool on the brain's own connector, and `GET /v1/plugins/readwise/highlights` on the REST core (`/api/v1/…` through the proxy, with `compose.api-public.yaml`). They are newest highlighted first, optionally one book's, and each names the thought its text is in (`fetch` reads it). A highlight whose thought was deleted is still listed, and still answered `duplicate`, naming the thought `fetch` no longer finds.
+- **`readwise_list_highlights`** (read) lists the highlights the webhook captured, newest highlighted first, optionally one book's. Each names the thought its text is in (`fetch` reads it) and is marked `trust: ingested`: its note, url, tags and the rest are what the sender posted. It is an MCP tool on the brain's own connector, and `GET /v1/plugins/readwise/highlights` on the REST core (`/api/v1/…` through the proxy, with `compose.api-public.yaml`). A highlight whose thought was deleted is still listed, and still answered `duplicate`, naming the thought `fetch` no longer finds.
 
 **What the standalone server did that the plugin does not:**
 - **No book title or author.** A plugin makes no outbound call, so the plugin cannot ask Readwise's API for the book's title and author. A highlight carries Readwise's book id alone (filling a books table the plugin can read is SMD-3878). The [readwise-import recipe](../../recipes/readwise-import/) and its [readwise-books schema](../../schemas/readwise-books/) keep a books table.
@@ -24,22 +24,7 @@ Readwise posts each new highlight to a webhook the brain serves, and the plugin 
 - **No book counter.** The old server bumped `readwise_books.num_highlights` for each highlight (`increment_book_highlight_count`). The plugin writes no book row, so nothing calls it now.
 - **One extra model call per highlight.** Every capture now runs the core's metadata extraction as well as its embedding. That is the same cost as any other capture on the brain, and more than the old server's embedding alone.
 
-**Readwise's secret is a bearer secret.** Readwise signs nothing and sends no time: the secret travels in each delivery's body. Anyone who has seen one delivery (a proxy log, a leaked request) can post highlights of their own. They are captured as ingested text, the trust a stranger's text gets, and change no existing thought. Readwise's highlight ids are whole numbers that rise one by one, so a forger who knows the next ones can send them first: the real highlights are then answered `duplicate` and lost without a trace. Its ids are kept for good, so making a new secret does not clear those. Keep the webhook URL behind TLS. If a delivery leaks:
-
-1. Delete the webhook in Readwise and make a new one, which gets a new secret, and set it ("Turn it on", step 4).
-2. Look over what was captured since the leak: `readwise_list_highlights` lists each highlight, its thought and when it was captured.
-3. Tell the forged highlights from the real ones against your Readwise library (its export lists every highlight's id).
-4. Before deleting anything, look at each forged highlight's thought, as the database owner in `psql`. A forger who sends text the brain already holds (a real highlight's, say) gets a row naming that existing thought, which is not theirs, and two forgeries of one text name one thought. This shows who first captured the thought and when, which highlights name it, and who else has changed it:
-
-   ```
-   SELECT a.actor_name, a.created_at,
-          (SELECT string_agg(h.highlight_id::text, ', ' ORDER BY h.highlight_id) FROM plugin_readwise.highlights h WHERE h.thought_id = a.thought_id) AS highlights,
-          (SELECT string_agg(DISTINCT coalesce(b.actor_name, '(no key)'), ', ') FROM public.thought_audit b WHERE b.thought_id = a.thought_id AND b.actor_name IS DISTINCT FROM 'hook:readwise') AS others
-     FROM public.thought_audit a WHERE a.thought_id = '<thought id>' AND a.action = 'capture' ORDER BY a.seq LIMIT 1;
-   ```
-
-   The thought is the forger's when `actor_name` is `hook:readwise`, `created_at` is after the leak, every id in `highlights` is a forged one, and `others` names no one who wrote to it (`(no key)` is a write made with none, such as SQL by hand): `vector-mender` or `reembed` there only filled its vector. Read it (`fetch`) before you delete it (`delete_thought`, with a write key): the audit trail is a guide, not proof. A key that can only capture leaves no row when it sends text the brain already holds, so a thought it saved too can look the forger's alone. Look at every forged highlight before step 5, which deletes the rows `highlights` lists.
-5. Then delete each forged highlight's rows, so the real highlight is captured if it is sent again: `DELETE FROM plugin_readwise.highlights WHERE highlight_id = <id>; DELETE FROM plugin_readwise.deliveries WHERE id = '<id>';`. Readwise documents no retries, so a real highlight already answered `duplicate` is captured only when it is posted to the webhook again by hand, as Readwise posts it.
+**Readwise's secret is a bearer secret.** Readwise signs nothing and sends no time: the secret travels in each delivery's body, so anyone who has seen one delivery (a proxy log, a leaked request) can post highlights of their own, captured as ingested text. Readwise's highlight ids rise one by one, so a forger can also send the next ones first, and the real highlights are then answered `duplicate` and lost. Keep the webhook URL behind TLS; if a delivery leaks, see [If a delivery leaks](#if-a-delivery-leaks).
 
 ## Prerequisites
 
@@ -79,9 +64,7 @@ Remove the name from `OB1_PLUGINS` and `OB1_HOOKS`, and its `readwise=` pair fro
 
 ## Moving from the standalone server
 
-The standalone server (`integrations/readwise-capture`) wrote each highlight into `thoughts`, with Readwise's fields in its metadata, and nothing else of its own but `readwise_books`. Those thoughts stay as they are. The plugin starts with an empty `highlights` table, so `readwise_list_highlights` lists only what it captures itself.
-
-The old server's book cache, `public.readwise_books`, stays: the readwise-import recipe still writes it.
+The standalone server (`integrations/readwise-capture`) wrote each highlight into `thoughts`, with Readwise's fields in its metadata, and kept a book cache, `public.readwise_books`, which stays for the readwise-import recipe that still writes it. The old thoughts stay as they are. The plugin starts with an empty `highlights` table, so `readwise_list_highlights` lists only what it captures itself. Don't run the old server beside the plugin.
 
 To list the old highlights too, copy them across. As the database owner, in `psql` (on the compose stack, `docker compose exec -T postgres psql -U postgres -d openbrain` from `deploy/`, the block on its input), this seeds the plugin's table from the thoughts the old server captured, and marks each highlight's id as captured. The readwise-import recipe's thoughts carry the same `source` and ids, so they are copied too, and a highlight it imported is then never captured twice. It is one transaction, so a refused row copies nothing and the block can be run again. A highlight already in the plugin's table is left as it is:
 
@@ -91,7 +74,7 @@ BEGIN;
 INSERT INTO plugin_readwise.highlights (highlight_id, thought_id, book_id, note, location, location_type, color, url, tags, highlighted_at)
   SELECT DISTINCT ON ((t.metadata->>'readwise_highlight_id')::bigint)
          (t.metadata->>'readwise_highlight_id')::bigint, t.id, (t.metadata->>'readwise_book_id')::bigint,
-         CASE WHEN t.metadata->>'note' ~ '^[[:space:]]*$' THEN NULL ELSE t.metadata->>'note' END, (t.metadata->>'location')::double precision, nullif(t.metadata->>'location_type', ''),
+         CASE WHEN t.metadata->>'note' ~ '^[[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*$' THEN NULL ELSE t.metadata->>'note' END, (t.metadata->>'location')::double precision, nullif(t.metadata->>'location_type', ''),
          nullif(t.metadata->>'color', ''), nullif(t.metadata->>'url', ''),
          (SELECT coalesce(array_agg(x ORDER BY n), '{}') FROM jsonb_array_elements_text(
             CASE WHEN jsonb_typeof(t.metadata->'tags') = 'array' THEN t.metadata->'tags' ELSE '[]'::jsonb END) WITH ORDINALITY AS a(x, n)),
@@ -116,15 +99,33 @@ COMMIT;
 
 ## Troubleshooting
 
-- **Readwise's Test Endpoint fails with `503`.** The webhook has no secret, or the REST core was not recreated after `OB1_HOOK_SECRETS` was set: the body says `HOOK_NOT_CONFIGURED`. Set the placeholder (step 1) and recreate `api`.
-- **It fails with `404`.** A JSON `{"code":"NO_ROUTE"}` is the REST core's: the plugin is not in `OB1_HOOKS` and `OB1_PLUGINS` on the running REST core. A plain-text `404 page not found` is the proxy's: it was started without `compose.hooks-public.yaml`.
-- **`405`.** A GET: the webhook takes POST alone. The old server's GET health check is the REST core's `/health` now.
 - **`400 NOT_JSON`.** The body was not a JSON object.
-- **`413 TOO_LARGE`.** The body was over 256 KiB, which the plugin refuses before it reads it (the REST core refuses one over 1 MiB first). A highlight is a few KB.
-- **`400 BAD_HIGHLIGHT` naming a long field.** Each field has a bound, in UTF-16 code units (an emoji counts two): the passage 16,384, the note 8,192, the url 4,096, the location type and colour 64, and up to 100 tags of 128.
-- **Deliveries are refused with `401 BAD_SECRET`.** The secret in `OB1_HOOK_SECRETS` is not the one Readwise made for this webhook. Copy it again from the webhook's entry, then recreate `api` (step 4).
-- **`400 BAD_HIGHLIGHT`.** The event lacked a field the plugin reads, or one was not of its kind (`fields` names them): a highlight with no text, say. Nothing was captured.
-- **`422 CORE_REFUSED`.** The core refused the capture, and `refused` names its code; the highlight's id is given back, so a resend captures it once the cause is fixed. A refusal the core says is worth retrying is answered `503` instead. No capture this hook sends draws either today. A model provider that does not answer, or an egress policy that keeps the text from it, is no refusal: the thought is saved, and its vector filled later.
-- **`500 FAILED`.** The store was down, or the highlight's row failed to write; the REST core's log has the cause. The highlight's id is given back, so a resend captures it, as the same thought if its text was saved.
-- **`409 IN_FLIGHT`.** A delivery of the same highlight is still being captured. A resend after it finishes is answered with its thought. One whose server stopped mid-capture holds its id for an hour, then a resend captures it.
+- **`400 BAD_HIGHLIGHT`.** The event lacked a field the plugin reads, or one was not of its kind or past its bound; `fields` names them. Nothing was captured. Each field has a bound in characters (an emoji is one): the passage 16,384, the note 8,192, the url 4,096, the location type and colour 64, and up to 100 tags of 128.
+- **`401 BAD_SECRET`.** The secret in `OB1_HOOK_SECRETS` is not the one Readwise made for this webhook. Copy it again from the webhook's entry, then recreate `api` ("Turn it on", step 4).
 - **`readwise_list_highlights` answers `403 FORBIDDEN`.** The key cannot read: a capture-only key cannot list.
+- **`404`.** A JSON `{"code":"NO_ROUTE"}` is the REST core's: the plugin is not in `OB1_HOOKS` and `OB1_PLUGINS` on the running REST core. A plain-text `404 page not found` is the proxy's: it was started without `compose.hooks-public.yaml`.
+- **`405`.** A GET: the webhook takes POST alone. The old server's GET health check is the REST core's `/health` now.
+- **`409 IN_FLIGHT`.** A delivery of the same highlight is still being captured. A resend after it finishes is answered with its thought. One whose server stopped mid-capture holds its id for an hour, then a resend captures it.
+- **`413 TOO_LARGE`.** The body was over 512 KiB, which the plugin refuses before it parses it (the REST core refuses one over 1 MiB first). A highlight is a few KB.
+- **`422 CORE_REFUSED`.** The core refused the capture, and `refused` names its code; the highlight's id is given back, so a resend captures it once the cause is fixed. A refusal the core says is worth retrying is answered `503` instead. The hook's captures meet neither refusal today. A model provider that does not answer, or an egress policy that keeps the text from it, is no refusal: the thought is saved, and its vector filled later.
+- **`500 FAILED`.** The store was down, or the highlight's row failed to write; the REST core's log has the cause. The highlight's id is given back, so a resend captures it, as the same thought if its text was saved.
+- **`503 HOOK_NOT_CONFIGURED`** (Readwise's Test Endpoint fails). The webhook has no secret, or the REST core was not recreated after `OB1_HOOK_SECRETS` was set. Set the placeholder ("Turn it on", step 1) and recreate `api`.
+
+## If a delivery leaks
+
+Readwise's secret travels in each delivery's body, and its ids are kept for good, so a new secret stops new forgeries but does not clear those already made.
+
+1. Delete the webhook in Readwise and make a new one, which gets a new secret, and set it ("Turn it on", step 4).
+2. Look over what was captured since the leak: `readwise_list_highlights` lists each highlight, its thought and when it was captured.
+3. Tell the forged highlights from the real ones against your Readwise library: its export lists every highlight's id and text. A forger who sends a real highlight's next id first uses an id the library has, so compare the text `fetch` shows for each row's thought with the library's text for that id, not the id alone.
+4. Before deleting anything, look at each forged highlight's thought, as the database owner in `psql`. A forger who sends text the brain already holds (a real highlight's, say) gets a row naming that existing thought, which is not theirs, and two forgeries of one text name one thought. This shows who first captured the thought and when, which highlights name it, and who else has written to it:
+
+   ```sql
+   SELECT a.actor_name, a.created_at,
+          (SELECT string_agg(h.highlight_id::text, ', ' ORDER BY h.highlight_id) FROM plugin_readwise.highlights h WHERE h.thought_id = a.thought_id) AS highlights,
+          (SELECT string_agg(DISTINCT coalesce(b.actor_name, '(no key)'), ', ') FROM public.thought_audit b WHERE b.thought_id = a.thought_id AND b.actor_name IS DISTINCT FROM 'hook:readwise') AS others
+     FROM public.thought_audit a WHERE a.thought_id = '<thought id>' AND a.action = 'capture' ORDER BY a.seq LIMIT 1;
+   ```
+
+   The thought is the forger's when `actor_name` is `hook:readwise`, `created_at` is after the leak, every id in `highlights` is a forged one, and `others` names no one who changed its text or metadata. `vector-mender` or `reembed` there only filled its vector; so may a key that can only capture, which leaves no row when it sends text the brain already holds unless the thought had no vector, which it then fills. `(no key)` is a write made with none, such as SQL by hand. So the trail is a guide, not proof: read the thought (`fetch`) before you delete it (`delete_thought`, with a write key). Check every forged highlight before step 5: once their rows are gone, the query no longer shows them.
+5. Then delete each forged highlight's rows, so the real highlight is captured if it is sent again: `DELETE FROM plugin_readwise.highlights WHERE highlight_id = <id>; DELETE FROM plugin_readwise.deliveries WHERE id = '<id>';`. Readwise documents no retries, so a real highlight already answered `duplicate` is captured only when it is posted to the webhook again by hand, as Readwise posts it.
