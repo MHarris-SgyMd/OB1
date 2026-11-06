@@ -2,7 +2,7 @@
 
 ## Why This Matters
 
-You're at the paint store and can't remember what shade of blue is in the living room. Your kid's shoe size changed and you're ordering online from memory. The plumber who fixed the leak last year — what was their number? Every household accumulates hundreds of small facts that matter at exactly the wrong moment. Your Open Brain agent can hold all of them and surface them when you need them.
+You're at the paint store and can't remember what shade of blue is in the living room. Your kid's shoe size changed and you're ordering online from memory. The plumber who fixed the leak last year — what was their number? Every household accumulates hundreds of small facts that matter at exactly the wrong moment. Your Daemonic Brain agent can hold all of them and surface them when you need them.
 
 ## Learning Path: Extension 1 of 6
 
@@ -43,7 +43,7 @@ The plugin's [README](../../plugins/household-knowledge/README.md) gives each on
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 
 ## Steps
 

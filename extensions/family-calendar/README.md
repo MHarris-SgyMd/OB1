@@ -47,7 +47,7 @@ The plugin's [README](../../plugins/family-calendar/README.md) gives each one's 
 
 ## Prerequisites
 
-- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
+- Working Daemonic Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-2 recommended but not required
 
 ## Steps
