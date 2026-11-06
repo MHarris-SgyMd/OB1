@@ -3241,7 +3241,8 @@ function noteAgentClaimCall(hook, brains) {
   if (!f) return;
   const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
   useStateRoot(brain.root);
-  const text = event === "PostToolUseFailure" ? String(hook.error ?? "") : resultText(hook.tool_response);
+  // A failure's words are its `error`, a string in Claude Code; any other shape, or the text left in tool_response, is read as a result is (review pass 1).
+  const text = event !== "PostToolUseFailure" ? resultText(hook.tool_response) : typeof hook.error === "string" ? hook.error : resultText(hook.error ?? hook.tool_response);
   // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
@@ -3501,7 +3502,7 @@ export async function main(argv) {
     if (has(args, "--claims")) {
       if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
       for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }
-      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key.`);
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key. It replaces a claims hook pasted before 1.7.3, which took no PostToolUseFailure and so never saw the agent's own refused claim calls (SMD-3874).`);
       console.log(JSON.stringify(claimsHookJson(), null, 2));
       return 0;
     }

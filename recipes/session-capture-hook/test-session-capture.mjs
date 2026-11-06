@@ -3663,6 +3663,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     && printed.PostToolUseFailure?.[0]?.matcher === "*" && printed.PostToolUseFailure[0].hooks[0].async === true && / --claims$/.test(printed.PostToolUseFailure[0].hooks[0].command)
     && printed.UserPromptSubmit[0].hooks[0].async === true && !ph.out.includes("claim-key") && JSON.stringify(claimsHookJson({ runtime: "/b/bun" })).includes("/b/bun"),
     "--print-hook --claims prints async PostToolUse and PostToolUseFailure (every tool, SMD-3874) and UserPromptSubmit hooks running --claims, no key");
+  assert(/replaces a claims hook pasted before 1\.7\.3/.test(ph.err), "…its banner says it replaces a claims hook pasted before 1.7.3");
   const phCodex = await spawnScript(["--print-hook", "codex", "--claims"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   const phMixed = await spawnScript(["--print-hook", "claude-code", "--claims", "--event", "Stop"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(phCodex.code === 2 && /renews with renew_claim itself/.test(phCodex.err) && phMixed.code === 2, "Codex, and --claims beside a session hook's flag, are refused");
@@ -4085,6 +4086,11 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await agentFailure("claim_work", { ticket: "SMD-9001", token: tok(111) }, unattributedText(C(111), "registry_away", past));
   assert(stateOf(111)?.expiresAt === past && revivedMarker(111)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && !renews().some((c) => c.args.id === C(111)),
     "…and one carrying CLAIM_UNATTRIBUTED with the claim's lapse records it, and the same run marks the claim made on its work since, the registry still away");
+  // A failure whose `error` is not a string, the text in content blocks as another harness might hand it: read as a result is (review pass 1).
+  putClaim(113);
+  age(113, 0);
+  await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "mcp__open-brain__renew_claim", tool_input: { id: C(113), token: tok(113) }, error: [{ type: "text", text: `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8990)}). Your claim lapsed before another covered its work.` }] });
+  assert(revivedMarker(113)?.blocked?.code === "WORK_CLAIMED", "…an `error` handed as content blocks is read as a result's text");
   // Another tool's failure, or a claim call's failure that is no refusal (an interrupt, a transport fault): nothing marked, and what is due still renewed.
   await agentFailure("renew_claim", { id: C(112), token: tok(112) }, "MCP error -32001: Request timed out");
   await claimsHook({ hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "false" }, error: "Exit code 1", is_interrupt: false });
