@@ -17443,6 +17443,13 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `within seven calendar days +1, the seventh day's end included; the eighth day nothing (${named(ur("SMD-9404"))}; ${named(ur("SMD-9408"))}; ${named(ur("SMD-9405"))})`);
   assert(e("SMD-9406") === 0 && ur("SMD-9406")?.overdue === false && e("SMD-9407") === 2 && ur("SMD-9407")?.settled === true && ur("SMD-9407")?.overdue === false && ur("SMD-9407")?.due_at !== null,
     `a level-0 item takes no urgency, overdue or not; a completed item keeps its due time but takes no term (${named(ur("SMD-9406"))}; ${named(ur("SMD-9407"))}, settled ${ur("SMD-9407")?.settled})`);
+  // Just past each window's end, inside the same count of 24-hour spans (review pass 7: no row told calendar days from
+  // now + 48 h): due 2027-03-12 10:00 is the day after tomorrow, a week's +1; due 2027-03-18 10:00 is the eighth day, none.
+  await ticket("SMD-9720"); await ticket("SMD-9721");
+  await put("ticket", "SMD-9720", 2, { due: "2027-03-12T10:00:00Z" }); await put("ticket", "SMD-9721", 2, { due: "2027-03-18T10:00:00Z" });
+  const [past1, past7] = await eff([["ticket", "SMD-9720"], ["ticket", "SMD-9721"]]);
+  assert(Number(past1?.urgency) === 1 && Number(past7?.urgency) === 0,
+    `a due time past the end of tomorrow but within 48 hours is the week's; past the seventh day's end but within eight 24-hour spans, nothing (${past1?.urgency}, ${past7?.urgency})`);
   // The window is calendar days, not hours: at 23:30 the day before, a due time 24.5 hours off is still "by the end of tomorrow".
   const late = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-10T23:30:00Z')`)).rows[0];
   const early = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-09T00:30:00Z')`)).rows[0];
@@ -17535,12 +17542,18 @@ console.log("\n[108] Migration 120: effective priority — the counted level, el
     `under a Low parent of a Critical, unknown; under a completed Critical, unknown; under a completed parent of a Critical, unknown (${past.map(from).join("; ")})`);
   const noHops = await one("ticket", "SMD-9451", { hops: 0 });
   assert(Number(noHops?.effective) === 2 && from(noHops) === "none", `hops 0 turns inheritance off (${from(noHops)})`);
-  // A tie between one hop and two — an Urgent ticket one hop off (3) and its Critical parent two off (3) — goes to the
-  // nearer. (The walk's stop at a stating parent is held by SMD-9493's row below.)
+  // A stating ticket one hop off stops the walk there: its Critical parent is not a candidate.
   await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
   await put("ticket", "SMD-9490", 4);
   const tie = await one("thought", await thoughtAs("[108] a note about SMD-9490", { ticket: "SMD-9490" }));
-  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `a tie between one hop and two goes to the nearer (${from(tie)})`);
+  assert(from(tie) === "ticket:SMD-9490/4-1" && Number(tie?.effective) === 3, `the stating ticket one hop off is read (${from(tie)})`);
+  // A real tie between hops: SMD-9730's parents are SMD-9731 (no level, under SMD-9455's Critical: 3 at two hops), walked
+  // first, and SMD-9732 (Urgent: 3 at one hop); the nearer wins (review pass 7: the row above never reached a two-hop one).
+  await ticket("SMD-9731", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9732");
+  await ticket("SMD-9730", "backlog", [["child_of", "SMD-9731"], ["child_of", "SMD-9732"]]);
+  await put("ticket", "SMD-9732", 4);
+  const hopTie = await one("ticket", "SMD-9730");
+  assert(from(hopTie) === "ticket:SMD-9732/4-1", `a tie between one hop and two, the two-hop one walked first, goes to the nearer (${from(hopTie)})`);
   // Two hops off: an open parent of no level under a completed Critical passes nothing; a tie among three Criticals
   // two hops off (a ticket whose rows state three parents, walked in key order) goes to the lowest key, which is
   // neither the first walked (SMD-9623, through SMD-9621) nor the last (SMD-9625, through SMD-9624).

@@ -90,10 +90,10 @@
 -- WHO READS
 --   No actor, as priority_of: any role with EXECUTE reads every item's terms.
 --   It reads priority_assertions and open_items (the priority group grants
---   both), thoughts and ob1_ticket_head (the capture group's), and
---   thought_sources and thought_facets (the server group's, which the
---   structure group grants too), and ob1_source_gate through
---   ob1_system_gates (the capture group's). The server's role holds all of them. A role
+--   both), thoughts, thought_facets, ob1_ticket_head and, through
+--   ob1_system_gates, ob1_source_gate (the capture group's), and
+--   thought_sources (the server group's, which the structure group grants
+--   too; review pass 7: thought_facets is the capture group's). The server's role holds all of them. A role
 --   short of one gets 42501 naming the table: one without thought_sources on
 --   any ticket or thought, since a thought is asked whether it is a ticket's
 --   row (review pass 2: this said the reverse). No grant changes.
@@ -493,7 +493,10 @@ DECLARE
   -- cap 50: the term is decided at unblocks_many_at, and the count past it is
   -- only shown; the walk stops at the frontier that reaches the cap (review
   -- pass 4: a board whose tickets each block ten took 6.5 s for 1,000 items
-  -- counting to a thousand).
+  -- counting to a thousand). The cap counts open items: a hub whose blocked
+  -- items are settled is still read through for each item reaching it
+  -- (review pass 7: 1,000 items through a hub of 3,000 settled ones, 4.9 s),
+  -- the case a stored projection would answer.
   v_w        jsonb;
   v_bad      text;
   w_unknown numeric; w_hop numeric; w_hops int; w_soon numeric; w_soon_days int; w_week numeric; w_week_days int; w_overdue numeric;
