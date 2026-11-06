@@ -2664,17 +2664,21 @@ else {
   const onThisDatabase = (setting: string) => claims.unsafe(`DO $i$ BEGIN EXECUTE format('ALTER DATABASE %I ${setting}', current_database()); END $i$`);
   await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
   try {
+    // 120's thread_relink stands here, so each names the subject writes refused too.
+    const [{ relinkHere }] = (await claims`SELECT to_regprocedure('public.thread_relink(text, boolean)') IS NOT NULL AS "relinkHere"`) as { relinkHere: boolean }[];
     const rr = await run(SQL_ENV);
     // Since 068 a fail: the projection's triggers refuse every ticket or
     // pointer write under repeatable read (SMD-2256, second review pass).
     assert(rr.code === 1 && /transaction isolation\s+default_transaction_isolation is repeatable read: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer/.test(rr.out)
              && /and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type/.test(rr.out)
-             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
-           `a connection defaulting to repeatable read is refused, naming 068's and 071's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
+             && /the citation guard \(042\) are argued under read committed/.test(rr.out) && /on the database: ALTER DATABASE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out)
+             && relinkHere && /; and 120's thread_relink refuses repeatable read, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\) — and the writers' lock order/.test(rr.out),
+           `a connection defaulting to repeatable read is refused, naming 068's, 071's and 120's refused writes and the guarantees that rest on read committed, with the ALTER DATABASE that restores it where it was set (exit ${rr.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''serializable''");
     const ser = await run(SQL_ENV);
-    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out),
-           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions (exit ${ser.code})`);
+    assert(ser.code === 0 && /transaction isolation\s+default_transaction_isolation is serializable: the writers' lock order/.test(ser.out) && /068's node_state projection stays exact only if every writer of ticket rows is serializable, and 071's gate only if every writer of source rows and statuses is/.test(ser.out)
+             && /; and 120's thread_relink refuses serializable, so every subject written or closed is refused at its commit \(the extraction pass records none, the subject sweep's runs fail\)/.test(ser.out),
+           `a connection defaulting to serializable starts with a warning that names 068's and 071's conditions and 120's refused subject writes (exit ${ser.code})`);
     await onThisDatabase("SET default_transaction_isolation = ''repeatable read''");
     // …and nowhere else: a session as the same role in `postgres` is still at
     // read committed. The suite's own database is asked of the server, not

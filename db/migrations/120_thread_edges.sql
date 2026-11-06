@@ -55,9 +55,9 @@
 --     a re-link's writes — INSERT and UPDATE on thought_facets (the structure
 --     and capture groups'), UPDATE on thoughts (the row locks) and the writes
 --     on derivations (the capture group's) — its transaction is READ
---     COMMITTED and no other transaction holds the key's lock: a delete never
---     waits on the key's lock, which a re-link waiting on the deleted thought
---     may hold.
+--     COMMITTED and no other transaction holds the key's lock: a delete's own
+--     re-link never waits on the key's lock, which a re-link waiting on the
+--     deleted thought may hold.
 --   * READ COMMITTED alone: thread_relink refuses a transaction above it
 --     (feature_not_supported, 115's rule), since its reads after the key's
 --     lock would see a snapshot taken before it; a subject written in such a
@@ -105,9 +105,13 @@
 --     its subjects, not by its texts' fingerprints — an edit that keeps the
 --     subject keeps the edge, its lineage at the fingerprints it was written
 --     at — so the arm, when it lands, keeps to the judge's edges.
---   * A transaction re-keying one thought twice locks the middle key alone, so
---     it can still deadlock with another writer on those keys; Postgres ends
---     one, its subject not written. No writer of the stack does.
+--   * A writer outside the stack's doors can still deadlock with a re-link,
+--     Postgres ending one: a transaction re-keying one thought twice (it locks
+--     the middle key alone); one that writes or closes a thought's subject and
+--     then deletes the thought (the subject's re-link waits on the key while
+--     the transaction holds the deleted row); a re-link closing stray edges a
+--     raw write left both on and naming a thought another transaction is
+--     deleting. No writer of the stack does any of them.
 --
 -- SAFETY
 --   Two functions redefined, the validator and record_thought_relation, each
@@ -622,7 +626,7 @@ BEGIN
   IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
     RAISE EXCEPTION USING
       MESSAGE = format('thread_relink must run under READ COMMITTED; this transaction is %s', upper(current_setting('transaction_isolation'))),
-      HINT = 'Under REPEATABLE READ or SERIALIZABLE its read of the thread would predate the key''s lock. A subject''s write re-links at its commit: write subjects under READ COMMITTED (BEGIN ISOLATION LEVEL READ COMMITTED).',
+      HINT = 'Under REPEATABLE READ or SERIALIZABLE its read of the thread would predate the key''s lock. A subject''s write re-links at its commit: write subjects under READ COMMITTED: BEGIN ISOLATION LEVEL READ COMMITTED in the writer, or, where a session''s default is above it, set default_transaction_isolation back to read committed (preflight names where it was set).',
       ERRCODE = 'feature_not_supported';
   END IF;
   -- One re-link of a thread at a time: two at once would both find an edge

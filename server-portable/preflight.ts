@@ -3505,11 +3505,14 @@ if (configFailed) {
         // the setting comes from (third review pass: a role-in-database or a
         // connection-string setting outranks the ALTER ROLE it used to name).
         try {
-          const [{ level, projection, gate, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
+          const [{ level, projection, gate, relink, source, db }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level,
                                                             to_regprocedure('public.ob1_node_projection_sync()') IS NOT NULL AS projection,
                                                             to_regprocedure('public.ob1_source_gate_status()') IS NOT NULL AS gate,
+                                                            to_regprocedure('public.thread_relink(text, boolean)') IS NOT NULL AS relink,
                                                             (SELECT source FROM pg_settings WHERE name = 'default_transaction_isolation') AS source,
-                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; gate: boolean; source: string; db: string }[];
+                                                            quote_ident(current_database()) AS db`) as { level: string; projection: boolean; gate: boolean; relink: boolean; source: string; db: string }[];
+          // Since 120 a subject's writer is READ COMMITTED alone: thread_relink refuses any other at the commit.
+          const refusedSubjects = relink ? `; and 120's thread_relink refuses ${level}, so every subject written or closed is refused at its commit (the extraction pass records none, the subject sweep's runs fail)` : "";
           const fixIsolation = source === "database" ? `Set it back where it was changed, on the database: ALTER DATABASE ${db} SET default_transaction_isolation = 'read committed';`
             : source === "database user" ? `Set it back where it was changed, on this role in this database: ALTER ROLE ${ident} IN DATABASE ${db} SET default_transaction_isolation = 'read committed';`
             : source === "user" ? `Set it back where it was changed, on the role: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed';`
@@ -3520,11 +3523,11 @@ if (configFailed) {
             add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else if (projection && /^repeatable read$/i.test(level)) {
             add("transaction isolation", "fail",
-                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
+                `default_transaction_isolation is ${level}: migration 068's node_state projection refuses, under it, every write that moves a ticket's key, status or watermark or a supersedes pointer (captures naming supersedes, and deletes of ticket rows or of any superseded thought, included)${gate ? ", and 071's gate every insert of a source row or move of one to another thought or system, and every status move between a known and an unknown status_type" : ""}${refusedSubjects} — and the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed`,
                 fixIsolation);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 071's gate only if every writer of source rows and statuses is" : ""}` : ""}`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source${projection ? `; and 068's node_state projection stays exact only if every writer of ticket rows is serializable${gate ? ", and 071's gate only if every writer of source rows and statuses is" : ""}` : ""}${refusedSubjects}`,
                 fixIsolation);
           }
         } catch (e) {

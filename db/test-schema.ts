@@ -17591,6 +17591,23 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const asStructure = await asRole(i2);
   assert(asStructure.code === null && (await pairs(K7)) === "i3→i1",
     `granted the structure group, the same role's delete links the neighbours itself (${asStructure.code ?? "deleted"}: ${asStructure.message.slice(0, 80)}; ${await pairs(K7)})`);
+  // INSERT and UPDATE on derivations, a re-link's lineage writes, taken from that role in turn: its delete stands,
+  // never refused for a thread, the neighbours left to the next re-link. The delete path's other terms no delete can
+  // tell apart, each one a delete needs itself: without UPDATE on thoughts or SELECT on derivations even a raw DELETE
+  // is refused, and without UPDATE on thought_facets 084's close of the edges naming the thought.
+  const lackedRefused: string[] = [];
+  for (const [n, [priv, table]] of ([["INSERT", "derivations"], ["UPDATE", "derivations"]] as const).entries()) {
+    const key = `ticket:SMD-912${n}`;
+    const [, m2] = await trio(`m${n}-`, key, 14 + n);
+    await db.exec(`REVOKE ${priv} ON ${table} FROM ${ROLE}`);
+    const r = await asRole(m2);
+    for (const st of grantStatements(ROLE, { groups: ["capture", "server", "structure"] })) await db.exec(st);
+    const left = (await q(`SELECT 1 FROM thoughts WHERE id = $1::uuid`, [m2])).length;
+    const gapped = await pairs(key);
+    if (r.code !== null || left !== 0 || gapped !== "") lackedRefused.push(`${priv} on ${table}: ${r.code ?? "deleted"} ${r.message.slice(0, 80)} (${gapped || "no edge"})`);
+  }
+  assert(lackedRefused.length === 0,
+    `without INSERT or UPDATE on derivations, the role's delete stands and leaves its neighbours to the next re-link, never refused for a thread (${lackedRefused.join("; ") || "each"})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 
   // READ COMMITTED alone (115's rule): above it the re-link's reads would see a snapshot taken before the key's lock.

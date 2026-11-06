@@ -28887,7 +28887,7 @@ if (want("46")) {
 }
 
 if (want("47")) {
-  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a writing run as a role short of a re-link's writes refused by name, its dry run read under READ COMMITTED whatever the role's default; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
+  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a writing run as a role short of a re-link's writes refused by name, every lack named under its group, its dry run read under READ COMMITTED whatever the role's default; a dry run visiting exactly the keys with work, a batch a key; a page's keys in key order under a hashed union; --batch at most 200; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
   // Its own client: [24] closed the suite's.
   const sql = new SQL({ url: URL_!, max: 1 });
   const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
@@ -28913,7 +28913,7 @@ if (want("47")) {
     const t = /^ {2}threads: +(\d+) .*?, (\d+) thought\(s\) in them$/m.exec(out), e = /^ {2}edges: +(\d+) standing, (\d+) once every thread is linked$/m.exec(out);
     return { threads: Number(t?.[1]), thoughts: Number(t?.[2]), standing: Number(e?.[1]), whole: Number(e?.[2]) };
   };
-  const KA = "ticket:SMD-9471", KB = "ticket:SMD-9472", KO = "ticket:SMD-9473";
+  const KA = "ticket:SMD-9471", KB = "ticket:SMD-9472", KO = "ticket:SMD-9473", KS = "ticket:SMD-9474";
   let renamed = false;
   try {
     // Settled first: a thread another section left is linked, so the counts below move by this section's alone.
@@ -28926,6 +28926,8 @@ if (want("47")) {
     const a1 = await thought("a1", "2026-11-01T01:00:00Z"), a2 = await thought("a2", "2026-11-01T02:00:00Z"), a3 = await thought("a3", "2026-11-01T03:00:00Z");
     const b1 = await thought("b1", "2026-11-02T01:00:00Z"), b2 = await thought("b2", "2026-11-02T02:00:00Z");
     for (const [id, key] of [[a1, KA], [a2, KA], [a3, KA], [b1, KB], [b2, KB]] as const) await subject(id, key);
+    // And a key one thought holds, which no edge names: no thread, passed over.
+    await subject(await thought("s1", "2026-11-03T01:00:00Z"), KS);
     const written = [await pairs(KA), await pairs(KB)];
     await unlink([KA, KB]);
     await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${a2}::uuid, 'relation', ${{ relation: "evolves", target: a1, judge_key: "thread:v1", key: KO }}::jsonb)`;
@@ -28937,10 +28939,16 @@ if (want("47")) {
         && census.out.includes(`  keys:      ${KA}, ${KB}, ${KO} — --key <key> re-links one`),
       `the subjects' writes linked each thread; unlinked, --status reads two more threads of five thoughts, the orphan's edge standing where three are wanted, and names both keys and the orphan's (${JSON.stringify([was, now])}; ${census.out.trim().split("\n").at(-1)})`);
 
+    // The keys with work in them, read apart from threads.ts's page: two thoughts or more, or a thread's edge standing.
+    const [{ withWork }] = (await sql`SELECT count(*)::int AS "withWork" FROM (
+        SELECT payload->>'key' FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL GROUP BY 1 HAVING count(*) >= 2
+        UNION
+        SELECT payload->>'key' FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key') k`) as { withWork: number }[];
     const dry = await threads({ dryRun: true });
     const dryLeft = [await pairs(KA), await pairs(KB), await pairs(KO)];
-    assert(dry.code === 0 && /^ {2}\d+ key\(s\) in \d+ batch\(es\): 1 edge\(s\) to close, 3 to write \(dry run: nothing written\)$/m.test(dry.out) && JSON.stringify(dryLeft) === JSON.stringify(["", "", "a2→a1"]),
-      `a dry run counts the orphan's edge to close and the threads' three to write, and writes nothing (${dry.out.trim()})`);
+    const [, dryKeys, dryBatches] = /^ {2}(\d+) key\(s\) in (\d+) batch\(es\): 1 edge\(s\) to close, 3 to write \(dry run: nothing written\)$/m.exec(dry.out) ?? [];
+    assert(dry.code === 0 && Number(dryKeys) === withWork && dryBatches === dryKeys && JSON.stringify(dryLeft) === JSON.stringify(["", "", "a2→a1"]),
+      `a dry run visits exactly the ${withWork} key(s) with work in them, a transaction (a batch) each, passing over a key one thought holds, counts the orphan's edge to close and the threads' three to write, and writes nothing (${dry.out.trim()})`);
     const ran = await threads({ batch: 1 });
     const [, keys, batches] = /^ {2}(\d+) key\(s\) in (\d+) batch\(es\): 1 edge\(s\) closed, 3 written$/m.exec(ran.out) ?? [];
     // Each a thread's edge by the validator's word: an older validator left by a section's swap would say judged.
@@ -28967,10 +28975,50 @@ if (want("47")) {
         return typeof v === "function" ? v.bind(target) : v;
       },
     });
-    const split = await threads({ batch: 10_000, sql: counting }).finally(() => pageSql.close());
+    const split = await threads({ batch: 200, sql: counting }).finally(() => pageSql.close());
     const [, splitBatches] = /^ {2}\d+ key\(s\) in (\d+) batch\(es\): 0 edge\(s\) closed, 3 written$/m.exec(split.out) ?? [];
     assert(split.code === 0 && Number(splitBatches) >= 2 && pageReads === 2 && (await pairs(KA)) === "a2→a1 a3→a2" && (await pairs(KB)) === "b2→b1",
       `a key whose re-link writes ends its batch, the next batch taking the page's rest: two threads linked in a run of one --batch take two batches or more from one page read and the empty one (${pageReads} page read(s); ${split.out.trim()})`);
+
+    // A page's keys come back in key order whatever the plan, its last key being where the next page starts: under a
+    // hashed union (sorts off, its plan read back) a run a key a batch still links every thread and closes every
+    // orphan's edge, the keys of the page's two sources interleaved.
+    const KH = ["ticket:SMD-9461", "ticket:SMD-9462", "ticket:SMD-9463", "ticket:SMD-9464", "ticket:SMD-9465"];
+    const h1a = await thought("h1a", "2026-11-04T01:00:00Z"), h1b = await thought("h1b", "2026-11-04T02:00:00Z");
+    const h3a = await thought("h3a", "2026-11-04T03:00:00Z"), h3b = await thought("h3b", "2026-11-04T04:00:00Z");
+    const h5a = await thought("h5a", "2026-11-04T05:00:00Z"), h5b = await thought("h5b", "2026-11-04T06:00:00Z");
+    for (const [id, key] of [[h1a, KH[0]], [h1b, KH[0]], [h3a, KH[2]], [h3b, KH[2]], [h5a, KH[4]], [h5b, KH[4]]] as const) await subject(id, key);
+    await unlink([KH[0], KH[2], KH[4]]);
+    for (const key of [KH[1], KH[3]]) {
+      await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${h1b}::uuid, 'relation', ${{ relation: "evolves", target: h1a, judge_key: "thread:v1", key }}::jsonb)`;
+    }
+    const hashSql = new SQL({ url: URL_!, max: 1 });
+    let pageQuery: { strings: readonly string[]; values: unknown[] } | undefined;
+    const hashing = new Proxy(hashSql, {
+      apply: (target, self, args: unknown[]) => {
+        const strings = args[0] as readonly string[] | undefined;
+        if (pageQuery === undefined && strings !== undefined && (strings[0] ?? "").includes("SELECT key FROM (")) pageQuery = { strings, values: args.slice(1) };
+        return Reflect.apply(target, self, args);
+      },
+      get: (target, p) => {
+        const v = Reflect.get(target, p, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    let hashedPlan = "";
+    const hashedRun = await (async () => {
+      await hashSql`SET enable_sort = off`;
+      const r = await threads({ batch: 1, sql: hashing });
+      if (pageQuery !== undefined) {
+        const text = pageQuery.strings.reduce((acc, s, i) => `${acc}$${i}${s}`);
+        hashedPlan = ((await hashSql.unsafe(`EXPLAIN ${text}`, pageQuery.values)) as { "QUERY PLAN": string }[]).map((x) => x["QUERY PLAN"]).join("\n");
+      }
+      return r;
+    })().finally(() => hashSql.close());
+    const hashedPairs = [];
+    for (const key of KH) hashedPairs.push(await pairs(key));
+    assert(hashedRun.code === 0 && /HashAggregate/.test(hashedPlan) && JSON.stringify(hashedPairs) === JSON.stringify(["h1b→h1a", "", "h3b→h3a", "", "h5b→h5a"]),
+      `under a hashed union a run a key a batch still links every thread and closes every orphan's edge, the page's keys in key order (${JSON.stringify(hashedPairs)}; the page's plan ${/HashAggregate/.test(hashedPlan) ? "hashed" : `not hashed: ${hashedPlan.split("\n")[0]}`}; ${hashedRun.out.trim()})`);
 
     // --key: one thread's gap, healed alone, the dry run counting first.
     await unlink([KB]);
@@ -29014,16 +29062,32 @@ if (want("47")) {
       await sql.unsafe(`DROP OWNED BY ${READER}`);
       await sql.unsafe(`DROP ROLE IF EXISTS ${READER}`);
     }
+    // A role in no group is refused the same, each privilege a re-link writes with named under its group, both groups in
+    // the grant.
+    const NONE = "ob1_live_threads_none";
+    await sql.unsafe(`DROP ROLE IF EXISTS ${NONE}`);
+    await sql.unsafe(`CREATE ROLE ${NONE} LOGIN PASSWORD 'threads-none'`);
+    try {
+      await sql.unsafe(`GRANT USAGE ON SCHEMA public TO ${NONE}`);
+      const bare = await threads({ url: URL_!.replace(/\/\/[^@]*@/, `//${NONE}:threads-none@`) });
+      assert(bare.code === 2 && bare.err.includes(`this role lacks INSERT on thought_facets (the structure group) and SELECT and UPDATE on thought_facets, SELECT and UPDATE on thoughts, INSERT, UPDATE and SELECT on derivations (the capture group), which a re-link writes with (each edge, its lineage, its thoughts' row locks) — cd db && bun migrate.ts --url <owner's url> --grant ${NONE} --groups capture,structure, or run as the owner.`),
+        `a writing run as a role in no group is refused, each privilege a re-link writes with named under its group, both groups in the grant (${bare.code}: ${bare.err.trim().slice(0, 320)})`);
+    } finally {
+      await sql.unsafe(`DROP OWNED BY ${NONE}`);
+      await sql.unsafe(`DROP ROLE IF EXISTS ${NONE}`);
+    }
 
     // Usage, before any connection: a URL nothing listens on is never opened.
     const DEAD = "postgres://nobody@127.0.0.1:1/none";
     const usage = [
       await threads({ url: DEAD, status: true, dryRun: true }), await threads({ url: DEAD, key: KB, batch: 5 }), await threads({ url: DEAD, key: "SMD-9472" }), await threads({ url: DEAD, batch: 0 }),
+      await threads({ url: DEAD, batch: 201 }),
     ];
     assert(usage.every((u) => u.code === 2)
         && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
-        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err),
-      `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
+        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
+        && /^--batch\b.*\b200\b/m.test(usage[4].err),
+      `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none, a batch over 200 (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
 
     // A brain without 120: refused by name.
     await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
@@ -29041,7 +29105,7 @@ if (want("47")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing, not deadlocking (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing, not deadlocking (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -29162,7 +29226,7 @@ if (want("48")) {
       assert(waitedKey && stillThere && r.added === 1 && (await pairs(K2)) === "e3→e1" && rPid !== hPid,
         `a re-link waits on the key's lock another transaction holds, writing nothing meanwhile, and links once it is let go (waited ${waitedKey}; ${r.added} written)`);
 
-      // A delete never waits on that lock: the owner's delete of a thread's middle thought while another transaction
+      // A delete's own re-link never waits on that lock: the owner's delete of a thread's middle thought while another transaction
       // holds the key commits at once, its neighbours left to the key's next re-link (a re-link holding the key may be
       // waiting on the deleted thought's row: waiting on the key there would deadlock).
       const K3 = "ticket:SMD-9483";
@@ -29195,7 +29259,7 @@ if (want("48")) {
       await holder`BEGIN`;
       await holder`SET LOCAL deadlock_timeout = '60s'`;
       await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${KB}::text, 0))`;
-      const batchRun = threads({ batch: 10_000 });
+      const batchRun = threads({ batch: 200 });
       const batchWaits = await pollUntil(() => someoneWaits([hPid], "advisory"), 10_000);
       await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${KA}::text, 0))`;
       await holder`COMMIT`;
@@ -29207,7 +29271,7 @@ if (want("48")) {
       // A batch an operator cancels ends the run, exit 1, never run again: a deadlock's batch alone is.
       await holder`BEGIN`;
       await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${KA}::text, 0))`;
-      const cancelRun = threads({ batch: 10_000 });
+      const cancelRun = threads({ batch: 200 });
       let batchPid = 0;
       await pollUntil(async () => {
         const [w] = (await owner`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory' AND pid <> ${hPid}`) as { pid: number }[];

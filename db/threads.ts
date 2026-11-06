@@ -13,19 +13,23 @@
  * ── What a run does ─────────────────────────────────────────────────────────
  * For each subject key two thoughts or more hold (111), and each key a thread's edge stands under, in key order, it
  * calls thread_relink(key), which writes each edge the thread has that does not stand, with its lineage, and closes
- * each it no longer has; --batch keys a transaction (200 unless said), so a brain of many keys commits as it goes and a
- * stop loses one batch at most. A key whose re-link writes ends its batch: the row locks a write takes (its edges'
- * thoughts, KEY SHARE) are held to the commit, so a delete of one of them waits one thread's re-link, never a batch's,
- * and delete_thought, which holds the brain's review lock while it waits, keeps every other delete waiting no longer. Each page reads its keys in their indexes' order, so a run over millions of keys pages
- * in linear time; a key one thought holds and no edge names has nothing to link, and is passed over. --key re-links
- * that one key's thread. --dry-run calls thread_relink(key, true), which counts what a re-link now would write and close
- * and writes nothing, a key a transaction, so it holds one key's lock at a time (a batch's held through it would leave
- * a delete beside it its gap). Every transaction runs under READ COMMITTED, which thread_relink needs, whatever the
- * role's default. A key a thread's edge still stands under with no subject left is re-linked too, its edges
- * closed. A writing run needs a re-link's writes, refused up front, by name, without them (a dry run and --status
- * read). A batch
- * holds its keys' locks until it commits, so a writer moving a thought between two of them can deadlock it: Postgres
- * ends one (40P01), and a batch it ends is said and run again, three tries in all.
+ * each it no longer has. It reads the keys a page at a time, each page in its indexes' order, so a run over millions
+ * of keys pages in linear time; a key one thought holds and no edge names has nothing to link, and is passed over. A
+ * batch of a page's keys is a transaction, at most --batch of them (200, the default and the most), so a brain of many
+ * keys commits as it goes and a stop loses one batch at most; a key whose re-link writes ends its batch, the next
+ * taking the page's rest. A batch holds its keys' locks, and a write's row locks (its edges' thoughts, KEY SHARE),
+ * until it commits: a subject written on one of its keys waits that long at its commit, and a delete of that thought
+ * waits behind it, holding the brain's review lock (delete_thought's), so every other delete with it. A batch is a
+ * thread's write and its no-op keys' reads at most, which is why --batch stops at 200: more keys a batch buy no speed,
+ * a writing key ending it anyway, and hold more locks longer (10,000 held ten thousand advisory locks, enough to run a
+ * default server's lock table short). --key re-links that one key's thread. --dry-run calls thread_relink(key, true),
+ * which counts what a re-link now would write and close and writes nothing, a key a transaction (a batch each, in its
+ * count), so it holds one key's lock at a time (a batch's held through it would leave a delete beside it its gap).
+ * Every transaction runs under READ COMMITTED, which thread_relink needs, whatever the role's default. A key a
+ * thread's edge still stands under with no subject left is re-linked too, its edges closed. A writing run needs a
+ * re-link's writes, refused up front, by name, without them (a dry run and --status read). A writer outside the
+ * stack's doors can still deadlock with a batch (120's NOT HERE): Postgres ends one (40P01), and a batch it ends is
+ * said and run again, three tries in all.
  *
  * --status reads, writing nothing: the threads (keys held by two thoughts or more), the thoughts in them, the edges
  * standing against those a whole linking leaves (each thread's thoughts less one), and the keys whose standing edges
@@ -44,11 +48,11 @@ import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSq
 import { subjectKeyValid } from "../server-portable/subject.ts";
 
 const FLAGS = { url: "one", key: "one", batch: "one", status: "none", "dry-run": "none" } as const;
-const HINTS = { url: "<postgres://…>", key: "<subject key> (ticket:SMD-123, pr:727, version:v1.2.3, phrase:…)", batch: "<N> keys a transaction" };
+const HINTS = { url: "<postgres://…>", key: "<subject key> (ticket:SMD-123, pr:727, version:v1.2.3, phrase:…)", batch: "<N> keys a transaction at most (1–200)" };
 
-/** The keys a transaction when --batch says none, and the most it takes. */
+/** The keys a transaction at most: --batch's default and its ceiling (more buy no speed and hold more locks longer). */
 export const DEFAULT_BATCH = 200;
-const MAX_BATCH = 10_000;
+const MAX_BATCH = DEFAULT_BATCH;
 
 /** One threads.ts run — the CLI's flags, typed. `sql`, when given, is the caller's client, never closed here. */
 export interface ThreadsOptions {
@@ -231,11 +235,12 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       // with a writer (40P01, the server's to break) ends the batch, rolled back, and it is run again, three tries in all.
       // A key that writes ends its batch, its row locks going at the commit, and the next batch takes the page's rest:
       // a page is read once, so a run that writes every key still pages in linear time. A dry run's keys go a
-      // transaction each, holding one key's lock at a time and no row's.
+      // transaction each, a batch each, holding one key's lock at a time and no row's.
       for (let from = 0; from < page.length; ) {
         let done: Relink[] = [];
         if (DRY) {
-          for (const { key } of page) done.push(await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${key}, true) AS r`) as { r: Relink }[])[0].r));
+          const { key } = page[from];
+          done = [await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${key}, true) AS r`) as { r: Relink }[])[0].r)];
         } else {
           for (let attempt = 1; ; attempt++) {
             try {
