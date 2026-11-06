@@ -503,7 +503,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   which this bullet used to prescribe, put an unauthenticated model API on the
   LAN for nothing).
 - **The codemod-migrated files are not individually tested.** Most need live
-  credentials (Gmail, Slack, Readwise). The shim itself is tested against
+  credentials (Gmail, Slack). The shim itself is tested against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them. The hand ports (`recipes/brain-backup` and

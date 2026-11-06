@@ -10,7 +10,7 @@
 
 A client-side Chrome (or Chromium-based browser) extension that sits on top of Claude.ai, chatgpt.com, and gemini.google.com. When you finish an interesting exchange, click the extension icon and the extension extracts the latest user + assistant turn from the page DOM, runs local sensitivity and duplicate filters, and POSTs the result to your brain's REST core. It also supports bulk backfill from Claude and ChatGPT using their internal conversation APIs so you can import your existing chat history in one pass.
 
-This is a **client-side** integration — unlike the capture integrations in this repo that run as servers (Slack, Telegram, Readwise), a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own brain.
+This is a **client-side** integration — unlike the capture integrations in this repo that run as servers or as a plugin's webhook (Slack, Telegram, Readwise), a Chrome extension runs entirely in the user's browser. It does **not** register as an MCP server. All it does is call your brain's REST core — `POST /v1/thoughts` (the `capture_thought` operation) with an `x-brain-key` header, and `GET /v1/whoami` to check the key (SMD-1931). Every user installs it locally against their own brain.
 
 ## Screenshots
 
