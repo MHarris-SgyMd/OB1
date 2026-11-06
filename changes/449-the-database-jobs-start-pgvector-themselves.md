@@ -1,0 +1,57 @@
+# 449. The database jobs start pgvector themselves, so its pull overlaps the checkout (SMD-3474)
+
+**What changed** in `.github/workflows/fork-checks.yml`, in `db-live`, `data-layer` and `compat-shim`:
+- **`services:` is gone.** Each job's first step, "Start Postgres in the background", runs `docker pull -q` and then `docker run -d` for each container, in a background subshell. Its output goes to `$RUNNER_TEMP/postgres-start.log`, and it holds none of the step's output, so the step ends at once.
+  - **The pull gets three tries,** as the runner gave a service's. The runner waited a random 1–10 s between tries; this waits 3 s, then 6 s. Each failed try is marked in the log, and "Wait for Postgres" warns of a pull that took more than one, as the runner warned of each failed try.
+  - **The subshell runs under `set +e`,** so every exit writes its exit code, whole, by a rename, to `postgres-start.rc`. Under the step's `-e`, a failing last `docker run` would end it before writing the exit code.
+  - **The same image, ports and settings** as the services: `pgvector/pgvector:0.8.6-pg16` on 5432 with `ob1test`. The data layer adds `pair-postgres` on 5433 (`ob1upgrade`) and `preflight-postgres` on 5434 (`ob1preflight`), each with `--shm-size=1g`.
+  - **Each container keeps its service's name.** So `db/ci-parity.sh` and earlier records that say `pair-postgres` still hold.
+  - **Still no health check** (SMD-3196).
+- **"Wait for the service Postgres" becomes "Wait for Postgres".** It first waits up to 180 s for the start's exit code. A non-zero code fails the step at once with the start's output, and so does no code at the deadline. Then it waits for each server, as before.
+- **A last step, "Postgres's log, and its removal"** (`if: always()`), does what the runner's teardown did for a service: each container's log, folded, then the container removed. A start still running is given 10 s to end first, so a container it makes afterwards isn't left behind.
+- **Comments** that named the services, and the data layer's `job.services.*.id` reads, now name the containers.
+- **`FORK.md` and `db/README.md`** no longer say CI's database is a service container.
+
+**Why.** The runner pulled and started each service in "Initialize containers", before the first step. Over main's last 20 runs that step took medians of 7.5 s (db-live's cells), 10 s (the data layer, three containers) and 7 s (the compat shim), most of it the pull. Nothing could overlap it.
+- **What can overlap now:** the checkout (2 s), Bun's setup (1–1.5 s) and the installs (about 1–2 s), plus the compat shim's typecheck (2 s).
+- **What goes:** the runner's "Stop containers" teardown, replaced by the last step's log and removal. Its medians were 1 s for db-live's cells and the compat shim, and 3 s for the data layer.
+- **Projection,** from main run 41383842581's logs:
+  - **db-live** saves about 4 s.
+  - **The compat shim** saves about 5.5 s.
+  - **The data layer** saves about 3 s:
+    - its pull took 7.8 s, longer than the 3.3 s of checkout and install it now overlaps;
+    - its three starts and Postgres's ~1.2 s to accept connections used to hide under the checkout, and now come after the pull.
+  - About 25 runner-s a run in all.
+  - The Verify's "at least 4 s" each will likely miss for the data layer. **For the maintainer:** ≥4 s for db-live's cells and the compat shim, ≥2 s for the data layer.
+
+**Departures from the ticket.** None in the work. The projection is below the Verify's 4 s for the data layer; see above. The ticket's step 3 found nothing to update: checks 34 and 35 read the steps' `bun test-*.ts` commands, and nothing in the checker or `db/ci-parity.sh` reads a workflow's `services:`. Three code comments still say "CI's service container" loosely: in `db/connect.ts`, `db/test-live.ts`, and `db/test-support.ts`'s `cuttableRelay`. What they say about it still holds, so they're left alone.
+
+**Held.**
+- **The three jobs' new steps,** extracted from the workflow and run on local podman (not Docker Engine), with the containers renamed `ob1-smd3474-*` and the ports moved:
+  - the start step ends in 0.01–0.02 s every time;
+  - db-live's, the data layer's (three containers) and the compat shim's waits pass, and the last step prints each log and leaves no container;
+  - a bad image tag fails the wait with the pull's own error;
+  - a Postgres that exits (no password) fails it, naming the container, with the entrypoint's error;
+  - a start that never ends fails it at the deadline, with the start's output;
+  - review pass 1's cases:
+    - a container name already in use fails the wait in about 1 s with docker's error (before the fix, 180 s);
+    - the data layer's last port held by another container fails it in 1.5 s;
+    - only `preflight-postgres` exiting fails it, naming that container;
+    - a failing pull is tried three times, then fails in 11 s;
+  - review pass 2's: a pull that fails once and then succeeds, through a shim ahead of the real CLI. The job passes, with "::warning::pgvector's pull took 2 tries" and the start's log.
+- **The checker and actionlint 1.7.7 with shellcheck** pass.
+- **On the runner,** the pull's overlap, and so the saving, needs the PR's own Fork Checks run.
+- **Off a hosted runner** these fixed names would clash with a leftover or a neighbour. Every job here runs on GitHub's hosted runners, whose machine goes with the job.
+
+**Review passes.**
+
+| Pass | Finding | Caught by | Fix |
+|---|---|---|---|
+| 1 | Under the step's `-e`, a failing last `docker run` (a taken name or port, a daemon error) ended the background subshell before it wrote its code, and the wait stalled 180 s, then blamed a start that "did not end" (confirmed on bash 3.2 and 5.2). The runner's three-try pull retry was dropped. A last step after a wait that gave up could leave a container made after it. The projection's 4–6 s was high for the data layer, whose Postgres start no longer hides under the checkout | walkthrough, mutant | `set +e` in each subshell, the exit code written whole by a rename; a three-try pull; the last step waits up to 10 s for the start; four cases; the projection by job, and a Verify proposal |
+| 2 | No defect in the shell. A pull that failed once and then succeeded was invisible, where the runner warned of each failed try. The record said the runner's retry waited 3 and 6 s (a random 1–10 s), that its teardown took 1–2 s (the data layer's 3 s), and named two of three "service container" comments; "code" read as source, "every outcome" over a killed subshell, and the wait's comment was hard to parse | cold read | failed tries marked in the log, a `::warning` from the wait, a case; the record's figures and wording |
+
+**Tidied while the files were open.** The start step's five-line note, copied into each job's run block, is said once, in db-live's step comment, where the other two point. The wait counts failed pull tries once, not twice. Its comment is rewrapped. No behaviour changed.
+
+**Verify.**
+- [ ] Each job's time from its start to its first suite step drops by at least 4 s over ten main runs.
+- [ ] The database is the same image and version, and a Postgres that never comes up still fails the wait step.

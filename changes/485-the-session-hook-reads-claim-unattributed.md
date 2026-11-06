@@ -1,0 +1,92 @@
+# 485. The session hook reads CLAIM_UNATTRIBUTED's `lapsedAt` — a claim made on a lapsed claim's work is marked while the registry is still away (SMD-3807)
+
+**What changed.** In `recipes/session-capture-hook/session-capture.mjs` (1.7.2):
+- **The hook's own renewal.** A CLAIM_UNATTRIBUTED carrying `lapsedAt` for the claim renewed records it as the claim's expiry, and the same run makes the lapse check the hook makes for any claim it knows lapsed:
+  - it lists the ticket's claims, ended ones included;
+  - a claim on overlapping work made or renewed since the lapse gets a `CLAIMED_WHILE_LAPSED` marker;
+  - `list_claims` needs no agent id, so the check runs with the registry still away;
+  - with no claim since, the line says so, and each renewal checks again before it tries;
+  - a check that can't be made (the list unread, or not showing the claim) is said on the kept line, by its reason, and the hook renews the claim only once the check can be made, as for any lapse it knows;
+  - a token file with no ticket is not checked, and the line says so;
+  - when the registry waits on an operator, the marker the agent reads says so, ahead of its cut: tell the user that too.
+- **The agent's own call.** With the claims hook pasted, a `renew_claim`, or `claim_work` with the token, refused CLAIM_UNATTRIBUTED with the token file's claim's lapse:
+  - records the lapse the same way, and makes the claim due, so the same run's renewal makes the check;
+  - reads the lapse from `structuredContent` where the harness hands it over, else from the reply's words ("It had lapsed at T, and stays lapsed until a renewal lands");
+  - records only the token file's own claim's lapse, by the id the reply names, and only a real time no more than five minutes to come (the clocks' skew).
+- **The kept line** is written from the reply's facts:
+  - the code and the cause;
+  - whether renewals retry, or an operator must act (tell the user);
+  - the lapse.
+
+  The brain's words, cut at 540 characters, lost the check's ending once a lapse was in them (648 characters). With an operator to wait on, they also lost the last sentence, "tell the user" (757 characters).
+
+**The rule.** In CLAUDE.md and AGENTS.md, step 4's CLAIM_UNATTRIBUTED bullet now has the agent retry when the check finds only claims the user already decided on, now lapsed or released, as "After the user's carry on" has it. The bullet also says the reply's "stop, and tell the user" is not for those. It said to stop on any claim found. So after a carry-on, with the registry away, the hook's repeat markers named the released claim, and the agent's own check stopped it at every renewal.
+
+**Tidied while the file was open.** A successful renewal's expiry is recorded and logged only when it is a time, from the hook's renewal or the agent's. A brain's word there went into the state file and the log unmasked. After the review passes: a repeated type check dropped, a docblock that still called the words all a PostToolUse hook gets brought up to SMD-3874, two test comments brought up to their rows, and two one-use test variables inlined.
+
+**Why.** Since SMD-3705, a renewal or a claim_work with the token, on the caller's own lapsed claim with the registry away, answers CLAIM_UNATTRIBUTED with `lapsedAt`. The hook logged it and kept the token, recording nothing. When its record showed no lapse (no expiry, or one still to come), another key's claim made on the work since the lapse went unmarked until the registry answered. The renewal then met it as WORK_CLAIMED, or as CLAIMED_WHILE_LAPSED on a revival. Found by SMD-3705's review passes 2 and 3.
+
+**Held.** test-session-capture passes (958 assertions). The new rows in [13]:
+- **The hook's renewal:**
+  - a CLAIM_UNATTRIBUTED with a lapse and a claim made on the work since: a `CLAIMED_WHILE_LAPSED` marker in the same run, the registry still away;
+  - with none since: no marker, the line giving the cause, the lapse and the check whole, and the next run checking again before it tries;
+  - the registry set up wrong, with a claim since: the marker saying, ahead of the claims it names, that an operator must act, so tell the user that too;
+  - the claim not listed: kept, the line giving the reason whole, a " — " in its piece included;
+  - listed live: nothing added.
+- **The other causes and claims:**
+  - the registry set up wrong: the line says an operator must act and the user be told;
+  - a live claim's refusal records nothing;
+  - a token file with no ticket says it was not checked, giving the lapse time once.
+- **An error result with no structured content** is kept, and the claim after it is renewed.
+- **A renewal's expiry that is no time**, a token or an impossible date, is neither recorded nor logged, from the hook's renewal or the agent's.
+- **The agent's own call:**
+  - `renew_claim` (words alone), `claim_work` (facts) and facts inside a result as JSON record the lapse, and the same run marks the claim made since;
+  - another claim's lapse, in words or in facts, and a `lapsedAt` that is no time, no real time, a date not as the server writes one, or ten minutes to come record nothing; one two minutes to come, within the clocks' skew, is recorded;
+  - a token file with no ticket says the claims since are not checked.
+- The fake brain's CLAIM_UNATTRIBUTED is now render.ts's words, the lapse sentence included.
+- **Against render.ts itself** (a scratch run, not a suite row): the hook was driven with replies the real `renderRenewClaim`, `renderClaimWork` and `renderListClaims` built.
+  - The registry away with a claim since: marked in the same run.
+  - None since: the kept line whole (the reply 628 characters, 648 with its code).
+  - The registry set up wrong: the operator clause in the marker.
+  - The agent's `claim_work`: its lapse read from the words alone and from the facts, then marked.
+  - No token reached the log, the state or a marker.
+
+**Mutants:** twenty-seven run, all killed:
+- **The recording:** dropped on the hook's renewal or the agent's call, or the agent's call not making the claim due.
+- **The reading:**
+  - the claim's id not checked, in the facts or in the words;
+  - the words not read, the facts not read, or the facts inside a result not read;
+  - the time not checked, a lapse still to come accepted, no skew allowed, or an impossible date read as a time;
+  - a renewal's expiry unchecked, on the hook's renewal or the agent's.
+- **The check:** not made at once, its "not checked" note dropped, its "none since" left off a kept line, or its reason cut at the first dash.
+- **The marker:** the operator clause dropped, or given to the registry away.
+- **The kept line:** promising a renewal the check holds back.
+- **The line:** its lapse dropped, every cause read as the registry away, a check promised for a token file with no ticket, or the lapse time given twice there.
+- **The branch:** the kept branch dropped, or the cause read without a guard.
+
+Before the review, the facts inside a result survived the first run, until a row read them.
+
+**Review passes.**
+
+| Pass | Finding | Caught by | Fix |
+|---|---|---|---|
+| 1 | An error result with no `structuredContent` threw: the `cause` read had no guard, and the claims after it went unrenewed | cold read | 50c86321 |
+| 1 | The recorded lapse waited for the next due renewal, up to an hour off, so a push could go before the marker | walkthrough | 50c86321 |
+| 1 | The line promised a check for a token file with no ticket, which lapseCheck never makes | cold read | 50c86321 |
+| 1 | The none-since row didn't show the check ran | cold read | 50c86321 |
+| 1 | Claude Code hands an MCP error result to PostToolUseFailure, so the agent-call path doesn't fire there | cold read | SMD-3874 |
+| 2 | The kept line spliced lapseCheck's reason at its first " — ", which a piece can hold, and said the lapse time twice | cold read | a72ac8f1 |
+| 2 | A marker from the same-run check dropped the registry's cause, so the line no longer said an operator must act | walkthrough | a72ac8f1 |
+| 2 | The fragment gave the cut's loss as the lapse time (it was the check's ending, and "tell the user") and the wrong length | run-it | a72ac8f1 |
+| 2 | The README's own-piece sentence had drifted from the WORK_CLAIMED text it explains; the agent rows' claims were live in the fake while their message said the registry was away | cold read | a72ac8f1 |
+| 3 | After a carry-on with the registry away, the rule's CLAIM_UNATTRIBUTED bullet stopped the agent on the claim the user had decided on, which the hook's repeat markers name | walkthrough | fc34cc99 |
+| 3 | A check that can't be made held renewals back, while the line said "renewals retry" | run-it | fc34cc99 |
+| 3 | The operator clause was in the log line only, not the marker the agent reads | run-it | fc34cc99 |
+| 3 | A lapse time still to come, or an impossible date, was recorded | run-it | fc34cc99 |
+| 4 | The README said the marker carries the operator part, which a marker from a lapse the hook already knew can't; the rule's sentence named one decided claim where a marker names several, and didn't say the reply's "stop" is not for them | walkthrough | review pass 4 |
+| 4 | The five-minute skew allowance on a lapse time was unsaid and untested; lapseCheck's `why` named both a marker note and a reason; a no-ticket line gave the lapse time twice; this table gave no commits | cold read | review pass 4 |
+| 4 | The rule's steps while the registry is away (pushing while lapsed, dropping it, a forced release, telling the user once) | walkthrough | SMD-3876 |
+
+**Follow-ups.**
+- SMD-3874: Claude Code hands an MCP error result to `PostToolUseFailure`, which the claims hook does not take. There the agent-call path above does not fire, nor does SMD-3602's agent-call WORK_CLAIMED marker, and only the hook's own renewal marks the claim. The ticket probes a real payload and registers the hook there.
+- SMD-3876: the rule's steps for a claim that can't be renewed or released while the registry is away: pushing while it stays lapsed, dropping it, a forced release, telling the user once. These predate this change; found by review pass 4's walkthrough.

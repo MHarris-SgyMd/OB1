@@ -1,0 +1,37 @@
+# 476. The claim, priority and item operations share one helper — one rule for a caller whose agent id the registry did not give (SMD-3780)
+
+**What changed.** `server-portable/core/caller.ts` holds two pieces that `core/claims.ts`, `core/priority.ts` and `core/items.ts` each had a copy of, and two that priority.ts and items.ts had:
+- `unattributedAs(code, principal, facts?)`: the registry's failure to give the caller's agent id (`agentUnresolved`) as CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED or ITEM_UNATTRIBUTED, retryable while the registry is unreachable and final when it is set up wrong or refuses. It answers null when the caller has its id, or no registry was asked (a plugin hook's principal). The caller says what follows then: claims.ts and items.ts say `registry_unknown` where they did, and items.ts keeps ITEM_UNOWNABLE for a hook. One signature per code: a claim's refusal must name its id and whether a force was asked, the other two take nothing more, and a code widened to a union matches no signature.
+- `asked(Refused, run)`: a store call, the store's own raised refusal (ClaimRefused, PriorityRefused, ItemRefused: an argument, or for 115 an ingested key) returned and any other throw left a fault.
+- `writerScope` and `readOnly`, the scope 116 and 117 read off the envelope and their READ_ONLY_KEY, from priority.ts and items.ts.
+
+Each file keeps its own docblock on why its refusal is said where it is, on a one-line `unattributed`.
+
+**Why.** The copies drifted once. SMD-3665 PR 2's review pass 1 exempted a plugin's call in items.ts and not in priority.ts, and pass 2 moved the check after the database call in both. SMD-3705 would have added a fourth copy in claim_work.
+
+**Held.** No behaviour change, checked three ways:
+- test-server (1455), test-auth (201) and test-e2e-sql (700) pass. No existing test-rest-sql condition was loosened or removed; [14]'s plugin assertion gained the new rows' conditions.
+- Review pass 1 ran main's and the branch's core against one stub store over 124,480 cells (every operation, principal state and store answer) and against Postgres over 3,752 cells. They differ only for an `agentUnresolved` outside its type's three values, which no code sets.
+- Ten mutants, in `caller.ts` and claims.ts's fallback, run against test-rest-sql (378), are all killed. The away, misconfigured and rethrown mutants each fail a row in all three families: [10] claims, [11] priority, [14] items.
+
+New rows read what no suite read, on main either:
+- [14]'s plugin row: the hook key's own item with the registry set up wrong, or refusing, answers ITEM_UNATTRIBUTED, final, with each cause, and a read key's open is READ_ONLY_KEY naming it. The row holds the key's name, not which side refused: with the core's check dropped, 117 refuses alike.
+- [10]: the holder's own renew with no agent id and no registry failure named is CLAIM_UNATTRIBUTED `registry_unknown`.
+
+Before these rows, mapping `registry_refused` to `registry_misconfigured`, emptying READ_ONLY_KEY's key, or changing claims' fallback survived every suite.
+
+**Review passes.**
+
+| Pass | Finding | Caught by | Fix |
+|---|---|---|---|
+| 1 | The registry refusing, claims' `registry_unknown` fallback and READ_ONLY_KEY's key were read by no suite | mutant | 541286c7 |
+| 1 | A code widened to a union compiled without a claim's facts: one signature per code | cold read | 541286c7 |
+| 2 | The helper's body was cast past the type checker: now typed by the refusal's own shape | cold read | review pass 2 |
+
+Pass 2 also prototyped SMD-3705 on the helper in a scratch copy: it needed no change to `caller.ts`.
+
+**Tidied while the files were open.** README lines rewrapped, `asked`'s docblock wrapped, `readOnly` given one, and claims.ts's registry_unknown comment reworded.
+
+**Not taken.** The ticket's optional wrapper for the five item writers' shared opening and closing. Each writer picks its own value off 117's answer, and the wrapper's type parameters would read worse than the four lines it saves.
+
+**Follow-ups.** SMD-3785: render.ts's guard nulls a uuid starting with a digit under `proposal`, `item` or `thought` in a refusal's structuredContent (found by review pass 1, the same on main).
