@@ -1,6 +1,6 @@
 -- Typed Reasoning Edges + Temporal Validity
 --
--- Adds two things to Open Brain's knowledge graph:
+-- Adds two things to the entity-extraction schema's knowledge graph:
 --
 --   1. A new `thought_edges` table that holds semantic reasoning
 --      relations BETWEEN thoughts (supports, contradicts, evolved_into,
