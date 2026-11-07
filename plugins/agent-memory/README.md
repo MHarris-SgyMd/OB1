@@ -51,6 +51,7 @@ The requests keep the old server's versions, `openbrain.agent_memory.*.v1` and O
 - **Source refs.** A source ref's `timestamp` that is no time is stored as none. The old server failed the write-back on it.
 - **Artifacts.** An `artifact_reference` memory keeps its own artifact. The old server gave each one every artifact of its write-back.
 - **Idempotency keys** are a workspace's own: the same key in two workspaces is two memories. The old server's were global, so a write-back to one workspace could be answered another's memory.
+- **A memory's text is a thought of the brain's.** Every key that can read finds it through `search_thoughts`, whatever the memory's workspace, visibility or review: `restrict_scope`, `reject` and `personal` act on the plugin's recall and lists alone, as they did on the old server (SMD-3983).
 - **The thought's metadata** is six flat `agent_memory_*` keys. The old server wrote `source_type`, `topics`, `people` and a nested `agent_memory` object, which a capture through the core does not take: the core's extractor gives the thought its topics and people. A text the brain already holds is one thought: a write key's write-back merges its keys into it, so they name the last write-back's workspace and type (a capture key's leaves them), while each memory's own row keeps its own.
 - **Bounds.** Each memory is at most 16,384 characters (over 15,000 is refused as transcript-like, as before), a recall's query 4,000, a label or id 200, a uri 4,096, a write-back 50 memories in all, each list 50 items and each record (entities, sensitivity) 50 keys. A summary is the memory's first 140 characters, counted and cut by code point (never half an emoji's surrogate pair, though a combined emoji or an accent may be split from its base); an edit of the content alone takes the new content's, when the text changes.
 
@@ -145,8 +146,9 @@ COMMIT;
 ## Troubleshooting
 
 - **`400 NO_MEMORIES`.** `memory_payload` held no memory: every list was empty.
-- **`400 TOO_MANY_MEMORIES`.** The write-back held more than 50 memories, each a capture with its model calls in one request. Send it in parts.
+- **`400 TOO_MANY_MEMORIES`.** The write-back held more than 50 memories, each a capture with its model calls in one request. Send it in parts. A long one on a slow local model can outlast the server's idle timeout (255 s): the memories written before the cut are kept, and the same write-back sent again finishes it.
 - **`400 REFUSED_INPUT`.** The body was not the contract's: `issues` names each field. The versions are four: `openbrain.agent_memory.recall.v1` and `openbrain.openclaw.recall.v1` for a recall, `openbrain.agent_memory.writeback.v1` and `openbrain.openclaw.writeback.v1` for a write-back; a field past its bound is named too.
+- **`400 NO_RELATED_MEMORY`.** A `merge` or `supersede` named no `related_memory_id`.
 - **`400 NOT_NARROWER`.** A `restrict_scope` named a visibility wider than the memory's own (`current` says it), narrowest first: personal, channel, project, workspace, organization. Restricting only narrows; no review action widens a memory.
 - **`403 FORBIDDEN`.** The key's scope does not reach the operation: recall and the lists read (a capture key cannot), and usage and review write (a read or capture key cannot).
 - **`404 NO_SUCH_MEMORY` or `NO_SUCH_RECALL`.** No memory has that id, or no traced recall that `request_id`. A recall made under a read key is never traced, and its `request_id` is null.

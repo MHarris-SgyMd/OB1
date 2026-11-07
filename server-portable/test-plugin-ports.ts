@@ -3252,6 +3252,10 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const self = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[2]!.memory_id });
   const missing = await review(w[2]!.memory_id, { action: "merge", related_memory_id: NO_ROW });
   const gone = await review(NO_ROW, { action: "confirm" });
+  const noRelated = await review(w[2]!.memory_id, { action: "supersede" });
+  const noRelatedActions = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.review_actions WHERE memory_id = ${w[2]!.memory_id}::uuid`);
+  assert(noRelated.status === 400 && noRelated.body.code === "NO_RELATED_MEMORY" && noRelatedActions.n === 0,
+    `a merge or supersede naming no other memory is refused, no review recorded (${noRelated.status} ${noRelated.body.code}, ${noRelatedActions.n})`);
   assert(nothing.body.code === "NOTHING_TO_CHANGE" && self.body.code === "SAME_MEMORY" && missing.status === 404 && missing.body.code === "NO_SUCH_MEMORY" && gone.body.code === "NO_SUCH_MEMORY",
     `refused: an edit with nothing to change, a merge into itself or into nothing, a memory that is not there (${nothing.body.code}, ${self.body.code}, ${missing.body.code}, ${gone.body.code})`);
   const merged = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[3]!.memory_id });
