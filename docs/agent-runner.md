@@ -120,7 +120,7 @@ Each tick, after reconciling the runner's own runs (step 0, below), the runner t
 
 * team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, state Backlog, assigned to no one and delegated to no agent;
 * carries SMD-4086's label, added by the maintainer (Linear's history says who) after the description was last edited, and not the label that hands a ticket to a person;
-* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL, and no REST operation carries it until SMD-3669's agenda read lands.
+* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL. SMD-3669's agenda read (`GET /v1/agenda`, migration 123) now carries startability: open blockers, live claims and `not_before`.
 * **nobody's work** (CLAUDE.md step 1, after a `git fetch` of the runner's bare repository):
   * no branch, and no worktree, carries the ticket's id, matched as a whole id (`smd-408` is not `smd-4087`). This covers branches of this repo, of the bot's fork once it exists, and of the main checkout, and the main checkout's worktrees;
   * there is no open PR (`gh pr list --search <id> --state open`);
@@ -128,7 +128,7 @@ Each tick, after reconciling the runner's own runs (step 0, below), the runner t
 
 A live claim whose PR merged or closed is stale. The runner skips its ticket and names the claim in its record for the maintainer (CLAUDE.md step 1). A lapsed claim never released whose PR hasn't merged or closed is skipped, never taken: it may be work paused on another machine. A whole-ticket `claim_work` would close it as taken over (migration 115), with no one having decided the work is dead (CLAUDE.md step 1).
 
-Once the agenda read lands (SMD-3669, ranked by effective priority, SMD-3667), the runner reads it, filtered by the label, instead of querying Linear.
+The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667); the runner is to read it, filtered by the label, instead of querying Linear.
 
 ## A run, step by step
 

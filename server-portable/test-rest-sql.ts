@@ -1954,6 +1954,9 @@ console.log("\n[16] The agenda through both doors (migration 123, SMD-3669): RES
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
   assert(blank.status === 400, `a blank scope is refused 400 by the schema, never a database fault (${blank.status} ${blank.body.code})`);
+  // A lone surrogate over MCP (review pass 6): the schema refuses it, never the database's jsonb cast (a 500).
+  const lone = await mcp("agenda", { project: "a" + String.fromCharCode(0xd800) + "b" });
+  assert(lone.isError && !/^Error: |FAILED/.test(lone.text) && /surrogate/.test(lone.text), `a lone surrogate in a scope is refused by the schema (${lone.text.slice(0, 120)})`);
   // An open item through both doors: read by the store's normaliser, rendered over MCP.
   const opened = await rest("POST", "/v1/items", { text: "[16] water the ferns", due_at: tomorrow });
   const its = await rest("GET", "/v1/agenda?source=items&limit=100");
