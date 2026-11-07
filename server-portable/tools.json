@@ -78,6 +78,10 @@
       "scope": "read"
     },
     {
+      "name": "thread",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "capture"
     },

@@ -927,6 +927,68 @@ export type ChangeFilters = {
  */
 export type TicketStatusInputs = { lifecycle: Set<string>; heads: Map<string, Status>; history: Map<string, Change[]> };
 
+// ── Work threads (SMD-3306 PR 7a-2a) ─────────────────────────────────────────
+
+/** How many linked threads a ticket's thread names; the rest are counted. */
+export const THREAD_LINKS_SHOWN = 50;
+/** How much of a member's text a thread read carries: its title's worth (thoughts.ts thoughtTitle reads the first line). */
+export const THREAD_HEAD_CHARS = 500;
+/**
+ * Which page of a thread to read: from its start, after a member's position (a cursor's, ListPosition's form), or
+ * around a member — up to `before` members ahead of it, then it and the rest — `limit` members in all.
+ */
+export type ThreadWindow = { limit: number } & ({ after?: ListPosition; around?: undefined } | { around: string; before: number; after?: undefined });
+/** A board ticket's own row (its head row), as a member: its ticket and its status as that row records it — the row is rewritten in place, so it keeps its first place. */
+export type ThreadTicket = { issue: string; status: string | null; statusType: string | null };
+/** A thread's member: its place (1 the first), its position (the cursor's), its time, its text's head, and its ticket when it is a board ticket's own row. */
+export type ThreadMember = { id: string; place: number; at: string | null; created_at: string | null; content: string; ticket: ThreadTicket | null };
+/** How a linked ticket stands to this thread's: its parent or child, it blocks or is blocked by this one, or they relate. */
+export type ThreadLinkRelation = "parent" | "child" | "blocks" | "blocked_by" | "relates_to";
+export const THREAD_LINK_RELATIONS = ["parent", "child", "blocks", "blocked_by", "relates_to"] as const satisfies readonly ThreadLinkRelation[];
+/** A linked thread: its key, how its ticket stands to this one, and how many thoughts it holds (0: none yet). */
+export type ThreadLink = { key: string; relation: ThreadLinkRelation; total: number };
+/** A thread's page: its key and size, the members picked, and — a ticket's — its linked threads, `linksMore` when more than those shown. */
+export type ThreadPage = { key: string; total: number; members: ThreadMember[]; links: ThreadLink[]; linksMore: boolean };
+export type ThreadNeighbour = Pick<ThreadMember, "id" | "created_at" | "content">;
+export type ThreadPlace = { key: string; place: number; total: number; previous: ThreadNeighbour | null; next: ThreadNeighbour | null };
+
+const textOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/**
+ * A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a board ticket's own
+ * row — `metadata.source` `linear`, which board-sync alone writes (capture and update_thought refuse it to every key,
+ * REFUSED_SOURCE_RESERVED); the ticket's head row (`head`: 068's ob1_ticket_head, the rule node_state and the
+ * stated-status label read — board-sync chains a ticket's older rows under its head, and a former head kept its
+ * status: review pass 3); and `metadata.issue` a ticket's shape (a team of one letter or more, as board-sync's
+ * identifiers are). Its status type is kept only as one lower-case word, as Linear's are (backlog, started, …).
+ * A write key may set `issue`, `status` and `status_type` on its own rows to any text (review pass 1 found a forged
+ * issue printed as a ticket's row, pass 2 a forged status type forging lines of the text): such a row carries no
+ * ticket. On board-sync's row it may patch them too, as it may for node_state's reading; the status is said as the
+ * row records it.
+ */
+export function normaliseThreadMember(r: Record<string, unknown>): ThreadMember {
+  const raw = textOrNull(r.issue), type = textOrNull(r.status_type);
+  const issue = r.source === "linear" && r.head === true && raw !== null && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(raw) ? raw : null;
+  return {
+    id: String(r.id), place: Number(r.place), at: textOrNull(r.at), created_at: isoTimestampOrNull(r.created_at ?? null),
+    content: String(r.content ?? ""),
+    ticket: issue === null ? null : { issue, status: textOrNull(r.status), statusType: type !== null && /^[a-z_]{1,20}$/.test(type) ? type : null },
+  };
+}
+
+/** A linked thread's row → ThreadLink, or null for a relation this read does not make. */
+export function normaliseThreadLink(r: Record<string, unknown>): ThreadLink | null {
+  const relation = (THREAD_LINK_RELATIONS as readonly unknown[]).includes(r.relation) ? r.relation as ThreadLinkRelation : null;
+  return relation === null || typeof r.other !== "string" ? null : { key: `ticket:${r.other}`, relation, total: Number(r.total) };
+}
+
+/** threadPlaces' row → ThreadPlace: a neighbour only where the row names one. */
+export function normaliseThreadPlace(r: Record<string, unknown>): ThreadPlace {
+  const side = (p: "prev" | "next"): ThreadNeighbour | null => r[`${p}_id`] == null ? null
+    : { id: String(r[`${p}_id`]), created_at: isoTimestampOrNull(r[`${p}_created_at`] ?? null), content: String(r[`${p}_content`] ?? "") };
+  return { key: String(r.key), place: Number(r.place), total: Number(r.total), previous: side("prev"), next: side("next") };
+}
+
 /** A ticket key as a store sends it: 077's TEAM-123 shape, each once. */
 export function ticketList(tickets: string[]): string[] {
   return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
@@ -2329,6 +2391,25 @@ export interface ThoughtStore {
   ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
 
   /**
+   * One work thread's page (SMD-3306 PR 7a-2a): the thoughts holding standing subject `key` (111), in the thread's
+   * order — created_at, ties by id, an undated thought last, as 120's thread_relink orders it — read from the
+   * subjects, not the edges, so a thread is whole before db/threads.ts links it. `window` picks the page: from the
+   * start, after a member's position, or around a member (`around`, up to `before` members ahead of it). A ticket
+   * key's page carries the threads its ticket's board links reach (053's linear links on the ticket's rows, either
+   * direction), each with its member count, the first THREAD_LINKS_SHOWN. Throws ListCursorRefused for a cursor
+   * whose time Postgres cannot read, else what Postgres throws: a role that cannot read thought_facets is the
+   * caller's to say.
+   */
+  threadPage(key: string, window: ThreadWindow): Promise<ThreadPage>;
+
+  /**
+   * Each thread a thought stands in (SMD-3306 PR 7a-2a), one per standing subject key, in key order: its place, the
+   * thread's size, and the members before and after it — fetch's "continues" and "continued by". Empty for a thought
+   * with no standing subject, or no such thought. Throws as threadPage does.
+   */
+  threadPlaces(id: string): Promise<ThreadPlace[]>;
+
+  /**
    * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
    * judged to conflict, in one status (null for every status), most confident
    * first, each with both thoughts. Read-only — accepting or rejecting is the
@@ -2488,7 +2569,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 
