@@ -5,14 +5,14 @@
  * runs each reader on fixtures, offline. Nothing here writes anywhere.
  *
  * Two rules hold every reader. No request that carries a credential follows a redirect, logs its headers, or
- * relaxes TLS: fetch would carry a custom header, the brain key among them, to the next origin, as
+ * relaxes TLS: fetch would carry custom headers, the brain key among them, to the next origin, as
  * rest-client/index.ts found, so a redirect is answered as the failure it is. And git runs with an environment built
  * from nothing, no credential helper, https alone and no redirect, so a remote that answers 401 can never make it
  * read or erase a credential of the maintainer's.
  */
 
 import { strict, type Gql } from "../../db/linear-api.ts";
-import { DEFAULT_BRANCH, type Branch, type BranchPrs, type Claim, type ClaimsRead, type HistoryEntry, type Ticket } from "./select.ts";
+import { CLAIMS_LIMIT, DEFAULT_BRANCH, type Branch, type BranchPrs, type Claim, type ClaimsRead, type HistoryEntry, type OpenPr, type Ticket, type Worktree } from "./select.ts";
 
 /** Runs a command and answers its exit code and output: dry-run.ts's spawner, or a stub in the self-check. */
 export type Runner = (cmd: string[], opts?: { cwd?: string }) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -23,7 +23,7 @@ export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 export const READY_LABEL = "agent-ready";
 export const HANDED_BACK_LABEL = "agent-handed-back";
 
-/** The runner's config, as dry-run.ts reads it from its file. Its keys live at fixed paths, not here. */
+/** The runner's config, as dry-run.ts reads it from its file. The runner's keys live at fixed paths, not here. */
 export type Config = {
   team: string;
   initiative: string;
@@ -146,7 +146,7 @@ export function toTicket(i: LinearIssue): Ticket {
   };
 }
 
-/** The initiative's id, the two labels' ids, and every open ticket in the initiative's projects that carries the ready label. */
+/** The two labels' ids, and every open ticket in the initiative's projects that carries the ready label. */
 export async function readBoard(gql: Gql, cfg: Config): Promise<{ readyLabelId: string; handedBackLabelId: string; tickets: Ticket[] }> {
   const initiatives = await strict<{ initiatives: { nodes: { id: string }[] } }>(gql, INITIATIVE_QUERY, { name: cfg.initiative });
   if (initiatives.initiatives.nodes.length !== 1) throw new Error(`Linear has ${initiatives.initiatives.nodes.length} initiatives of the configured name, not one`);
@@ -201,8 +201,8 @@ export function parseLocalBranches(out: string): Branch[] {
  * `git worktree list --porcelain` output: each worktree's path, its branch when it is on one, and its commit. A block
  * with no worktree line is an error, never a worktree dropped.
  */
-export function parseWorktrees(out: string): { path: string; branch: string | null; sha: string | null }[] {
-  const trees: { path: string; branch: string | null; sha: string | null }[] = [];
+export function parseWorktrees(out: string): Worktree[] {
+  const trees: Worktree[] = [];
   for (const block of out.split(/\n\s*\n/)) {
     if (!block.trim()) continue;
     const path = /^worktree (.+)$/m.exec(block)?.[1];
@@ -216,7 +216,7 @@ export function parseWorktrees(out: string): { path: string; branch: string | nu
  * Branches on this repo and the bot's copy, read from GitHub with `ls-remote` from outside any repository (so no
  * repository's config applies) and no local fetch; and the main checkout's local branches and worktrees.
  */
-export async function readBranches(run: Runner, cfg: Config): Promise<{ branches: Branch[]; worktrees: { path: string; branch: string | null; sha: string | null }[] }> {
+export async function readBranches(run: Runner, cfg: Config): Promise<{ branches: Branch[]; worktrees: Worktree[] }> {
   const must = async (cmd: string[], cwd?: string): Promise<string> => {
     const r = await run(cmd, cwd ? { cwd } : undefined);
     if (r.code !== 0) throw new Error(`git ${cmd.slice(1 + GIT_SAFE.length).join(" ")} exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`);
@@ -265,8 +265,8 @@ function githubError(res: Response, what: string): Error {
 }
 
 /** Every open pull request on this repo, with its number, title, body, head branch and author; a public repo needs no token. */
-export async function readOpenPrs(fetchImpl: Fetch, cfg: Config, token: string | null): Promise<{ number: number; title: string; body: string; head: string; author: string }[]> {
-  const prs: { number: number; title: string; body: string; head: string; author: string }[] = [];
+export async function readOpenPrs(fetchImpl: Fetch, cfg: Config, token: string | null): Promise<OpenPr[]> {
+  const prs: OpenPr[] = [];
   for (let page = 1; page <= 10; page++) {
     const res = await fetchImpl(`https://api.github.com/repos/${cfg.repo}/pulls?state=open&per_page=100&page=${page}`, githubInit(token));
     if (!res.ok) throw githubError(res, "listing open pull requests");
@@ -315,7 +315,7 @@ export async function readClaims(fetchImpl: Fetch, cfg: Config, key: string | nu
   if (tier !== "stable") return { unreadable: `the brain at ${base} says its tier is ${tier ?? "unset"}, not stable` };
   const out = new Map<string, ClaimsRead>();
   for (const ticket of tickets) {
-    const res = await fetchImpl(`${base}/v1/claims?ticket=${encodeURIComponent(ticket)}&include_ended=true&limit=1000`, init());
+    const res = await fetchImpl(`${base}/v1/claims?ticket=${encodeURIComponent(ticket)}&include_ended=true&limit=${CLAIMS_LIMIT}`, init());
     if (res.status === 404) return { unreadable: `${base} has no claim operations (stable before v2.0.0)` };
     if (!res.ok) {
       out.set(ticket, { unreadable: `list_claims answered ${res.status}` });

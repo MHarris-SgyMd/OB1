@@ -17,7 +17,8 @@
  * takes nothing. It reads the runner's own keys alone, at fixed paths in ~/.config/open-brain/agent-runner/ (0700):
  * linear.key always, brain.key and github.token when they are there. Each must be a regular file its owner alone can
  * read, of a key's shape; every key is read before any request, and none is ever printed. Exit 0 once it has
- * printed its verdicts, 1 when a read fails, 2 for a refused option, start, environment, config or key.
+ * printed its verdicts, 1 when a read fails, 2 for a refused option, start, environment, runner directory, config,
+ * key or access list.
  */
 
 import { chmodSync, closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -89,7 +90,7 @@ export function parseArgs(argv: string[]): Opts {
   return out;
 }
 
-/** The runner's directory, its config, and its keys: fixed paths, so no config can point a key read elsewhere. */
+/** The runner's directory and its keys: fixed paths, so no config can point a key read elsewhere. */
 export const RUNNER_DIR = join(homedir(), ".config", "open-brain", "agent-runner");
 export const KEY_FILES = { linear: "linear.key", brain: "brain.key", github: "github.token" } as const;
 /** Each key's shape: a value that isn't one is never sent. Linear's personal or OAuth key; keygen.ts's 64 hex; a GitHub token. */
@@ -152,7 +153,10 @@ export function checkRestUrl(value: string): { url: string } | { error: string }
   return { url: `${u.origin}${u.pathname.replace(/\/+$/, "")}` };
 }
 
-/** The config file's JSON: every key a string (or null where it may be), the required ones given, no unknown key; `~/` expanded. */
+/**
+ * The config file's JSON: every key a string (or null where it may be), the required ones given, no unknown key,
+ * maintainerLinearId a UUID, each repo owner/name, and restUrl one checkRestUrl takes; `~/` expanded.
+ */
 export function parseConfig(text: string, home: string): Config | { error: string } {
   let raw: unknown;
   try {
@@ -196,7 +200,7 @@ export function parseConfig(text: string, home: string): Config | { error: strin
   return out as unknown as Config;
 }
 
-/** Why `dir` can't hold the runner's keys, or null when it can: a real directory, its owner's, no group or other bits. */
+/** Why `dir` can't hold the runner's keys, or null when it can: a real directory of this user's, with no group or other bits. */
 export function privateDirProblem(dir: string): string | null {
   let st;
   try {
@@ -259,8 +263,6 @@ export function hasAclEntry(lsOutput: string): boolean {
   return /^\s*\d+: /m.test(lsOutput);
 }
 
-const BACKSLASH = String.fromCharCode(92);
-
 /** Untrusted text for a terminal: each code point that doesn't show, or changes how text shows, as <U+XXXX>. */
 export function printable(s: string): string {
   let out = "";
@@ -279,6 +281,8 @@ export function masker(secrets: (string | null)[]): (text: string) => string {
   const present = secrets.filter((k): k is string => !!k);
   return (text) => present.reduce((out, k) => out.split(k).join("<a key>"), text);
 }
+
+const BACKSLASH = String.fromCharCode(92);
 
 /** JSON whose strings carry no hidden code point raw: JSON.stringify escapes C0 controls, and this escapes the rest, astral ones as surrogate pairs. */
 export function safeJson(value: unknown): string {
@@ -395,8 +399,9 @@ export type Io = {
 
 /**
  * The dry run from its arguments to its exit code. Bun's start, the environment, the runner's directory, the config
- * and every key are checked before any request; then the facts are read and the verdicts printed, with "<a key>" in
- * place of any key's value an answer carried. 0 once printed, 1 when a read fails, 2 for anything refused.
+ * and every key, on macOS with their access lists, are checked before any request; then the facts are read and the
+ * verdicts printed, with "<a key>" in place of any key's value an answer carried. 0 once printed, 1 when a read
+ * fails, 2 for anything refused.
  */
 export async function main(io: Io): Promise<number> {
   const refuse = (message: string): number => {
@@ -477,6 +482,7 @@ const facts = (over: Partial<Facts> = {}, claims: ClaimsRead = { claims: [], tru
   branches: [], worktrees: [], openPrs: [], trustedAuthors: ["mharris-sgymd"], claims: () => claims, prsOfBranch: (b) => prs[b] ?? null, ...over,
 });
 const merged = (head: string): BranchPrs => ({ open: false, merged: true, closedHeads: [head] });
+const closed = (head: string): BranchPrs => ({ open: false, merged: false, closedHeads: [head] });
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 const throws = async (f: () => unknown, has: string, hasNot?: string): Promise<boolean> => {
   try {
@@ -500,7 +506,7 @@ async function selfCheck(): Promise<number> {
   let passed = 0;
   let failed = 0;
   /** One case. Its check runs inside, so a throw fails this case by name and the cases after it still run. */
-  const ok = async (check: () => unknown, what: string): Promise<boolean> => {
+  const ok = async (check: () => unknown, what: string): Promise<void> => {
     let pass = false;
     let note = "";
     try {
@@ -511,7 +517,6 @@ async function selfCheck(): Promise<number> {
     if (pass) passed++;
     else failed++;
     console.log(`  ${pass ? "✓" : "✗"} ${what}${note}`);
-    return pass;
   };
   /** A group of cases. A throw in its setup fails the group by name, and the next group still runs. */
   const section = async (name: string, body: () => Promise<void>): Promise<void> => {
@@ -524,7 +529,6 @@ async function selfCheck(): Promise<number> {
   };
   const chr = (cp: number) => String.fromCodePoint(cp);
   const esc = chr(0x1b);
-  const head = "aaaa1111";
   const base = { initiative: "Initiative", maintainerLinearId: MAINTAINER, mainCheckout: "~/src/repo" };
   const conf = (over: Record<string, unknown>) => parseConfig(JSON.stringify({ ...base, ...over }), "/home/x");
   const cfg = conf({ restUrl: "http://127.0.0.1:8010/api", botRepo: "bot-user/OB1" }) as Config;
@@ -535,6 +539,14 @@ async function selfCheck(): Promise<number> {
     history: { pageInfo: { hasNextPage: false }, nodes: [{ createdAt: T0, updatedAt: T0, actorId: MAINTAINER, botActor: null, addedLabelIds: ["L-ready"], updatedDescription: false, toTitle: null }] as unknown[] },
     ...over,
   });
+
+  /** Linear's answer to the initiative, labels or board query: the initiative, both labels, and one page of `nodes`. */
+  const linearData = (query: string, nodes: unknown[]) =>
+    query.includes("initiatives(")
+      ? { initiatives: { nodes: [{ id: "i", name: "Initiative" }] } }
+      : query.includes("issueLabels")
+        ? { issueLabels: { nodes: [{ id: "L-ready", name: "agent-ready" }, { id: "L-back", name: "agent-handed-back" }] } }
+        : { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } };
 
   await section("options and config", async () => {
     await ok(() => parseArgs(["--config", "a.json", "--json"])["--config"] === "a.json" && parseArgs(["--config=b.json"])["--config"] === "b.json", "values by space and by =");
@@ -589,35 +601,36 @@ async function selfCheck(): Promise<number> {
       writeFileSync(plainFile, "x");
       await ok(() => (privateDirProblem(open) ?? "").includes("chmod 700") && (privateDirProblem(groupDir) ?? "").includes("chmod 700") && (privateDirProblem(linkedDir) ?? "").includes("not a link") && (privateDirProblem(plainFile) ?? "").includes("not a link") && (privateDirProblem(join(dir, "none")) ?? "").includes("no runner directory"), "an open directory, one its group can read, a link, a file and a missing one hold none");
       const brain = "ab".repeat(32);
-      writeFileSync(join(dir, "brain.key"), `${brain}\n`, { mode: 0o600 });
-      chmodSync(join(dir, "brain.key"), 0o600);
+      const keyFile = join(dir, "brain.key");
+      writeFileSync(keyFile, `${brain}\n`, { mode: 0o600 });
+      chmodSync(keyFile, 0o600);
       await ok(() => readKey(dir, "brain") === brain && readKey(dir, "linear") === null, "a key of its shape is read, and a missing one is no key");
       writeFileSync(join(dir, "linear.key"), "not-a-linear-key-but-a-secret\n", { mode: 0o600 });
       await ok(() => throws(() => readKey(dir, "linear"), "right shape", "not-a-linear-key"), "a value not of the key's shape is refused, and the message doesn't show it");
       rmSync(join(dir, "linear.key"));
-      chmodSync(join(dir, "brain.key"), 0o644);
+      chmodSync(keyFile, 0o644);
       await ok(() => throws(() => readKey(dir, "brain"), "chmod 600"), "a key others can read is refused");
-      chmodSync(join(dir, "brain.key"), 0o640);
+      chmodSync(keyFile, 0o640);
       await ok(() => throws(() => readKey(dir, "brain"), "chmod 600"), "a key its group can read is refused");
-      chmodSync(join(dir, "brain.key"), 0o400);
+      chmodSync(keyFile, 0o400);
       await ok(() => readKey(dir, "brain") === brain, "a key only its owner can read, read-only, is read");
-      chmodSync(join(dir, "brain.key"), 0o600);
-      linkSync(join(dir, "brain.key"), join(dir, "brain.hard"));
+      chmodSync(keyFile, 0o600);
+      linkSync(keyFile, join(dir, "brain.hard"));
       await ok(() => throws(() => readKey(dir, "brain"), "other links"), "a key with another hard link is refused");
       rmSync(join(dir, "brain.hard"));
       writeFileSync(join(dir, "big.key"), "x".repeat(70_000), { mode: 0o600 });
       await ok(() => throws(() => readOwnedFile(join(dir, "big.key"), true), "too large"), "a file larger than a key or a config can be is refused");
       const elsewhere = join(dir, "elsewhere");
       writeFileSync(elsewhere, `${brain}\n`, { mode: 0o600 });
-      rmSync(join(dir, "brain.key"));
-      symlinkSync(elsewhere, join(dir, "brain.key"));
+      rmSync(keyFile);
+      symlinkSync(elsewhere, keyFile);
       await ok(() => throws(() => readKey(dir, "brain"), "is a link"), "a key that is a link is refused, not followed");
-      rmSync(join(dir, "brain.key"));
-      mkdirSync(join(dir, "brain.key"));
+      rmSync(keyFile);
+      mkdirSync(keyFile);
       await ok(() => throws(() => readKey(dir, "brain"), "not a regular file"), "a key that is a directory is refused");
-      rmSync(join(dir, "brain.key"), { recursive: true });
+      rmSync(keyFile, { recursive: true });
       if (flagsOk) {
-        const fifo = Bun.spawnSync(["/usr/bin/mkfifo", join(dir, "brain.key")]);
+        const fifo = Bun.spawnSync(["/usr/bin/mkfifo", keyFile]);
         await ok(async () => fifo.exitCode === 0 && (await throws(() => readKey(dir, "brain"), "not a regular file")), "a key that is a pipe is refused without waiting on it");
       } else await ok(() => false, "a key that is a pipe is refused without waiting on it (not run: the open flags would wait on it)");
       const cfgFile = join(dir, "config.json");
@@ -697,9 +710,10 @@ async function selfCheck(): Promise<number> {
 
   await section("nobody's work", async () => {
     const w = workReasons;
+    const head = "aaaa1111";
     await ok(() => w("SMD-100", facts()).length === 0, "no branch, worktree, PR or claim passes");
     await ok(() => w("SMD-100", facts({ branches: [{ name: "michaelharris/smd-100-x", sha: head }, { name: "main", sha: "b" }] })).join() === "branch michaelharris/smd-100-x (no PR)", "a branch naming the ticket, with no PR, holds it, and says so");
-    await ok(() => w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }] }, undefined, { "smd-100-x": merged(head) })).length === 0 && w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }] }, undefined, { "smd-100-x": { open: false, merged: false, closedHeads: [head] } })).length === 0, "a branch whose PR merged, or closed, at its current commit is done with");
+    await ok(() => w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }] }, undefined, { "smd-100-x": merged(head) })).length === 0 && w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }] }, undefined, { "smd-100-x": closed(head) })).length === 0, "a branch whose PR merged, or closed, at its current commit is done with");
     await ok(() => w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: "bbbb2222" }] }, undefined, { "smd-100-x": merged(head) })).join() === "branch smd-100-x (no PR of it merged or closed into main at its commit)", "a branch with commits past its merged PR holds it, and says why");
     await ok(() => w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }] }, undefined, { "smd-100-x": { open: true, merged: true, closedHeads: [head] } })).join() === "branch smd-100-x (a PR open)", "a branch with an open PR still holds it");
     await ok(() => w("SMD-100", facts({ branches: [{ name: "smd-100-x", sha: head }], prsOfBranch: () => undefined })).join() === "branch smd-100-x (its PRs not looked up)", "a branch whose PRs weren't looked up says so, not that it is unmerged");
@@ -715,10 +729,10 @@ async function selfCheck(): Promise<number> {
     await ok(() => w("SMD-100", facts({}, { claims: [], truncated: true })).some((r) => r.includes("cut at 1000")), "a claim list cut at the cap holds it");
     await ok(() => w("SMD-100", facts({}, { claims: [claim({ piece: "PR 2", state: "lapsed" })], truncated: false })).join() === `a lapsed claim on its piece "PR 2" by codex (codex@laptop michaelharris/smd-100-x)` && w("SMD-100", facts({}, { claims: [claim({ piece: "PR 2", state: "released" })], truncated: false })).length === 0, "an unreleased piece claim holds it, and a released one doesn't");
     await ok(() => w("SMD-100", facts({}, { claims: [claim()], truncated: false })).join() === "a live claim by codex (codex@laptop michaelharris/smd-100-x), until 2026-11-07T00:00:00.000Z", "a live claim holds it, with its holder, label and lease end");
-    await ok(() => w("SMD-100", facts({}, { claims: [claim()], truncated: false }, { "michaelharris/smd-100-x": merged(head) })).join() === "a stale live claim by codex (codex@laptop michaelharris/smd-100-x), its PR merged: tell the maintainer" && w("SMD-100", facts({}, { claims: [claim()], truncated: false }, { "michaelharris/smd-100-x": { open: false, merged: false, closedHeads: [head] } })).some((r) => r.includes("its PR closed")), "a live claim whose PR merged or closed still holds it, named stale, with which");
+    await ok(() => w("SMD-100", facts({}, { claims: [claim()], truncated: false }, { "michaelharris/smd-100-x": merged(head) })).join() === "a stale live claim by codex (codex@laptop michaelharris/smd-100-x), its PR merged: tell the maintainer" && w("SMD-100", facts({}, { claims: [claim()], truncated: false }, { "michaelharris/smd-100-x": closed(head) })).some((r) => r.includes("its PR closed")), "a live claim whose PR merged or closed still holds it, named stale, with which");
     await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "lapsed" })], truncated: false })).join() === "a lapsed claim by codex (codex@laptop michaelharris/smd-100-x), never released, with no merged or closed PR found: maybe work paused on another machine" && w("SMD-100", facts({}, { claims: [claim({ state: "lapsed" })], truncated: false }, { "michaelharris/smd-100-x": { open: true, merged: false, closedHeads: [] } })).some((r) => r.includes("its PR open")), "a lapsed claim with no PR, or an open one, holds it");
     await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "lapsed" })], truncated: false }, { "michaelharris/smd-100-x": { open: true, merged: true, closedHeads: [head] } })).some((r) => r.includes("its PR open")), "a lapsed claim with an open PR beside a merged one still holds it");
-    await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "lapsed" })], truncated: false }, { "michaelharris/smd-100-x": { open: false, merged: false, closedHeads: ["c"] } })).length === 0 && w("SMD-100", facts({}, { claims: [claim({ state: "released" })], truncated: false })).length === 0, "a lapsed claim whose PR closed, and a released one, hold nothing");
+    await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "lapsed" })], truncated: false }, { "michaelharris/smd-100-x": closed("c") })).length === 0 && w("SMD-100", facts({}, { claims: [claim({ state: "released" })], truncated: false })).length === 0, "a lapsed claim whose PR closed, and a released one, hold nothing");
     await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "lapsed", label: "codex@laptop michaelharris/smd-99-x" })], truncated: false }, { "michaelharris/smd-99-x": merged(head) })).length === 1, "a claim whose label names another ticket's branch isn't freed by that branch's PR");
     await ok(() => w("SMD-100", facts({}, { claims: [claim({ state: "paused" })], truncated: false })).join() === "a claim by codex (codex@laptop michaelharris/smd-100-x) in a state the rule doesn't know (paused)", "a claim in an unknown state holds it, and names the state");
   });
@@ -768,13 +782,13 @@ async function selfCheck(): Promise<number> {
     await ok(() => JSON.stringify(gitEnv("/empty")) === JSON.stringify({ PATH: "/usr/bin:/bin", HOME: "/empty", LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }), "git's environment is built from nothing: no credential, agent socket, prompt or config of the maintainer's");
     await ok(() => GIT_SAFE.join(" ") === "-c credential.helper= -c protocol.allow=never -c protocol.https.allow=always -c http.followRedirects=false -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20", "every git call drops the credential helpers, allows https alone, follows no redirect and gives up a stalled transfer");
     const spawned: { cmd: string[]; opts: Parameters<SpawnImpl>[1] }[] = [];
-    let killed = false;
     const recorder: SpawnImpl = (cmd, opts) => {
       spawned.push({ cmd, opts });
       return { stdout: stream("out"), stderr: stream("err"), exited: Promise.resolve(3), kill() {} };
     };
     const ran = await spawner("/h", recorder)(["git", "status"], { cwd: "/" });
     await ok(() => ran.stdout === "out" && ran.stderr === "err" && ran.code === 3 && JSON.stringify(spawned[0].opts.env) === JSON.stringify(gitEnv("/h")) && spawned[0].opts.cwd === "/" && spawned[0].cmd.join(" ") === "git status", "the spawner runs the command with gitEnv's environment and the directory given, and answers its output and exit code");
+    let killed = false;
     const hung: SpawnImpl = () => {
       let end: (n: number) => void = () => {};
       const exited = new Promise<number>((r) => (end = r));
@@ -911,12 +925,7 @@ async function selfCheck(): Promise<number> {
     ];
     const gql: Gql = async <T>(query: string) => {
       queries.push(query);
-      const data = query.includes("initiatives(")
-        ? { initiatives: { nodes: [{ id: "init-1", name: "Initiative" }] } }
-        : query.includes("issueLabels")
-          ? { issueLabels: { nodes: [{ id: "L-ready", name: "agent-ready" }, { id: "L-back", name: "agent-handed-back" }] } }
-          : { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: boardNodes } };
-      return { data: data as T, errors: [] };
+      return { data: linearData(query, boardNodes) as T, errors: [] };
     };
     const run: Runner = async (cmd, opts) => {
       commands.push({ cmd, cwd: opts?.cwd });
@@ -937,7 +946,7 @@ async function selfCheck(): Promise<number> {
       if (u.startsWith("http://127.0.0.1:8010/api/v1/claims?ticket=")) return json({ claims: u.includes("ticket=SMD-14&") ? [claim({ issue: "SMD-14", state: "lapsed", label: "codex@laptop michaelharris/smd-14-x" })] : [], truncated: false });
       return json({ message: "the stub doesn't know this URL" }, 404);
     };
-    const result = await dryRun({ ...cfg, maintainerLinearId: MAINTAINER }, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: GH_TOKEN } });
+    const result = await dryRun(cfg, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: GH_TOKEN } });
     const verdict = (id: string) => result.verdicts.find((v) => v.identifier === id) as Verdict;
     const hdr = (s: { init?: RequestInit }) => (s.init?.headers ?? {}) as Record<string, string>;
     await ok(() => result.taken === "SMD-10" && result.verdicts[0].identifier === "SMD-11" && verdict("SMD-11").reasons.join() === "worktree /r (on smd-11-wip: no PR)", "the dry run skips the urgent ticket a worktree holds, and takes the next");
@@ -958,7 +967,7 @@ async function selfCheck(): Promise<number> {
     const text = render(result, cfg);
     await ok(() => text.includes("A run would take SMD-10.") && text.includes("  SMD-13     skip  t\n      - branch smd-13-local (no PR)") && text.includes("reads only"), "the text names the ticket a run would take, and lists each skip with its reasons");
     const before = sent.length;
-    const blind = await dryRun({ ...noUrl, maintainerLinearId: MAINTAINER }, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: null } });
+    const blind = await dryRun(noUrl, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: null } });
     await ok(() => blind.taken === null && blind.claimsNote !== null && render(blind, noUrl).includes("would take nothing, since claims can't be read") && !sent.slice(before).some((s) => s.url.includes("pulls?state=all")), "with claims unreadable it takes nothing, says why, and looks up no branch's PRs");
     await ok(() => blind.verdicts.find((v) => v.identifier === "SMD-13")?.reasons.includes("branch smd-13-local (its PRs not looked up)") === true, "with claims unreadable, a branch's reason says its PRs weren't looked up, not that it is unmerged");
   });
@@ -987,8 +996,7 @@ async function selfCheck(): Promise<number> {
         mainSent.push({ url: u, init });
         if (u === "https://api.linear.app/graphql") {
           const q = String(JSON.parse(String(init?.body)).query);
-          const data = q.includes("initiatives(") ? { initiatives: { nodes: [{ id: "i", name: "Initiative" }] } } : q.includes("issueLabels") ? { issueLabels: { nodes: [{ id: "L-ready", name: "agent-ready" }, { id: "L-back", name: "agent-handed-back" }] } } : { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [issue({ identifier: "SMD-20", title })] } };
-          return json({ data });
+          return json({ data: linearData(q, [issue({ identifier: "SMD-20", title })]) });
         }
         if (u === "https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=open&per_page=100&page=1") return json([]);
         if (u.startsWith("https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=all&per_page=100&head=")) return json([]);
@@ -1004,7 +1012,7 @@ async function selfCheck(): Promise<number> {
       };
       const io = (over: Partial<Io> = {}): Io => ({ argv: [], env: {}, runnerDir, home: root, tmpRoot, platform: "darwin", execArgv: [...START_FLAGS], cwd: root, fetch: mainFetch, spawnImpl: mainSpawn, out: (s) => lines.push(s), err: (s) => errs.push(s), ...over });
       const nothingSent = () => mainSent.length === 0;
-      await ok(async () => (await main(io({ execArgv: ["--no-env-file"] }))) === 2 && nothingSent() && errs.at(-1)?.includes("bun --no-env-file --config=/dev/null") === true, "a start without --no-env-file and --config=/dev/null is refused before anything is read");
+      await ok(async () => (await main(io({ execArgv: ["--no-env-file"] }))) === 2 && nothingSent() && errs.at(-1)?.includes("bun --no-env-file --config=/dev/null") === true, "a start without both --no-env-file and --config=/dev/null is refused before anything is read");
       await ok(async () => (await main(io({ argv: ["--bogus"] }))) === 2 && nothingSent() && errs.at(-1)?.includes("unknown option") === true, "an unknown option is refused before anything is read");
       await ok(async () => (await main(io({ argv: ["--help"] }))) === 0 && lines.at(-1)?.startsWith("bun --no-env-file --config=/dev/null scripts/agent-runner/dry-run.ts") === true && nothingSent(), "--help prints how to start it, and sends nothing");
       writeFileSync(join(runnerDir, "brain.key"), "not-a-brain-key\n", { mode: 0o600 });

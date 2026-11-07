@@ -25,6 +25,8 @@ Three are let through: `BUN_INSTALL`, `NO_PROXY`, and `BUN_RUNTIME_TRANSPILER_CA
 
 It lists each open ticket labelled `agent-ready` in the initiative's projects, in the order a run considers them. The one a run would take is marked `take`. Every other ticket is marked `skip`, with each of its reasons.
 
+A ticket that fails the label or board checks is skipped for those reasons alone: its claims and PRs aren't read. Of the tickets that pass every check, a run takes the first by priority (urgent first, none last), then by age. Each later ticket that passes is skipped, with the one taken as its reason.
+
 Any text that came from Linear, the brain or GitHub is printed on one line, with each character that doesn't show written as `<U+XXXX>`. Those are controls, bidirectional marks, zero-width and other invisible characters, fillers, private-use and unassigned code points, and the braille blank. So none of it can rewrite the terminal or pass for a line of its own. The JSON escapes the same characters. If a key's value ever comes back in an answer, the dry run prints `<a key>` in its place. An answer that isn't JSON is reported as such, never quoted.
 
 It reads:
@@ -40,13 +42,13 @@ It reads:
   * the main checkout's local branches and worktrees.
 
   git runs with an environment built from nothing, no credential helper, https as its only transport, and no redirect followed. So a remote that refuses it can't make it use, or erase, a credential of yours. A transfer slower than 1 kB/s for 20 seconds is given up, and any git command still running after 60 seconds is ended.
-* **The stable brain's claims,** over its REST core, only for the tickets that pass the label and board checks:
+* **The stable brain's claims,** over its REST core with the brain key in the `x-brain-key` header, only for the tickets that pass the label and board checks:
   * `GET /v1/brain` must say the brain's tier is `stable`;
-  * then one `GET /v1/claims` per ticket, with the brain key in the `x-brain-key` header.
+  * then one `GET /v1/claims` per ticket.
 
   Until stable runs v2.0.0 with its proxy's `/api` route, every ticket's claims can't be read, and the dry run takes nothing. The route comes from `compose.api-public.yaml` (deploy/README.md, "The REST core and its opt-in `/api`"); stable's server must also set `OB1_TIER=stable`.
 
-No request it makes follows a redirect, logs its headers or relaxes TLS. A redirect would carry the key to wherever it points. It exits 0 once it has printed, 1 when a read fails, and 2 for a refused option, start, environment, config or key file.
+No request it makes follows a redirect, logs its headers or relaxes TLS. A redirect would carry the key to wherever it points. It exits 0 once it has printed, 1 when a read fails, and 2 for a refused option, start, environment, runner directory, config, key or access list.
 
 ## The runner's files
 
@@ -126,8 +128,6 @@ A ticket the runner takes meets every criterion below. The runner checks the fir
   The dry run looks for a branch's PR only in this repo owner's account. A PR from another account's copy reads as none, which holds the work.
 
   **Limits.** A branch names a ticket only by its whole id: a joint branch like `smd-3336-3173-x` names SMD-3336 alone. A worktree counts by its branch, so a locked worktree on a branch merged at its commit frees its ticket, uncommitted work and all. Claims cover both cases, since CLAUDE.md has every session at work hold one.
-
-A ticket that fails the label or board checks is skipped for those reasons alone: its claims and PRs aren't read. Of the tickets that pass, a run takes the first by priority (urgent first, none last), then by age. Each later ticket that passes is skipped, with the one taken as its reason.
 
 **Vouched for by the label:**
 

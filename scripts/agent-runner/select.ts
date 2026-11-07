@@ -69,14 +69,20 @@ export const DEFAULT_BRANCH = "main";
 /** A branch, and the commit it points at (null when it couldn't be read). */
 export type Branch = { name: string; sha: string | null };
 
+/** A worktree, its branch when it has one, and the commit it points at (null when it couldn't be read). */
+export type Worktree = { path: string; branch: string | null; sha: string | null };
+
+/** An open pull request: its number, title, body, head branch and author. */
+export type OpenPr = { number: number; title: string; body: string; head: string; author: string };
+
 /** What the dry run found beyond the board: branches and worktrees, open pull requests, claims, and a branch's PRs. */
 export type Facts = {
   /** Every branch it read: this repo's, the bot's own copy's (once it exists), and the main checkout's local ones. */
   branches: Branch[];
   /** The main checkout's worktrees: each path, its branch when it has one, and its commit. */
-  worktrees: { path: string; branch: string | null; sha: string | null }[];
-  openPrs: { number: number; title: string; body: string; head: string; author: string }[];
-  /** GitHub accounts, in lower case, whose PR bodies count: the maintainer's and the bot's. */
+  worktrees: Worktree[];
+  openPrs: OpenPr[];
+  /** GitHub accounts whose PR bodies count: the maintainer's and the bot's. Case does not matter. */
   trustedAuthors: string[];
   /** Each ticket's claims, by identifier. */
   claims: (identifier: string) => ClaimsRead;
@@ -84,7 +90,7 @@ export type Facts = {
   prsOfBranch: (branch: string) => BranchPrs | null | undefined;
 };
 
-/** What the rule needs from the runner's config: the two labels' ids and the maintainer's Linear user id. */
+/** What the rule needs besides the facts: the two labels' ids, from Linear, and the maintainer's Linear user id, from the runner's config. */
 export type Rules = { readyLabelId: string; handedBackLabelId: string; maintainerId: string };
 
 /** One ticket's verdict: taken, or skipped with every reason found. */
@@ -101,7 +107,7 @@ export const TICKET_ID = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/;
  * among them), line and paragraph separators, default-ignorable ones (zero-width spaces, fillers, tag characters),
  * private-use and unassigned ones, whose look depends on the font, and U+2800, the braille blank, which shows
  * nothing yet is neither whitespace nor default-ignorable. dry-run.ts shows each as <U+XXXX>, and a title holding one
- * holds its ticket. (U+2800 is added as a character, so this file holds no escape for it.)
+ * holds its ticket. (U+2800 is added by String.fromCodePoint, so this file holds no escape for it.)
  */
 export const HIDDEN_TEXT = new RegExp(String.raw`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}` + String.fromCodePoint(0x2800) + "]", "u");
 
@@ -195,7 +201,8 @@ export function firstReasons(t: Ticket, rules: Rules): string[] {
  * holds the work, and one whose PR merged or closed is stale and named for the maintainer; a lapsed claim never
  * released holds it unless its PR merged or closed, since it may be work paused on another machine. A claim's PR is
  * found by the branch its label names for the ticket (branchOfLabel). A claim in a state the rule doesn't know holds
- * it. Claims that can't be read hold the ticket too.
+ * it. An unreleased piece claim always holds it. Claims that can't be read hold the ticket too, and so does a list
+ * cut at CLAIMS_LIMIT.
  */
 export function workReasons(identifier: string, facts: Facts): string[] {
   if (!TICKET_ID.test(identifier)) return [`its id ${identifier} is no ticket id the rule can match against branches and claims`];
