@@ -752,6 +752,8 @@ function parseModels(m: unknown): WorkerHeartbeat["models"] {
     const w = slotWaits as Record<string, unknown> | null;
     if (c === null || typeof c !== "object" || w === null || typeof w !== "object") return undefined;
     if (![c.live, c.background, callMs, w.held, w.open, w.stopped, w.waited, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
+    // The figures as one process writes them: no more waits than asks, no longer wait than all of them (review pass 2).
+    if ((w.waited as number) > (w.held as number) + (w.open as number) + (w.stopped as number) || (w.maxMs as number) > (w.totalMs as number)) return undefined;
     out[pass] = {
       calls: { live: c.live as number, background: c.background as number },
       callMs: callMs as number,
@@ -2119,9 +2121,10 @@ export function modelCallsWords(beats: readonly WorkerHeartbeat[]): string | nul
       if (n === 0 && asks === 0) continue;
       const classes = [t.calls.background ? `${t.calls.background} background` : "", t.calls.live ? `${t.calls.live} live` : ""].filter(Boolean).join(", ");
       const each = n ? `, ${duration(t.callMs / n)} each` : "";
-      // Asks and waits apart: a slot taken at once is no wait (review pass 1).
+      // Asks and waits apart: a slot taken at once is no wait (review pass 1); the times the asks', round trips and a
+      // stalled database's bound included, said before the waits so they do not read as theirs (review pass 2).
       const waited = asks
-        ? ` — ${asks} asked for a slot, ${t.slotWaits.waited} waited, ${duration(t.slotWaits.totalMs)} in all, the longest ${duration(t.slotWaits.maxMs)}${t.slotWaits.open ? `, ${t.slotWaits.open} ran without one` : ""}${t.slotWaits.stopped ? `, ${t.slotWaits.stopped} stopped` : ""}`
+        ? ` — ${asks} asked for a slot, ${duration(t.slotWaits.totalMs)} in all, the longest ${duration(t.slotWaits.maxMs)}; ${t.slotWaits.waited} waited${t.slotWaits.open ? `, ${t.slotWaits.open} ran without one` : ""}${t.slotWaits.stopped ? `, ${t.slotWaits.stopped} stopped` : ""}`
         : "";
       parts.push(`${h.job ?? h.worker}${pass === "-" ? "" : ` ${pass}`}: ${classes || "0"} call(s)${each}${waited}`);
     }

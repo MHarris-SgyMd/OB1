@@ -2451,11 +2451,16 @@ console.log("\n[13] Model calls measured: every call's own time at the seam and 
     const kinds = [
       await failWith(new ProviderError("overloaded", "http", 503)),
       await failWith(new ProviderError("too slow", "timeout")),
-      await failWith(new ProviderError("no JSON", "body")),
+      // A body that is no JSON carries its 2xx, as embed.ts's and jev.ts's do (review pass 2: it read `_OTHER`).
+      await failWith(new ProviderError("no JSON", "body", 200)),
+      await failWith(new ProviderError("an http error with no status", "http")),
+      await failWith(new ProviderError("refused by the gate", "egress")),
       await failWith(Object.assign(new Error("the judge's call answered 429"), { status: 429 })),
       await failWith(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })),
+      // Another throw's `kind` is no label: its name is (review pass 2).
+      await failWith(Object.assign(new RangeError("a kind of its own"), { kind: "some_arbitrary_kind" })),
     ];
-    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === failedBefore + 6 && kinds.join() === "503,timeout,invalid_body,429,ECONNREFUSED",
+    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === failedBefore + 9 && kinds.join() === "503,timeout,invalid_body,http,egress,429,ECONNREFUSED,RangeError",
       `a call that throws is a point naming how it failed — a status, a timeout, a body, the runtime's code, else the throw's kind — and counted (${JSON.stringify(kinds)})`);
     // Waits for a slot, by how each ended: held — the second of two under chat=1 waiting for the first — then stopped,
     // then run without one where the semaphore's database does not answer.
@@ -2494,12 +2499,23 @@ console.log("\n[13] Model calls measured: every call's own time at the seam and 
     const beats = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: written, at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
     const words = modelCallsWords(beats.heartbeats) ?? "";
     assert(JSON.stringify(stamped.models?.[pass]) === JSON.stringify(modelCallTallies()[pass]) && beats.heartbeats[0]?.models?.[pass]?.slotWaits.held === 2
-        && /extract:measured measured: \d+ background, 2 live call\(s\), \d+ ms each — 4 asked for a slot, 1 waited, \d+ ms in all, the longest \d+ ms, 1 ran without one, 1 stopped/.test(words),
+        && /extract:measured measured: \d+ background, 2 live call\(s\), [\d.]+ m?s each — 4 asked for a slot, [\d.]+ m?s in all, the longest [\d.]+ m?s; 1 waited, 1 ran without one, 1 stopped/.test(words),
       `the pass stamp carries the process's tallies, and brain_info reads them back and says them (${words.slice(Math.max(0, words.indexOf("extract:measured measured:")), 400)})`);
     // A stamp whose tallies are not of the shape is left off whole.
     const bad = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: -1, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
     assert(bad.heartbeats[0] !== undefined && bad.heartbeats[0].models === undefined && modelCallsWords(bad.heartbeats) === null,
       "a stamp whose tallies are not of the shape has them left off, the row read and nothing said of them");
+    // Nor figures one process cannot write: more waits than asks, a longest wait past all of them (review pass 2).
+    const forged = (slotWaits: Record<string, number>) => parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 1 }, callMs: 5, slotWaits } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]).heartbeats[0]?.models;
+    assert(forged({ held: 1, open: 0, stopped: 0, waited: 2, totalMs: 9, maxMs: 9 }) === undefined && forged({ held: 2, open: 0, stopped: 0, waited: 1, totalMs: 9, maxMs: 10 }) === undefined
+        && forged({ held: 2, open: 0, stopped: 0, waited: 1, totalMs: 10, maxMs: 9 })?.measured?.slotWaits.waited === 1,
+      "tallies no process writes — more waits than asks, a longest wait past them all — are left off; consistent ones read");
+    // The row's times on figures it is handed: under a second in whole milliseconds, else seconds to a tenth (review
+    // pass 1's "0.0 s"); the row above matches either unit, so a loaded runner's second does not fail it (review pass 2).
+    const known = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 2 }, callMs: 61, slotWaits: { held: 2, open: 0, stopped: 0, waited: 1, totalMs: 1500, maxMs: 999 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    const knownWords = modelCallsWords(known.heartbeats) ?? "";
+    assert(knownWords === "since each worker started, as last stamped: extract:measured measured: 2 background call(s), 31 ms each — 2 asked for a slot, 1.5 s in all, the longest 999 ms; 1 waited",
+      `the row says a time under a second in milliseconds, a longer one in seconds (${knownWords})`);
   } finally {
     useTracing(before);
   }

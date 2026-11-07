@@ -1435,12 +1435,14 @@ millisecond to five minutes, by type, model, host and port, pass,
 `ob1.slot.outcome` — `held` (a slot taken), `open` (the semaphore's database
 did not answer, so it ran without one) or `stopped` — and `ob1.slot.waited`,
 false for a slot taken at once. These are recorded where telemetry runs, the
-servers. The claim engines, the sleep scheduler and board-sync run none, so
-each one's pass stamp carries its tallies instead (`models` on `heartbeat:*`):
+servers. The claim engines under `--follow`, the sleep scheduler and
+board-sync under `--trigger` run none, so each one's pass stamp carries its
+tallies instead (`models` on `heartbeat:*`):
 its calls by pass and class, their own time, and their asks for a slot by how
 each ended and how many waited, which `brain_info`'s Model calls row says; the
 servers' own background calls (the vector mender, the provider reprobe, a
-detached job) are in the metrics alone.
+detached job) are in the metrics alone. A run that stamps nothing — a claim
+engine's one-shot run, the weekly digest, the evals — is measured nowhere.
 
 Each operation the core calls on the store is a client span named for the
 operation (`matchThoughts`, `captureThought`) — one span per operation, not

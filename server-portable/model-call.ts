@@ -46,7 +46,8 @@
  * `ob1.model.call.duration`, a slot hook's wait one on
  * `ob1.model.slot.wait.duration` (noteSlotWait), where a process installed
  * telemetry; and in this process's tallies by pass (modelCallTallies), which
- * a worker's pass stamp carries, where none runs.
+ * a follower's pass stamp carries, where none runs. A one-shot worker run, the
+ * weekly digest and the evals stamp nothing, so theirs are measured nowhere.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { faultOf, modelLabel, recordPoint, serverOf, statusType, type HistogramSpec, type SpanAttributes } from "./spans.ts";
@@ -109,7 +110,11 @@ export function asBackground<T>(fn: () => T): T {
   return context.run({ ...context.getStore(), cls: "background" }, fn);
 }
 
-/** Runs `fn` with every model call it makes belonging to `pass`: a claim worker's run, or the subject sweep's. */
+/**
+ * Runs `fn` with every model call it makes belonging to `pass`: a claim worker's run, or the subject sweep's. A pass's
+ * name is lower case and hyphens, at most 40 characters: brain_info reads a stamp's `models` by it, and leaves the
+ * whole field off at any other (review pass 2).
+ */
 export function asPass<T>(pass: string, fn: () => T): T {
   return context.run({ ...context.getStore(), pass }, fn);
 }
@@ -193,17 +198,23 @@ export function noteSlotWait(call: ResolvedModelCall, ms: number, end: SlotWaitE
 }
 
 /**
- * How a call failed, in the provider point's words (embed.ts's providerErrorType, read by shape: this module imports
- * neither embed.ts nor jev.ts): an answer's status (`503`, `_OTHER`), `timeout`, `invalid_body`, a kind of the
- * provider's own; else the runtime's code (`ECONNREFUSED`) or the throw's kind — so an overload, a 429 or a 503, is
- * told from a timeout and a body (review pass 1: every ProviderError read `ProviderError`).
+ * How a call failed, in the provider point's words — embed.ts's providerErrorType, in its order, read by shape (this
+ * module imports neither embed.ts nor jev.ts): a ProviderError's answer status (`503`, `_OTHER`), `invalid_body` for
+ * a 2xx that is no JSON, its own kind (`timeout`, `egress`); another throw's status (a 429 a caller's own error
+ * carries); else the runtime's code (`ECONNREFUSED`) or the throw's kind — so an overload is told from a timeout and
+ * a body (review pass 1: every ProviderError read `ProviderError`; pass 2: a body's 200 read `_OTHER`, and any
+ * throw's `kind` was a label).
  */
+const PROVIDER_KINDS: readonly unknown[] = ["timeout", "http", "body", "egress"];
 function errorTypeOf(e: unknown): string {
   try {
-    const { kind, status } = (e ?? {}) as { kind?: unknown; status?: unknown };
-    if (typeof status === "number" && Number.isInteger(status)) return statusType(status);
-    if (kind === "body") return "invalid_body";
-    if (typeof kind === "string" && /^[a-z_]{1,40}$/.test(kind)) return kind;
+    const { name, kind, status } = (e ?? {}) as { name?: unknown; kind?: unknown; status?: unknown };
+    const hasStatus = typeof status === "number" && Number.isInteger(status);
+    if (e instanceof Error && name === "ProviderError" && PROVIDER_KINDS.includes(kind)) {
+      if (kind === "http") return hasStatus ? statusType(status as number) : "http";
+      return kind === "body" ? "invalid_body" : (kind as string);
+    }
+    if (hasStatus) return statusType(status as number);
   } catch {}
   const f = faultOf(e);
   return f.code ?? f.kind;
