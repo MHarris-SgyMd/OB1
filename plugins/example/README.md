@@ -39,7 +39,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to pin notes.
 
 ## Turn it on

@@ -6,7 +6,7 @@ Each server is one HTTP process reached by URL: never a stdio process a client s
 
 ## Prerequisites
 
-- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
+- A running Daemonic Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
 - [Bun](https://bun.sh) 1.4+ on the machine that will run the server
 - A checkout of this repository: the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
 - The server's README, which names its tables, its environment and what calls it
@@ -20,7 +20,7 @@ Every vendored server's README names the file to run and the environment it read
 | Server file | `integrations/<name>/index.ts` or `recipes/<name>/<file>.ts` |
 | Port | `8787` (any free port; `PORT` unset means 8000, the stack's published port, which podman's `gvproxy` may hold too) |
 | Listen address | every address, unset; `OB1_LISTEN_HOST` names one IP address instead (`127.0.0.1` keeps the server to this machine). A value that is not one, or a link-local one, stops the server at start, in words; one this host does not have stops it with Bun's own error, `Is port N in use?` on macOS, EADDRNOTAVAIL on Linux (SMD-3323) |
-| Environment | `SUPABASE_URL` (the Postgres connection string: the shim keeps the variable's name), `MCP_ACCESS_KEYS` (the editorial-policy auditor reads `AUDITOR_ACCESS_KEYS`; smart-ingest, the single raw `MCP_ACCESS_KEY`; readwise-capture no key list at all, but the secret Readwise echoes, `READWISE_WEBHOOK_SECRET`), and whatever else the README lists (`OPENROUTER_API_KEY`, …) |
+| Environment | `SUPABASE_URL` (the Postgres connection string: the shim keeps the variable's name), `MCP_ACCESS_KEYS` (the editorial-policy auditor reads `AUDITOR_ACCESS_KEYS`; smart-ingest, the single raw `MCP_ACCESS_KEY`), and whatever else the README lists (`OPENROUTER_API_KEY`, …) |
 
 These servers run this way, and `integrations/test-auth.ts` starts each one so in CI:
 
@@ -31,13 +31,12 @@ These servers run this way, and `integrations/test-auth.ts` starts each one so i
 | [`integrations/entity-extraction-worker`](../../integrations/entity-extraction-worker/) | worker | a schedule, or smart-ingest after a write |
 | [`integrations/consolidation-workers`](../../integrations/consolidation-workers/) (`bio`, `metadata-norm`) | workers | a schedule |
 | [`recipes/editorial-policy`](../../recipes/editorial-policy/) (`auditor/index.ts`) | worker | a weekly schedule |
-| [`integrations/readwise-capture`](../../integrations/readwise-capture/) | webhook receiver | Readwise |
 
 ---
 
 ## Step 1: Apply the Server's Tables
 
-Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/agent-memory` for agent-memory-api, `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/readwise-books` for readwise-capture, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your Open Brain database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
+Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/agent-memory` for agent-memory-api, `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your brain's database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
 
 The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 
@@ -154,13 +153,13 @@ The URL and access key stay the same, so its callers need no change. If the serv
 **`permission denied for table …`**
 - The server's role is not the tables' owner and was not granted them. Apply the schema as the role the server connects with, or grant that role with `bun db/migrate.ts --grant <role>`: the **community** group for the tables under `schemas/`, the **recipes** group for a recipe's own SQL (`db/README.md`, "Grants for a capturing role").
 
-**A caller on another machine, or a service's webhook, cannot reach the server**
+**A caller on another machine cannot reach the server**
 - It needs the HTTPS URL (Step 5). A `127.0.0.1` or LAN address works only from this machine or network.
 - Read the server's terminal: a refused request logs its cause there.
 
 ## Expected Outcome
 
-One `bun` process per server, each answering on its own port: every route for a write key, the reading routes and a worker's dry run for a read key, a 401 for anything else (readwise-capture answers Readwise's echoed secret instead). Behind a TLS proxy, an HTTPS URL its callers reach. Stopping the process stops the server; restarting it with the same environment brings it back at the same URL.
+One `bun` process per server, each answering on its own port: every route for a write key, the reading routes and a worker's dry run for a read key, a 401 for anything else. Behind a TLS proxy, an HTTPS URL its callers reach. Stopping the process stops the server; restarting it with the same environment brings it back at the same URL.
 
 ## Extensions That Use This
 

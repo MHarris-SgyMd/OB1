@@ -80,7 +80,7 @@ Beyond the curated learning path, the community builds and shares real tools tha
 
 ### [`/recipes`](recipes/) — Import Your Data
 
-Pull your digital life into Open Brain. Each recipe handles a specific data source — parsing, deduplication, embedding, and ingestion included.
+Pull your digital life into Daemonic Brain. Each recipe handles a specific data source — parsing, deduplication, embedding, and ingestion included.
 
 | Recipe | What It Does | Contributor |
 | ------ | ------------ | ----------- |
@@ -96,11 +96,11 @@ Pull your digital life into Open Brain. Each recipe handles a specific data sour
 
 ### [`/recipes`](recipes/) — Tools & Workflows
 
-Standalone capabilities that make your Open Brain smarter.
+Standalone capabilities that make your brain smarter.
 
 | Recipe | What It Does | Contributor |
 | ------ | ------------ | ----------- |
-| [Auto-Capture Protocol](recipes/auto-capture/) | Stores ACT NOW items and session summaries in Open Brain at session close using the reusable Auto-Capture skill | [@jaredirish](https://github.com/jaredirish) |
+| [Auto-Capture Protocol](recipes/auto-capture/) | Stores ACT NOW items and session summaries in Daemonic Brain at session close using the reusable Auto-Capture skill | [@jaredirish](https://github.com/jaredirish) |
 | [Panning for Gold](recipes/panning-for-gold/) | Mine brain dumps and voice transcripts for actionable ideas — battle-tested across 13+ sessions | [@jaredirish](https://github.com/jaredirish) |
 | [Aiception (formerly Claudeception)](recipes/claudeception/) | Self-improving system that creates new skills from work sessions — skills that create other skills | [@jaredirish](https://github.com/jaredirish) |
 | [Schema-Aware Routing](recipes/schema-aware-routing/) | LLM-powered routing that distributes unstructured text across multiple database tables | [@claydunker-yalc](https://github.com/claydunker-yalc) |
@@ -109,7 +109,7 @@ Standalone capabilities that make your Open Brain smarter.
 | [Life Engine](recipes/life-engine/) | Self-improving personal assistant — calendar, habits, health, proactive briefings via Telegram or Discord | [@justfinethanku](https://github.com/justfinethanku) |
 | [Life Engine Video](recipes/life-engine-video/) | Add-on that renders Life Engine briefings as short animated videos with voiceover | [@justfinethanku](https://github.com/justfinethanku) |
 | [Daily Digest](recipes/daily-digest/) | Automated daily summary of recent thoughts delivered via email or Slack | OB1 Team |
-| [World Model Diagnostic Activation](recipes/world-model-diagnostic-activation/) | Ship-now activation path for a 20-minute world-model readiness diagnostic that compounds through core Open Brain capture | [@jonathanedwards](https://github.com/jonathanedwards) |
+| [World Model Diagnostic Activation](recipes/world-model-diagnostic-activation/) | Ship-now activation path for a 20-minute world-model readiness diagnostic that compounds through core Daemonic Brain capture | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [Research-to-Decision Workflow](recipes/research-to-decision-workflow/) | Composition recipe that chains canonical skills into operator and investor research, synthesis, meeting, and memo workflows | [@NateBJones](https://github.com/NateBJones) |
 | [OpenClaw Agent Memory for OB1](recipes/openclaw-agent-memory/) | Canonical recipe for using OB1 Agent Memory as the governed continuity layer for OpenClaw workflows | OB1 Team |
 | [OpenClaw Code Review Memory](recipes/openclaw-code-review-memory/) | Flagship workflow for compounding repo-specific review lessons, maintainer corrections, and false positives | OB1 Team |
@@ -121,7 +121,7 @@ Plain-text skill packs you can drop into Claude Code, Codex, or other AI clients
 
 | Skill | What It Does | Contributor |
 | ----- | ------------ | ----------- |
-| [Auto-Capture Skill Pack](skills/auto-capture/) | Captures ACT NOW items and session summaries to Open Brain when a session ends | [@jaredirish](https://github.com/jaredirish) |
+| [Auto-Capture Skill Pack](skills/auto-capture/) | Captures ACT NOW items and session summaries to Daemonic Brain when a session ends | [@jaredirish](https://github.com/jaredirish) |
 | [Competitive Analysis Skill Pack](skills/competitive-analysis/) | Builds competitor briefs, pricing comparisons, market maps, and strategic recommendations | [@NateBJones](https://github.com/NateBJones) |
 | [Financial Model Review Skill Pack](skills/financial-model-review/) | Reviews an existing model for assumption quality, structural risk, and scenario gaps | [@NateBJones](https://github.com/NateBJones) |
 | [Deal Memo Drafting Skill Pack](skills/deal-memo-drafting/) | Turns existing diligence materials into structured deal, IC, or partnership memos | [@NateBJones](https://github.com/NateBJones) |

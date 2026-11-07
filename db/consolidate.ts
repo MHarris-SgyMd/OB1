@@ -167,6 +167,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -183,7 +184,7 @@ import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -1150,8 +1151,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         JOIN thoughts n ON n.id = f.thought_id
         JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
         LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117).
-       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
+       -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117). A work
+       -- thread's edge (origin thread, 120) is no judgement to review (SMD-3306).
+       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+         AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
          -- --key (SMD-3248): one pass's relations alone, by the key its facet names.
          AND (${KEY ?? null}::text IS NULL OR f.payload->>'judge_key' = ${KEY ?? null}::text)
        ORDER BY f.created_at DESC, f.id
@@ -1243,7 +1246,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           JOIN thoughts n ON n.id = f.thought_id
           JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
           LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
+         -- The judge's alone: a work thread's edges (origin thread, 120) are the subjects' (SMD-3306).
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
       out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them` +
         (r.distinct_pairs ? `; ${r.distinct_pairs} pair(s) judged distinct — near neighbours the judge called unrelated, kept apart (102)` : ""));
@@ -1553,6 +1557,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let abortedInHand = 0;
   /** Each worker's judge call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   let beats = 0;
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
@@ -1778,12 +1785,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
-        const callSignal = AbortSignal.any([AbortSignal.timeout(limitS * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
+        // The pair's bound counts its calls' own time: a wait for a slot on the model-call seam pauses it, told by
+        // the worker's waits observer beside its call in hand (SMD-3379 PR 2b-1); the limit as this call starts.
+        const deadline = pausableTimeout(limitS * 1000);
+        const callSignal = AbortSignal.any([deadline.signal, onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
         // deadline for all three calls, as for the judge's one.
-        j = jev ? await decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
-                : await judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS });
+        try {
+          j = await withCallWaits(callWaitsFor(() => inCall.get(workerId), deadline.waits), () =>
+            jev ? decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
+                : judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS }));
+        } finally {
+          deadline.dispose();
+        }
       } catch (e) {
         llmMs += Date.now() - t0;
         // The hard stop aborted the call: the thought is abandoned, not failed.
@@ -2550,7 +2565,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
-    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller` : ""}, in ${elapsed.toFixed(1)}s ` +
+    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed.toFixed(1)}s ` +
       `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
   );
   out(
@@ -2659,6 +2674,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 if (import.meta.main) {
   const cli = commandLine("consolidate.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.

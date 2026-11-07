@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and nineteen (119) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and twenty-two (122) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -385,7 +385,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.6.0+upstream.9543c29`, the seventh (`077..081`), and 083 writes
 `1.7.0+upstream.9543c29`, the eighth (`082..083`), and 089 writes
 `1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
-`1.9.0+upstream.9543c29`, the tenth (`090..103`); from 2.0.0, the eleventh, a stamp is the plain version. `preflight` prints the
+`1.9.0+upstream.9543c29`, the tenth (`090..103`), and 121 writes
+`2.0.0`, the eleventh (`104..121`), the first plain version (SMD-3317). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -2504,6 +2505,20 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 122 adds the composed read, `effective_priority(items, weights, now)`
+(SMD-3667, docs/priority.md decision 5). For each `{kind, key}` it returns the
+order a ranking read uses and every term that made it: the counted level (116's
+winner, an inferred statement left out unless the weights count it), else a level
+inherited from what the item serves (a parent ticket, the ticket a thought is
+about, an open item's origin thought; one less a hop, two hops, only above
+unknown's 2), else unknown's 2; urgency from its due time in calendar days in UTC
+(+2 by the end of tomorrow, +1 by the end of the seventh day, +3 overdue in
+their place, none at level 0 or once settled); and +0.5 or +1 for the open items
+it blocks, transitively to depth 3. The weights are docs/priority.md's,
+overridden by name. It reads; nothing is stored, and `node_state` is unchanged.
+The agenda (SMD-3669) and search (SMD-3668) will call it; today the store's
+`effectivePriority` is its only caller.
+
 Migration 119 makes a due date alone mean the end of that day (SMD-3778, the
 maintainer's rule of 2026-11-05): `ob1_item_due` reads `2027-03-01` as the next
 day's start in UTC, so an open item is not overdue on its own due day. The server
@@ -2541,6 +2556,60 @@ says so once per run and goes on. Needs 058 (`node_settled_types`, with 105's
 `duplicate`), 068 and 115; a re-apply is a no-op. test-schema [106] (the tickets released and
 left, the reason, the dry run, the group, the re-apply), test-upgrade [20bj]
 (onto a populated brain at 117).
+
+Migration 120 links each work thread (SMD-3306 PR 7a-1). A thread is the
+thoughts holding one standing subject key (111), in `created_at` order (ties by
+id: stable, not meaningful), and each thought after the first carries a standing
+`relation` facet on it: relation `evolves`, its target the thought before it,
+judge key `thread:v1`, the thread's `key`, no confidence, origin `thread`, with
+its lineage row (the older and the newer thought at their fingerprints, produced
+by `thread:v1`). `thread_relink(key, dry)` makes one thread stand as its
+subjects say, under a lock on the key: it writes each edge the thread lacks, the
+edge's two thoughts locked first, so a delete in flight is waited out and the
+thread read again past the thought it took, then closes each edge the thread no
+longer has (a closed edge is history, never re-opened); dry, it counts and
+writes nothing. Three constraint triggers on `thought_facets`, deferred to the
+writer's commit, call it as a subject is written, closed
+(`close_thought_subject` included, which since 120 needs the door's writes), or
+deleted with its thought, so a subject recorded again under the same key moves
+no edge, and one moved to another key locks both keys first, in key order, as
+`threads.ts` locks its batches' keys, so two writers moving thoughts across one
+pair of keys queue. The last re-links only when the deleting role can make a
+re-link's writes (INSERT and UPDATE on `thought_facets`, UPDATE on `thoughts`
+for the row locks, and INSERT, UPDATE and SELECT on `derivations`), under READ
+COMMITTED, and while no other transaction holds the key's lock, since a delete's
+own re-link never waits on that lock: a server role cannot, so a thought it
+deletes leaves its neighbours unlinked until their key's next re-link.
+`thread_relink` runs under READ COMMITTED alone and refuses a transaction above
+it, so a subject written in one is refused at its commit. The validator says a
+relation's origin: one naming a subject key is a thread's edge, `evolves` under
+a `thread:` judge key with no confidence; any other is the judge's, `judged`,
+under 084's index, which now keeps to the judge's edges, so a judged `related`
+and a thread's `evolves` stand side by side on one pair.
+`record_thought_relation` reads, keeps, replaces and closes the judge's edge
+alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
+count the judge's alone. The upgrade writes no edge: run `threads.ts` once after
+it, which links every thread, a batch of at most 200 keys a transaction, a key
+that writes ending its batch and the next batch taking the page's rest (on the
+compose stack, from a checkout, reaching its Postgres through deploy/README's
+host-ports file):
+
+```bash
+bun threads.ts --url … --status                # the threads, and the keys whose edges differ
+bun threads.ts --url … --dry-run               # counts what it would close and write; writes nothing
+bun threads.ts --url …                         # links them (--batch N keys a transaction at most, 200 the default and the most)
+bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete
+```
+
+A thought stands in one thread until its subjects are a set (PR 7a-3); the
+thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
+and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the re-link,
+the validator, the judge's door beside a thread, the deletes with and without
+the writes, a replace that keeps its key, a write and a delete under REPEATABLE
+READ, the re-apply), test-upgrade [20bl] (onto a populated brain at the file
+before it), test-live [47] (`threads.ts`, its page reads counted) and [48]
+(beside a delete in flight or stalled, a held key, a deadlock and a writer
+re-keying the other way).
 
 ## What changed relative to the guide
 

@@ -58,7 +58,7 @@ It reads and writes no thought. It reaches the core through `ctx.call` for its t
 
 ## Prerequisites
 
-- A working Open Brain stack (`deploy/compose.yaml`).
+- A working Daemonic Brain stack (`deploy/compose.yaml`).
 - A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to add tasks and log work.
 
 ## Turn it on

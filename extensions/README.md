@@ -2,7 +2,7 @@
 
 https://github.com/user-attachments/assets/cc477f00-bb6b-4f96-9f7d-a6bcd0cf8b60
 
-Extensions are the curated learning path of Open Brain. Build them in order — each one teaches new concepts through something you'll actually use. By the end, your agent manages your household, your schedule, your meals, your professional network, and your career — all interconnected.
+Extensions are the curated learning path of Daemonic Brain. Build them in order — each one teaches new concepts through something you'll actually use. By the end, your agent manages your household, your schedule, your meals, your professional network, and your career — all interconnected.
 
 | # | Extension | What You Build | Difficulty |
 | --- | --------- | -------------- | ---------- |
@@ -17,7 +17,7 @@ Extensions compound. Your CRM knows about thoughts you've captured. Your meal pl
 
 ## Prerequisites
 
-Every extension requires a working Open Brain setup. If you haven't built one yet, start with the [Setup Guide](../docs/01-getting-started.md).
+Every extension requires a working Daemonic Brain setup. If you haven't built one yet, start with the [Setup Guide](../docs/01-getting-started.md).
 
 ## Access Keys
 

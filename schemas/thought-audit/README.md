@@ -8,7 +8,7 @@
 
 ## What It Does
 
-Adds one new table (`thought_audit`) and a couple of optional query helpers. The goal is to make "who changed what, when" answerable once more than one agent is writing to your Open Brain — Claude Desktop, Codex, ChatGPT via the API, a background importer, or any combination of the above.
+Adds one new table (`thought_audit`) and a couple of optional query helpers. The goal is to make "who changed what, when" answerable once more than one agent is writing to your brain — Claude Desktop, Codex, ChatGPT via the API, a background importer, or any combination of the above.
 
 The schema is strictly **additive**. No existing columns on the `thoughts` table are altered or dropped. Existing functions (`match_thoughts`, `upsert_thought`) are not replaced. Every statement is idempotent and safe to re-run.
 
@@ -32,7 +32,7 @@ A single query against `thought_audit` where `thought_id = 'thought-123'` return
 
 ## Prerequisites
 
-- Working Open Brain setup ([guide](../../docs/01-getting-started.md))
+- Working Daemonic Brain setup ([guide](../../docs/01-getting-started.md))
 
 ## Credential Tracker
 

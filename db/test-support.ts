@@ -454,12 +454,26 @@ const FUNCTIONS = [
   "ob1_item_refused(text, text)",
   "ob1_item_event(uuid, text, text, text, text, timestamp with time zone, text, uuid, record, timestamp with time zone, uuid, text, text, timestamp with time zone)",
   "ob1_item_project(uuid)",
+  "effective_priority(jsonb, jsonb, timestamp with time zone)",
+  "ob1_priority_counted(text, text, boolean)",
+  "ob1_item_settled(text, text)",
+  "ob1_node_settled(text, text)",
+  "ob1_item_serves(text, text)",
+  "ob1_item_unblocks(text, text, integer, integer)",
+  "ob1_ticket_row_of(uuid)",
+  "ob1_ticket_rows(text)",
+  "ob1_priority_subject(text, text)",
+  "ob1_priority_open(text, text)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",
   // 118 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
   "release_closed_ticket_claims(text, boolean, jsonb)",
   "ob1_work_claim_closed_head(text)",
+  // 120 (SMD-3306): a work thread's re-link and the trigger function that calls it; the triggers and the indexes go with
+  // thought_facets.
+  "thread_relink(text, boolean)",
+  "ob1_thread_relink_subject()",
 ];
 
 /**

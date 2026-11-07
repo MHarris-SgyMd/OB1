@@ -8,7 +8,7 @@ and inserts into `thoughts` with source_type='readwise'. Idempotent
 on re-run: already-imported highlights are skipped by their
 readwise_highlight_id.
 
-Pair with the readwise-capture integration to keep things live after
+Pair with the readwise plugin's webhook to keep things live after
 the one-shot backfill. This script catches everything historical; the
 webhook catches everything new.
 

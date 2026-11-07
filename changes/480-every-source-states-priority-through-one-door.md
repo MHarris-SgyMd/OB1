@@ -1,0 +1,43 @@
+# 480. Every source states priority through one door, PRs 1 to 3: the one scale's mapping table, the ingestion contract's priority, Linear's priority and due day stated by board-sync, a Markdown note's frontmatter, and home-maintenance's tasks (SMD-3666)
+
+The first of SMD-3666's three PRs (the maintainer's plan, 2026-11-05): PR 2 maps markdown frontmatter, PR 3 the plugins (SMD-3804 folded in). No migration: migration 116's writers take it all.
+
+### PR 3: the plugins
+
+**What changed.**
+- **The SDK's `keepItemPriority(ctx, itemId, { scale, value, chosen? })`** states a row's own word on the open item it stands for, through `ctx.call("set_priority")` at the caller's tier, mapped by PR 1's scale with the word as the reason, or `clear_priority` when it reads as unknown. A refusal or a fault answers `failed` and never fails the plugin's write. The SDK re-exports `PriorityScale`.
+- **home-maintenance:** migration `002_priority_chosen.sql` adds `priority_chosen` (false for a task from before it) and appends it to `task_rows`, beside `answer`. `add_maintenance_task` takes `priority` with no default, so whether it was given is recorded; the row's own default is still medium, and the brain reads an unchosen medium as unknown (decision 3). The add states the priority as the item opens; `sync_open_items` states every live item's (`priorities_stated`), clearing one gone back to the unchosen default. A settled item's priority is left; the due day is the item's own. SMD-3804, filed for this, is folded in.
+- **family-calendar** has no priority field: its deadlines' due days are already their items'.
+
+**Held.** test-plugin-ports' home-maintenance section: low 1, a chosen medium 2, high 3, urgent 4 on their items, the word the reason; a task given none medium in the plugin and unknown in the brain; a sync stating one changed to a chosen high and clearing one set back to the unchosen default, and again stating nothing. `[keepRowItem]`: `keepItemPriority` setting a chosen word, clearing the unchosen default, a refusal and a throw answered `failed`.
+
+**Review pass 1.** A settled item's priority being left had no row: the sync now meets a task whose item a key dropped, changed to a chosen urgent, and must leave the item unstated. Documented: each statement is the calling key's and a key clears only its own, so a task changed in the table and synced under another key keeps the first key's statement beside the second's (the plugin has no operation that changes a priority).
+
+**Review pass 2.** Both plugins' guides for moving from the standalone server copied the rows and stopped, so a copied task or deadline had no open item, nor its priority, until someone ran the sync: each now ends with `sync_open_items`, home-maintenance's saying a copied task's medium is unchosen.
+
+**Review pass 3** found nothing to fix. **Tidied while the files were open:** the add reads whether its priority was given once, and `keepTaskPriority` takes the SDK's `PluginContext`.
+
+### PR 2: Markdown frontmatter
+
+**What changed.** `db/ingest-markdown.ts`'s `notePriority` maps a note's frontmatter `priority:` and `due:` onto the contract's `priority` on the frontmatter scale, stated on the note's own thought by PR 1's pipeline. Every note carries one, null for a key it has not got, so a note whose `priority:` line is deleted clears the statement an earlier run made; a list, or a value that is not one string, is none. The pipeline's line for a role without the priority group now says the records "state or clear" a priority, every note being one.
+
+**Held.** The `ingest-markdown.ts` self-check: a note's word and day, on its own thought; a note with none carrying none; a list no value. **test-live [23e]**, the ingester's own command over a scratch vault: a note saying `priority: high` and `due: 2026-12-01` reads High due that day through `priority_of` (the ticket's Verify), stated as the run's actor with its word as the reason; a note with none states nothing; the same vault again writes nothing; the line deleted clears the statement and the note reads unknown.
+
+**Review passes.** Two found nothing to fix; pass 2 corrected pass 1's note that a trailing `# comment` stays in a value (the reader strips it from an unquoted one, so `priority: high # soon` reads high). **Tidied while the files were open:** the adapter's header table aligned.
+
+### PR 1: the scale, the contract and Linear
+
+**What changed.**
+- **`server-portable/priority-scale.ts`** holds `docs/priority.md`'s mapping table as one module: Linear (`Low` to `Urgent`, `No priority` unknown), frontmatter (`none` to `critical`, any case), GitHub-style labels (P3 to P0) and home-maintenance (its default `medium` unknown unless chosen). `levelOf` maps a source's word, `dueInstant` reads a due time as the core does (a date is the start of its day in UTC; a day that does not exist, or a time with no offset, is none), and `reasonOf` gives a statement its reason (`Linear priority: High`).
+- **The ingestion contract** (`db/ingest-contract.ts`): `Ingested.priority` is `{scale, value, due?, on?}`, `on` naming the ticket a record is of; a derived part carries none. `db/ingest-records.ts` maps it in `docOf` and states it in the record's own transaction through `assert_priority`, as the run's actor at write scope: the same again is `unchanged`, unknown clears the actor's statement, a due time with no level is not stated. A brain before 116, or a role without every privilege the priority grant group gives (`db/priority-writers.ts`, shared with board-sync; review pass 2: EXECUTE, which PUBLIC holds, said nothing, and the first write failed the run), is said once and states none. `db/ingest-items.ts` takes a line's `priority {scale, value, due?}`, on its own thought alone.
+- **The Linear adapter** fetches `dueDate`, keeps it as the `due_date` facet, and gives each ticket its priority on the ticket. The text is unchanged, so no ticket re-embeds. A dump built before `dueDate` was fetched writes no `due_date`, so its re-ingest cannot wipe the day board-sync wrote (review pass 1).
+- **Board-sync's priority step** (`sync-linear.ts`, after each pass, beside SMD-3600's claims step): reads every Linear head row's `priority` and `due_date` facets with the tool's own open statement, and states the moves as `board-sync` — a level, due day or reason moved, or the tier the operator's declaration now gives — and clears on unknown. A dry run counts; a refusal or a failure fails the pass. Off, said once, before 116 or without the priority group, the privilege it lacks named.
+- **Docs:** db/README.md (the contract, the items format, board-sync, the priority group) and `docs/priority.md` (where the table lives).
+
+**Not stated, by design:** a Linear ticket with no priority but a due date states nothing; a statement needs a level, and unknown is no statement (decision 3). The day stays as the `due_date` facet.
+
+**Held.**
+- **Self-checks:** `ingest-records.ts`, the mapping table a row each, the due and reason rules, `docOf` on a ticket, a note, a derived part and an item with none; `ingest-items.ts`, a priority carried, and each malformed one refused by its field; `sync-linear.ts`, the moves (stated, left, a new level or day, the same instant spelled otherwise, cleared, the tier following the declaration), the step off and on against a fake, and its line.
+- **test-live [23d]**, on a real Postgres through board-sync's own writer: a dry run writing nothing; High due 2026-12-01 and Low stated as board-sync, No priority none, and its own stated beside another key's statement of the same words; a second run writing nothing; the declaration restating at tier 2; Urgent with the day dropped replacing it, history kept; No priority clearing. A role with nothing granted told SELECT on priority_assertions and the step off, then granted the group and allowed. The pipeline: a note's priority on its thought as the run's actor, unchanged again, cleared by an unknown word, none when told the brain cannot take them; a ticket's on the ticket.
+
+**Review passes.** Pass 1: a dump built before `dueDate` was fetched wrote `due_date: null`, which a re-ingest merged over board-sync's day; the facet is written only when the issue carries the key. Pass 2: whether a tool may state priorities was asked of EXECUTE, which PUBLIC holds, so a role without the priority group failed its first write and the run; `db/priority-writers.ts` asks the group's privileges for both callers, and both images carry it. Pass 3 found nothing to fix. **Tidied while the files were open:** the scale's unused `PRIORITY_LEVELS` and an export read only in its own module dropped, a stray blank line.
