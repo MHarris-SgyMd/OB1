@@ -209,6 +209,13 @@ export interface WorkerHeartbeat {
    */
   waitingMidPass?: SleepPass[];
   /**
+   * The worker's model calls by pass since its process began, `-` for calls of no pass (SMD-3379 PR 2b-2a): by
+   * class, their own time, and their waits for a slot by how each ended — a slot taken, run without one (the
+   * semaphore failed open), stopped — their time in all and the longest. No telemetry runs in a worker, so its
+   * stamp carries them. Absent from a row with none, or not of the shape, and from an earlier worker's.
+   */
+  models?: Record<string, { calls: { live: number; background: number }; callMs: number; slotWaits: { held: number; open: number; stopped: number; totalMs: number; maxMs: number } }>;
+  /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
    * db/supervise.ts's guard holding any compose follower (SMD-3214). Absent
@@ -729,6 +736,31 @@ const FUTURE_SLACK_S = 60;
 const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= max;
 
+/** A pass's name on a stamp's `models`: a pass's or `-` (none), at most 40 characters of lower case and hyphens. */
+const MODELS_PASS = /^(?:-|[a-z][a-z-]{0,39})$/;
+
+/** A stamp's `models` (SMD-3379 PR 2b-2a), or undefined where any of it is not of the shape: at most 16 passes. */
+function parseModels(m: unknown): WorkerHeartbeat["models"] {
+  if (m === null || typeof m !== "object" || Array.isArray(m)) return undefined;
+  const entries = Object.entries(m as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > 16) return undefined;
+  const out: NonNullable<WorkerHeartbeat["models"]> = {};
+  for (const [pass, t] of entries) {
+    if (!MODELS_PASS.test(pass) || t === null || typeof t !== "object") return undefined;
+    const { calls, callMs, slotWaits } = t as Record<string, Record<string, unknown> | unknown>;
+    const c = calls as Record<string, unknown> | null;
+    const w = slotWaits as Record<string, unknown> | null;
+    if (c === null || typeof c !== "object" || w === null || typeof w !== "object") return undefined;
+    if (![c.live, c.background, callMs, w.held, w.open, w.stopped, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
+    out[pass] = {
+      calls: { live: c.live as number, background: c.background as number },
+      callMs: callMs as number,
+      slotWaits: { held: w.held as number, open: w.open as number, stopped: w.stopped as number, totalMs: w.totalMs as number, maxMs: w.maxMs as number },
+    };
+  }
+  return out;
+}
+
 /**
  * The heartbeat rows as the record carries them. The record is rendered
  * unguarded (render.ts's AS_RECORD), and any role with the worker group can
@@ -819,6 +851,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ? (mid as SleepPass[])
       : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    // Its model calls by pass (SMD-3379 PR 2b-2a), left off whole when any part is not of the shape.
+    const models = parseModels(v!.models);
     // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
     const re = v!.ended === true ? (v!.restart as Record<string, unknown> | undefined) : undefined;
     const restart = re !== null && typeof re === "object" && (re.in_s === null || count(re.in_s, 86_400)) && count(re.code, 255) && count(re.tries)
@@ -854,6 +888,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),
+      ...(models ? { models } : {}),
       ...(restart ? { restart } : {}),
       ...(held ? { held } : {}),
       ...(budget ? { budget } : {}),
@@ -2059,6 +2094,35 @@ function workersLine(db: DatabaseSummary): string {
   return tasks.map((t) => `${t.job ?? t.task} ${t.words}`).join("; ") + tail;
 }
 
+/**
+ * The Model calls row (SMD-3379 PR 2b-2a): each worker's calls by pass since its process began, their own time
+ * on average, and their waits for a slot — how many, the time in all and the longest, and how many ran without a
+ * slot or were stopped waiting. Null where no worker's stamp carries any.
+ */
+function modelCallsLine(db: DatabaseSummary): string | null {
+  return modelCallsWords(db.workers?.heartbeats ?? []);
+}
+
+/** The Model calls row's words for these heartbeats, null where none carries a call or a wait. */
+export function modelCallsWords(beats: readonly WorkerHeartbeat[]): string | null {
+  const parts: string[] = [];
+  for (const h of beats) {
+    if (!h.models) continue;
+    for (const [pass, t] of Object.entries(h.models)) {
+      const n = t.calls.live + t.calls.background;
+      if (n === 0 && t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped === 0) continue;
+      const waits = t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped;
+      const classes = [t.calls.background ? `${t.calls.background} background` : "", t.calls.live ? `${t.calls.live} live` : ""].filter(Boolean).join(", ");
+      const each = n ? `, ${(t.callMs / n / 1000).toFixed(1)} s each` : "";
+      const waited = waits
+        ? `; ${waits} waited for a slot, ${(t.slotWaits.totalMs / 1000).toFixed(1)} s in all, the longest ${(t.slotWaits.maxMs / 1000).toFixed(1)} s${t.slotWaits.open ? `, ${t.slotWaits.open} ran without one` : ""}${t.slotWaits.stopped ? `, ${t.slotWaits.stopped} stopped` : ""}`
+        : "";
+      parts.push(`${h.job ?? h.worker}${pass === "-" ? "" : ` ${pass}`}: ${classes || "0"} call(s)${each}${waited}`);
+    }
+  }
+  return parts.length ? parts.join("; ") : null;
+}
+
 /** "4 pair two tickets the board does not link", `?` when that read did not answer, or nothing. */
 const boardTail = (n: number | null, unread: Unread | undefined) =>
   unread
@@ -2219,6 +2283,8 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
   lines.push(row("Proposals", proposalsLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
+  const calls = modelCallsLine(db);
+  if (calls !== null) lines.push(row("Model calls", calls));
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
   // A deadline's message is its words; every other reason adds the database's.

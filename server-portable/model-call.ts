@@ -41,8 +41,15 @@
  * stall — do not count a wait for a slot as the call's time (review pass 3),
  * and a stopping pass gives back only a call that waits (PR 2b-1, its review
  * pass 6).
+ *
+ * Each call is measured here (PR 2b-2a): its own time a point on
+ * `ob1.model.call.duration`, a slot hook's wait one on
+ * `ob1.model.slot.wait.duration` (noteSlotWait), where a process installed
+ * telemetry; and in this process's tallies by pass (modelCallTallies), which
+ * a worker's pass stamp carries, where none runs.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { faultOf, modelLabel, recordPoint, serverOf, type HistogramSpec, type SpanAttributes } from "./spans.ts";
 
 /** The model server a call reaches, by what it is asked: embeddings, a chat completion, or a typed decision (jev). */
 export type ModelType = "embed" | "chat" | "decide";
@@ -112,12 +119,103 @@ export function withCallWaits<T>(waits: CallWaits, fn: () => T): T {
   return context.run({ ...context.getStore(), waits }, fn);
 }
 
+/**
+ * A model call's own time, in seconds, from when its exchange starts — a wait for a slot is not in it — for every
+ * call through the seam: the decide tier's, extraction's, the judge's and the writer's among them, which record no
+ * `gen_ai.client.operation.duration` point (SMD-3379 PR 2b-2a). The GenAI conventions' bounds, as spans.ts's.
+ */
+export const CALL_DURATION: HistogramSpec = {
+  unit: "s",
+  description: "How long each model call took once it ran, through the model-call seam (SMD-3379)",
+  bounds: [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92, 163.84, 327.68],
+};
+
+/** A background call's wait for a slot of its share on the hook, in seconds, however it ended (SMD-3379 PR 2b-2a). */
+export const SLOT_WAIT: HistogramSpec = {
+  unit: "s",
+  description: "How long a background model call waited for a slot of its share (SMD-3379)",
+  bounds: [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+};
+
+/** How a wait for a slot ended: a slot taken, the call run without one (the semaphore failed open), or a stop. */
+export type SlotWaitEnd = "held" | "open" | "stopped";
+
+/**
+ * One pass's model calls in this process since it started — `-` for calls of no pass: a timer's, a request's, a
+ * script's — what its pass stamp carries, where no telemetry runs (SMD-3379 PR 2b-2a): the calls by class and their
+ * own time, and the waits for a slot by how each ended, their time in all and the longest.
+ */
+export type ModelCallTally = {
+  calls: Record<CallClass, number>;
+  callMs: number;
+  slotWaits: Record<SlotWaitEnd, number> & { totalMs: number; maxMs: number };
+};
+const tallies = new Map<string, ModelCallTally>();
+function tallyOf(pass: string | undefined): ModelCallTally {
+  const key = pass ?? "-";
+  let t = tallies.get(key);
+  if (!t) tallies.set(key, (t = { calls: { live: 0, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, totalMs: 0, maxMs: 0 } }));
+  return t;
+}
+
+/** This process's tallies so far, by pass: a copy, whole numbers of milliseconds. */
+export function modelCallTallies(): Record<string, ModelCallTally> {
+  const out: Record<string, ModelCallTally> = {};
+  for (const [pass, t] of tallies) {
+    out[pass] = {
+      calls: { ...t.calls },
+      callMs: Math.round(t.callMs),
+      slotWaits: { ...t.slotWaits, totalMs: Math.round(t.slotWaits.totalMs), maxMs: Math.round(t.slotWaits.maxMs) },
+    };
+  }
+  return out;
+}
+
+/** The labels a call's points carry: its type, model and server, never the base's userinfo or path; its pass where it has one. */
+function labelsOf(call: ResolvedModelCall): SpanAttributes {
+  return { "ob1.model.type": call.type, "gen_ai.request.model": modelLabel(call.model), ...serverOf(call.base), ...(call.pass ? { "ob1.pass": call.pass } : {}) };
+}
+
+/** A wait for a slot ended, `ms` long: a point, and its pass's tally. The background-slots hook's (slots.ts). */
+export function noteSlotWait(call: ResolvedModelCall, ms: number, end: SlotWaitEnd): void {
+  recordPoint("ob1.model.slot.wait.duration", SLOT_WAIT, ms / 1000, { ...labelsOf(call), "ob1.slot.outcome": end });
+  const w = tallyOf(call.pass).slotWaits;
+  w[end] += 1;
+  w.totalMs += ms;
+  w.maxMs = Math.max(w.maxMs, ms);
+}
+
+/** `run`, timed from when it starts: a point, and its pass's tally, whether it answers or throws. */
+function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise<T> {
+  return async () => {
+    const started = performance.now();
+    let failed: unknown;
+    let threw = false;
+    try {
+      return await run();
+    } catch (e) {
+      threw = true;
+      failed = e;
+      throw e;
+    } finally {
+      const ms = performance.now() - started;
+      recordPoint("ob1.model.call.duration", CALL_DURATION, ms / 1000, {
+        ...labelsOf(call), "ob1.call.class": call.cls, "ob1.call.purpose": call.purpose, ...(threw ? { "error.type": faultOf(failed).kind } : {}),
+      });
+      const t = tallyOf(call.pass);
+      t.calls[call.cls] += 1;
+      t.callMs += ms;
+    }
+  };
+}
+
 /** One model call: `run` is the whole exchange, its deadline started inside it; through the hook when one is set. */
-export function modelCall<T>(call: ModelCall, run: () => Promise<T>): Promise<T> {
-  if (hook === null) return run();
+export function modelCall<T>(call: ModelCall, plain: () => Promise<T>): Promise<T> {
   const { cls, ...rest } = call;
   const store = context.getStore();
   const resolved: ResolvedModelCall = { ...rest, cls: cls ?? store?.cls ?? "background", pass: store?.pass };
+  const run = timed(resolved, plain);
+  if (hook === null) return run();
   // The wait on the hook told to the worker's observer: waiting when the hook says it waits, running when it runs the
   // call — or, if the call ended without running (refused, stopped), running then, so its clocks start from there
   // (review pass 3). A call the hook runs at once is told neither (PR 2b-1, its review pass 6).

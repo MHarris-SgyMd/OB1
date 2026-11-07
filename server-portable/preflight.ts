@@ -47,6 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
+import { backgroundSlotsFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -1103,6 +1104,15 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
   else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
+}
+
+// The background slots in force (SMD-3379 PR 2b-2a): only when set, off unless it is — a value the servers and the
+// passes cannot read leaves them off, with a line in each process's log an operator may never read.
+if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
+  const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
+  if (bs.problem) add("background slots", "warn", bs.problem, "Write types and per-model overrides, e.g. chat=1,embed=2,decide=1, or off, or unset it.");
+  else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
+  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model server's slots across the brain's processes, a live call never; brain_info's Model calls row says how long they waited`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -5525,7 +5535,7 @@ async function probed(operation: "embeddings" | "chat", model: string, base: str
     const r = await call();
     if (!r.ok) span.end("error", statusType(r.status));
     return r;
-  }, undefined, { "ob1.probe": "preflight" }));
+  }, undefined, { "ob1.probe": "preflight", "ob1.call.class": "background" }));
 }
 
 if (!deep) {

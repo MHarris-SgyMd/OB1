@@ -97,6 +97,8 @@ export interface SpanRequest {
 /** What makes spans: nothing, until a serving process installs the OpenTelemetry API's (useTracing). */
 export interface Tracing {
   run<T>(name: string, request: SpanRequest, fn: (span: WorkSpan) => Promise<T>): Promise<T>;
+  /** One point on a histogram with no span about it: the model-call seam's (SMD-3379 PR 2b-2a). */
+  record?(name: string, spec: HistogramSpec, value: number, labels: SpanAttributes): void;
 }
 
 /** What a span is where none is made: nothing, and the work runs. */
@@ -105,6 +107,22 @@ const UNTRACED: Tracing = { run: async (_name, _request, fn) => fn(NO_SPAN) };
 /** Whether spans are made at all: a process that installed none builds no name or labels for them. */
 const untraced = () => tracing === UNTRACED;
 let tracing: Tracing = UNTRACED;
+
+/**
+ * One point on a histogram where a process installed tracing, nothing where it did not — the claim engines and
+ * the sleep passes, which start no telemetry, count their model calls on their pass stamps instead (SMD-3379 PR 2b-2a).
+ * Never the work's undoing: a meter that throws loses the point.
+ */
+export function recordPoint(name: string, spec: HistogramSpec, value: number, labels: SpanAttributes): void {
+  try {
+    tracing.record?.(name, spec, value, labels);
+  } catch {}
+}
+
+/** What makes spans now, undefined where nothing was installed: a test's, to put back what it replaced. */
+export function currentTracing(): Tracing | undefined {
+  return tracing === UNTRACED ? undefined : tracing;
+}
 
 /** Installs what makes spans: telemetry.ts's, the OpenTelemetry API's (tracing.ts); undefined puts back none. */
 export function useTracing(next: Tracing | undefined): void {
@@ -125,6 +143,11 @@ export function withSpan<T>(name: string, request: SpanRequest, fn: (span: WorkS
 /** A model's name as an operator writes one (`text-embedding-3-small`, `qwen3:8b`, `openai/gpt-4o-mini`); `?` for anything else. */
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 
+/** A model's name as a span or a point may carry it: as written where it is a model's name, `?` for anything else. */
+export function modelLabel(model: unknown): string {
+  return typeof model === "string" && MODEL.test(model) ? model : "?";
+}
+
 /**
  * A provider call's duration, in seconds, under the GenAI conventions' name:
  * their advised bounds, on to 327.68 s, past the 120 s a call is given by
@@ -137,7 +160,7 @@ const PROVIDER_DURATION: HistogramSpec = {
 };
 
 /** The host and port a call goes to, from its endpoint's base: never its userinfo, its path or its query. */
-function serverOf(base: string): SpanAttributes {
+export function serverOf(base: string): SpanAttributes {
   try {
     const url = new URL(base);
     const port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : url.protocol === "http:" ? 80 : undefined;
@@ -158,7 +181,7 @@ function serverOf(base: string): SpanAttributes {
  * text sent or answered.
  */
 export function withProviderSpan<T>(
-  operation: "embeddings" | "chat",
+  operation: "embeddings" | "chat" | "decide",
   model: unknown,
   base: string,
   fn: (span: WorkSpan) => Promise<T>,
@@ -166,7 +189,7 @@ export function withProviderSpan<T>(
   extra: SpanAttributes = {},
 ): Promise<T> {
   if (untraced()) return UNTRACED.run(operation, {}, fn);
-  const name = typeof model === "string" && MODEL.test(model) ? model : "?";
+  const name = modelLabel(model);
   const labels: SpanAttributes = { "gen_ai.operation.name": operation, "gen_ai.request.model": name, ...serverOf(base), ...extra };
   return withSpan(`${operation} ${name}`, {
     kind: "client",

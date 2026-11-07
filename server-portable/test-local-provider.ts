@@ -2387,6 +2387,100 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     `a pausable deadline stops while its calls wait and goes on with what was left: paused at ${pausedAt}, resumed at ${resumedAt}, fired at ${firedAt} ms (expected ${expected}), a TimeoutError`);
 }
 
+console.log("\n[13] Model calls measured: every call's own time at the seam and its class on the provider's point, a span for the decide tier, a slot wait by how it ended, and each pass's tallies on its stamp, where no telemetry runs (SMD-3379 PR 2b-2a)");
+{
+  const { asLive, asPass, modelCall, modelCallTallies } = await import("./model-call.ts");
+  const { currentTracing, useTracing, NO_SPAN } = await import("./spans.ts");
+  const { resolveEmbedConfig, providerCall } = await import("./embed.ts");
+  const { resolveJevConfig, jevInfo } = await import("./jev.ts");
+  const { installBackgroundSlots } = await import("./slots.ts");
+  const { passStamper, stampKey } = await import("../db/pass-stamp.ts");
+  const { parseHeartbeats, modelCallsWords } = await import("./brain-info.ts");
+  type Labels = Record<string, string | number | boolean | undefined>;
+  const points: { name: string; value: number; labels: Labels }[] = [];
+  const spans: { name: string; attributes: Labels }[] = [];
+  const before = currentTracing();
+  useTracing({
+    run: async (name, request, fn) => { spans.push({ name, attributes: { ...request.attributes } }); return fn(NO_SPAN); },
+    record: (name, _spec, value, labels) => { points.push({ name, value, labels: { ...labels } }); },
+  });
+  const pass = "measured";
+  const tally = () => modelCallTallies()[pass];
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: PROVIDER, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_METADATA_MODEL: META_MODEL });
+    const embBody = { model: EMB_MODEL, input: ["measured"] };
+    // A background embedding and a live one under one pass: each call's own time a point, labelled with its class,
+    // purpose and pass; the provider's point labelled with its class; the pass's tally counting both.
+    await asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" }));
+    await asLive(() => asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" })));
+    const seam = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.pass"] === pass);
+    const provider = spans.filter((sp) => sp.name === `embeddings ${EMB_MODEL}`);
+    const t1 = tally();
+    assert(seam.length === 2 && seam.map((p) => p.labels["ob1.call.class"]).join() === "background,live"
+        && seam.every((p) => p.labels["ob1.model.type"] === "embed" && p.labels["gen_ai.request.model"] === EMB_MODEL && p.labels["ob1.call.purpose"] === "capture" && p.labels["server.address"] === "127.0.0.1" && p.value >= 0 && p.labels["error.type"] === undefined)
+        && provider.slice(-2).map((sp) => sp.attributes["ob1.call.class"]).join() === "background,live"
+        && t1?.calls.background === 1 && t1.calls.live === 1 && t1.callMs >= 0,
+      `each call's own time is a point at the seam labelled with its class, purpose and pass, the provider's span carries the class, and the pass's tally counts both (${JSON.stringify({ seam: seam.map((p) => p.labels["ob1.call.class"]), tally: t1 })})`);
+    // The decide tier's exchange under a client span of its own, `decide <model>`.
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
+    await asPass(pass, () => jevInfo(jev));
+    const decide = spans.find((sp) => sp.name === "decide stub-decider");
+    const decidePoint = points.find((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.model.type"] === "decide" && p.labels["ob1.call.purpose"] === "info");
+    assert(decide?.attributes["gen_ai.operation.name"] === "decide" && decide.attributes["ob1.call.class"] === "background" && decidePoint !== undefined,
+      `the decide tier's call runs under a client span of its own and its time is a point at the seam (${JSON.stringify(decide?.attributes)})`);
+    // A call that throws: its point names how it failed, and it is counted.
+    const failedBefore = tally()!.calls.background;
+    await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw new TypeError("measured to fail"); })).catch(() => undefined);
+    const failed = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1);
+    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === failedBefore + 1,
+      `a call that throws is a point naming how it failed, and counted (${JSON.stringify(failed?.labels)})`);
+    // Waits for a slot, by how each ended: held — the second of two under chat=1 waiting for the first — then stopped,
+    // then run without one where the semaphore's database does not answer.
+    const held = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+    try {
+      const work = () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, () => Bun.sleep(150));
+      await asPass(pass, () => Promise.all([work(), work()]));
+      const stop = new AbortController();
+      stop.abort(new Error("stopped before it waited"));
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test", signal: stop.signal }, async () => "ran")).catch(() => undefined);
+    } finally {
+      await held.uninstall();
+    }
+    const dead = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:1/none", raw: "chat=1", log: () => {}, connectS: 1 });
+    try {
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => "ran"));
+    } finally {
+      await dead.uninstall();
+    }
+    const waits = points.filter((p) => p.name === "ob1.model.slot.wait.duration" && p.labels["ob1.pass"] === pass);
+    const ends = waits.map((p) => p.labels["ob1.slot.outcome"]);
+    const w = tally()!.slotWaits;
+    const longest = Math.max(...waits.filter((p) => p.labels["ob1.slot.outcome"] === "held").map((p) => p.value));
+    assert(ends.filter((e) => e === "held").length === 2 && ends.includes("stopped") && ends.includes("open")
+        && waits.every((p) => p.labels["ob1.model.type"] === "chat" && p.labels["gen_ai.request.model"] === META_MODEL)
+        && longest >= 0.1 && w.held === 2 && w.stopped === 1 && w.open === 1 && w.maxMs >= 100 && w.totalMs >= w.maxMs,
+      `a wait for a slot is a point by how it ended — two held, the second waiting ${Math.round(longest * 1000)} ms, one stopped, one run without a slot — and the pass's tally counts each (${JSON.stringify(w)})`);
+    // The pass stamp carries the process's tallies; brain_info reads them back and says them.
+    let written = "";
+    const fakeSql = ((_strings: TemplateStringsArray, ...values: unknown[]) => { written = String(values[1]); return Promise.resolve([]); }) as unknown as import("bun").SQL;
+    const stamper = passStamper({ sql: fakeSql, worker: "extract", job: "extract:measured", intervalS: 60 });
+    await stamper.stamp("ok");
+    const stamped = JSON.parse(written) as { models?: Record<string, unknown> };
+    // The row as the database hands it back: its key, and its value as text.
+    const beats = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: written, at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    const words = modelCallsWords(beats.heartbeats) ?? "";
+    assert(JSON.stringify(stamped.models?.[pass]) === JSON.stringify(modelCallTallies()[pass]) && beats.heartbeats[0]?.models?.[pass]?.slotWaits.held === 2
+        && /extract:measured measured: \d+ background, 1 live call\(s\), [\d.]+ s each; 4 waited for a slot, [\d.]+ s in all, the longest [\d.]+ s, 1 ran without one, 1 stopped/.test(words),
+      `the pass stamp carries the process's tallies, and brain_info reads them back and says them (${words.slice(0, 260)})`);
+    // A stamp whose tallies are not of the shape is left off whole.
+    const bad = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: -1, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, totalMs: 0, maxMs: 0 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    assert(bad.heartbeats[0] !== undefined && bad.heartbeats[0].models === undefined && modelCallsWords(bad.heartbeats) === null,
+      "a stamp whose tallies are not of the shape has them left off, the row read and nothing said of them");
+  } finally {
+    useTracing(before);
+  }
+}
+
 server.stop();
 provider.stop();
 

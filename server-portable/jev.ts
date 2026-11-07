@@ -32,9 +32,10 @@
  * preflight reads the knobs only to check the tier. The spikes are the callers.
  */
 
-import { baseUrlOr, ProviderError, providerEndpoint, refuseEgress, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { baseUrlOr, ProviderError, providerEndpoint, providerErrorType, refuseEgress, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressEnv, type EgressPolicy, type EgressSubject } from "./egress.ts";
-import { modelCall } from "./model-call.ts";
+import { currentCallClass, modelCall } from "./model-call.ts";
+import { withProviderSpan } from "./spans.ts";
 import {
   INSUFFICIENT_EVIDENCE,
   JEV_CONTRACT,
@@ -117,8 +118,10 @@ type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
  * asks no model but is still one of the tier's one-at-a-time requests.
  */
 function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
+  // Under a client span, as a provider call's (SMD-3379 PR 2b-2a): `decide <model>`, its point labelled live or
+  // background.
   return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
-    () => jevExchange<T>(cfg, method, path, body, opts));
+    () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass() }));
 }
 
 /** exchange's request, once the seam lets it run: the deadline, the status kept, the body capped in a message, the JSON parsed. */
