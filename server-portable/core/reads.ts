@@ -277,11 +277,11 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
 export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult>;
 
 export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input<"fetch">): Promise<Outcome<FetchedThought>> {
-  const thought = await (await ctx.store()).getThought(id);
+  const store = await ctx.store();
+  const thought = await store.getThought(id);
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const store = await ctx.store();
   const [, claimed, threads] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id)]);
   return ok({
     id: thought.id,

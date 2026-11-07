@@ -98,7 +98,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     search_thoughts: { query: "a needle & more", limit: 5, prefer_current: true, threshold: 0.25 },
     search_thoughts_keyword: { query: "exact text", limit: 3, offset: 1 },
     list_thoughts: { limit: 5, days: 1e-7, type: "idea", topic: "a topic with spaces & symbols?" },
-    // Work threads (SMD-3306 PR 7a-2a): a phrase key's spaces and a colon ride the query string.
+    // Work threads (SMD-3306 PR 7a-2a): a phrase key's colon, spaces, & and ? ride the query string.
     thread: { key: "phrase:a key & more?", after: "dGhyZWFk", limit: 7 },
     list_thought_ids: { limit: 2, after: ID },
     list_logged_searches: { since: "2026-10-01T00:00:00+02:00", limit: 3 },

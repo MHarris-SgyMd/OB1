@@ -1927,18 +1927,22 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
     `a key the registry knows with no kind is left unclassified and stops the run before it writes, its dry run too (${unkinded.code} ${unkinded.err.trim()} | ${unkindedKind} | ${b4Items.length} | ${unkindedDry.code} ${unkindedDry.out.trim().replace(/\n/g, " | ")})`);
 }
 
-console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status now; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought in no thread, a phrase key's value, and each refusal by its rule");
+// The work-thread sections' shared reading (SMD-3306 PR 7a-2a): a thread as both doors give it, a capture, and a subject recorded as the extraction pass records it.
+type ThreadMember = { id: string; place: number; supersededBy: string | null; ticket: { issue: string; status?: string | null; statusType: string | null } | null };
+type ThreadRead = { key: string | null; total: number; place: number | null; members: ThreadMember[]; earlier: boolean; cursor: string | null; linked: { key: string; relation: string; total: number }[]; linkedMore: boolean };
+const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as ThreadRead[];
+const capture = async (content: string, metadata?: Record<string, unknown>) => String((await rest("POST", "/v1/thoughts", { content, ...(metadata ? { metadata } : {}) })).body.id);
+const subject = async (id: string, key: string | null, by: "metadata" | "model") =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
+
+console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status as the row records it; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought in no thread, a phrase key's value, and each refusal by its rule");
 {
-  type M = { id: string; place: number; supersededBy: string | null; ticket: { issue: string; status?: string | null; statusType: string | null } | null; title?: string };
-  type T = { key: string | null; total: number; place: number | null; members: M[]; earlier: boolean; cursor: string | null; linked: { key: string; relation: string; total: number }[]; linkedMore: boolean };
-  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as T[];
-  const capture = async (content: string) => String((await rest("POST", "/v1/thoughts", { content })).body.id);
-  // A ticket's own row (board-sync's shape: metadata.issue and its status), two notes on it, a parent's and a blocker's rows.
+  // The ticket's own row, two notes on it, the rows of its parent, blocker, duplicate and child, a loose thought and one on a phrase.
   const [row, note1, note2, parent, blocker, dup, loose, phrased, child] = await Promise.all([
     "Ticket SMD-9700: the thread read's own ticket", "First note on SMD-9700, before the work", "Second note on SMD-9700, the work landed",
     "Ticket SMD-9701: the parent", "Ticket SMD-9702: the blocker", "Ticket SMD-9703: a duplicate", "A loose thought on nothing in particular",
     "A thought on the retry budget", "Ticket SMD-9705: a child",
-  ].map(capture));
+  ].map((content) => capture(content)));
   const at = (id: string, ts: string) => sql`UPDATE thoughts SET created_at = ${ts}::timestamptz WHERE id = ${id}::uuid`;
   await at(row, "2026-10-01T00:00:00Z"); await at(note1, "2026-10-02T00:00:00Z"); await at(note2, "2026-10-03T00:00:00Z");
   const issue = (id: string, key: string, status: string, type: string) =>
@@ -1948,8 +1952,6 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
   // note2 supersedes note1: note1 stays in the thread, labelled.
   await sql`UPDATE thoughts SET supersedes = ${note1}::uuid WHERE id = ${note2}::uuid`;
   // As the extraction pass records them: a ticket's row by its metadata, a note by the judge model (113's door refuses a model's subject on a ticket's row).
-  const subject = async (id: string, key: string, by: "metadata" | "model") =>
-    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
   const written = [];
   for (const [id, key, by] of [[row, "ticket:SMD-9700", "metadata"], [note1, "ticket:SMD-9700", "model"], [note2, "ticket:SMD-9700", "model"], [parent, "ticket:SMD-9701", "metadata"], [blocker, "ticket:SMD-9702", "metadata"], [dup, "ticket:SMD-9703", "metadata"], [phrased, "phrase:retry budget", "model"], [child, "ticket:SMD-9705", "metadata"]] as const) written.push(await subject(id, key, by));
   assert(written.every((w) => w.ok === true), `the case's eight subjects are written (${JSON.stringify(written.filter((w) => !w.ok))})`);
@@ -2022,12 +2024,6 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
 
 console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread with undated members, ties, infinities and a BC time paged one at a time through both doors in 120's order, each member once; the window's lead on a longer thread; a closed subject leaves its thread; an empty page past the cursor; a cursor Postgres cannot read; every link arm, a self link, a closed link and another system's, and the cap of 50; keys as the extractor writes them; a forged issue is no ticket row; a long phrase key given back whole; fetch's threads null when they cannot be read");
 {
-  type M = { id: string; place: number; ticket: unknown };
-  type T = { key: string | null; total: number; place: number | null; members: M[]; earlier: boolean; cursor: string | null; linked: { key: string; relation: string; total: number }[]; linkedMore: boolean };
-  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as T[];
-  const capture = async (content: string, metadata?: Record<string, unknown>) => String((await rest("POST", "/v1/thoughts", { content, ...(metadata ? { metadata } : {}) })).body.id);
-  const subject = async (id: string, key: string | null, by: "metadata" | "model") =>
-    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
   // Twelve members of phrase:paging order: three undated, three on one microsecond, a microsecond either side, ±infinity, a BC time, and a date.
   const stamps: (string | null)[] = [null, null, null, "2026-01-01 00:00:00.000005+00", "2026-01-01 00:00:00.000005+00", "2026-01-01 00:00:00.000005+00",
     "2026-01-01 00:00:00.000004+00", "2026-01-01 00:00:00.000006+00", "infinity", "-infinity", "0044-03-15 12:00:00+00 BC", "1999-12-31 23:59:59+00"];
@@ -2155,12 +2151,6 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
 
 console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket filed under a team whose prefix texts deny is read by its key and paged from an id read; a ticket row is board-sync's own (source linear) and its status type one word — a forged status type forges no line; a version past 2^53 keeps its digits; an id read's place is its page's; the text's branches: the earlier count, a last page's range, an empty thread's linked line, a status not stated, a key's case and spaces, an upper-case id");
 {
-  type M = { id: string; place: number; ticket: { issue: string; statusType: string | null } | null };
-  type T = { key: string | null; total: number; place: number | null; members: M[]; earlier: boolean; cursor: string | null };
-  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as T[];
-  const capture = async (content: string, metadata?: Record<string, unknown>) => String((await rest("POST", "/v1/thoughts", { content, ...(metadata ? { metadata } : {}) })).body.id);
-  const subject = async (id: string, key: string | null, by: "metadata" | "model") =>
-    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
   const boardRow = async (key: string, status: string | null, type: string, at: string) => {
     const id = await capture(`Ticket ${key}: a board row for review pass 2`);
     await sql`UPDATE thoughts SET created_at = ${at}::timestamptz, metadata = metadata || jsonb_build_object('source', 'linear', 'linear_updated_at', '2026-01-01T00:00:00.000Z', 'issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
@@ -2197,9 +2187,9 @@ console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket f
   const real = await db();
   const skewed = new Proxy(real, { get: (t, k) => k === "threadPlaces" ? async (id: string) => (await t.threadPlaces(id)).map((p) => ({ ...p, place: p.place + 5 })) : Reflect.get(t, k, t) });
   const skewedCore = createCore({ env, store: async () => skewed, door: "open-brain-direct" });
-  const skewedRead = await skewedCore.thread(writer!, { id: esNote, limit: 20 }) as { ok: boolean; value?: { threads: T[] } };
+  const skewedRead = await skewedCore.thread(writer!, { id: esNote, limit: 20 }) as { ok: boolean; value?: { threads: ThreadRead[] } };
   assert(skewedRead.ok && skewedRead.value?.threads[0]?.place === 2,
-    `an id read's place is its member's on the page it heads (${skewedRead.value?.threads[0]?.place})`);
+    `an id read's place is its thought's on the page, not the store's first read (${skewedRead.value?.threads[0]?.place})`);
   // The text's branches. A thread of seven read around its sixth with a page of three: "4 earlier", "5–7 shown".
   const seven: string[] = [];
   for (const i of [1, 2, 3, 4, 5, 6, 7]) {
@@ -2226,11 +2216,6 @@ console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket f
 
 console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket whose board rows are chained (an older row superseded by its head) has one own row, its head, with the head's status; pr: and version: in any case");
 {
-  type M = { id: string; place: number; supersededBy: string | null; ticket: { issue: string; status?: string | null; statusType: string | null } | null };
-  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as { total: number; members: M[] }[];
-  const capture = async (content: string) => String((await rest("POST", "/v1/thoughts", { content })).body.id);
-  const subject = async (id: string) =>
-    ((await sql`SELECT record_thought_subject(${id}::uuid, 'ticket:SMD-9980', 'metadata', 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
   const row = async (status: string, type: string, at: string, synced: string) => {
     const id = await capture(`Ticket SMD-9980: a board row, ${status}`);
     await sql`UPDATE thoughts SET created_at = ${at}::timestamptz, metadata = metadata || jsonb_build_object('source', 'linear', 'issue', 'SMD-9980', 'status', ${status}::text, 'status_type', ${type}::text, 'linear_updated_at', ${synced}::text) WHERE id = ${id}::uuid`;
@@ -2240,7 +2225,7 @@ console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket w
   const older = await row("Backlog", "backlog", "2026-06-01T00:00:00Z", "2026-06-01T00:00:00.000Z");
   const head = await row("Done", "completed", "2026-06-03T00:00:00Z", "2026-06-03T00:00:00.000Z");
   await sql`UPDATE thoughts SET supersedes = ${older}::uuid WHERE id = ${head}::uuid`;
-  const written = [await subject(older), await subject(head)];
+  const written = [await subject(older, "ticket:SMD-9980", "metadata"), await subject(head, "ticket:SMD-9980", "metadata")];
   const [chain, chainMcp] = await Promise.all([rest("GET", "/v1/thread?key=SMD-9980"), mcp("thread", { key: "SMD-9980" })]);
   const t = threadsOf(chain.body)[0];
   assert(written.every((w) => w.ok) && t?.total === 2 && t.members[0].id === older && t.members[0].ticket === null && t.members[0].supersededBy === head
@@ -2248,7 +2233,7 @@ console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket w
       && (chainMcp.text.match(/own row/g) ?? []).length === 1 && chainMcp.text.includes(`Ticket SMD-9980's own row — status as the row records it: "Done" (completed)`) && !chainMcp.text.includes('"Backlog"'),
     `a ticket's chained board rows: the older, superseded, is no own row; the head alone is, with its status (${JSON.stringify(t?.members.map((m) => [m.ticket?.status ?? null, m.supersededBy !== null]))})`);
   const [prUpper, versionUpper] = await Promise.all([rest("GET", "/v1/thread?key=PR:012"), rest("GET", "/v1/thread?key=VERSION:V1.2")]);
-  assert(prUpper.status === 200 && (threadsOf(prUpper.body)[0] as unknown as { key: string })?.key === "pr:12" && versionUpper.status === 200 && (threadsOf(versionUpper.body)[0] as unknown as { key: string })?.key === "version:v1.2",
+  assert(prUpper.status === 200 && threadsOf(prUpper.body)[0]?.key === "pr:12" && versionUpper.status === 200 && threadsOf(versionUpper.body)[0]?.key === "version:v1.2",
     `PR:012 reads pr:12 and VERSION:V1.2 version:v1.2 (${prUpper.status} ${versionUpper.status})`);
 }
 

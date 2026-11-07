@@ -938,9 +938,9 @@ export const THREAD_HEAD_CHARS = 500;
  * around a member — up to `before` members ahead of it, then it and the rest — `limit` members in all.
  */
 export type ThreadWindow = { limit: number } & ({ after?: ListPosition; around?: undefined } | { around: string; before: number; after?: undefined });
-/** A board ticket's own row, as a member: its key and its status now — the row is rewritten in place, so it keeps its first place. */
+/** A board ticket's own row (its head row), as a member: its ticket and its status as that row records it — the row is rewritten in place, so it keeps its first place. */
 export type ThreadTicket = { issue: string; status: string | null; statusType: string | null };
-/** A thread's member: its place (1 the first), its position (the cursor's), its time, its text's head, and its ticket when it is a ticket's row. */
+/** A thread's member: its place (1 the first), its position (the cursor's), its time, its text's head, and its ticket when it is a board ticket's own row. */
 export type ThreadMember = { id: string; place: number; at: string | null; created_at: string | null; content: string; ticket: ThreadTicket | null };
 /** How a linked ticket stands to this thread's: its parent or child, it blocks or is blocked by this one, or they relate. */
 export type ThreadLinkRelation = "parent" | "child" | "blocks" | "blocked_by" | "relates_to";
@@ -2316,8 +2316,9 @@ export interface ThoughtStore {
    * subjects, not the edges, so a thread is whole before db/threads.ts links it. `window` picks the page: from the
    * start, after a member's position, or around a member (`around`, up to `before` members ahead of it). A ticket
    * key's page carries the threads its ticket's board links reach (053's linear links on the ticket's rows, either
-   * direction), each with its member count, the first THREAD_LINKS_SHOWN. Throws what Postgres throws: a role that
-   * cannot read thought_facets is the caller's to say.
+   * direction), each with its member count, the first THREAD_LINKS_SHOWN. Throws ListCursorRefused for a cursor
+   * whose time Postgres cannot read, else what Postgres throws: a role that cannot read thought_facets is the
+   * caller's to say.
    */
   threadPage(key: string, window: ThreadWindow): Promise<ThreadPage>;
 

@@ -822,8 +822,9 @@ const LINKED_WORDS: Record<ThreadShown["linked"][number]["relation"], string> = 
 const membersWord = (n: number) => `${n} thought${n === 1 ? "" : "s"}`;
 /**
  * A thread's key in the text: a phrase, the judge model's words, quoted whole — 111 holds it to 207 code points on one
- * line, lower case, single spaces — since the cursor line asks for it back, and MCP's value carries no phrase key (review
- * pass 1: a key cut to 120 with an ellipsis could not be given back, so a long phrase's thread could not be paged).
+ * line, lower case, single spaces — since the cursor line asks for it back, and MCP's value carries no phrase key
+ * (review pass 1: a key cut to 120 with an ellipsis could not be given back, so a long phrase's thread could not be
+ * paged).
  */
 const threadKeyText = (key: string) => SHAPED_KEY.test(key) ? key : JSON.stringify(key);
 /** A thread's linked threads as one line, or nothing. */
@@ -839,17 +840,16 @@ function threadText(t: ThreadShown, thought: string | null): string {
     const marks = [
       m.id === thought ? "   ◀ this thought" : "",
       m.supersededBy ? `   ⚠ Superseded by a newer thought — ID ${m.supersededBy} (it stays in the thread, which keeps its history)` : "",
-      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status as that row records
-      // it, quoted, the row's own words — a write key may patch it, so not "board-sync's" (review pass 3); the ticket's
-      // head row alone, board-sync's, its issue a ticket's shape (store.ts normaliseThreadMember).
+      // A ticket's head row alone, board-sync's, its issue a ticket's shape (store.ts normaliseThreadMember). The row
+      // is rewritten in place and keeps its first place (the maintainer, 11-06); its status is said as that row
+      // records it, quoted, the row's own words — a write key may patch it, so not "board-sync's" (review pass 3).
       m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status as the row records it: ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
     ].filter(Boolean);
     return `${m.place}. ${JSON.stringify(oneLine(m.title))}\n   ID: ${m.id}${marks.length ? `\n${marks.join("\n")}` : ""}`;
   });
-  // An empty page of a thread with members (review pass 1): the members after the cursor left it between pages, or the
-  // thought an id read was around left it between the two reads.
   // An id read's page without its thought, whatever the thread then held (review pass 2: a thread emptied between the
-  // two reads said nothing).
+  // two reads said nothing); a key's empty page of a thread with members, those after the cursor having left it
+  // between pages (review pass 1).
   const before = t.members.length === 0 && thought !== null ? "\n(This thought left the thread while it was read: read it again, or read the key's thread from its start.)"
     : !t.earlier ? "" : t.members.length > 0 ? `\n(${first - 1} earlier: read the key's thread from its start for them.)`
       : "\n(No member stands past the cursor now: those after it left the thread since that page, or the cursor came from another thread's page. Read the key's thread from its start.)";
@@ -861,7 +861,7 @@ export function renderThread(o: Outcome<ThreadResult>): Reply {
   return render(o, ({ id, threads }) => {
     if (id !== null && threads.length === 0) return `Thought ${id} stands in no thread: no subject has been found for it yet (the extraction worker's rules find a ticket's, its --subjects sweep asks the judge model for the rest).`;
     const t = threads[0];
-    if (id === null && t && t.total === 0) return `No thought holds subject ${threadKeyText(t.key)}: its thread is empty.${linkedLine(t) ? `\n${linkedLine(t)}` : ""}`;
+    if (id === null && t && t.total === 0) return [`No thought holds subject ${threadKeyText(t.key)}: its thread is empty.`, linkedLine(t)].filter(Boolean).join("\n");
     const lead = id === null ? "" : `Thought ${id} stands in ${threads.length === 1 ? "one thread" : `${threads.length} threads`}.\n\n`;
     return lead + threads.map((x) => threadText(x, id)).join("\n\n———\n\n");
   }, (r) => r.code === "REFUSED_THREAD_INPUT"

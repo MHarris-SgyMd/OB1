@@ -1451,8 +1451,8 @@ export class SqlStore implements ThoughtStore {
 
   async threadPage(key: string, w: ThreadWindow): Promise<ThreadPage> {
     // SMD-3306 PR 7a-2a: the thread from its standing subjects (111's key index), numbered in 120's order — created_at,
-    // ties by id, an undated thought last — then the page cut from it. A thread is read whole to number it: its size
-    // is a subject's: stable's largest held 47 thoughts on 11-06.
+    // ties by id, an undated thought last — then the page cut from it. A thread is read whole to number it, which a
+    // subject's size allows: stable's largest held 47 thoughts on 11-06.
     const after = w.after ?? null;
     const cut = w.around !== undefined
       ? this.sql`place >= (SELECT place FROM thread WHERE id = ${w.around}::uuid) - ${w.before}::int`
@@ -1482,17 +1482,17 @@ export class SqlStore implements ThoughtStore {
       if (unread) throw new ListCursorRefused();
       throw e;
     }
-    const head = rows[0] ?? {};
+    const head = rows[0] ?? {}, total = Number(head.total ?? 0);
     const raw = typeof head.members === "string" ? JSON.parse(head.members) : head.members;
     const members = (Array.isArray(raw) ? raw : []).map((m: Record<string, unknown>) => normaliseThreadMember(m));
     const ticket = /^ticket:([A-Z][A-Z0-9]*-[0-9]+)$/.exec(key)?.[1] ?? null;
-    if (ticket === null) return { key, total: Number(head.total ?? 0), members, links: [], linksMore: false };
+    if (ticket === null) return { key, total, members, links: [], linksMore: false };
     // A ticket's linked threads (the maintainer's linked threads, 11-05): the linear links 053 keeps on the ticket's
     // own rows (thoughts_issue_key_idx), and those other tickets' rows hold naming it (thought_facets_link_target_idx),
-    // each turned to how the other ticket stands to this one. This ticket's row saying `X child_of Y` makes Y its parent,
-    // `X blocks Y` makes Y blocked by it, `X blocked_by Y` makes Y block it; another's row saying `Y <relation> X` is
-    // Y's relation as it stands, child_of a child. A text reference and duplicate_of join no thread. One row past the
-    // shown says more follow.
+    // each turned to how the other ticket stands to this one. This ticket's row saying `X child_of Y` makes Y its
+    // parent, `X blocks Y` makes Y blocked by it, `X blocked_by Y` makes Y block it; another's row saying
+    // `Y <relation> X` is Y's relation as it stands, child_of a child. A text reference and duplicate_of join no
+    // thread. One row past the shown says more follow.
     const links = await this.sql`
       WITH own AS (
         SELECT id FROM thoughts WHERE metadata ? 'issue' AND md5(metadata->>'issue')::uuid = md5(${ticket}::text)::uuid AND metadata->>'issue' = ${ticket}::text),
@@ -1515,7 +1515,7 @@ export class SqlStore implements ThoughtStore {
        ORDER BY array_position(ARRAY['parent', 'child', 'blocks', 'blocked_by', 'relates_to'], relation), other
        LIMIT ${THREAD_LINKS_SHOWN + 1}::int`;
     const read = links.map((r: Record<string, unknown>) => normaliseThreadLink(r)).filter((l: ThreadLink | null): l is ThreadLink => l !== null);
-    return { key, total: Number(head.total ?? 0), members, links: read.slice(0, THREAD_LINKS_SHOWN), linksMore: read.length > THREAD_LINKS_SHOWN };
+    return { key, total, members, links: read.slice(0, THREAD_LINKS_SHOWN), linksMore: read.length > THREAD_LINKS_SHOWN };
   }
 
   async threadPlaces(id: string): Promise<ThreadPlace[]> {

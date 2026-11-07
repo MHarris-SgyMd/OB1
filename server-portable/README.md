@@ -819,13 +819,12 @@ whole before `db/threads.ts` has linked it.
     numbers without leading zeros.
   - `id` reads each thread the thought stands in, around it: up to half the page before it, then it and those after,
     its `place` marked.
-  - **Paging.** `limit` members a page, 1–100, default 20. A thread with more carries a `cursor`, which is passed back as
-    `after` with the same key.
+  - **Paging.** `limit` thoughts a page, 1–100, default 20. A thread with more carries a `cursor`, which is passed back
+    as `after` with the same key.
   - **Each member** carries its id, title, time and place. A superseded member carries `supersededBy` and stays in its
-    thread, which keeps its history. A board ticket's own row — board-sync's (`metadata.source` `linear`, which no key may write), and the
-    ticket's head row (068's `ob1_ticket_head`; board-sync chains a ticket's older rows under it) — carries
-    `ticket`, its status as that row records it: the row is rewritten in
-    place, so it keeps its first place.
+    thread, which keeps its history. A board ticket's own row — board-sync's (`metadata.source` `linear`, which no key
+    may write), and the ticket's head row (068's `ob1_ticket_head`; board-sync chains a ticket's older rows under it) —
+    carries `ticket`, its status as that row records it: the row is rewritten in place, so it keeps its first place.
   - **Linked threads.** A ticket's thread names the threads its ticket's board links reach (`linked`): from 053's
     `linear` links in either direction, `parent`, `child`, `blocks`, `blocked_by` or `relates_to`, each with how many
     thoughts its thread holds. The first 50 are shown, and `linkedMore` says when there are more. No thread runs across
@@ -836,8 +835,9 @@ whole before `db/threads.ts` has linked it.
   - **MCP's value** carries a ticket's, pull request's or version's key. A phrase key, the judge model's words, rides
     the text alone.
 - **`fetch`** carries `threads` where the thought stands in a thread: each one's key, the thought's place and the
-  thread's size, and the member it `continues` and the one that `continuedBy` it, each labelled when superseded. It is
-  `threads: null` when they couldn't be read, such as for a role without `thought_facets`, and the log says why.
+  thread's size, and the member it continues (`continues`) and the one that continues it (`continuedBy`), each labelled
+  when superseded. It is `threads: null` when they couldn't be read, such as for a role without `thought_facets`, and
+  the log says why.
 
 The `thread` read reads `thought_facets` and 068's `ob1_ticket_head`, as `prefer_current` does: a role without SELECT on
 either faults it, the error naming the table.

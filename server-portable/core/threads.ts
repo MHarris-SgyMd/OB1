@@ -4,7 +4,8 @@
 // thought last. Both reads find it from the subjects, not from 120's edges: the subjects define it, so a read is right
 // on a brain db/threads.ts has not linked yet. The maintainer's decisions (2026-11-06) are read here: a superseded
 // member stays in its thread and is labelled; a ticket's own row, rewritten in place, keeps its first place and shows
-// its status as that row records it; a ticket's thread names the threads its board links reach, and no thread runs across one.
+// its status as that row records it; a ticket's thread names the threads its board links reach, and no thread runs
+// across one.
 
 import { thoughtTitle } from "../thoughts.ts";
 import { isTicket, subjectKeyValid } from "../subject.ts";
@@ -31,17 +32,20 @@ const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
 
 /**
  * A key as the caller wrote it, as subject.ts writes it, so a key the extractor would write for the same thing finds
- * its thread: a ticket with its prefix, in any case, is `ticket:<ID>` upper-cased — any id 111 takes, since the ticket a
- * thought is filed under keeps a prefix the text rules deny (metadataTicket: `ticket:ES-5`, review pass 2); a ticket
- * alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or `UTF-8` is
- * no ticket a text names (review pass 1); a pull request's and a version's numbers lose their leading zeros (`pr:012`
- * is `pr:12`, `version:v01.2` `version:v1.2`). Any other key is taken as written, trimmed. Null for what is no subject
- * key (111's subject_key_valid, mirrored by subjectKeyValid). `pr:` and `version:v` are read in any case (review pass 3).
+ * its thread: a ticket with its prefix, in any case, is `ticket:<ID>` upper-cased — any id 111 takes, since the
+ * ticket a thought is filed under keeps a prefix the text rules deny (metadataTicket: `ticket:ES-5`, review pass 2);
+ * a ticket alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or
+ * `UTF-8` is no ticket a text names (review pass 1); `pr:` and `version:v` are read in any case (review pass 3), their
+ * numbers without leading zeros (`pr:012` is `pr:12`, `version:v01.2` `version:v1.2`). Any other key is taken as
+ * written, trimmed. Null for what is no subject key (111's subject_key_valid, mirrored by subjectKeyValid).
  */
 export function threadKey(raw: string): string | null {
   const k = raw.trim();
   const prefixed = /^ticket:([A-Za-z][A-Za-z0-9]*-[0-9]+)$/i.exec(k);
-  if (prefixed) return subjectKeyValid(`ticket:${prefixed[1].toUpperCase()}`) ? `ticket:${prefixed[1].toUpperCase()}` : null;
+  if (prefixed) {
+    const t = `ticket:${prefixed[1].toUpperCase()}`;
+    return subjectKeyValid(t) ? t : null;
+  }
   const bare = /^([A-Za-z][A-Za-z0-9]*-[0-9]+)$/.exec(k);
   if (bare) return isTicket(bare[1].toUpperCase()) ? `ticket:${bare[1].toUpperCase()}` : null;
   const pr = /^pr:([0-9]{1,9})$/i.exec(k);
@@ -64,8 +68,8 @@ async function shown(store: Pick<ThoughtStore, "supersededAmong">, pages: readon
       // threadPlaces' place, read first, could disagree with a page a write landed before); null when it left.
       key: p.key, total: p.total, place: placeOf === null ? null : (p.members.find((m) => m.id === placeOf)?.place ?? null),
       members: p.members.map((m) => ({ id: m.id, title: thoughtTitle(m.content, m.created_at), created_at: m.created_at, place: m.place, supersededBy: superseded[m.id] ?? null, ticket: m.ticket })),
-      // An empty page of a thread that holds members (a cursor whose members after it left between pages, or the
-      // thought an id read was around leaving its thread between the two reads) has all of them before it (review pass 1).
+      // An empty page of a thread that holds members has all of them before it (review pass 1): a cursor whose members
+      // after it left between pages, or the thought an id read was around leaving its thread between the two reads.
       earlier: p.members.length === 0 ? p.total > 0 : p.members[0].place > 1,
       cursor: last && last.place < p.total ? threadCursor(last.at, last.id) : null,
       linked: p.links, linkedMore: p.linksMore,
