@@ -78,6 +78,8 @@ export type Refusal =
   | { code: "ITEM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown" } // …the registry cannot answer until an operator acts, or the server holds no id for the key and no word why (claims.ts's registry_unknown)
   | { code: "ITEM_UNOWNABLE"; retryable: false } // a caller with no agent id at all (a plugin hook's) opening an item for no plugin row: it could never be shown its own
   | { code: "ORIGIN_NOT_FOUND"; retryable: false; thought: string } // the thought an item was to be read from is not in the brain
+  // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
+  | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   | { code: "EVIDENCE_NOT_FOUND"; retryable: false; thought: string } // the thought a proposed close cites is not in the brain
   | { code: "ITEM_SETTLED"; retryable: false; item: string; status: "done" | "dropped" } // a close proposed for an item already done or dropped
   | { code: "PROPOSAL_NOT_FOUND"; retryable: false; proposal: string } // no such proposed close (told to a write key alone)
@@ -188,6 +190,7 @@ const FACTS: Facts = {
   ITEM_UNOWNABLE: none,
   ITEM_UNATTRIBUTED: (r) => ({ cause: r.cause }),
   ORIGIN_NOT_FOUND: (r) => ({ thought: r.thought }),
+  CLAIMS_UNREADABLE: none,
   EVIDENCE_NOT_FOUND: (r) => ({ thought: r.thought }),
   ITEM_SETTLED: (r) => ({ item: r.item, status: r.status }),
   PROPOSAL_NOT_FOUND: (r) => ({ proposal: r.proposal }),

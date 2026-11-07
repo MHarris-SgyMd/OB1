@@ -18133,11 +18133,16 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   await db.exec(`UPDATE ob1_config SET value = '{not json' WHERE key = 'heartbeat:board-sync'`);
   let garbled: Ag["board_sync"] | undefined;
   try { garbled = (await ag({ project: P })).board_sync; } catch { garbled = undefined; }
+  // JSON that jsonb still cannot take (review pass 2: a \u0000 raised 22P05, past the 22P02 alone the guard caught).
+  await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'heartbeat:board-sync'`, ['{"outcome": "a' + String.fromCharCode(92) + 'u0000b"}']);
+  let nul: Ag["board_sync"] | undefined;
+  try { nul = (await ag({ project: P })).board_sync; } catch { nul = undefined; }
   await db.exec(`UPDATE ob1_config SET value = '{"outcome": "ok", "every_s": 300}' WHERE key = 'heartbeat:board-sync'`);
   const codes = [await raisedCode(`SELECT agenda(NULL, NULL, 0)`), await raisedCode(`SELECT agenda(NULL, NULL, 101)`), await raisedCode(`SELECT agenda('{"team": "x"}')`),
-                 await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`)];
-  assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && codes.every((c) => c === "22023"),
-    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown or empty scope and a holder with no name each 22023 (${JSON.stringify(after)}; ${codes})`);
+                 await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`),
+                 await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`)];
+  assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && nul?.outcome === null && typeof nul?.at === "string" && codes.every((c) => c === "22023"),
+    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown or empty scope, a holder with no name and a NULL flag each 22023 (${JSON.stringify(after)}; ${codes})`);
 
   await reapply(file.slice(0, 4));
   assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");

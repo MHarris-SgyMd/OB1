@@ -2512,8 +2512,8 @@ when asked), in a scope (`source`: linear, items or a plugin's name; Linear's
 `project` and `label`), or the tickets a key holds a live claim on (`mine`). It
 ranks them by 122's effective priority, every term named. A ticket blocked by an
 open item and a ticket under a live claim are left out unless asked, and an item
-not yet startable always is, each counted. It says how many listed items carry no
-priority and when board-sync last ran. query_log gains the `agenda` kind and
+not yet startable always is, each counted. It says how many items that passed the
+filters carry no priority, and when board-sync last ran. query_log gains the `agenda` kind and
 `result_items`, the typed items a call returned.
 
 Migration 122 adds the composed read, `effective_priority(items, weights, now)`

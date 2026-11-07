@@ -36,8 +36,8 @@
 --     p_include_claimed, which names the holder; an item whose not_before is
 --     still ahead (waiting), always. A lapsed claim never released hides
 --     nothing: the item names it, so a client checks before starting.
---   * COVERAGE: how many listed items carry no priority — no counted level and
---     none inherited, read as unknown's value, never low (docs/priority.md
+--   * COVERAGE: how many items that passed the filters (total, not the first
+--     p_limit) carry no priority — no counted level and none inherited, read as unknown's value, never low (docs/priority.md
 --     decision 3) — and board-sync's last heartbeat (its ob1_config row's
 --     time and outcome), null on a brain without board-sync.
 --   The answer: {items, total, unknown, left_out: {blocked, claimed, waiting},
@@ -216,6 +216,9 @@ BEGIN
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
     RAISE EXCEPTION USING MESSAGE = format('an agenda shows 1 to 100 items; %s is not', COALESCE(p_limit::text, 'NULL')), ERRCODE = 'invalid_parameter_value';
   END IF;
+  IF p_include_blocked IS NULL OR p_include_claimed IS NULL OR p_include_proposed IS NULL THEN
+    RAISE EXCEPTION USING MESSAGE = 'agenda''s include flags are true or false, never NULL', ERRCODE = 'invalid_parameter_value';
+  END IF;
   IF p_scope IS NOT NULL AND jsonb_typeof(p_scope) <> 'object' THEN
     RAISE EXCEPTION USING MESSAGE = 'an agenda''s scope is a JSON object of source, project and label', ERRCODE = 'invalid_parameter_value';
   END IF;
@@ -288,12 +291,13 @@ BEGIN
   END LOOP;
 
   -- Board-sync's last heartbeat (db/pass-stamp.ts writes its value as JSON); a
-  -- value that is no JSON names no outcome, and never fails the read.
+  -- value jsonb cannot take (no JSON, a \u0000, a number past numeric: any
+  -- data exception) names no outcome, and never fails the read.
   SELECT o.updated_at, o.value INTO v_beat_at, v_beat FROM ob1_config o WHERE o.key = 'heartbeat:board-sync';
   IF v_beat_at IS NOT NULL THEN
     BEGIN
       v_board := jsonb_build_object('at', v_beat_at, 'outcome', (v_beat::jsonb)->'outcome');
-    EXCEPTION WHEN invalid_text_representation THEN
+    EXCEPTION WHEN data_exception THEN
       v_board := jsonb_build_object('at', v_beat_at, 'outcome', NULL);
     END;
   END IF;
@@ -372,4 +376,4 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz) IS
-  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder or clock. Migration 123 / SMD-3669.';
+  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder or clock. Migration 123 / SMD-3669.';

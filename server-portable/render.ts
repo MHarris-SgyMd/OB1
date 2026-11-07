@@ -2103,7 +2103,7 @@ const agendaTerm = (t: AgendaResult["items"][number]["terms"][number]): string =
   if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
   return `${t.term} ${t.value}`;
 };
-export const renderAgenda = (o: Outcome<AgendaResult>): Reply => render(o, (v) => {
+export const renderAgenda = (o: Outcome<AgendaResult, "CLAIMS_UNREADABLE">): Reply => render(o, (v) => {
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
@@ -2127,7 +2127,7 @@ export const renderAgenda = (o: Outcome<AgendaResult>): Reply => render(o, (v) =
   lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
   if (!v.claimsRead) lines.push("Claims could not be read (this key's role lacks the claims group): claimed work is not left out or named.");
   return lines.join("\n");
-}, unknownRefusal, AS_JSON);
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
 
 export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Reply => render(o, (v) =>
   v.items.length === 0 ? "No items match."
