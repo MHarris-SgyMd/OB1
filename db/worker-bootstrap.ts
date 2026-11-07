@@ -955,8 +955,8 @@ const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answe
  *   the probe's after the last answer, past the window unless --timeout is short or the poll long.
  * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
  *   again at once.
- * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404 (probeChat), the tier's any
- *   other 4xx (probeTier), re-embed's any error neither down nor missing (embedProbe). A key revoked, credit run out,
+ * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404, or a redirect (probeChat;
+ *   SMD-2908), the tier's any other 4xx or a redirect (probeTier), re-embed's any error neither down nor missing (embedProbe). A key revoked, credit run out,
  *   the base URL gone while it was away, or a proxy answering 404 before its route is back — the request's, not the
  *   provider back: said, in the tier's name when its probe met it, and returned with whether it did, for the
  *   caller's follower to stop on, exit 2, nothing marked failed.
