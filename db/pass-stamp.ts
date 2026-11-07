@@ -25,9 +25,9 @@
  * provider that stopped answering — the sleep scheduler's by name, a
  * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
  * services' command, which runs the follower again on its own (SMD-3214) — written there, not
- * here; and `models`, the process's model calls by pass since it began — their class, their own time,
- * their waits for a slot — where it has made any (SMD-3379 PR 2b-2a: no telemetry runs in a worker). Each stamp writes the whole value: a restarted follower's first
- * stamp carries no block until it judges one. The time is the row's
+ * here; and `models`, the process's model calls by pass since it began — their class, failures and own
+ * time, their asks for a slot — where it has made any (SMD-3379 PR 2b-2a: no telemetry runs in a worker).
+ * Each stamp writes the whole value: a restarted follower's first stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
  * holds INSERT and UPDATE on it (db/config.mjs ROLE_GRANTS), and a
@@ -359,7 +359,7 @@ export function passStamper(opts: {
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
     // The process's model calls by pass since it started, where it has made any: no telemetry runs here, so the
-    // stamp carries them — their class, their own time, their waits for a slot (SMD-3379 PR 2b-2a).
+    // stamp carries them — their class, failures and own time, their asks for a slot (SMD-3379 PR 2b-2a).
     const tallies = modelCallTallies();
     const models = Object.keys(tallies).length ? { models: tallies } : {};
     const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }), ...models });

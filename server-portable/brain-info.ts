@@ -2100,8 +2100,8 @@ function workersLine(db: DatabaseSummary): string {
 
 /**
  * The Model calls row (SMD-3379 PR 2b-2a): each worker's calls by pass since its process began, their own time
- * on average, and their waits for a slot — how many, the time in all and the longest, and how many ran without a
- * slot or were stopped waiting. Null where no worker's stamp carries any.
+ * on average and how many failed, and their asks for a slot — how many, their time in all and the longest, how many
+ * waited, ran without a slot or were stopped. Null where no worker's stamp carries any.
  */
 function modelCallsLine(db: DatabaseSummary): string | null {
   return modelCallsWords(db.workers?.heartbeats ?? []);

@@ -119,8 +119,8 @@ type CallOpts = { signal?: AbortSignal; timeoutMs?: number; probe?: string };
  */
 function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
   // Under a client span, as a provider call's (SMD-3379 PR 2b-2a): `decide <model>`, its point labelled live or
-  // background, and preflight's probes marked so (`probe`), as its embedding and chat probes are, which the provider
-  // alert leaves out (review pass 1).
+  // background, and preflight's probes marked so (`probe`), as its embedding and chat probes are (review pass 1). The
+  // provider alert leaves the tier's calls out (the maintainer, 2026-11-07).
   return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
     () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass(), ...(opts.probe ? { "ob1.probe": opts.probe } : {}) }));
 }

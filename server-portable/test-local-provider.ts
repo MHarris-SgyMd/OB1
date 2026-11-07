@@ -2438,8 +2438,8 @@ console.log("\n[13] Model calls measured: every call's own time at the seam and 
     assert(decide?.attributes["gen_ai.operation.name"] === "decide" && decide.attributes["ob1.call.class"] === "background" && decide.attributes["ob1.probe"] === undefined && decidePoint !== undefined
         && probeSpan?.attributes["ob1.probe"] === "preflight",
       `the decide tier's call runs under a client span of its own, a probe's marked as one, and its time is a point at the seam (${JSON.stringify(decide?.attributes)})`);
-    // A call that throws: its point names how it failed, and it is counted.
-    const failedBefore = tally()!.calls.background;
+    // A call that throws: its point names how it failed, and it is counted, as a failure too.
+    const callsBefore = tally()!.calls.background;
     const failuresBefore = tally()!.failed;
     await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw new TypeError("measured to fail"); })).catch(() => undefined);
     const failed = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1);
@@ -2461,8 +2461,8 @@ console.log("\n[13] Model calls measured: every call's own time at the seam and 
       // Another throw's `kind` is no label: its name is (review pass 2).
       await failWith(Object.assign(new RangeError("a kind of its own"), { kind: "some_arbitrary_kind" })),
     ];
-    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === failedBefore + 9 && tally()!.failed === failuresBefore + 9 && kinds.join() === "503,timeout,invalid_body,http,egress,429,ECONNREFUSED,RangeError",
-      `a call that throws is a point naming how it failed — a status, a timeout, a body, the runtime's code, else the throw's kind — and counted (${JSON.stringify(kinds)})`);
+    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === callsBefore + 9 && tally()!.failed === failuresBefore + 9 && kinds.join() === "503,timeout,invalid_body,http,egress,429,ECONNREFUSED,RangeError",
+      `a call that throws is a point naming how it failed — a status, a timeout, a body, the runtime's code, else the throw's name — and counted a failure (${JSON.stringify(kinds)})`);
     // Waits for a slot, by how each ended: held — the second of two under chat=1 waiting for the first — then stopped,
     // then run without one where the semaphore's database does not answer.
     const held = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });

@@ -126,10 +126,10 @@ export function withCallWaits<T>(waits: CallWaits, fn: () => T): T {
 
 /**
  * A model call's own time, in seconds, from when its exchange starts — a wait for a slot is not in it — for every
- * call through the seam, labelled with its purpose (and its pass, a worker's), where telemetry runs: the servers, beside the provider's
- * `gen_ai.client.operation.duration` point. Extraction's, the judge's and the writer's calls, which record no such point,
- * run in the workers, which export nothing: theirs are the stamp's tallies (SMD-3379 PR 2b-2a, its review pass 1).
- * The GenAI conventions' bounds, as spans.ts's.
+ * call through the seam, labelled with its purpose (and its pass, a worker's), where telemetry runs: the servers,
+ * beside the provider's `gen_ai.client.operation.duration` point. Extraction's, the judge's and the writer's calls,
+ * which record no such point, run in the workers, which export nothing: theirs are the stamp's tallies (SMD-3379
+ * PR 2b-2a, its review pass 1). The GenAI conventions' bounds, as spans.ts's.
  */
 export const CALL_DURATION: HistogramSpec = {
   unit: "s",
@@ -137,10 +137,10 @@ export const CALL_DURATION: HistogramSpec = {
   bounds: [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92, 163.84, 327.68],
 };
 
-/** A background call's wait for a slot of its share on the hook, in seconds, however it ended (SMD-3379 PR 2b-2a). */
+/** A background call's ask for a slot of its share on the hook, in seconds, however it ended, a slot taken at once included (SMD-3379 PR 2b-2a). */
 export const SLOT_WAIT: HistogramSpec = {
   unit: "s",
-  description: "How long a background model call waited for a slot of its share (SMD-3379)",
+  description: "How long a background model call's ask for a slot of its share took, waiting or not (SMD-3379)",
   bounds: [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
 };
 
@@ -227,18 +227,18 @@ function errorTypeOf(e: unknown): string {
 function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise<T> {
   return async () => {
     const started = performance.now();
-    let failed: unknown;
+    let thrown: unknown;
     let threw = false;
     try {
       return await run();
     } catch (e) {
       threw = true;
-      failed = e;
+      thrown = e;
       throw e;
     } finally {
       const ms = performance.now() - started;
       recordPoint("ob1.model.call.duration", CALL_DURATION, ms / 1000, () => ({
-        ...labelsOf(call), "ob1.call.class": call.cls, "ob1.call.purpose": call.purpose, ...(threw ? { "error.type": errorTypeOf(failed) } : {}),
+        ...labelsOf(call), "ob1.call.class": call.cls, "ob1.call.purpose": call.purpose, ...(threw ? { "error.type": errorTypeOf(thrown) } : {}),
       }));
       const t = tallyOf(call.pass);
       t.calls[call.cls] += 1;
