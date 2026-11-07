@@ -118,7 +118,7 @@ So each session's limits come in layers, set so that a layer that fails is caugh
 
 Each tick, after reconciling the runner's own runs (step 0, below), the runner takes the first ticket that passes every check, in order of priority and then age:
 
-* team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, in the state named Backlog, assigned to no one and delegated to no agent, with no character in its title that doesn't show;
+* team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, in the state named Backlog, of the backlog type, assigned to no one and delegated to no agent, with no character in its title that doesn't show;
 * carries SMD-4086's label and not the label that hands a ticket to a person. Linear's history, read whole, shows that every add of the label at or after its last add is the maintainer's own, made directly: the maintainer as the user, and no bot. Any change to the description or the title at or after that add, the maintainer's own included, voids the label until the maintainer adds it again on its own. Other changes, such as the priority or a relation, leave it standing: the label vouches for the text;
 * **unblocked:** every Linear blocker is Done, Canceled or a Duplicate, with the ticket's relations read whole. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL, and no REST operation carries it until SMD-3669's agenda read lands.
 * **nobody's work** (CLAUDE.md step 1, from the branches on GitHub and in the main checkout):

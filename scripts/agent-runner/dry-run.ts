@@ -32,6 +32,7 @@ import {
   INITIATIVE_QUERY,
   LABELS_QUERY,
   SAFE_REQUEST,
+  TIME_LIMITS,
   gitEnv,
   parseLocalBranches,
   parseLsRemote,
@@ -452,7 +453,7 @@ export async function main(io: Io): Promise<number> {
       if (hasAclEntry(ls.stdout)) return refuse("an access control list is on the runner's directory, config or a key, and one can grant what the mode doesn't: remove it (chmod -N)");
     }
     const safeFetch = noRedirect(io.fetch);
-    const result = await dryRun(cfg, { gql: linearClient(keys.linear, safeFetch, { timeoutMs: 30_000 }), run, fetch: safeFetch, keys: { brain: keys.brain, github: keys.github } });
+    const result = await dryRun(cfg, { gql: linearClient(keys.linear, safeFetch, { timeoutMs: TIME_LIMITS.linear }), run, fetch: safeFetch, keys: { brain: keys.brain, github: keys.github } });
     const masked = JSON.parse(mask(JSON.stringify(result))) as DryRun;
     io.out(opts["--json"] ? safeJson(masked) : render(masked, cfg));
     return 0;
@@ -830,8 +831,8 @@ async function selfCheck(): Promise<number> {
     await ok(async () => "unreadable" in (await readClaims(answering(json({ tier: "canary" })), cfg, "k", ["SMD-1"])) && "unreadable" in (await readClaims(answering(json({ tier: null })), cfg, "k", ["SMD-1"])) && "unreadable" in (await readClaims(answering(json({})), cfg, "k", ["SMD-1"])), "a brain whose tier is another, unset or missing is refused");
     await ok(async () => {
       const reflected = await readClaims(answering(new Response("k-reflected not json", { status: 200 })), cfg, "k", ["SMD-1"]);
-      return "unreadable" in reflected && !reflected.unreadable.includes("k-reflected");
-    }, "a brain answer that isn't JSON is a reason that doesn't quote it");
+      return "unreadable" in reflected && reflected.unreadable.includes("isn't JSON") && !reflected.unreadable.includes("k-reflected");
+    }, "a brain answer that isn't JSON is a reason that says so and doesn't quote it");
     const stable = (claims: Response): Fetch => async (u) => {
       asked.push(u);
       return u === "http://127.0.0.1:8010/api/v1/brain" ? json({ tier: "stable" }) : claims;
@@ -849,8 +850,9 @@ async function selfCheck(): Promise<number> {
     }, "a failed list is a reason for that ticket, not an empty list");
     await ok(async () => {
       const shapes = await Promise.all([json({ rows: [] }), json({ claims: [] }), new Response("not json", { status: 200 })].map((r) => readClaims(stable(r), cfg, "k", ["SMD-1"])));
-      return shapes.every((s) => !("unreadable" in s) && "unreadable" in (s.get("SMD-1") as ClaimsRead));
-    }, "an answer in an unknown shape, without its truncated flag, or no JSON at all, is a reason, not claims");
+      const why = shapes.map((s) => ("unreadable" in s ? "" : ((s.get("SMD-1") as { unreadable?: string }).unreadable ?? "")));
+      return why[0].includes("shape") && why[1].includes("shape") && why[2].includes("isn't JSON");
+    }, "an answer in an unknown shape, without its truncated flag, or no JSON at all, is a reason, not claims, saying which");
     const redirecting: Fetch = async (u, init) => (init?.redirect === "manual" ? new Response("", { status: 307, headers: { Location: "http://elsewhere/" } }) : json(u.endsWith("/v1/brain") ? { tier: "stable" } : { claims: [], truncated: false }));
     const redirectingClaims: Fetch = async (u, init) => (u.endsWith("/v1/brain") ? json({ tier: "stable" }) : init?.redirect === "manual" ? new Response("", { status: 307, headers: { Location: "http://elsewhere/" } }) : json({ claims: [], truncated: false }));
     await ok(async () => {
@@ -864,8 +866,8 @@ async function selfCheck(): Promise<number> {
     };
     const into = (state: string, merged_at: string | null, sha: string, baseRef = "main") => ({ state, merged_at, head: { sha }, base: { ref: baseRef } });
     await ok(async () => (await readBranchPrs(prAnswer([]), cfg, null, "b")) === null && JSON.stringify(await readBranchPrs(prAnswer([into("closed", "x", "h1"), into("open", null, "h2"), into("closed", null, "h3")]), cfg, null, "b")) === JSON.stringify({ open: true, merged: true, closedHeads: ["h1", "h3"] }), "a branch's PRs: none, or whether any is open or merged, with the merged and closed ones' heads");
-    await ok(async () => JSON.stringify(await readBranchPrs(prAnswer([into("closed", "x", "h1", "smd-1-base"), into("closed", null, "h2", "smd-1-base")]), cfg, null, "b")) === JSON.stringify({ open: false, merged: false, closedHeads: [] }), "a PR merged or closed into another branch, a stacked one, frees nothing");
-    await ok(() => prUrls.length === 3 && prUrls.every((u) => u === `https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=all&per_page=100&head=${encodeURIComponent("MHarris-SgyMd:b")}&page=1`), "a branch's PRs are looked up in this repo, state=all, 100 a page, with the owner in the head filter");
+    await ok(async () => JSON.stringify(await readBranchPrs(prAnswer([into("closed", "x", "h1", "smd-1-base"), into("closed", null, "h2", "smd-1-base")]), cfg, null, "b")) === JSON.stringify({ open: false, merged: false, closedHeads: [] }) && JSON.stringify(await readBranchPrs(prAnswer([into("open", null, "h9", "smd-1-base"), into("closed", "x", "h1")]), cfg, null, "b")) === JSON.stringify({ open: true, merged: true, closedHeads: ["h1"] }), "a PR merged or closed into another branch, a stacked one, frees nothing, and an open one into it still holds");
+    await ok(() => prUrls.length === 4 && prUrls.every((u) => u === `https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=all&per_page=100&head=${encodeURIComponent("MHarris-SgyMd:b")}&page=1`), "a branch's PRs are looked up in this repo, state=all, 100 a page, with the owner in the head filter");
     const pagesAsked: string[] = [];
     const fullPage100 = () => Array.from({ length: 100 }, (_, i) => into("closed", null, `s${i}`));
     await ok(async () => {
@@ -875,7 +877,27 @@ async function selfCheck(): Promise<number> {
       }, cfg, null, "b");
       return paged?.open === true && paged.closedHeads.length === 100 && pagesAsked.map((u) => /&page=(\d+)$/.exec(u)?.[1]).join() === "1,2";
     }, "a branch's PRs are read page by page: an open one on the second page still counts");
-    await ok(() => throws(() => readBranchPrs(async () => json(fullPage100()), cfg, null, "b"), "more than 1,000"), "more PRs from one branch than the dry run reads is an error, not a branch freed");
+    await ok(async () => {
+      const firstAsked: string[] = [];
+      const firstOpen = await readBranchPrs(async (u) => {
+        firstAsked.push(u);
+        return json(u.endsWith("&page=1") ? [into("open", null, "o1"), ...fullPage100().slice(1)] : [into("closed", "x", "h-last")]);
+      }, cfg, null, "b");
+      const exactAsked: string[] = [];
+      const hundred = await readBranchPrs(async (u) => {
+        exactAsked.push(u);
+        return json(u.endsWith("&page=1") ? fullPage100() : []);
+      }, cfg, null, "b");
+      return firstOpen?.open === true && firstAsked.length === 2 && hundred !== null && hundred.closedHeads.length === 100 && exactAsked.length === 2;
+    }, "an open PR on the first page still counts once a second is read, and exactly 100 PRs take two requests and read whole");
+    await ok(async () => {
+      const capped: string[] = [];
+      const threw = await throws(() => readBranchPrs(async (u) => {
+        capped.push(u);
+        return json(fullPage100());
+      }, cfg, null, "b"), "1,000 or more");
+      return threw && capped.map((u) => /&page=(\d+)$/.exec(u)?.[1]).join() === "1,2,3,4,5,6,7,8,9,10";
+    }, "1,000 or more PRs from one branch is an error after ten pages, not a branch freed");
     await ok(async () => (await throws(() => readBranchPrs(prAnswer({}, 403, { "x-ratelimit-remaining": "0" }), cfg, null, "b"), "rate limit is spent")) && (await throws(() => readBranchPrs(prAnswer({}, 429, { "x-ratelimit-remaining": "0" }), cfg, null, "b"), "rate limit is spent")) && (await throws(() => readBranchPrs(prAnswer({}, 403), cfg, null, "b"), "answered 403")), "a spent rate limit is named as such, and another refusal by its status");
     await ok(() => throws(() => readBranchPrs(answering(new Response("reflected-secret <html>", { status: 200 })), cfg, null, "b"), "isn't JSON", "reflected-secret"), "a GitHub body that isn't JSON is an error that doesn't quote it");
     await ok(async () => (await throws(() => readBranchPrs(answering(json(null)), cfg, null, "b"), "isn't a list")) && (await throws(() => readOpenPrs(answering(json({ message: "x" })), cfg, null), "isn't a list")), "GitHub JSON that isn't a list, null among it, is an error that says so");
@@ -885,6 +907,17 @@ async function selfCheck(): Promise<number> {
       return "unreadable" in brainNull && brainNull.unreadable.includes("isn't an object") && !("unreadable" in claimsNull) && (claimsNull.get("SMD-1") as { unreadable: string }).unreadable.includes("shape");
     }, "JSON null from the brain, as its tier or a claim list, is a reason that names its shape, not a body that isn't JSON");
     await ok(() => throws(() => readOpenPrs(prAnswer({}, 500), cfg, null), "answered 500"), "a failed open-PR list is an error, not an empty list");
+    await ok(async () => {
+      const saved = TIME_LIMITS.request;
+      TIME_LIMITS.request = 20;
+      try {
+        const stall: Fetch = (_u, init) => new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("stopped"))));
+        const ended = (read: Promise<unknown>) => Promise.race([read.then(() => "answered", () => "ended"), Bun.sleep(2_000).then(() => "hung")]);
+        return (await ended(readOpenPrs(stall, cfg, null))) === "ended" && (await ended(readBranchPrs(stall, cfg, null, "b"))) === "ended" && (await ended(readClaims(stall, cfg, "k", ["SMD-1"]))) === "ended";
+      } finally {
+        TIME_LIMITS.request = saved;
+      }
+    }, "a GitHub or brain request that stalls ends at its time limit");
     const openUrls: string[] = [];
     const openHeaders: unknown[] = [];
     const openRows = [{ number: 5, title: "T", body: null, head: { ref: "h-5" }, user: { login: "L" } }, { number: 6, title: "U", body: "B", head: { ref: "h-6" }, user: null }];
@@ -976,7 +1009,7 @@ async function selfCheck(): Promise<number> {
     await ok(() => verdict("SMD-15").reasons.join() === "assigned to someone" && !sent.some((s) => s.url.includes("smd-15") || s.url.includes("SMD-15")), "a ticket failing the board checks gets no claim or PR lookup");
     await ok(() => verdict("SMD-16").reasons.join() === "open PR 999 by MHarris-SgyMd" && verdict("SMD-17").reasons.join() === "open PR 1001 by bot-user" && verdict("SMD-10").reasons.length === 0, "a PR body of the maintainer's or the bot's holds its ticket, and other people's bodies hold none");
     await ok(() => sent.length > 0 && sent.every((s) => (s.init?.method ?? "GET") === "GET" && s.init?.redirect === "manual" && (s.init as { verbose?: boolean }).verbose === false && (s.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true) && queries.every((q) => !/^\s*mutation\b/.test(q)), "every request is a GET or a GraphQL query, follows no redirect, logs nothing and checks TLS: it writes nothing");
-    await ok(() => sent.length > 0 && sent.every((s) => s.init?.signal instanceof AbortSignal), "every request carries a time limit");
+    await ok(() => sent.length > 0 && sent.every((s) => s.init?.signal instanceof AbortSignal), "every request carries an abort signal");
     const claimUrls = sent.filter((s) => s.url.includes("/v1/claims"));
     await ok(() => claimUrls.length === 7 && claimUrls.every((s) => /^http:\/\/127\.0\.0\.1:8010\/api\/v1\/claims[?]ticket=SMD-1[0-467]&include_ended=true&limit=1000$/.test(s.url) && hdr(s)["x-brain-key"] === SENTINEL) && sent.every((s) => !s.url.includes(SENTINEL)), "each candidate's claims are asked of the configured brain by ticket, with include_ended and limit 1000, the key in a header and in no URL");
     await ok(() => sent.filter((s) => s.url.startsWith("https://api.github.com/")).every((s) => hdr(s).Authorization === `Bearer ${GH_TOKEN}` && !JSON.stringify(hdr(s)).includes(SENTINEL)) && sent.filter((s) => !s.url.startsWith("https://api.github.com/")).every((s) => !JSON.stringify(hdr(s)).includes(GH_TOKEN)), "the GitHub token goes to GitHub alone, and the brain key to the brain alone");
@@ -1060,7 +1093,7 @@ async function selfCheck(): Promise<number> {
       await ok(() => JSON.stringify(spawned.find((c) => c[0] === "/bin/ls")) === JSON.stringify(["/bin/ls", "-lde", runnerDir, configPath, join(runnerDir, "linear.key"), join(runnerDir, "brain.key")]), "the access lists are read with ls -lde, of the directory, the config and each key there is");
       await ok(async () => (await main(io({ platform: "linux", spawnImpl: aclSpawn }))) === 0, "off macOS, no ls -lde is run");
       const linearCall = mainSent.find((s) => s.url === "https://api.linear.app/graphql");
-      await ok(() => linearCall?.init?.redirect === "manual" && (linearCall?.init as { verbose?: boolean }).verbose === false && (linearCall?.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true && JSON.stringify(linearCall?.init?.headers).includes(linearKey) && linearCall?.init?.signal instanceof AbortSignal, "main hands Linear's client the no-redirect fetch, with the runner's own key and a time limit");
+      await ok(() => linearCall?.init?.redirect === "manual" && (linearCall?.init as { verbose?: boolean }).verbose === false && (linearCall?.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true && JSON.stringify(linearCall?.init?.headers).includes(linearKey) && linearCall?.init?.signal instanceof AbortSignal, "main hands Linear's client the no-redirect fetch, with the runner's own key and an abort signal");
       await ok(() => readdirSync(tmpRoot).length === 0, "main removes the temporary home git ran with");
       title = `Fix ${chr(0x202e)}gnp.exe`;
       await ok(async () => (await main(io({ argv: ["--json"] }))) === 0 && JSON.parse(lines.at(-1) ?? "{}").verdicts?.[0]?.title === title && !(lines.at(-1) ?? "").includes(chr(0x202e)), "--json prints the verdicts as JSON, a bidi character escaped");
@@ -1079,6 +1112,16 @@ async function selfCheck(): Promise<number> {
       const failing: Fetch = async (u, init) => (u.includes("api.github.com") ? Promise.reject(new Error(`boom ${esc}[2J ${linearKey}`)) : mainFetch(u, init));
       await ok(async () => (await main(io({ fetch: failing }))) === 1 && errs.at(-1)?.includes("<U+001B>") === true && !errs.at(-1)?.includes(esc) && errs.at(-1)?.includes("<a key>") === true && !errs.at(-1)?.includes(linearKey), "a failed read exits 1, its message printable and any key in it masked");
       await ok(() => readdirSync(tmpRoot).length === 0, "the temporary home is removed after a failed read too");
+      await ok(async () => {
+        const saved = TIME_LIMITS.linear;
+        TIME_LIMITS.linear = 20;
+        try {
+          const stallLinear: Fetch = (u, init) => (u === "https://api.linear.app/graphql" ? new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("stopped")))) : mainFetch(u, init));
+          return (await Promise.race([main(io({ fetch: stallLinear })), Bun.sleep(2_000).then(() => "hung")])) === 1;
+        } finally {
+          TIME_LIMITS.linear = saved;
+        }
+      }, "a Linear read that stalls ends at its time limit, and the run exits 1");
       rmSync(join(runnerDir, "linear.key"));
       await ok(async () => (await main(io())) === 2 && errs.at(-1)?.includes("no Linear key") === true && readdirSync(tmpRoot).length === 0, "a missing Linear key is refused, before any temporary home is made");
     } finally {

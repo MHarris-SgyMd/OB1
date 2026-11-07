@@ -44,6 +44,12 @@ export const HISTORY_PAGE = 100;
 /** Relations read per issue; more than this is refused, since an open blocker could be among the rest. */
 export const RELATIONS_PAGE = 50;
 
+/**
+ * How long a request may take, in milliseconds: one to GitHub or the brain, and one to Linear. Each request's signal is
+ * AbortSignal.timeout of its limit; the self-check shortens a limit to watch a stalled read end, then restores it.
+ */
+export const TIME_LIMITS = { request: 20_000, linear: 30_000 };
+
 /** The request options every credentialed call carries: no redirect followed, no headers logged, TLS checked. Bun reads `verbose` and `tls`. */
 export const SAFE_REQUEST = { redirect: "manual", verbose: false, tls: { rejectUnauthorized: true } } as const;
 
@@ -234,7 +240,7 @@ export async function readBranches(run: Runner, cfg: Config): Promise<{ branches
 const githubInit = (token: string | null): RequestInit => ({
   ...SAFE_REQUEST,
   headers: { Accept: "application/vnd.github+json", "User-Agent": "agent-runner-dry-run", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-  signal: AbortSignal.timeout(20_000),
+  signal: AbortSignal.timeout(TIME_LIMITS.request),
 });
 
 /** What jsonOf answers for a body that isn't JSON, so a body that is the JSON `null` reads as itself. */
@@ -278,7 +284,7 @@ export async function readOpenPrs(fetchImpl: Fetch, cfg: Config, token: string |
     prs.push(...rows.map((r) => ({ number: r.number, title: r.title, body: r.body ?? "", head: r.head.ref, author: r.user?.login ?? "" })));
     if (rows.length < 100) return prs;
   }
-  throw new Error("more than 1,000 open pull requests: the dry run reads no further");
+  throw new Error("1,000 or more open pull requests: the dry run reads no further");
 }
 
 /** A pull request as a branch's lookup reads it. */
@@ -308,7 +314,7 @@ export async function readBranchPrs(fetchImpl: Fetch, cfg: Config, token: string
       };
     }
   }
-  throw new Error(`more than 1,000 pull requests from ${branch}: the dry run reads no further`);
+  throw new Error(`1,000 or more pull requests from ${branch}: the dry run reads no further`);
 }
 
 /**
@@ -320,7 +326,7 @@ export async function readClaims(fetchImpl: Fetch, cfg: Config, key: string | nu
   if (!cfg.restUrl) return { unreadable: "the config names no REST URL for the stable brain" };
   if (!key) return { unreadable: "there is no brain key in the runner's directory (SMD-4089)" };
   const base = cfg.restUrl.replace(/\/+$/, "");
-  const init = (): RequestInit => ({ ...SAFE_REQUEST, headers: { "x-brain-key": key, Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  const init = (): RequestInit => ({ ...SAFE_REQUEST, headers: { "x-brain-key": key, Accept: "application/json" }, signal: AbortSignal.timeout(TIME_LIMITS.request) });
   const brain = await fetchImpl(`${base}/v1/brain`, init());
   if (!brain.ok) return { unreadable: `${base}/v1/brain answered ${brain.status}` };
   const brainBody = await jsonOf(brain);
@@ -337,7 +343,7 @@ export async function readClaims(fetchImpl: Fetch, cfg: Config, key: string | nu
       continue;
     }
     const body = await jsonOf(res);
-    const read = body !== NOT_JSON && body !== null && typeof body === "object" ? (body as { claims?: Claim[]; truncated?: boolean }) : null;
+    const read = typeof body === "object" ? (body as { claims?: Claim[]; truncated?: boolean } | null) : null;
     out.set(ticket, read && Array.isArray(read.claims) && typeof read.truncated === "boolean" ? { claims: read.claims, truncated: read.truncated } : { unreadable: body === NOT_JSON ? "list_claims answered a body that isn't JSON" : "list_claims answered in a shape the dry run doesn't know" });
   }
   return out;

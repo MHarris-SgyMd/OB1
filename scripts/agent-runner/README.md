@@ -27,7 +27,7 @@ It lists each open ticket labelled `agent-ready` in the initiative's projects, i
 
 A ticket that fails the label or board checks is skipped for those reasons alone: its claims and PRs aren't read. Of the tickets that pass every check, a run takes the first by priority (urgent first, none last), then by age. Each later ticket that passes is skipped, with the one taken as its reason.
 
-Any text that came from Linear, the brain or GitHub is printed on one line, with each character that doesn't show written as `<U+XXXX>`. Those are controls, bidirectional marks, zero-width and other invisible characters, fillers, private-use and unassigned code points, and the braille blank. So none of it can rewrite the terminal or pass for a line of its own. The JSON escapes the same characters. If a key's value ever comes back in an answer, the dry run prints `<a key>` in its place. An answer that isn't JSON is reported as such, never quoted.
+Any text that came from Linear, the brain or GitHub is printed on one line, with each character that doesn't show written as `<U+XXXX>`. Those are controls, bidirectional marks, zero-width and other invisible characters, fillers, private-use and unassigned code points, and the braille blank. So none of it can rewrite the terminal or pass for a line of its own. The JSON escapes the same characters. If a key's value ever comes back in an answer, the dry run prints `<a key>` in its place. A GitHub or brain answer that isn't JSON is reported as such, never quoted. Linear's client, `db/linear-api.ts`, which other tools share, can quote part of an error's body; the dry run masks any key in it and makes the text printable all the same.
 
 It reads:
 
@@ -48,7 +48,7 @@ It reads:
 
   Until stable runs v2.0.0 with its proxy's `/api` route, every ticket's claims can't be read, and the dry run takes nothing. The route comes from `compose.api-public.yaml` (deploy/README.md, "The REST core and its opt-in `/api`"); stable's server must also set `OB1_TIER=stable`.
 
-No request it makes follows a redirect, logs its headers or relaxes TLS. A redirect would carry the key to wherever it points. It exits 0 once it has printed, 1 when a read fails, and 2 for a refused option, start, environment, runner directory, config, key or access list.
+No request it makes follows a redirect, logs its headers or relaxes TLS. A redirect would carry the key to wherever it points. Each request has a time limit: 20 seconds for GitHub and the brain, 30 for Linear. It exits 0 once it has printed, 1 when a read fails, and 2 for a refused option, start, environment, runner directory, config, key or access list.
 
 ## The runner's files
 
@@ -98,7 +98,7 @@ A ticket the runner takes meets every criterion below. The runner checks the fir
 
 **Checked by rule:**
 
-* team SMD, in a project of the configured initiative, in the state named Backlog;
+* team SMD, in a project of the configured initiative, in the state named Backlog, of Linear's backlog type;
 * assigned to no one and delegated to no agent;
 * its title holds no character that doesn't show, since the maintainer couldn't see all it says;
 * **the label:**
