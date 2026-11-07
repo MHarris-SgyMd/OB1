@@ -160,9 +160,13 @@ async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/in
   }
   const capped = text.slice(0, 500);
   // A redirect is not followed (it could point off the box); its Location is the useful part.
-  // Printed as refuseRedirect prints one: userinfo and query masked, capped (SMD-2908).
-  const location = isRedirect(r.status) ? r.headers.get("location") : null;
-  if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${shownLocation(location, `${at}${path}`)}` : ""} ${capped}`.trimEnd(), "http", r.status, capped);
+  // Printed as refuseRedirect prints one: userinfo and query masked, capped (SMD-2908); and its body left out, which
+  // commonly repeats the target whole, query and all ("Found. Redirecting to …", review pass 3).
+  if (isRedirect(r.status)) {
+    const location = r.headers.get("location");
+    throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${shownLocation(location, `${at}${path}`)}` : ""}`, "http", r.status);
+  }
+  if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status} ${capped}`.trimEnd(), "http", r.status, capped);
   try {
     return JSON.parse(text) as T;
   } catch {

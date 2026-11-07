@@ -1815,7 +1815,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   };
   if (!probeGate.allowed) {
-    out(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404) halts the run, anything else is the row's`);
+    out(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404, a redirect) halts the run, anything else is the row's`);
   } else {
     try {
       await embedder.getEmbedding("reembed.ts provider probe", probeSubject);

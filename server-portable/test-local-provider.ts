@@ -2403,7 +2403,14 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
   let status = 307;
   /** Set, a relative Location the stand-in answers instead (review pass 2: it must resolve against the URL that answered). */
   let relative = "";
-  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response("moved", { status, headers: { location: relative || `http://127.0.0.1:${far.port}${new URL(req.url).pathname}` } }) });
+  /** Set, the stand-in answers its 3xx with no Location at all. */
+  let noLocation = false;
+  // Its body repeats the target whole, as Express's default does ("Found. Redirecting to …"): a message that prints the
+  // body undoes the target's masking (review pass 3).
+  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => {
+    const location = relative || `http://127.0.0.1:${far.port}${new URL(req.url).pathname}`;
+    return new Response(`Found. Redirecting to ${location}`, { status, headers: noLocation ? {} : { location } });
+  } });
   const NEAR = `http://127.0.0.1:${near.port}/v1`;
   const FAR = `127.0.0.1:${far.port}`;
   try {
@@ -2434,6 +2441,13 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     const tierInfo = await failure(jevInfo(jev));
     const tier = await probeTier(jev, "stub-decider", 5000);
     assert((tierInfo as { status?: number }).status === 307 && tier.state === "refused", `the decide tier's client fails on a redirect and its probe reads it as refused (${String(tierInfo)}; ${JSON.stringify(tier)})`);
+    // Its message masks the target's query, and leaves out the body that repeats it (review pass 3).
+    relative = "http://evil.example/x?key=private-query-key";
+    const tierHostile = await failure(jevInfo(jev));
+    relative = "";
+    const tierMsg = tierHostile instanceof Error ? tierHostile.message : String(tierHostile);
+    assert(tierMsg.includes("redirecting to http://evil.example/x?…") && !tierMsg.includes("private-query-key") && (tierHostile as { body?: string }).body === "",
+      `the decide tier's message masks a target's query and prints no body that repeats it (${tierMsg})`);
     // The digest's Telegram post: refused, not retried, and the bot token in the redirect's target never printed.
     const token = "123456:private-bot-token";
     const tg = await failure(deliverTelegram(providerEndpoint(NEAR, undefined, true), token, "42", "the digest's private text"));
@@ -2454,6 +2468,13 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     const linMsg = lin instanceof Error ? lin.message : String(lin);
     assert((lin as { status?: number }).status === 307 && /never followed/.test(linMsg) && linMsg.includes(FAR) && !linMsg.includes("lin_api_private"),
       `the Linear client fails on a redirect, naming the target's host and not its key (${linMsg})`);
+    // A 3xx with no Location names no target, not Linear's own host (review pass 3).
+    noLocation = true;
+    const linBare = await failure(gql("query { viewer { id } }"));
+    noLocation = false;
+    const linBareMsg = linBare instanceof Error ? linBare.message : String(linBare);
+    assert((linBare as { status?: number }).status === 307 && !linBareMsg.includes("redirecting to") && /never followed/.test(linBareMsg),
+      `a Linear 3xx with no Location names no target (${linBareMsg})`);
     assert(farSeen.length === 0, `the far origin received nothing from any of them (${JSON.stringify(farSeen).slice(0, 300)})`);
     // How a target prints: a protocol-relative one's userinfo masked, a query's key not printed, a long one capped.
     const hostile = refuseRedirect("Embeddings", NEAR, new Response(null, { status: 302, headers: { location: `//user:pass@evil.example/v1/x?key=private-query-key&pad=${"a".repeat(5000)}` } }));
@@ -2487,10 +2508,17 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
   const files = [...[here, join(here, "core"), join(here, "rest"), join(here, "../db"), join(here, "../mcp-server")].flatMap((d) => tsIn(d, false)), ...tsIn(join(here, "../plugins"), true)];
   type Node = import("typescript").Node;
   type Expression = import("typescript").Expression;
-  /** fetch, fetchImpl, globalThis.fetch or Bun.fetch. */
+  /** The receivers whose `.fetch` is the runtime's own: read off one, uncalled, it is an alias. */
+  const GLOBAL_FETCH = new Set(["globalThis", "Bun", "self", "window"]);
+  /** fetch, fetchImpl, or any x.fetch / x["fetch"]: an injected `opts.fetch(...)` is checked as fetch is (review pass 3). */
   const isFetch = (e: Expression): boolean =>
     (ts.isIdentifier(e) && (e.text === "fetch" || e.text === "fetchImpl"))
-    || (ts.isPropertyAccessExpression(e) && e.name.text === "fetch" && ts.isIdentifier(e.expression) && (e.expression.text === "globalThis" || e.expression.text === "Bun"));
+    || (ts.isPropertyAccessExpression(e) && e.name.text === "fetch")
+    || (ts.isElementAccessExpression(e) && ts.isStringLiteral(e.argumentExpression) && e.argumentExpression.text === "fetch");
+  /** The runtime's fetch read off its global, as globalThis.fetch or Bun["fetch"]. */
+  const isGlobalFetch = (n: Node): boolean =>
+    (ts.isPropertyAccessExpression(n) && n.name.text === "fetch" && ts.isIdentifier(n.expression) && GLOBAL_FETCH.has(n.expression.text))
+    || (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression) && n.argumentExpression.text === "fetch" && ts.isIdentifier(n.expression) && GLOBAL_FETCH.has(n.expression.text));
   /** Whether a call's options say redirect "manual" or "error", with no spread after it that could say otherwise. */
   const refuses = (init: Expression | undefined): boolean => {
     if (!init || !ts.isObjectLiteralExpression(init)) return false;
@@ -2511,9 +2539,13 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
       if (ts.isCallExpression(n) && isFetch(n.expression)) {
         if (refuses(n.arguments[1])) out.guarded++;
         else out.unguarded.push(line(n));
+      } else if (isGlobalFetch(n) && !(ts.isCallExpression(n.parent) && n.parent.expression === n)) {
+        // globalThis.fetch read but not called: assigned, passed, a default (review pass 3).
+        out.aliases.push(line(n));
       } else if (ts.isIdentifier(n) && n.text === "fetch") {
         const p = n.parent;
-        // Not an alias: the callee itself, a property's name (x.fetch, { fetch }, a method), a type (typeof fetch), a declaration's own name.
+        // Not an alias: the callee itself, a member's name (x.fetch, read above when its receiver is the runtime's), a
+        // property's or method's name, a type (typeof fetch), a declaration's own name. Shorthand `{ fetch }` is one.
         const named = (ts.isCallExpression(p) && p.expression === n) || (ts.isPropertyAccessExpression(p) && p.name === n)
           || ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isMethodSignature(p) || ts.isPropertySignature(p)) && p.name === n)
           || ts.isTypeQueryNode(p) || ts.isQualifiedName(p) || ((ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p) || ts.isParameter(p)) && p.name === n);
@@ -2536,11 +2568,13 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     ["a spread after the option", 'await fetch(u, { redirect: "manual", ...opts });', { unguarded: 1 }],
     ["an alias", "const f = fetch; await f(u, {});", { unguarded: 0, aliases: 1 }],
     ["a guarded call, a comment's apostrophe inside, a spread before", 'await fetch(u, {\n  ...base,\n  // the caller\'s deadline\n  redirect: "manual",\n});', { unguarded: 0, aliases: 0 }],
+    ["globalThis.fetch aliased, Bun.fetch a default", "const f = globalThis.fetch; function g(h = Bun.fetch) { return h; }", { unguarded: 0, aliases: 2 }],
+    ["an injected opts.fetch called, and globalThis[\"fetch\"]", 'await opts.fetch(u, { method: "POST" }); await globalThis["fetch"](u, { method: "POST" });', { unguarded: 2, aliases: 0 }],
   ];
   const teeth = fixtures.map(([what, src, want]) => { const s = scan(src); return { what, got: { unguarded: s.unguarded.length, aliases: s.aliases.length }, want }; });
   assert(teeth.every((t) => t.got.unguarded === t.want.unguarded && (t.want.aliases === undefined || t.got.aliases === t.want.aliases)),
     `the guard's scanner counts each shape a cold read found passing as unguarded or an alias, and a guarded call as guarded (${JSON.stringify(teeth.filter((t) => t.got.unguarded !== t.want.unguarded || (t.want.aliases !== undefined && t.got.aliases !== t.want.aliases)))})`);
-  /** Calls and aliases that dial no brain text, by file and kind, with the count there and why. */
+  /** Calls and aliases that dial no brain text, by repository path and kind, with the count there and why. */
   const NOT_DIALLERS = new Map<string, { calls?: number; aliases?: number }>([
     ["db/bench-live.ts", { calls: 1 }], // the benchmark's calls to the brain's own /mcp
     ["server-portable/oauth-edge.ts", { calls: 1 }], // a pass-through: its caller passes redirect: "manual"
@@ -2548,12 +2582,18 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     ["db/linear-api.ts", { aliases: 1 }], // fetchImpl's default, whose every call is read above
     ["db/board-findings.ts", { aliases: 2 }], // handed to linearClient as its fetchImpl, whose calls are read above
     ["db/sync-linear.ts", { aliases: 4 }], // a local array named fetch (the identifiers to fetch), not the global
+    ["server-portable/api.ts", { calls: 1 }], // app.fetch: the REST core's own Hono app, in process
+    ["mcp-server/index.ts", { calls: 1 }], // app.fetch: the MCP server's own app, in process
+    ["mcp-server/stack.ts", { calls: 2 }], // restCore.fetch and app.fetch: the stack's servers, in process
+    ["server-portable/core/calls.ts", { calls: 1 }], // c.fetch: the core's fetch-a-thought operation, no HTTP
   ]);
+  const root = join(here, "..");
   const unread: string[] = [];
   const allowed = new Map<string, { calls: number; aliases: number }>();
   let guarded = 0;
   for (const f of files) {
-    const name = f.split("/").slice(-2).join("/");
+    // By its whole repository path: two plugins' files of one name are two entries (review pass 3).
+    const name = f.slice(root.length + 1);
     const found = scan(readFileSync(f, "utf8"));
     guarded += found.guarded;
     const known = NOT_DIALLERS.get(name);
