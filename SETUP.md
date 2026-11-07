@@ -182,10 +182,7 @@ the embeddings endpoint is on this machine or its private network, and
 `OB1_CHAT_LOCAL=1` says the same of a chat endpoint of its own (one at the same
 base is the same box: either knob declares it). A loopback URL, `host.containers.internal` and the
 stack's own `ollama` service are all remote to the gate until the flag says
-otherwise — which is why both blocks above carry the line. The gate judges the
-base you set, so no call follows a redirect: a 3xx would carry the text to
-wherever it points. It is refused, naming the address, and you set the base
-there (SMD-2908). A refused capture is
+otherwise — which is why both blocks above carry the line. A refused capture is
 not lost: it lands with its text and fingerprint and no vector, the reply says
 so and names the rule, the decision sits on the row's audit entry, and the
 servers' vector mender fills the vector in once the policy allows the call — a
@@ -201,6 +198,13 @@ the passes and the re-embed, not at a first capture), `marker` (a literal in the
 text) — and a term that does not parse fails preflight and closes the gate.
 Preflight prints the mode and, per endpoint, what leaves; `deploy/.env.example`
 has the block.
+
+The gate judges the base you set, so no call that sends a thought's text
+follows a redirect: a 3xx would carry the text to wherever it points. Unlike
+a refusal or an outage, a redirect fails the call, as a 4xx does, so a capture
+that meets one is not stored. The error names where the redirect pointed: set
+the base there, and the gate judges that address (SMD-2908). `preflight.ts
+--deep` shows one before it costs a capture.
 
 **With protected health information in the brain, keep every endpoint on the
 box** — Options A or B above, both declared local — and leave the policy at its

@@ -341,17 +341,38 @@ export function isRedirect(status: number): boolean {
  * pointed (userinfo masked), so the operator can set the base there, where the
  * gate judges it. providerDown reads it as no outage, and a worker's
  * classifyError as fatal: a base that redirects one call redirects them all.
- * The answer's body is let go unread. `shown` prints the target: a dialler
- * whose path carries a secret (the digest's Telegram token) masks it there,
- * since a redirect to the same path on another scheme echoes it.
+ * The answer's body is let go unread, and the target is shownLocation's.
+ * `mask` hides a secret its path carries (the digest's Telegram token: a
+ * redirect to the same path on another scheme echoes it), before the cap.
  */
-export function refuseRedirect(what: string, base: string, r: Response, shown: (url: string) => string = shownUrl): ProviderError | null {
+export function refuseRedirect(what: string, base: string, r: Response, mask: (shown: string) => string = (s) => s): ProviderError | null {
   if (!isRedirect(r.status)) return null;
   const to = r.headers.get("location");
   void r.body?.cancel().catch(() => {});
   return new ProviderError(
-    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shown(to)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
+    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, base, mask)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
     "http", r.status);
+}
+
+/** How long a redirect's target may print: a hostile endpoint's `Location` lands in every log line naming it. */
+export const LOCATION_CHARS = 200;
+
+/**
+ * A redirect's `Location` as a message prints it (SMD-2908): resolved against
+ * the URL it answered for, so a relative or protocol-relative one
+ * (`//user:pass@host/…`, which shownUrl's parse refuses) is read as fetch
+ * would; userinfo as `***@`; a query as `?…`, since a key may ride there; and
+ * capped at LOCATION_CHARS, after `mask`.
+ */
+export function shownLocation(to: string, from: string, mask: (shown: string) => string = (s) => s): string {
+  let u: URL;
+  try {
+    u = new URL(to, from);
+  } catch {
+    return "an address that does not parse";
+  }
+  const shown = mask(`${u.protocol}//${u.username || u.password ? "***@" : ""}${u.host}${u.pathname}${u.search ? "?…" : ""}`);
+  return shown.length > LOCATION_CHARS ? `${shown.slice(0, LOCATION_CHARS)}…` : shown;
 }
 
 /** The endpoint a path is served by: /embeddings by the embeddings one, /chat/completions by the chat one. */

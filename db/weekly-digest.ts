@@ -57,7 +57,7 @@
 
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
-import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, baseUrlOr, shownUrl, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
@@ -329,7 +329,7 @@ export async function deliverTelegram(at: ProviderEndpoint, token: string, chatI
         redirect: "manual",
       });
       // The target masked: a redirect to the same path elsewhere carries the token in it, as written or percent-encoded.
-      const redirected = refuseRedirect("Telegram sendMessage", at.base, r, (to) => shownUrl(maskToken(to, token)));
+      const redirected = refuseRedirect("Telegram sendMessage", at.base, r, (shown) => maskToken(shown, token));
       if (redirected) throw redirected;
       if (!r.ok) {
         const err = new Error(`Telegram sendMessage failed: ${r.status} ${await r.text()}`) as Error & { status?: number };

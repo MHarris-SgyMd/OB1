@@ -2389,7 +2389,8 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
 
 console.log("\n[13] A redirect is never followed: each call that sends brain text refuses a 3xx where it lands, each probe reads it as refused, and the origin it points at receives nothing (SMD-2908)");
 {
-  const { resolveEmbedConfig, createEmbedder, providerCall, providerEndpoint, ProviderError, providerDown } = await import("./embed.ts");
+  const { resolveEmbedConfig, createEmbedder, providerCall, providerEndpoint, ProviderError, providerDown, refuseRedirect } = await import("./embed.ts");
+  const { linearClient } = await import("../db/linear-api.ts");
   const { judgePair } = await import("./consolidate.ts");
   const { extractEntities } = await import("./entities.ts");
   const { resolveJevConfig, jevInfo } = await import("./jev.ts");
@@ -2439,33 +2440,55 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
       `the digest's Telegram post fails as a redirect, its token masked in the target named (${tgMsg})`);
     assert(maskToken(`https://x/bot${encodeURIComponent(token)}/sendMessage`, token) === "https://x/bot<token>/sendMessage" && maskToken(`https://x/bot${encodeURIComponent(token).toLowerCase()}/m`, token) === "https://x/bot<token>/m",
       "…and a token percent-encoded in the target, in either case, is masked too");
+    // The Linear client, which board-findings posts brain rows through under the gate: refused, its key sent nowhere else.
+    const gql = linearClient("lin_api_private", fetch, { url: `${NEAR}/graphql`, timeoutMs: 5000 });
+    const lin = await failure(gql("query { viewer { id } }"));
+    const linMsg = lin instanceof Error ? lin.message : String(lin);
+    assert((lin as { status?: number }).status === 307 && /never followed/.test(linMsg) && linMsg.includes(FAR) && !linMsg.includes("lin_api_private"),
+      `the Linear client fails on a redirect, naming the target's host and not its key (${linMsg})`);
     assert(farSeen.length === 0, `the far origin received nothing from any of them (${JSON.stringify(farSeen).slice(0, 300)})`);
+    // How a target prints: a protocol-relative one's userinfo masked, a query's key not printed, a long one capped.
+    const hostile = refuseRedirect("Embeddings", NEAR, new Response(null, { status: 302, headers: { location: `//user:pass@evil.example/v1/x?key=private-query-key&pad=${"a".repeat(5000)}` } }));
+    const hostileMsg = hostile?.message ?? "";
+    assert(hostile !== null && hostileMsg.includes("http://***@evil.example/v1/x?…") && !/user|pass|private-query-key/.test(hostileMsg) && hostileMsg.length < 600,
+      `a protocol-relative target's userinfo and a query's key are not printed, and the target is capped (${hostileMsg.length} chars: ${hostileMsg.slice(0, 200)})`);
+    const long = refuseRedirect("Embeddings", NEAR, new Response(null, { status: 307, headers: { location: `http://far.example/${"b".repeat(5000)}` } }));
+    assert(long !== null && long.message.length < 600 && long.message.includes("…"), `a 5,000-character target prints capped (${long?.message.length} chars)`);
   } finally {
     near.stop(true);
     far.stop(true);
   }
-  // A guard over the files, as [11]'s: every bare fetch in the servers', the REST core's and db/'s files passes a
-  // `redirect` option in its call, so a dialler added later cannot follow one by leaving it out — whatever its URL
-  // says, since the digest's builds its URL a line before (a guard keyed on a model path in the call missed it).
-  // Two are not diallers of brain text, each named with why.
-  const { readdirSync, readFileSync } = await import("node:fs");
+  // A guard over the files, as [11]'s: every bare fetch (or an injected fetchImpl) in the servers', the REST core's,
+  // db/'s, the MCP server's and the plugins' files passes redirect: "manual" or "error" in its call, so a dialler added
+  // later cannot follow one by leaving it out — whatever its URL says, since the digest's builds its URL a line before
+  // (a guard keyed on a model path in the call missed it). Two are not diallers of brain text, each named with why.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
   const here = dirname(fileURLToPath(import.meta.url));
-  const dirs = [here, join(here, "core"), join(here, "rest"), join(here, "../db")];
-  const files = dirs.flatMap((d) => readdirSync(d).map((f) => join(d, f))).filter((f) => f.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(f));
-  /** The call starting at `from` (its open paren), comments, quoted strings and template literals skipped. */
-  const callAt = (src: string, from: number): string => {
+  /** A directory's .ts files, its subdirectories' too when `deep`, node_modules and the test files left out. */
+  const tsIn = (d: string, deep: boolean): string[] => readdirSync(d).flatMap((f) => {
+    const p = join(d, f);
+    if (f === "node_modules") return [];
+    if (statSync(p).isDirectory()) return deep ? tsIn(p, true) : [];
+    return p.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(p) ? [p] : [];
+  });
+  const files = [...[here, join(here, "core"), join(here, "rest"), join(here, "../db"), join(here, "../mcp-server")].flatMap((d) => tsIn(d, false)), ...tsIn(join(here, "../plugins"), true)];
+  /** A call longer than this is one the scanner lost (a regex literal's paren, say), and counts as unguarded. */
+  const CALL_CHARS = 3000;
+  /** The call starting at `from` (its open paren), comments, quoted strings and template literals skipped; null when it does not close within CALL_CHARS. */
+  const callAt = (src: string, from: number): string | null => {
     let depth = 0;
-    for (let i = from; i < src.length; i++) {
+    const stop = Math.min(src.length, from + CALL_CHARS);
+    for (let i = from; i < stop; i++) {
       const c = src[i];
       // A comment's words ("the caller's deadline") are not code: an apostrophe there opens no string.
       if (c === "/" && src[i + 1] === "/") {
         i = src.indexOf("\n", i);
-        if (i < 0) break;
+        if (i < 0) return null;
         continue;
       }
       if (c === "/" && src[i + 1] === "*") {
         i = src.indexOf("*/", i + 2) + 1;
-        if (i <= 0) break;
+        if (i <= 0) return null;
         continue;
       }
       if (c === "'" || c === '"' || c === "`") {
@@ -2475,34 +2498,54 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
       if (c === "(") depth++;
       else if (c === ")" && --depth === 0) return src.slice(from, i + 1);
     }
-    return src.slice(from);
+    return null;
   };
+  const CALL = /(?<![.\w])(?:fetch|fetchImpl)\s*\(/g;
+  const REDIRECT_OPTION = /\bredirect\s*:\s*["'](?:manual|error)["']/;
+  /** A source's calls: the guarded count, and each unguarded one by its line. */
+  const scan = (src: string): { guarded: number; unguarded: number[] } => {
+    const out = { guarded: 0, unguarded: [] as number[] };
+    for (const m of src.matchAll(CALL)) {
+      // A fetch( in a comment, or inside a string still open on its line, is no call. The line's closed strings are
+      // taken out first, so a URL's // in one ("http://h") is not read as a comment (review pass 1).
+      const line = src.slice(src.lastIndexOf("\n", m.index) + 1, m.index).replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`/g, "");
+      if (/\/\/|^\s*\*|["'`]/.test(line)) continue;
+      const call = callAt(src, m.index + m[0].length - 1);
+      if (call !== null && REDIRECT_OPTION.test(call)) out.guarded++;
+      else out.unguarded.push(src.slice(0, m.index).split("\n").length);
+    }
+    return out;
+  };
+  // The scanner's own teeth, on the shapes a cold read found it passing (review pass 1).
+  const fixtures: [string, string, number][] = [
+    ["a redirect that follows", 'await fetch(u, { method: "POST", redirect: "follow" });', 1],
+    ["a regex literal's paren, a guarded call after it", 'await fetch(base.replace(/\\($/, "") + "/chat", { method: "POST" });\nawait fetch(x, { redirect: "manual" });', 1],
+    ["a URL's // in a string before the call", 'const u = "http://h"; await fetch(u, { method: "POST" });', 1],
+    ["an injected fetchImpl", 'const r = await fetchImpl(url, { method: "POST" });', 1],
+    ["a guarded call, a comment's apostrophe inside", 'await fetch(u, {\n  // the caller\'s deadline\n  redirect: "manual",\n});', 0],
+  ];
+  const teeth = fixtures.map(([what, src, want]) => ({ what, got: scan(src).unguarded.length, want }));
+  assert(teeth.every((t) => t.got === t.want), `the guard's scanner counts each shape it was found passing as unguarded, and a guarded call as guarded (${JSON.stringify(teeth)})`);
   /** Bare fetches that dial no provider, by file and the count of them there. */
   const NOT_DIALLERS = new Map([
     ["db/bench-live.ts", 1], // the benchmark's calls to the brain's own /mcp
     ["server-portable/oauth-edge.ts", 1], // a pass-through: its caller passes redirect: "manual"
   ]);
-  const BARE_FETCH = /(?<![.\w])fetch\s*\(/g;
   const unguarded: string[] = [];
   const allowed = new Map<string, number>();
   let guarded = 0;
   for (const f of files) {
-    const src = readFileSync(f, "utf8");
     const name = f.split("/").slice(-2).join("/");
-    for (const m of src.matchAll(BARE_FETCH)) {
-      // A fetch( in a comment or inside a string (an odd count of its quote before it on the line) is no call.
-      const line = src.slice(src.lastIndexOf("\n", m.index) + 1, m.index);
-      const open = (q: string) => (line.split(q).length - 1) % 2 === 1;
-      if (/\/\/|^\s*\*/.test(line) || open('"') || open("`")) continue;
-      const call = callAt(src, m.index + m[0].length - 1);
-      if (/\bredirect\s*:/.test(call)) guarded++;
-      else if (NOT_DIALLERS.has(name)) allowed.set(name, (allowed.get(name) ?? 0) + 1);
-      else unguarded.push(`${name}:${src.slice(0, m.index).split("\n").length}`);
+    const found = scan(readFileSync(f, "utf8"));
+    guarded += found.guarded;
+    for (const line of found.unguarded) {
+      if (NOT_DIALLERS.has(name)) allowed.set(name, (allowed.get(name) ?? 0) + 1);
+      else unguarded.push(`${name}:${line}`);
     }
   }
   const allowedRight = [...NOT_DIALLERS].every(([name, n]) => allowed.get(name) === n);
-  assert(unguarded.length === 0 && allowedRight && guarded >= 14,
-    `every bare fetch passes a redirect option, the two that dial no provider aside (${guarded} do; ${unguarded.join(", ") || "none without"}; allowed ${JSON.stringify([...allowed])})`);
+  assert(unguarded.length === 0 && allowedRight && guarded >= 15,
+    `every bare fetch and fetchImpl call passes redirect "manual" or "error", the two that dial no provider aside (${guarded} do; ${unguarded.join(", ") || "none without"}; allowed ${JSON.stringify([...allowed])})`);
 }
 
 server.stop();

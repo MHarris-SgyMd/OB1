@@ -380,7 +380,8 @@ export function missingModelIs(e: unknown, model: string): boolean {
  *   it, so a write that always fails is seen, not cycled through the pool
  *   (review pass 5). At a pool no thought is in hand: the caller reads it as
  *   a moment (a thought deleted under the pool's insert: 23503).
- * - `probe-decides`: any other 4xx, a body not of the shape, a width
+ * - `probe-decides`: any other 4xx, a redirect refused (SMD-2908: the probe
+ *   reads one as refused, so the pass stops), a body not of the shape, a width
  *   mismatch, an error the rules do not know — Bun's client-side refusals
  *   (a TypeError, a SyntaxError) among them.
  * Pure, the worker's state apart: a stop is the caller's. Each verdict here

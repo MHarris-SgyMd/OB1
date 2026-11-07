@@ -27,7 +27,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, maskUrl, missingDatabaseUrl, POSTGREST_RETIRED, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, shownUrl, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
@@ -930,7 +930,7 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     // too, each fails. A warning, not a failure: /models may redirect where the calls do not, which --deep tells.
     if (isRedirect(r.status)) {
       const to = r.headers.get("location");
-      add(row, "warn", `${shown} answers with a redirect — HTTP ${r.status} to GET /models${to ? `, to ${shownUrl(to)}` : ""}, in ${ms} ms; the brain's calls follow no redirect (SMD-2908), so if they are redirected too, each fails`,
+      add(row, "warn", `${shown} answers with a redirect — HTTP ${r.status} to GET /models${to ? `, to ${shownLocation(to, `${at.base}/models`)}` : ""}, in ${ms} ms; the brain's calls follow no redirect (SMD-2908), so if they are redirected too, each fails`,
           `Set ${knob} to where it points, or run --deep to see whether the calls are redirected.`);
       return;
     }
@@ -5528,7 +5528,7 @@ function redirectRow(r: Response, at: ProviderEndpoint, knob: string): { detail:
   const to = r.headers.get("location");
   void r.body?.cancel().catch(() => {});
   return {
-    detail: `${shownBase(at)} answered ${r.status}${to ? `, redirecting to ${shownUrl(to)}` : ""} — the brain's calls follow no redirect, which would carry the text past the egress gate (SMD-2908)`,
+    detail: `${shownBase(at)} answered ${r.status}${to ? `, redirecting to ${shownLocation(to, r.url || at.base)}` : ""} — the brain's calls follow no redirect, which would carry the text past the egress gate (SMD-2908)`,
     fix: `Set ${knob} to where it points; the egress gate then judges that base.`,
   };
 }
