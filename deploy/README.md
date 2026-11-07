@@ -1411,7 +1411,8 @@ for a call that failed, its `error.type`: the provider's status (`503`;
 `_OTHER` outside 300–599, so a provider cannot mint a series per status),
 `timeout`, `invalid_body` (a 2xx that is no JSON), or the runtime's code
 (`ECONNREFUSED`). A call the egress gate refuses is never made, and has none.
-The decide tier's calls are client spans the same way, `decide <model>` with
+The decide tier's calls are client spans the same way, `decide <model>` —
+`decide ?` unless `OB1_JEV_MODEL` names the model — with
 `gen_ai.operation.name` `decide` (SMD-3379 PR 2b-2a) — the REST core's, as
 the genre classifier asks the tier live on a capture where
 `OB1_JEV_BASE_URL` names one; the workers' export nothing, and preflight dials
@@ -1428,9 +1429,11 @@ model, the host and port, `ob1.call.class`, `ob1.call.purpose` (`capture`,
 where a pass made it, and how it failed, in the provider point's words (a
 status, `timeout`, `invalid_body`, the runtime's code) — but extraction's,
 the judge's and the writer's, which throw their own errors, read
-`TimeoutError` for their own deadline and `SyntaxError` for a body that is
-no JSON. In the servers it
-stands beside the provider's own point, adding the purpose and the pass; and it
+`TimeoutError` for their own deadline, and for a body that is no JSON
+`SyntaxError` (the judge's, the writer's) or `Error` (extraction's stream,
+read empty). In the servers it
+stands beside the provider's own point, adding the purpose (a pass is a
+worker's, and the servers run none); and it
 counts calls no `gen_ai` point counts, extraction's, the judge's and the
 writer's, in any process that runs telemetry — today none does, so theirs are
 on the pass stamps below.
@@ -1801,7 +1804,9 @@ folder, each evaluated every 30 s:
   failed provider calls of one operation and error type over 10 minutes, for 5
   minutes; `preflight.ts --deep`'s probes are not counted (it says how they
   went itself), nor the decide tier's calls, whose failure leaves a capture's
-  genre `other` (SMD-3379 PR 2b-2a).
+  genre `other` (SMD-3379 PR 2b-2a) — though a tier that hangs holds each
+  capture its 30 s timeout first, which no rule here alerts on; the
+  dashboard's Provider latency p50 and p99 shows it.
 - **The exporter does not reach Postgres**: the collector reads pg-exporter
   `up` 0, or pg-exporter reads Postgres `pg_up` 0, or either series is gone,
   for a minute (measured: pg-exporter stopped, pending in 26 s and firing in

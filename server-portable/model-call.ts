@@ -126,7 +126,7 @@ export function withCallWaits<T>(waits: CallWaits, fn: () => T): T {
 
 /**
  * A model call's own time, in seconds, from when its exchange starts — a wait for a slot is not in it — for every
- * call through the seam, labelled with its purpose and pass, where telemetry runs: the servers, beside the provider's
+ * call through the seam, labelled with its purpose (and its pass, a worker's), where telemetry runs: the servers, beside the provider's
  * `gen_ai.client.operation.duration` point. Extraction's, the judge's and the writer's calls, which record no such point,
  * run in the workers, which export nothing: theirs are the stamp's tallies (SMD-3379 PR 2b-2a, its review pass 1).
  * The GenAI conventions' bounds, as spans.ts's.
