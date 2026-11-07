@@ -625,10 +625,10 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
 
 /**
  * Probe on outageWait's schedule until a probe `settles` (SMD-2599), and
- * return that probe — null when `wake` aborted first. An outage settles on anything
- * but out or missing (`isOut`): up, or refused, which waitOutProvider's
- * follower stops on (SMD-2636 PR 2; the subject sweep's own wait leaves it to
- * the next real call). The start's wait settles on
+ * return that probe — null when `wake` aborted first. An outage settles on
+ * anything but out or missing (`isOut`): up, or refused, which
+ * waitOutProvider's follower stops on (SMD-2636 PR 2; the subject sweep's own
+ * wait leaves it to the next real call). The start's wait settles on
  * anything but out, so a model the provider turns out not to serve, once it
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
@@ -706,7 +706,7 @@ export class ProviderOutage {
   private reached = 0;
   private settledAtEnd = -1;
 
-  /** A probe answered — at step `reached` of its schedule, the caller's count of work that got past the provider at `settled` (resumeFrom's; waitOutProvider passes both). */
+  /** A probe answered — at step `reached` of its schedule, with the caller's count of work that got past the provider at `settled` (resumeFrom's; waitOutProvider passes both, the subject sweep neither). */
   end(reached = 0, settled = -1): void {
     this.reason = null;
     this.endedAt = this.now();
@@ -717,8 +717,9 @@ export class ProviderOutage {
   /**
    * The probe schedule's first step for an outage beginning now: where the
    * last one's ended, when it ended within `windowMs` and the count `settled`
-   * has not moved since — a limit the probe passes and no work gets past, whose waits then
-   * keep growing to the cap; else 0, the first wait (SMD-2679 PR 4a-2b).
+   * has not moved since — a limit the probe passes and no work gets past,
+   * whose waits then keep growing to the cap; else 0, the first wait
+   * (SMD-2679 PR 4a-2b).
    */
   resumeFrom(settled: number, windowMs: number): number {
     return this.settledAtEnd >= 0 && settled === this.settledAtEnd && this.now() - this.endedAt < windowMs ? this.reached : 0;
@@ -925,17 +926,17 @@ const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answe
 
 /**
  * A follower's wait for its provider after a pass a worker halted on the provider's outage (SMD-2599; one copy for
- * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, stamped through the
- * caller's stamper's providerWait while it lasts (SMD-2905), and probed on outageWait's schedule until a probe
- * settles — anything but out or missing.
+ * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, and stamped on the
+ * caller's row through `stamper.providerWait` while it lasts (SMD-2905), and probed on outageWait's schedule until a
+ * probe settles — anything but out or missing.
  * - **The schedule carries** (ProviderOutage.resumeFrom): a wait beginning within a minute and a poll of the last
  *   one's answer — and the pauses, for a follower that spends them before an outage begins (`pausesBefore`: extract's,
- *   consolidate's; TRANSIENT_PAUSES_MS read as it runs) — `settled()` unmoved since, nothing got past the provider,
+ *   consolidate's; TRANSIENT_PAUSES_MS read as it runs) — `settled()` unmoved since (nothing got past the provider),
  *   goes on from the last one's step, so a limit the probe passes and no work gets past waits longer each time, to the
  *   cap. The window runs from the last answer to this wait's start, after the pass: a call another worker had in
  *   flight, which the outage does not abort, or a wait at the admit gate can take it past, and such a call usually
- *   answers and moves `settled()` anyway; an outage that begins with a timeout comes the call's timeout and the
- *   probe's after the last answer at the least, past the window unless --timeout is short or the poll long.
+ *   answers and moves `settled()` anyway; an outage that begins with a timeout comes at least the call's timeout and
+ *   the probe's after the last answer, past the window unless --timeout is short or the poll long.
  * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
  *   again at once.
  * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404 (probeChat), the tier's any

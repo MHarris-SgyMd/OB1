@@ -115,13 +115,14 @@
  * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
  * back soon after the last one's answer, nothing got past the provider since,
  * carries the probe's schedule on; a probe the provider refuses ends the
- * follower, exit 2; an answer polls again at once. A thought that draws the error again right
- * after a probe answered is its own fault, and is recorded failed — unless
- * every error of its streak was the provider holding calls back (a 429, a 503,
- * the model not served), which makes no suspect (SMD-3311). Before it
- * writes anything, the worker key's registration included, a follower probes
- * once. A model the provider does not serve, a key it refuses or a wrong
- * base URL exits 2 there, and an unreachable provider is waited for.
+ * follower, exit 2; an answer polls again at once. A thought that draws the
+ * error again right after a probe answered is its own fault, and is recorded
+ * failed — unless every error of its streak was the provider holding calls
+ * back (a 429, a 503, the model not served), which makes no suspect
+ * (SMD-3311). Before it writes anything, the worker key's registration
+ * included, a follower probes once. A model the provider does not serve, a
+ * key it refuses or a wrong base URL exits 2 there, and an unreachable
+ * provider is waited for.
  * OB1_EXTRACT_ESCALATE_MODEL is checked by GET /models, which loads nothing:
  * refused where the list plainly leaves it out, waited for by name if the
  * start saw it and it goes missing, and a refusal at its first 404 if the
@@ -668,8 +669,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2): the outage's model by name, said on the row it
    * stamps — the sleep scheduler's, or this follower's own — so preflight names the provider (SMD-2905). The schedule
    * carries on from the last outage's when this one comes back within a minute, a poll and the pauses of its answer
-   * with nothing got past the provider since (a thought settled, or a window answered and kept); an answer polls again
-   * at once; a refusal ends the follower, exit 2.
+   * and nothing has got past the provider since (a thought settled, or a window answered and kept); an answer polls
+   * again at once; a refusal ends the follower, exit 2.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const back = await waitOutProvider({
@@ -1094,7 +1095,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
-  /** Windows of long thoughts answered and kept (a brain keeping them: migration 093 and its grant), run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2, review passes 1 and 2). */
+  /** Windows of long thoughts answered and kept (a brain keeping them: migration 093 and its grant), run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2). */
   let windowsAnswered = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;

@@ -4508,7 +4508,6 @@ if (want("9f")) {
     // exit until its own deadline (at this section's 2 s it ended inside the bar).
     const hungFollower = liveFollower({ env: { ...env, OB1_LLM_TIMEOUT: "20" } });
     await hungFollower.idle();
-    const hungProbesBefore = probeCalls;
     const hungBefore = embedProbesHung;
     let hungAtStop = 0;
     let hungThought = "";
@@ -5856,8 +5855,7 @@ if (want("10")) {
       await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${soon}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 30_000);
       doneAt = Date.now();
       // Once: the interval comes back after the poll at once — a thought seeded a second later, the at-once pass over,
-      // waits for the next pass, 8 s on
-      // (review pass 2, mutant: a reset dropped polled without end).
+      // waits for the next pass, 8 s on (review pass 2, mutant: a reset dropped polled without end).
       await Bun.sleep(1_000);
       later = await seed("Ulla checked the interval came back after the poll.");
       await Bun.sleep(4_000);
@@ -5871,7 +5869,7 @@ if (want("10")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus === "pending",
-           `a follower polls again at once after the provider answers a wait, not after its 8 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a follower polls again at once after the provider answers a wait, not after its 8 s interval, and once: a thought seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, extracted ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s after its seed; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of [soon, later]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
@@ -16771,7 +16769,7 @@ if (want("16")) {
       restorePauses();
     }
     assert(answeredAt > 0 && doneAt > 0 && doneAt - answeredAt < 3_000 && laterStatus !== "succeeded" && laterStatus !== "failed",
-           `a consolidate follower polls again at once after the judge answers a wait, not after its 8 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 5 s on; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `a consolidate follower polls again at once after the judge answers a wait, not after its 8 s interval, and once: a pair seeded after waits for the interval (SMD-2636 PR 2; answered ${answeredAt > 0}, judged ${doneAt > 0 ? `${doneAt - answeredAt} ms after` : "never"}, the later one ${laterStatus} 4 s after its seed; ${lines.filter((l) => /answer|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of soonSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 

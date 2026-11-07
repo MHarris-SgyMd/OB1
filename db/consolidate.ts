@@ -97,12 +97,12 @@
  * waitOutProvider, SMD-2636 PR 2): an outage back soon after the last one's
  * answer, nothing got past the provider since, carries the probe's schedule
  * on; a probe the provider refuses ends the follower, exit 2; an answer polls
- * again at once. A thought that fails the same way
- * right after a probe answered is recorded failed — unless every error of its
- * streak was the provider holding calls back (a 429, a 503, the model not
- * served), which makes no suspect (SMD-3311). A follower probes once
- * before it writes anything, and refuses an unserved model, a refused key or
- * a wrong base URL with exit 2.
+ * again at once. A thought that fails the same way right after a probe
+ * answered is recorded failed — unless every error of its streak was the
+ * provider holding calls back (a 429, a 503, the model not served), which
+ * makes no suspect (SMD-3311). A follower probes once before it writes
+ * anything, and refuses an unserved model, a refused key or a wrong base URL
+ * with exit 2.
  *
  * ── The key ─────────────────────────────────────────────────────────────────
  * `consolidate:<model>@p<prompt version>`. A different model or prompt is a
@@ -731,9 +731,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps: the sleep
    * scheduler's, which also sets extraction to the newer work while the judge waits (SMD-3008), or this follower's own
    * (SMD-2905). The schedule carries on waitOutProvider's rules, counting thoughts finished having asked the judge and
-   * thoughts recorded failed (a thought put back asks its pairs again; one with no candidate finishes without a call);
-   * an answer polls again at once; a refusal ends the
-   * follower, exit 2, its remedy naming the tier when the tier's probe was refused.
+   * thoughts recorded failed (`settled` below says why); an answer polls again at once; a refusal ends the follower,
+   * exit 2, its remedy naming the tier when the tier's probe was refused.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const back = await waitOutProvider({
@@ -1542,7 +1541,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let gate: AbortSignal = onStop.signal;
   let done = 0;
   let failed = 0;
-  /** Of `done`, the thoughts that asked the judge at least once: the outage wait's count, with `failed` (SMD-2636 PR 2, review passes 1 and 5). */
+  /** Of `done`, the thoughts that asked the judge at least once: the outage wait's count, with `failed` (SMD-2636 PR 2). */
   let doneAsked = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
@@ -2347,7 +2346,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             err(`  ${b.thought_id}: ${outcome.error}`);
           } else {
             done++;
-            if ("called" in outcome && outcome.called) doneAsked++;
+            if (outcome.called) doneAsked++;
           }
           outage.settled(b.thought_id);
           progress();
