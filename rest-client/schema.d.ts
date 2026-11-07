@@ -30,7 +30,7 @@ export interface paths {
         };
         /**
          * Fetch Daemonic Brain Thought
-         * @description Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs.
+         * @description Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs. A thought in a work thread — the thoughts holding one subject, such as a ticket, in the order they were captured — carries `threads`: per thread its `key`, the thought's `place` (1 the first) and the thread's `total`, and `continues` (the member captured just before it, not a judged evolution) and `continuedBy` (the one just after), each its id, title and `supersededBy` when a newer thought supersedes it; null at the thread's ends. A board ticket's own row (its head row) keeps its first place while its text and status change. `threads: null` says they could not be read; a thought in no thread carries no `threads`. The brain's `thread` tool reads a whole thread.
          */
         get: operations["fetch"];
         put?: never;
@@ -107,6 +107,26 @@ export interface paths {
          * @description Save a new thought to the brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client — notes, insights, decisions, or migrated content from other systems.
          */
         post: operations["capture_thought"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/thread": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a Work Thread
+         * @description Read a work thread: the thoughts holding one subject — a ticket (ticket:SMD-3306, or SMD-3306 alone), a pull request (pr:12), a version (version:v2.0.0) or a phrase (phrase:<lower-case words>) — in the order they were captured (created_at, ties by id, an undated thought last). Give exactly one of `key` or `id`. A key is read as the extractor writes it: `ticket:`, `pr:` and `version:` in any case, a ticket's id upper-cased, a pull request's or version's numbers without leading zeros. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8) is refused: a ticket filed under such a team is read with `ticket:` before it (ticket:ES-5), a pull request is pr:12, a word a phrase (phrase:utf-8). `key` reads that subject's thread from its start, `limit` thoughts a page; when more follow the thread carries a `cursor`, passed as `after` with the same `key` for the next page. `id` reads each thread that thought stands in, around it: up to half the page before it, then it and those after it, its `place` marked (1 is the first); its `cursor` continues the thread with its `key`. A thought stands in no thread until its subject is found (the extraction worker's rules, or its --subjects sweep). The reply is `{id, threads}`: `id` the thought an id read was about (null for a key's), `threads` one per thread — one for a key (with `total` 0 when no thought holds it), one per subject for an id (none when it stands in no thread). A thread is `{key, total, place, earlier, cursor, members, linked, linkedMore}`: `earlier` when members come before the page, `cursor` null at the thread's end. Each member carries its id, title, created_at and place; `supersededBy` when a newer thought supersedes it (the thread keeps its whole history); and the ticket's own row — the board's head row for it, which is rewritten in place and so keeps its first place — its `ticket`: the ticket and its status as that row records it. A ticket's thread names the threads its ticket's board links reach (`linked`): each ticket's key, how it stands to this one (parent, child, blocks, blocked_by, relates_to) and how many thoughts its thread holds; the first 50, `linkedMore` when more. No thread runs across a link. MCP's structured value leaves out each member's title and a ticket row's status, and gives a phrase key (the judge model's words) as null: the text carries them, the key whole as a JSON string — send it decoded, without its quotes or escapes. Refused: neither or both of key and id, a key that is no subject key, or `after` without `key` (REFUSED_THREAD_INPUT); a cursor that is not this tool's (REFUSED_CURSOR); an id no thought has (NOT_FOUND).
+         */
+        get: operations["thread"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -739,7 +759,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -844,7 +864,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -951,7 +971,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1071,7 +1091,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1205,11 +1225,11 @@ export interface operations {
                      */
                     prefer_current?: boolean;
                     /**
-                     * @description How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's score over the top one's, priority its effective priority (a stated level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is the highest of its own (a ticket's row reads as its ticket) and those of the tickets its metadata files it under; a ticket its text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.
+                     * @description How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's score over the top one's, priority its effective priority (a stated level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own stated level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less, counted only above medium, and nothing from a finished ticket; a ticket its text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.
                      * @default 0
                      */
                     priority_weight?: number;
-                    /** @description Keep only matches whose priority is known — a level stated on it, on a ticket it is filed under, or inherited from what it serves — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log. */
+                    /** @description Keep only matches whose priority is known — a level stated on it (on a ticket's row, on its ticket), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log. */
                     min_priority?: number;
                 };
             };
@@ -1224,7 +1244,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1360,7 +1380,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1474,7 +1494,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1601,7 +1621,115 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY, ITEM_NOT_YOURS, READ_ONLY_KEY, ITEM_UNOWNABLE, PROPOSAL_YOURS, CONFIRM_NOT_YOURS. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND, CLAIM_NOT_FOUND, ITEM_NOT_FOUND, ORIGIN_NOT_FOUND, EVIDENCE_NOT_FOUND, PROPOSAL_NOT_FOUND. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, REFUSED_SUPERSEDED_GONE. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED, CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone; their other causes wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    thread: {
+        parameters: {
+            query?: {
+                key?: string;
+                id?: string;
+                after?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The operation's value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1707,7 +1835,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1813,7 +1941,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1922,7 +2050,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2025,7 +2153,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2134,7 +2262,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2237,7 +2365,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2340,7 +2468,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2443,7 +2571,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2548,7 +2676,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2658,7 +2786,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2767,7 +2895,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2891,7 +3019,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3001,7 +3129,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3115,7 +3243,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3229,7 +3357,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3346,7 +3474,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3464,7 +3592,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3578,7 +3706,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3694,7 +3822,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3800,7 +3928,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3927,7 +4055,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4033,7 +4161,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4142,7 +4270,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4262,7 +4390,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4367,7 +4495,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4483,7 +4611,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4600,7 +4728,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4722,7 +4850,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4836,7 +4964,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;

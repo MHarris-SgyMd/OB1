@@ -20,6 +20,7 @@ import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust }
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
 import { parseSince } from "./since.ts";
+import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
@@ -270,14 +271,20 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
   });
 }
 
-export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown> } & ReturnType<typeof claimedResult>;
+/**
+ * fetch's thought: ChatGPT's compat shape, its claims where a ticket it names is claimed, and `threads` where it stands
+ * in a work thread (SMD-3306 PR 7a-2a) — the thought it continues and the one continuing it in each, null when they
+ * could not be read.
+ */
+export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult>;
 
 export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input<"fetch">): Promise<Outcome<FetchedThought>> {
-  const thought = await (await ctx.store()).getThought(id);
+  const store = await ctx.store();
+  const thought = await store.getThought(id);
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const [, claimed] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(await ctx.store(), principal, [thought])]);
+  const [, claimed, threads] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id)]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),
@@ -289,6 +296,8 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
       updated_at: thought.updated_at,
     },
     ...claimedResult(claimed, thought.id),
+    // Only where it stands in a thread, or the read failed: a thought in none adds nothing to ChatGPT's shape.
+    ...(threads === null || threads.length > 0 ? { threads } : {}),
   });
 }
 

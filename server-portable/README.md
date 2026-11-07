@@ -840,6 +840,47 @@ they read `/health`. It is a parallel route, deliberately kept out of the `/heal
 BrainInfo body: the queue read is SQL-only and stays off the health path's identity
 budget and its both-backend contract.
 
+## Work threads (SMD-3306)
+
+A work thread is the thoughts holding one subject (migration 111's `subject` facet): a ticket (`ticket:SMD-3306`), a
+pull request (`pr:12`), a version (`version:v2.0.0`) or a phrase (`phrase:<lower-case words>`). They are in the order
+they were captured: `created_at`, ties by id, an undated thought last. Migration 120 keeps an `evolves` edge between
+each two consecutive members. The reads below find a thread from its standing subjects instead, so a thread reads
+whole before `db/threads.ts` has linked it.
+
+- **`thread`** (read scope; REST `GET /v1/thread`) takes exactly one of `key` or `id`.
+  - `key` reads that subject's thread from its start, read as the extractor writes keys: `ticket:` and its id in any
+    case; a ticket alone (`smd-3306`) when its team is one a text means as a ticket (not `PR-12` or `UTF-8`; a ticket
+    filed under such a team is read with `ticket:` before it, `ticket:ES-5`); `pr:` and `version:` in any case, their
+    numbers without leading zeros.
+  - `id` reads each thread the thought stands in, around it: up to half the page before it, then it and those after,
+    its `place` marked.
+  - **Paging.** `limit` thoughts a page, 1–100, default 20. A thread with more carries a `cursor`, which is passed back
+    as `after` with the same key.
+  - **Each member** carries its id, title, time and place. A superseded member carries `supersededBy` and stays in its
+    thread, which keeps its history. A board ticket's own row — board-sync's (`metadata.source` `linear`, which no key
+    may write), and the ticket's head row (068's `ob1_ticket_head`; board-sync chains a ticket's older rows under it) —
+    carries `ticket`, its status as that row records it: the row is rewritten in place, so it keeps its first place.
+  - **Linked threads.** A ticket's thread names the threads its ticket's board links reach (`linked`): from 053's
+    `linear` links in either direction, `parent`, `child`, `blocks`, `blocked_by` or `relates_to`, each with how many
+    thoughts its thread holds. The first 50 are shown, and `linkedMore` says when there are more. No thread runs across
+    a link.
+  - **Refusals.** Neither or both of `key` and `id`, a key that is no subject key, or `after` with an id is
+    `REFUSED_THREAD_INPUT` (its `problem` says which). Another tool's cursor is `REFUSED_CURSOR`. An unknown id is
+    `NOT_FOUND`.
+  - **MCP's value** carries a ticket's, pull request's or version's key. A phrase key, the judge model's words, rides
+    the text alone.
+- **`fetch`** carries `threads` where the thought stands in a thread: each one's key, the thought's place and the
+  thread's size, and the member it continues (`continues`) and the one that continues it (`continuedBy`), each labelled
+  when superseded. It is `threads: null` when they couldn't be read, such as for a role without `thought_facets`, and
+  the log says why.
+
+The `thread` read reads `thought_facets` and 068's `ob1_ticket_head`, as `prefer_current` does: a role without SELECT on
+either faults it, the error naming the table.
+
+A thought stands in no thread until its subject is found. The extraction worker's rules find a ticket's subject, and its
+`--subjects` sweep asks the judge model for the rest.
+
 ## Worker-queue write actions
 
 Three **write-scoped** tools act on the same queues (SMD-2132, SMD-2272) — the control
