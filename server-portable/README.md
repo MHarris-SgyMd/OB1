@@ -819,7 +819,7 @@ whole before `db/threads.ts` has linked it.
   - **Paging.** `limit` members a page, 1–100, default 20. A thread with more carries a `cursor`, which is passed back as
     `after` with the same key.
   - **Each member** carries its id, title, time and place. A superseded member carries `supersededBy` and stays in its
-    thread, which keeps its history. A board ticket's own row carries `ticket`, its status now: the row is rewritten in
+    thread, which keeps its history. A board ticket's own row carries `ticket`, its status as board-sync last wrote it: the row is rewritten in
     place, so it keeps its first place.
   - **Linked threads.** A ticket's thread names the threads its ticket's board links reach (`linked`): from 053's
     `linear` links in either direction, `parent`, `child`, `blocks`, `blocked_by` or `relates_to`, each with how many

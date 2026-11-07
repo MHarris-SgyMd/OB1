@@ -820,8 +820,12 @@ const safeThread: Safe<ThreadResult> = (v) => ({
 /** How a linked ticket stands to the thread's, in words. */
 const LINKED_WORDS: Record<ThreadShown["linked"][number]["relation"], string> = { parent: "its parent", child: "its child", blocks: "blocks it", blocked_by: "blocked by it", relates_to: "relates to it" };
 const membersWord = (n: number) => `${n} thought${n === 1 ? "" : "s"}`;
-/** A thread's key in the text: a phrase, the judge model's words, quoted and cut. */
-const threadKeyText = (key: string) => SHAPED_KEY.test(key) ? key : JSON.stringify(oneLine(snipText(key, 120)));
+/**
+ * A thread's key in the text: a phrase, the judge model's words, quoted whole — 111 holds it to 207 code points on one
+ * line, lower case, single spaces — since the cursor line asks for it back, and MCP's value carries no phrase key (review
+ * pass 1: a key cut to 120 with an ellipsis could not be given back, so a long phrase's thread could not be paged).
+ */
+const threadKeyText = (key: string) => SHAPED_KEY.test(key) ? key : JSON.stringify(key);
 /** A thread's linked threads as one line, or nothing. */
 const linkedLine = (t: ThreadShown) => t.linked.length
   ? `Linked threads (no thread runs across a link): ${t.linked.map((l) => `${l.key} ${LINKED_WORDS[l.relation]} (${membersWord(l.total)})`).join("; ")}${t.linkedMore ? "; and more the board holds" : ""}.`
@@ -835,12 +839,17 @@ function threadText(t: ThreadShown, thought: string | null): string {
     const marks = [
       m.id === thought ? "   ◀ this thought" : "",
       m.supersededBy ? `   ⚠ Superseded by a newer thought — ID ${m.supersededBy} (it stays in the thread, which keeps its history)` : "",
-      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status now, quoted, the row's own words.
-      m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status now ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
+      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status as board-sync last
+      // wrote it, quoted, the row's own words; its issue a ticket's shape (store.ts normaliseThreadMember).
+      m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status as board-sync last wrote it: ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
     ].filter(Boolean);
     return `${m.place}. ${JSON.stringify(oneLine(m.title))}\n   ID: ${m.id}${marks.length ? `\n${marks.join("\n")}` : ""}`;
   });
-  const before = t.earlier ? `\n(${first - 1} earlier: read the key's thread from its start for them.)` : "";
+  // An empty page of a thread with members (review pass 1): the members after the cursor left it between pages, or the
+  // thought an id read was around left it between the two reads.
+  const before = !t.earlier ? "" : t.members.length > 0 ? `\n(${first - 1} earlier: read the key's thread from its start for them.)`
+    : thought !== null ? "\n(This thought left the thread while it was read: read it again, or read the key's thread from its start.)"
+      : "\n(No member stands past the cursor now: those after it left the thread since that page. Read the key's thread from its start.)";
   const more = t.cursor ? `\n\nMore follow. Cursor: ${t.cursor} — pass it as \`after\` with key ${threadKeyText(t.key)} for the next page.` : "";
   return `${head}${linked ? `\n${linked}` : ""}${before}\n\n${members.join("\n\n")}${more}`;
 }

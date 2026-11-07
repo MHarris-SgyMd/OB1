@@ -954,9 +954,14 @@ export type ThreadPlace = { key: string; place: number; total: number; previous:
 
 const textOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
-/** A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a ticket's row. */
+/**
+ * A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a ticket's row — its
+ * `metadata.issue` a ticket's shape (077's TEAM-123), as board-sync writes it. A write key may set `issue` to any text
+ * (review pass 1: a forged one, newlines and all, was printed as a ticket's row); that member carries no ticket.
+ */
 export function normaliseThreadMember(r: Record<string, unknown>): ThreadMember {
-  const issue = textOrNull(r.issue);
+  const raw = textOrNull(r.issue);
+  const issue = raw !== null && /^[A-Z][A-Z0-9]+-[0-9]+$/.test(raw) ? raw : null;
   return {
     id: String(r.id), place: Number(r.place), at: textOrNull(r.at), created_at: isoTimestampOrNull(r.created_at ?? null),
     content: String(r.content ?? ""),

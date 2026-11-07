@@ -4,10 +4,10 @@
 // thought last. Both reads find it from the subjects, not from 120's edges: the subjects define it, so a read is right
 // on a brain db/threads.ts has not linked yet. The maintainer's decisions (2026-11-06) are read here: a superseded
 // member stays in its thread and is labelled; a ticket's own row, rewritten in place, keeps its first place and shows
-// its status now; a ticket's thread names the threads its board links reach, and no thread runs across one.
+// its status as board-sync last wrote it; a ticket's thread names the threads its board links reach, and no thread runs across one.
 
 import { thoughtTitle } from "../thoughts.ts";
-import { subjectKeyValid } from "../subject.ts";
+import { isTicket, subjectKeyValid } from "../subject.ts";
 import { ListCursorRefused, UUID_RE, type ThoughtStore, type ThreadLink, type ThreadPage, type ThreadTicket } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
@@ -27,15 +27,22 @@ export type ThreadShown = { key: string; total: number; place: number | null; me
 export type ThreadResult = { id: string | null; threads: ThreadShown[] };
 
 /**
- * A key as the caller wrote it, as 111 holds it: a ticket alone (`SMD-3306`) or with its prefix in any case is
- * `ticket:SMD-3306`; any other key is taken as written, trimmed. Null for what is no subject key (111's
- * subject_key_valid, mirrored by subjectKeyValid).
+ * A key as the caller wrote it, as subject.ts writes it, so a key the extractor would write for the same thing finds
+ * its thread: a ticket alone (`SMD-3306`) or with its prefix, in any case, is `ticket:SMD-3306`, and a ticket-shaped
+ * word whose prefix is never a ticket (isTicket: `PR-12`, `UTF-8`) is no key, as no extractor writes one; a pull
+ * request's and a version's numbers lose their leading zeros (`pr:012` is `pr:12`, `version:v01.2` `version:v1.2`).
+ * Any other key is taken as written, trimmed. Null for what is no subject key (111's subject_key_valid, mirrored by
+ * subjectKeyValid) — review pass 1.
  */
 export function threadKey(raw: string): string | null {
   const k = raw.trim();
   const ticket = /^(?:ticket:)?([A-Za-z][A-Za-z0-9]*-[0-9]+)$/i.exec(k);
-  const key = ticket ? `ticket:${ticket[1].toUpperCase()}` : k;
-  return subjectKeyValid(key) ? key : null;
+  if (ticket) return isTicket(ticket[1].toUpperCase()) ? `ticket:${ticket[1].toUpperCase()}` : null;
+  const pr = /^pr:([0-9]{1,9})$/.exec(k);
+  if (pr) return `pr:${Number(pr[1])}`;
+  const version = /^version:v([0-9]+(?:\.[0-9]+){1,3})$/.exec(k);
+  if (version) return `version:v${version[1].split(".").map((n) => String(Number(n))).join(".")}`;
+  return subjectKeyValid(k) ? k : null;
 }
 
 /** The pages as the read shows them: each member's title and the thought superseding it (one read for all), the cursors, the places. */
@@ -46,7 +53,9 @@ async function shown(store: Pick<ThoughtStore, "supersededAmong">, pages: readon
     return {
       key: p.key, total: p.total, place: placeOf(p.key),
       members: p.members.map((m) => ({ id: m.id, title: thoughtTitle(m.content, m.created_at), created_at: m.created_at, place: m.place, supersededBy: superseded[m.id] ?? null, ticket: m.ticket })),
-      earlier: (p.members[0]?.place ?? 1) > 1,
+      // An empty page of a thread that holds members (a cursor whose members after it left between pages, or the
+      // thought an id read was around leaving its thread between the two reads) has all of them before it (review pass 1).
+      earlier: p.members.length === 0 ? p.total > 0 : p.members[0].place > 1,
       cursor: last && last.place < p.total ? threadCursor(last.at, last.id) : null,
       linked: p.links, linkedMore: p.linksMore,
     };
