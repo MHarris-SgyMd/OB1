@@ -1509,6 +1509,8 @@ export type AgendaResult = {
   unknown: number;
   leftOut: { blocked: number; claimed: number; waiting: number };
   boardSync: { at: string; outcome: unknown } | null;
+  /** False when the role may not read work_claims (the claims group is soft): no claim was filtered or named. */
+  claimsRead: boolean;
   now: string;
 };
 
@@ -1529,7 +1531,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
   const lo = o?.left_out !== null && typeof o?.left_out === "object" ? (o.left_out as Record<string, unknown>) : undefined;
   const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
   if (!o || !Array.isArray(o.items) || !Number.isInteger(num(o.total)) || !Number.isInteger(num(o.unknown)) || !lo
-      || ![lo.blocked, lo.claimed, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date))) {
+      || ![lo.blocked, lo.claimed, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean") {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
@@ -1557,6 +1559,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     items, total: num(o.total), unknown: num(o.unknown),
     leftOut: { blocked: num(lo.blocked), claimed: num(lo.claimed), waiting: num(lo.waiting) },
     boardSync: bs && (typeof bs.at === "string" || bs.at instanceof Date) ? { at: isoTimestamp(bs.at as string | Date), outcome: bs.outcome ?? null } : null,
+    claimsRead: o.claims_read as boolean,
     now: isoTimestamp(o.now as string | Date),
   };
 }

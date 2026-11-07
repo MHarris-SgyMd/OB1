@@ -41,7 +41,7 @@
 --     decision 3) — and board-sync's last heartbeat (its ob1_config row's
 --     time and outcome), null on a brain without board-sync.
 --   The answer: {items, total, unknown, left_out: {blocked, claimed, waiting},
---   board_sync, now}. items is the first p_limit (1 to 100), total every item
+--   board_sync, claims_read, now}. items is the first p_limit (1 to 100), total every item
 --   that passed the filters.
 --
 --   ob1_item_blockers(kind, key) — the open items blocking a ticket or a
@@ -55,9 +55,13 @@
 --
 -- WHO READS
 --   No actor: the server passes the caller's identity as p_holder, for
---   `mine`. It reads what 122 reads, and work_claims (the claims group's
---   SELECT) and ob1_config (every group's). A role short of one gets 42501
---   naming the table. query_log's INSERT is the server group's, as it was.
+--   `mine` — its agent id, or its name alone when the registry gave none
+--   (key names are unique, and find a claim made either way). It reads what
+--   122 reads, ob1_config (every group's), and work_claims (the claims
+--   group's SELECT) only when the role may: that group is soft, so without
+--   it the agenda answers unfiltered by claims and says `claims_read` false,
+--   and `mine` alone is refused (42501). query_log's INSERT is the server
+--   group's, as it was.
 --
 -- SAFETY
 --   Two new functions, STABLE (one snapshot for the read); query_log gains a
@@ -68,7 +72,8 @@
 --   006 (ob1_config), 034 (query_log), 053, 068, 071 (the links, heads and
 --   gate), 115 (work_claims), 117 (open_items), 122 (effective_priority).
 --   Applied by `bun db/migrate.ts`. Re-applied: the functions are replaced,
---   the column and the CHECK kept as they are.
+--   the column and both CHECKs kept as they are, the log neither locked nor
+--   re-scanned.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not
@@ -107,10 +112,21 @@ $qc$;
 ALTER TABLE query_log ADD COLUMN IF NOT EXISTS result_items jsonb;
 COMMENT ON COLUMN query_log.result_items IS
   'An agenda row''s items in the order returned, each {kind, key, effective}: tickets are keys, not thought ids, so result_ids cannot hold them. NULL on search and action rows. Migration 123 / SMD-3669.';
-ALTER TABLE query_log DROP CONSTRAINT IF EXISTS query_log_kind_check;
-ALTER TABLE query_log ADD CONSTRAINT query_log_kind_check CHECK (kind IN ('search', 'action', 'agenda'));
-ALTER TABLE query_log DROP CONSTRAINT IF EXISTS query_log_agenda_has_items;
-ALTER TABLE query_log ADD CONSTRAINT query_log_agenda_has_items CHECK (kind <> 'agenda' OR (result_items IS NOT NULL AND jsonb_typeof(result_items) = 'array'));
+-- Changed only when it lacks the agenda kind, and the items CHECK added only
+-- when missing, so a re-apply neither locks nor re-scans the log (review
+-- pass 1).
+DO $kind$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass
+                    AND pg_get_constraintdef(oid) LIKE '%agenda%') THEN
+    ALTER TABLE query_log DROP CONSTRAINT IF EXISTS query_log_kind_check;
+    ALTER TABLE query_log ADD CONSTRAINT query_log_kind_check CHECK (kind IN ('search', 'action', 'agenda'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'query_log_agenda_has_items' AND conrelid = 'query_log'::regclass) THEN
+    ALTER TABLE query_log ADD CONSTRAINT query_log_agenda_has_items CHECK (kind <> 'agenda' OR (result_items IS NOT NULL AND jsonb_typeof(result_items) = 'array'));
+  END IF;
+END
+$kind$;
 
 -- ---------------------------------------------------------------------------
 -- ob1_item_blockers — the open items blocking a ticket or a thought
@@ -191,6 +207,11 @@ DECLARE
   v_off      int := 0;
   v_rows     jsonb;
   v_board    jsonb;
+  v_claims_ok boolean := has_table_privilege('work_claims', 'SELECT');
+  v_claims   jsonb := '{}';
+  v_mine_issues text[] := '{}';
+  v_beat_at  timestamptz;
+  v_beat     text;
 BEGIN
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
     RAISE EXCEPTION USING MESSAGE = format('an agenda shows 1 to 100 items; %s is not', COALESCE(p_limit::text, 'NULL')), ERRCODE = 'invalid_parameter_value';
@@ -218,6 +239,18 @@ BEGIN
   IF p_now IS NULL OR NOT isfinite(p_now) THEN
     RAISE EXCEPTION USING MESSAGE = 'agenda''s clock is a moment', ERRCODE = 'invalid_parameter_value';
   END IF;
+  IF v_mine THEN
+    IF NOT v_claims_ok THEN
+      RAISE EXCEPTION USING MESSAGE = 'agenda: holder mine reads work_claims, which this role may not (the claims group)', ERRCODE = 'insufficient_privilege';
+    END IF;
+    -- 115's holder rule: a claim made under an agent id is that id's, one made by name alone that name's. With no
+    -- agent id to hand (the registry away), the key's name finds both: key names are unique.
+    SELECT COALESCE(array_agg(DISTINCT w.issue), '{}') INTO v_mine_issues
+      FROM work_claims w
+     WHERE w.released_at IS NULL AND w.expires_at > p_now
+       AND CASE WHEN v_agent IS NOT NULL THEN w.holder_agent_id = v_agent OR (w.holder_agent_id IS NULL AND w.holder_name = v_name)
+                ELSE w.holder_name = v_name END;
+  END IF;
 
   -- The candidates, in the scope.
   SELECT COALESCE(jsonb_agg(c ORDER BY c->>'kind', c->>'key'), '[]') INTO v_cands
@@ -232,10 +265,7 @@ BEGIN
          AND (v_source IS NULL OR v_source = 'linear')
          AND (v_project IS NULL OR t.metadata->>'project' = v_project)
          AND (v_label IS NULL OR (jsonb_typeof(t.metadata->'labels') = 'array' AND t.metadata->'labels' ? v_label))
-         AND (NOT v_mine OR EXISTS (
-               SELECT 1 FROM work_claims w
-                WHERE w.issue = h.issue AND w.released_at IS NULL AND w.expires_at > p_now
-                  AND (w.holder_agent_id = v_agent OR (w.holder_agent_id IS NULL AND w.holder_name = v_name))))
+         AND (NOT v_mine OR h.issue = ANY(v_mine_issues))
       UNION ALL
       SELECT jsonb_build_object('kind', 'item', 'key', i.item_id::text, 'source', COALESCE(i.plugin, 'items'),
                                 'title', left(i.text, 200), 'status', i.status, 'owner', i.owner)
@@ -257,29 +287,46 @@ BEGIN
     v_off := v_off + 1000;
   END LOOP;
 
-  -- Board-sync's last heartbeat (db/pass-stamp.ts writes its value as JSON).
-  SELECT jsonb_build_object('at', o.updated_at, 'outcome', CASE WHEN o.value ~ '^\s*\{' THEN (o.value::jsonb)->'outcome' END)
-    INTO v_board FROM ob1_config o WHERE o.key = 'heartbeat:board-sync';
+  -- Board-sync's last heartbeat (db/pass-stamp.ts writes its value as JSON); a
+  -- value that is no JSON names no outcome, and never fails the read.
+  SELECT o.updated_at, o.value INTO v_beat_at, v_beat FROM ob1_config o WHERE o.key = 'heartbeat:board-sync';
+  IF v_beat_at IS NOT NULL THEN
+    BEGIN
+      v_board := jsonb_build_object('at', v_beat_at, 'outcome', (v_beat::jsonb)->'outcome');
+    EXCEPTION WHEN invalid_text_representation THEN
+      v_board := jsonb_build_object('at', v_beat_at, 'outcome', NULL);
+    END;
+  END IF;
+
+  -- The claims on the candidate tickets, read only when this role may (the
+  -- claims group is soft: without it every read's claim label says the claims
+  -- could not be read, and so does this one, `claims_read` false).
+  IF v_claims_ok THEN
+    SELECT COALESCE(jsonb_object_agg(x.issue, jsonb_build_object('live', x.live, 'lapsed', x.lapsed)), '{}') INTO v_claims
+      FROM (SELECT w.issue,
+                   jsonb_agg(jsonb_build_object('holder', w.holder_name, 'piece', w.piece, 'label', w.label, 'expires_at', w.expires_at)
+                             ORDER BY w.claimed_at) FILTER (WHERE w.expires_at > p_now) AS live,
+                   jsonb_agg(jsonb_build_object('holder', w.holder_name, 'piece', w.piece, 'expired_at', w.expires_at)
+                             ORDER BY w.claimed_at) FILTER (WHERE w.expires_at <= p_now) AS lapsed
+              FROM work_claims w
+             WHERE w.released_at IS NULL
+               AND w.issue IN (SELECT c->>'key' FROM jsonb_array_elements(v_cands) c WHERE c->>'kind' = 'ticket')
+             GROUP BY w.issue) x;
+  END IF;
 
   RETURN (
     WITH scored AS (
       SELECT c, s
         FROM jsonb_array_elements(v_cands) c
         JOIN jsonb_array_elements(v_scored) s ON s->>'item_kind' = c->>'kind' AND s->>'item_key' = c->>'key'
-    ), claims AS (
-      SELECT w.issue,
-             jsonb_agg(jsonb_build_object('holder', w.holder_name, 'piece', w.piece, 'label', w.label, 'expires_at', w.expires_at)
-                       ORDER BY w.claimed_at) FILTER (WHERE w.expires_at > p_now) AS live,
-             jsonb_agg(jsonb_build_object('holder', w.holder_name, 'piece', w.piece, 'expired_at', w.expires_at)
-                       ORDER BY w.claimed_at) FILTER (WHERE w.expires_at <= p_now) AS lapsed
-        FROM work_claims w
-       WHERE w.released_at IS NULL AND w.issue IN (SELECT sc.c->>'key' FROM scored sc WHERE sc.c->>'kind' = 'ticket')
-       GROUP BY w.issue
     ), judged AS (
-      SELECT sc.c, sc.s, cl.live, cl.lapsed,
+      -- An absent ticket, or an empty half, reads as SQL NULL: jsonb_agg over
+      -- no rows built a JSON null.
+      SELECT sc.c, sc.s,
+             CASE WHEN sc.c->>'kind' = 'ticket' THEN NULLIF(v_claims->(sc.c->>'key')->'live', 'null'::jsonb) END AS live,
+             CASE WHEN sc.c->>'kind' = 'ticket' THEN NULLIF(v_claims->(sc.c->>'key')->'lapsed', 'null'::jsonb) END AS lapsed,
              CASE WHEN sc.c->>'kind' = 'ticket' THEN ob1_item_blockers('ticket', sc.c->>'key') ELSE '{}'::text[] END AS blockers
         FROM scored sc
-        LEFT JOIN claims cl ON sc.c->>'kind' = 'ticket' AND cl.issue = sc.c->>'key'
     ), kept AS (
       SELECT j.*
         FROM judged j
@@ -319,9 +366,10 @@ BEGIN
                                                     AND (p_include_blocked OR cardinality(j.blockers) = 0)),
         'waiting', (SELECT count(*) FROM judged j WHERE COALESCE((j.s->>'waiting')::boolean, false))),
       'board_sync', v_board,
+      'claims_read', v_claims_ok,
       'now', p_now)
   );
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz) IS
-  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, now}. Raises 22023 on a bad limit, scope, holder or clock. Migration 123 / SMD-3669.';
+  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder or clock. Migration 123 / SMD-3669.';

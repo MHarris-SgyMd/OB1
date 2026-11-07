@@ -1952,6 +1952,8 @@ console.log("\n[16] The agenda through both doors (migration 123, SMD-3669): RES
   assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 "SMD-9912 — \[16\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
       && /\n1 of 3 carry no stated priority \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
+  const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
+  assert(blank.status === 400, `a blank scope is refused 400 by the schema, never a database fault (${blank.status} ${blank.body.code})`);
   const reader = await rest("GET", q, undefined, KEYS.reader);
   const hook = await rest("GET", q, undefined, KEYS.hook);
   assert(reader.status === 200 && same(reader.body.items, r.body.items) && hook.status === 403,
@@ -1962,7 +1964,7 @@ console.log("\n[16] The agenda through both doors (migration 123, SMD-3669): RES
   const rivalMine = await rest("GET", "/v1/agenda?holder=mine", undefined, KEYS.rival);
   const mineItems = (mine.body.items ?? []) as (It & { claimed: { holder: string }[] })[];
   assert(claim.status === 200 && mineItems.map((i) => i.key).join(" ") === "SMD-9914" && mineItems[0].claimed[0]?.holder === "writer"
-      && ((rivalMine.body.items ?? []) as It[]).every((i) => i.key !== "SMD-9914"),
+      && rivalMine.status === 200 && Array.isArray(rivalMine.body.items) && (rivalMine.body.items as It[]).every((i) => i.key !== "SMD-9914"),
     `holder mine lists the ticket the key claimed, its claim named; another key's mine leaves it out (${mine.status} ${mineItems.map((i) => i.key)} | ${rivalMine.status})`);
   if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [16] done" });
 }

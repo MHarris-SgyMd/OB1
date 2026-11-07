@@ -2114,7 +2114,8 @@ export const renderAgenda = (o: Outcome<AgendaResult>): Reply => render(o, (v) =
             i.overdue ? "OVERDUE" : null,
             i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
             i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
-            i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => oneLine(snipText(b, 80))).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+            // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
+            i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
           ].filter(Boolean);
           return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
         }),
@@ -2122,7 +2123,9 @@ export const renderAgenda = (o: Outcome<AgendaResult>): Reply => render(o, (v) =
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no stated priority (read as medium, not low).` : "Every item listed carries a priority.");
-  lines.push(v.boardSync ? `Board-sync last ran ${v.boardSync.at}.` : "No board-sync heartbeat: tickets may be missing or stale.");
+  // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
+  lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
+  if (!v.claimsRead) lines.push("Claims could not be read (this key's role lacks the claims group): claimed work is not left out or named.");
   return lines.join("\n");
 }, unknownRefusal, AS_JSON);
 

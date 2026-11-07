@@ -18087,6 +18087,33 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
          && later.items.find((i) => i.key === "SMD-9801")?.lapsed_claim?.[0]?.holder === "ag-bot" && later.left_out.claimed === 0,
     `a live claim hides its ticket, counted; include_claimed names the holder; mine lists the key's claimed tickets alone, another key's none; a day on, the lapsed claim hides nothing and is named (${claimed.outcome}; ${live.left_out.claimed}; ${keys(mine)}; ${notMine.items.length})`);
 
+  // 115's holder rule for mine: a claim made under an agent id is that id's, not another key given the same name; a
+  // claim made by name alone is that name's; with no agent id to hand (the registry away) the name finds the key's.
+  const byName = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9802', NULL, 'by name', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-noid" })])).rows[0].r;
+  const t0 = new Date().toISOString();
+  const otherId = await ag(null, { now: t0, holder: { name: "ag-bot", agent_id: "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" } });
+  const noId = await ag(null, { now: t0, holder: { name: "ag-bot" } });
+  const nameOnly = await ag(null, { now: t0, holder: { name: "ag-noid" } });
+  const nameOnlyWithId = await ag(null, { now: t0, holder: { name: "ag-noid", agent_id: "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" } });
+  assert(byName.outcome === "claimed" && otherId.items.length === 0 && keys(noId) === "SMD-9801" && keys(nameOnly) === "SMD-9802" && keys(nameOnlyWithId) === "SMD-9802",
+    `mine: an agent-id claim is not another key's with the same name; with no agent id the name finds it; a claim made by name is that name's, with an id or without (${byName.outcome}; ${otherId.items.length}; ${keys(noId)}; ${keys(nameOnly)}; ${keys(nameOnlyWithId)})`);
+
+  // A role without the claims group (soft): the agenda answers unfiltered by claims and says so; mine alone is refused.
+  await db.exec(`CREATE ROLE ag110_noclaims NOLOGIN; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ag110_noclaims; REVOKE SELECT ON work_claims FROM ag110_noclaims`);
+  let soft: Ag | null = null, softMine = "";
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL ROLE ag110_noclaims`);
+    try { soft = (await tx.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, now()) AS a`, [JSON.stringify({ project: P })])).rows[0].a; } catch { soft = null; }
+  });
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL ROLE ag110_noclaims`);
+    try { await tx.query(`SELECT agenda(NULL, '{"name": "ag-bot"}'::jsonb)`); } catch (e) { softMine = String((e as { code?: string }).code ?? "?"); }
+  });
+  const softA = soft as Ag | null;
+  assert(softA !== null && (softA as unknown as { claims_read: boolean }).claims_read === false && softA.items.some((i) => i.key === "SMD-9801") && softA.left_out.claimed === 0 && softMine === "42501",
+    `without the claims group the claimed ticket is listed, nothing counted as claimed, claims_read false; mine refused 42501 (${softA?.items.length}; ${softMine})`);
+  await db.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ag110_noclaims; DROP ROLE ag110_noclaims`);
+
   // Open items: open ones listed, proposed only when asked; source scopes; a project or label scope leaves them out.
   const open = (await db.query<{ r: { item: { id: string } } }>(`SELECT open_item('[110] pay the water bill', NULL, '2027-03-11', NULL, NULL, false, $1::jsonb) AS r`, [JSON.stringify(OP)])).rows[0].r.item.id;
   const proposed = (await db.query<{ r: { item: { id: string } } }>(`SELECT open_item('[110] maybe clean the garage', NULL, NULL, NULL, NULL, true, $1::jsonb) AS r`, [JSON.stringify(OP)])).rows[0].r.item.id;
@@ -18103,10 +18130,14 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const before = (await ag({ project: P })).board_sync;
   await db.exec(`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:board-sync', '{"outcome": "ok", "every_s": 300}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   const after = (await ag({ project: P })).board_sync;
+  await db.exec(`UPDATE ob1_config SET value = '{not json' WHERE key = 'heartbeat:board-sync'`);
+  let garbled: Ag["board_sync"] | undefined;
+  try { garbled = (await ag({ project: P })).board_sync; } catch { garbled = undefined; }
+  await db.exec(`UPDATE ob1_config SET value = '{"outcome": "ok", "every_s": 300}' WHERE key = 'heartbeat:board-sync'`);
   const codes = [await raisedCode(`SELECT agenda(NULL, NULL, 0)`), await raisedCode(`SELECT agenda(NULL, NULL, 101)`), await raisedCode(`SELECT agenda('{"team": "x"}')`),
                  await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`)];
-  assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && codes.every((c) => c === "22023"),
-    `no heartbeat is null, one names its outcome and time; a limit outside 1 to 100, an unknown or empty scope and a holder with no name each 22023 (${JSON.stringify(after)}; ${codes})`);
+  assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && codes.every((c) => c === "22023"),
+    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown or empty scope and a holder with no name each 22023 (${JSON.stringify(after)}; ${codes})`);
 
   await reapply(file.slice(0, 4));
   assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");

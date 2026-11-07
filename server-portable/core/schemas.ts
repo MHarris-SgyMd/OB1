@@ -713,9 +713,9 @@ export const SPECS = {
       "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed work: blocked items, items under a live claim and items not yet startable are left out and counted. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a claim on). `unknown` counts the listed items nobody stated a priority on; `board_sync` says when the board last synced. It orders and explains; the caller decides.",
     annotations: { readOnlyHint: true },
     inputSchema: {
-      source: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
-      project: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only tickets in this Linear project"),
-      label: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only tickets with this Linear label"),
+      source: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
+      project: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").optional().describe("Only tickets in this Linear project"),
+      label: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").optional().describe("Only tickets with this Linear label"),
       holder: z.enum(["mine"]).optional().describe("mine: only the work this key holds a live claim on"),
       limit: z.number().int().min(1).max(100).optional().default(20).describe("At most this many. Default 20"),
       include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),
