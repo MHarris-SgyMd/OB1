@@ -3068,16 +3068,33 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   assert(again.status === 200 && ids(again).join() === ids(first).join() && (await rows("memories")) === memoriesBefore && (await rows("source_refs")) === refsBefore,
     "the same write-back again answers the memories it wrote and writes nothing");
 
-  // A capture key writes back (over MCP here): a person's confirmation, OpenClaw's alias.
+  // A write key writes back over MCP: a person's confirmation, OpenClaw's alias.
   const conf = await am("writeback", {
     schema_version: "openbrain.openclaw.writeback.v1", workspace_id: "ws-am", project_id: "proj-a", runtime: { name: "openclaw" }, trust: "ingested",
     provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false }, memory_payload: { constraints: ["am_ledger never drops rows."] },
-  }, { as: KEYS.capture, door: "mcp" });
+  }, { door: "mcp" });
   const c = mems(conf)[0];
   assert(conf.status === 200 && conf.body.schema_version === "openbrain.openclaw.writeback_response.v1" && c?.review_status === "confirmed" && c.use_policy.can_use_as_instruction
     && !c.use_policy.requires_user_confirmation && c.provenance.status === "user_confirmed",
-    `a capture key writes back; user_confirmed without review is confirmed at once, usable as an instruction; OpenClaw's alias answered in kind (${JSON.stringify(conf.body).slice(0, 200)})`);
-  assert((await thoughtOf(c?.thought_id ?? null))?.actor === "capturer", "…its thought's audit row names the capture key");
+    `a write key's user_confirmed without review is confirmed at once, usable as an instruction; OpenClaw's alias answered in kind (${JSON.stringify(conf.body).slice(0, 200)})`);
+  // A capture key writes back too, but never confirms: its user_confirmed is generated, waiting for review, and it is answered ids alone.
+  const capWrite = await am("writeback", {
+    schema_version: "openbrain.openclaw.writeback.v1", workspace_id: "ws-cap", project_id: "proj-a", runtime: { name: "openclaw" }, trust: "ingested",
+    provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false }, memory_payload: { constraints: ["am_ledger capture keys never confirm."] },
+  }, { as: KEYS.capture, door: "mcp" });
+  const capAnswer = (capWrite.body.memories ?? [])[0] as Body | undefined;
+  const capStored = (await am("get_memory", { memory_id: capAnswer?.memory_id ?? NO_ROW }, { as: KEYS.reader })).body.memory as Body | undefined;
+  assert(capWrite.status === 200 && JSON.stringify(Object.keys(capAnswer ?? {})) === JSON.stringify(["memory_id", "thought_id"]) && UUID.test(capAnswer?.thought_id ?? "")
+    && capStored?.review_status === "pending" && capStored.provenance.status === "generated" && capStored.use_policy.can_use_as_instruction === false && capStored.use_policy.requires_user_confirmation === true
+    && (await thoughtOf(capAnswer?.thought_id ?? null))?.actor === "capturer",
+    `a capture key's write-back: answered its memory's id and thought alone; its user_confirmed without review stored generated and waiting, never an instruction; its thought the capture key's (${JSON.stringify(capAnswer)}; ${JSON.stringify([capStored?.review_status, capStored?.provenance?.status])})`);
+  const capImported = await am("writeback", { ...base, workspace_id: "ws-cap", provenance: { default_status: "imported", requires_review: false }, memory_payload: { decisions: ["am_ledger an import by a capture key."] } }, { as: KEYS.capture });
+  const capImportedStored = (await am("get_memory", { memory_id: (capImported.body.memories ?? [])[0]?.memory_id ?? NO_ROW }, { as: KEYS.reader })).body.memory as Body | undefined;
+  assert(capImportedStored?.provenance.status === "imported" && capImportedStored.review_status === "pending" && capImportedStored.use_policy.can_use_as_instruction === false,
+    `…an import from a capture key keeps its provenance and waits for review (${JSON.stringify([capImportedStored?.provenance?.status, capImportedStored?.review_status])})`);
+  const tooMany = await am("writeback", { ...base, memory_payload: { decisions: Array.from({ length: 26 }, (_, i) => `am_ledger many ${i}.`), lessons: Array.from({ length: 25 }, (_, i) => `am_ledger lesson ${i}.`) } });
+  assert(tooMany.status === 400 && tooMany.body.code === "TOO_MANY_MEMORIES" && tooMany.body.count === 51 && tooMany.body.limit === 50,
+    `a write-back of more than 50 memories is refused before any capture (${tooMany.status} ${JSON.stringify(tooMany.body)})`);
   const personal = mems(await am("writeback", { schema_version: WB, workspace_id: "ws-am", runtime: { name: "codex" }, provenance: { default_status: "imported", requires_review: false }, memory_payload: { lessons: ["am_ledger personal note."] } }))[0];
   const otherProject = mems(await am("writeback", { ...base, project_id: "proj-b", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger in project b."] } }))[0];
   const otherWorkspace = mems(await am("writeback", { ...base, workspace_id: "ws-other", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger keeps the ledger in Postgres."] } }))[0];
@@ -3096,7 +3113,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     `an idempotency key holding other text is refused, naming the key and not the text; the same text answers its memory (${beta.status} ${JSON.stringify(beta.body)})`);
   const gamma = await am("writeback", { ...idem, workspace_id: "ws-idem-2", memory_payload: { decisions: ["am_ledger beta."] } }, { as: KEYS.capture });
   const gammaAgain = await am("writeback", { ...idem, workspace_id: "ws-idem-2", memory_payload: { decisions: ["am_ledger alpha."] } }, { as: KEYS.capture });
-  assert(gamma.status === 200 && mems(gamma)[0]?.content === "am_ledger beta." && ids(gamma)[0] !== ids(alpha)[0]
+  const gammaStored = (await am("get_memory", { memory_id: ids(gamma)[0] ?? NO_ROW }, { as: KEYS.reader })).body.memory as Body | undefined;
+  assert(gamma.status === 200 && gammaStored?.content === "am_ledger beta." && gammaStored.scope.workspace_id === "ws-idem-2" && ids(gamma)[0] !== ids(alpha)[0]
     && gammaAgain.status === 409 && gammaAgain.body.code === "IDEMPOTENCY_KEY_REUSED",
     `a key is the workspace's own: the same key in another workspace is another memory, never answered or refused by the first's (${gamma.status} ${JSON.stringify(gamma.body).slice(0, 160)}; ${gammaAgain.status})`);
   // Two write-backs racing with one key and other texts: both pass the first check before either inserts (the chat stub
@@ -3113,7 +3131,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const lost = raced.find((r) => r.status !== 200);
   const raceRows = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.memories WHERE workspace_id = 'ws-race'`);
   assert(won !== undefined && lost?.status === 409 && lost.body.code === "IDEMPOTENCY_KEY_REUSED" && lost.body.idempotency_key === "race-key:0" && raceRows.n === 1
-    && mems(won)[0]?.content === (raced.indexOf(won) === 0 ? "am_ledger race one." : "am_ledger race two."),
+    && ((await am("get_memory", { memory_id: ids(won)[0] ?? NO_ROW }, { as: KEYS.reader })).body.memory as Body | undefined)?.content === (raced.indexOf(won) === 0 ? "am_ledger race one." : "am_ledger race two."),
     `two write-backs racing on one key with other texts: one memory, its own text answered to its sender, the other refused (${raced.map((r) => r.status).join(", ")}; ${raceRows.n} row)`);
   // The same write-back twice at once (a runtime's retry while its first call runs): one memory, answered to both,
   // never another workspace's, which holds that key and text too.
@@ -3423,10 +3441,9 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     await reviewY(written.memory_id, { action: "restrict_scope" });
     const viaCapture = bodyOf(await am("writeback", orig, { as: KEYS.capture }))[0];
     const viaWriter = bodyOf(await am("writeback", orig))[0];
-    assert(viaCapture?.memory_id === written.memory_id && viaCapture.content === "y_mem orig decision." && viaCapture.scope.visibility === "project"
-      && viaCapture.review_status === "pending" && !JSON.stringify(viaCapture).includes("reviewer-private")
+    assert(JSON.stringify(viaCapture) === JSON.stringify({ memory_id: written.memory_id, thought_id: written.thought_id })
       && viaWriter?.content === "y_mem reviewer-private correction." && viaWriter.scope.visibility === "personal" && viaWriter.review_status === "restricted",
-      `a capture key resending a memory is answered it as its write-back made it, a write key as it stands (${JSON.stringify([viaCapture?.content, viaCapture?.review_status, viaWriter?.content])})`);
+      `a capture key resending a memory a reviewer edited and restricted is answered its id and its write-back's thought alone, a write key the memory as it stands (${JSON.stringify(viaCapture)}; ${viaWriter?.content})`);
     // Ids at their bound in a script of three bytes a character: the key fits its index.
     // Distinct characters, so Postgres cannot compress the index row under its bound.
     const wide = (seed: number) => Array.from({ length: 200 }, (_, i) => String.fromCodePoint(0x4e00 + seed * 211 + i * 7)).join("");
@@ -3489,9 +3506,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const theirs = bodyOf(await am("writeback", { ...Y, project_id: "py-1", memory_payload: { decisions: ["y_mem theirs."] } }))[0]!;
     const asked = bodyOf(await am("writeback", { ...Y, project_id: "py-2", provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
       memory_payload: { decisions: ["y_mem theirs."] } }, { as: KEYS.capture }))[0];
-    assert(asked?.memory_id === theirs.memory_id && asked.scope.project_id === "py-1" && asked.scope.visibility === "project" && asked.review_status === "pending"
-      && asked.provenance.status === "generated" && asked.provenance.confidence === 0.5 && asked.use_policy.can_use_as_instruction === false && asked.thought_id === theirs.thought_id,
-      `a capture key resending another key's memory with other provenance and project is answered the memory as it was written, not as it asked (${JSON.stringify([asked?.scope, asked?.review_status, asked?.provenance])})`);
+    assert(JSON.stringify(asked) === JSON.stringify({ memory_id: theirs.memory_id, thought_id: theirs.thought_id }),
+      `a capture key resending another key's memory with other provenance and project is answered its id and thought alone (${JSON.stringify(asked)})`);
     const mine = { ...Y, provenance: { default_status: "user_confirmed", confidence: 0.555, requires_review: false }, memory_payload: { decisions: ["y_mem mine, confirmed."] } };
     const firstAnswer = bodyOf(await am("writeback", mine, { as: KEYS.capture }))[0];
     await reviewY(firstAnswer?.memory_id, { action: "confirm" });
@@ -3506,8 +3522,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     await reviewY(waitingFirst?.memory_id, { action: "confirm" });
     await reviewY(waitingFirst?.memory_id, { action: "evidence_only" });
     const waitingAgain = bodyOf(await am("writeback", waiting, { as: KEYS.capture }))[0];
-    assert(waitingFirst?.review_status === "pending" && JSON.stringify(waitingAgain) === JSON.stringify(waitingFirst),
-      `…and after a confirm and evidence_only, still the pending memory it wrote (${JSON.stringify([waitingAgain?.review_status, waitingAgain?.freshness])})`);
+    assert(waitingFirst !== undefined && JSON.stringify(waitingAgain) === JSON.stringify(waitingFirst),
+      `…and after a confirm and evidence_only, the same ids (${JSON.stringify(waitingAgain)})`);
     // The default key's format, golden: each part escaped, the parts joined by colons, the text's hash, the item's index.
     const golden = { schema_version: WB, workspace_id: "ws:y%", project_id: "py", task_id: "t:2:x", step_id: "s:3", runtime: { name: "r:1" }, memory_payload: { decisions: ["y_mem golden key."] } };
     const goldenId = ids(await am("writeback", golden))[0];
@@ -3532,13 +3548,22 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const rejectedThenRestricted = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem rejected, then restricted."] } }))[0]!;
     await reviewY(rejectedThenRestricted.memory_id, { action: "reject" });
     await reviewY(rejectedThenRestricted.memory_id, { action: "restrict_scope" });
-    // A row with no record of its write-back (none the README's copy block leaves) is answered unconfirmed, its stored provenance, never what the resend asks.
+    const staleThenRestricted = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem stale, then restricted."] } }))[0]!;
+    await reviewY(staleThenRestricted.memory_id, { action: "mark_stale" });
+    await reviewY(staleThenRestricted.memory_id, { action: "restrict_scope" });
+    const disputedThenRestricted = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem disputed, then restricted."] } }))[0]!;
+    await reviewY(disputedThenRestricted.memory_id, { action: "dispute" });
+    await reviewY(disputedThenRestricted.memory_id, { action: "restrict_scope" });
+    // A review that is no edit leaves the content, whatever it is sent.
+    const contentKept = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem a confirm keeps this text."] } }))[0]!;
+    const kept = (await reviewY(contentKept.memory_id, { action: "confirm", content: "y_mem not an edit's content." })).body.memory as Body;
+    assert(kept.content === "y_mem a confirm keeps this text.", `a confirm sent content keeps the memory's (${kept.content})`);
+    // A row with no record of its write-back (none the README's copy block leaves) is answered its id and no thought.
     const bare = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem no written record."] } }))[0]!;
     await sql`UPDATE plugin_agent_memory.memories SET metadata = metadata - 'written' WHERE id = ${bare.memory_id}::uuid`;
     const bareAsked = bodyOf(await am("writeback", { ...Y, provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["y_mem no written record."] } }, { as: KEYS.capture }))[0];
-    assert(bareAsked?.memory_id === bare.memory_id && bareAsked.review_status === "pending" && bareAsked.provenance.status === "generated" && bareAsked.use_policy.can_use_as_instruction === false
-      && bareAsked.thought_id === bare.thought_id,
-      `a memory with no record of its write-back is answered to a capture key unconfirmed, its stored provenance (${JSON.stringify([bareAsked?.review_status, bareAsked?.provenance?.status])})`);
+    assert(JSON.stringify(bareAsked) === JSON.stringify({ memory_id: bare.memory_id, thought_id: null }),
+      `a memory with no record of its write-back is answered to a capture key its id and no thought (${JSON.stringify(bareAsked)})`);
     // An edit's own summary is cut and run together; a review that is no edit leaves the summary, whatever it is sent.
     const longText = `y_mem   long   edit ${"word ".repeat(50)}`;
     const longEdit = (await reviewY(redact.memory_id, { action: "edit", content: longText })).body.memory as Body;
@@ -3554,7 +3579,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(pairFirst.length === 2 && pairFirst[0].thought_id !== pairFirst[1].thought_id && JSON.stringify(pairAgain) === JSON.stringify(pairFirst),
       `a capture key's resend of two memories answers each its own write-back, one confirmed and edited since (${JSON.stringify(pairAgain.map((m) => [m.review_status, m.thought_id === pairFirst[pairAgain.indexOf(m)]?.thought_id]))})`);
     const queueY = ids(await am("review_queue", { workspace_id: "ws-y" }, { as: KEYS.reader }));
-    assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id) && !queueY.includes(rejectedThenRestricted.memory_id),
+    assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id) && !queueY.includes(rejectedThenRestricted.memory_id) && !queueY.includes(staleThenRestricted.memory_id) && !queueY.includes(disputedThenRestricted.memory_id),
       `review_queue lists a restricted memory no one confirmed, not a confirmed one, nor a rejected one restricted since (${queueY.length})`);
   }
 

@@ -117,36 +117,13 @@ function asMemory(m: Row, artifacts: Map<string, z.output<typeof Artifact>[]>): 
   };
 }
 
-/**
- * A memory as its write-back made it: what a key that can only capture is
- * answered for a memory it finds already written, so no reviewer's change since
- * (text, summary, thought, visibility, provenance, policy, review) is read
- * through it. What no review changes (project, channel, runtime, model,
- * confidence, created_by, artifacts, times) is the stored row's; what one
- * changes is the write-back's own, kept in metadata.written (the README's copy
- * block writes it for a migrated memory, as it stood at the copy). A row with
- * none is answered unconfirmed, its stored provenance: never what this resend
- * asks for.
- */
-function asWritten(m: Memory, stored: Row, row: { memory_type: (typeof MEMORY_TYPES)[number]; content: string }): Memory {
-  const written = (stored.metadata?.written ?? null) as { provenance_status?: unknown; review_status?: unknown; thought_id?: unknown } | null;
-  const status = typeof written?.provenance_status === "string" ? written.provenance_status : m.provenance.status;
-  const confirmed = written?.review_status === "confirmed";
-  return {
-    ...m,
-    thought_id: typeof written?.thought_id === "string" ? written.thought_id : m.thought_id,
-    memory_type: row.memory_type,
-    summary: summaryOf(row.content),
-    content: row.content,
-    source: { ...m.source, title: summaryOf(row.content) },
-    provenance: { ...m.provenance, status },
-    scope: { ...m.scope, visibility: m.scope.project_id ? "project" : "personal" },
-    use_policy: { can_use_as_instruction: confirmed, can_use_as_evidence: true, requires_user_confirmation: !confirmed },
-    freshness: { ...m.freshness, last_confirmed_at: confirmed ? m.freshness.created_at : null },
-    review_status: confirmed ? "confirmed" : "pending",
-    lifecycle_status: "active",
-  };
-}
+/** What a key that can only capture is answered for each memory of its write-back: ids alone, as the core answers its capture. */
+const Written = z.object({ memory_id: z.string(), thought_id: z.string().nullable() });
+/** The thought a memory's write-back captured (kept in metadata.written; the README's copy block writes it for a migrated memory). */
+const writtenThought = (r: Row) => {
+  const t = (r.metadata?.written as { thought_id?: unknown } | undefined)?.thought_id;
+  return typeof t === "string" ? t : null;
+};
 
 /** Rows as memories, their artifacts read once. */
 const asMemories = async (sql: PluginSql, rows: Row[]) => {
@@ -408,16 +385,18 @@ export default definePlugin({
     }),
     writeback: operation({
       title: "Write back agent memories",
-      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when provenance.default_status is user_confirmed or imported and requires_review is false; any other waits for review, usable as evidence. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing (to a key that can only capture, as the write-back made them, never as a reviewer changed them since). Refused: no memory in the payload (NO_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in.",
+      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when your key can write and provenance.default_status is user_confirmed or imported with requires_review false; any other waits for review, usable as evidence. A key that can only capture never confirms one (its user_confirmed is recorded as generated) and is answered each memory's memory_id and thought_id alone. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing. Refused: no memory in the payload (NO_MEMORIES), more than 50 (TOO_MANY_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in.",
       scope: "capture",
       annotations: ADDS,
       method: "POST",
       path: "/writeback",
       input: WritebackInput,
-      output: { schema_version: z.string(), memories: z.array(Memory) },
+      output: { schema_version: z.string(), memories: z.array(z.union([Memory, Written])) },
       async handler(ctx, req) {
         const rows = memoryRows(req);
         if (rows.length === 0) return refuse(400, "NO_MEMORIES", { message: "memory_payload holds no memory" });
+        // Each memory is a capture with its model calls, run in turn in this one request.
+        if (rows.length > LIMITS.items) return refuse(400, "TOO_MANY_MEMORIES", { count: rows.length, limit: LIMITS.items });
         const unsafe = rows.flatMap((row) => unsafeReasons(row.content).map((reason) => ({ reason, memory_type: row.memory_type })));
         if (unsafe.length > 0) {
           await ctx.db.tx((sql) => audit(sql, "memory_rejected", { workspace_id: req.workspace_id, project_id: req.project_id, runtime_name: req.runtime.name, task_id: req.task_id, actor_label: ctx.caller.name },
@@ -426,12 +405,14 @@ export default definePlugin({
         }
         const provider = req.models_used[0]?.provider ?? null;
         const model = req.models_used[0]?.model ?? null;
-        const confirmed = ["user_confirmed", "imported"].includes(req.provenance.default_status) && !req.provenance.requires_review;
-        const createdBy = createdByOf(req.provenance.default_status);
+        // Only a key that can write is a person's (or a runtime's with a person's word): a key that can only capture never
+        // confirms a memory, nor claims a person confirmed it; its user_confirmed is recorded as generated.
+        const person = ctx.caller.scope === "write";
+        const status = !person && req.provenance.default_status === "user_confirmed" ? "generated" : req.provenance.default_status;
+        const confirmed = person && ["user_confirmed", "imported"].includes(status) && !req.provenance.requires_review;
+        const createdBy = createdByOf(status);
         const staleAfter = req.retention.stale_after_days ? new Date(Date.now() + req.retention.stale_after_days * 86_400_000).toISOString() : null;
         const ids: string[] = [];
-        /** The memories this write-back found already written, with the item each answers. */
-        const heldRows = new Map<string, (typeof rows)[number]>();
         for (const [index, row] of rows.entries()) {
           const contentHash = await sha256Hex(`${row.memory_type}:${row.content}`);
           const base = req.idempotency_key || [req.workspace_id, req.runtime.name, req.task_id || "taskless", req.step_id || "step"].map(keyPart).concat(contentHash).join(":");
@@ -442,10 +423,9 @@ export default definePlugin({
             // The same memory sent again. A key holding other text is refused, never answered with that text.
             if (held.content_hash !== contentHash) return keyReused(key);
             ids.push(held.id);
-            heldRows.set(held.id, row);
             continue;
           }
-          const metadata = thoughtMetadata({ workspace_id: req.workspace_id, memory_type: row.memory_type, runtime_name: req.runtime.name, provenance_status: req.provenance.default_status, project_id: req.project_id, task_id: req.task_id });
+          const metadata = thoughtMetadata({ workspace_id: req.workspace_id, memory_type: row.memory_type, runtime_name: req.runtime.name, provenance_status: status, project_id: req.project_id, task_id: req.task_id });
           const captured = await ctx.call("capture_thought", { content: row.content, source: "agent-memory", metadata, ...(req.trust ? { trust: req.trust } : {}) });
           // A thought saved with no vector (the provider down, or the egress policy keeping the text in) is still kept, and
           // its memory with it: the brain's vector mender fills the vector in, and recall finds it from then on.
@@ -459,12 +439,12 @@ export default definePlugin({
                                     idempotency_key, content_hash, metadata)
               VALUES (${thoughtId}::uuid, ${req.workspace_id}, ${req.project_id ?? null}, ${req.channel.kind ?? null}, ${req.channel.id ?? null}, ${req.channel.thread_id ?? null},
                       ${req.project_id ? "project" : "personal"}, ${row.memory_type}, ${summaryOf(row.content)}, ${row.content},
-                      ${req.provenance.default_status}, ${req.provenance.confidence}, ${createdBy},
+                      ${status}, ${req.provenance.confidence}, ${createdBy},
                       ${req.runtime.name}, ${req.runtime.version ?? null}, ${provider}, ${model}, ${req.task_id ?? null}, ${req.flow_id ?? null},
                       ${confirmed}, true, ${!confirmed}, ${confirmed ? "confirmed" : "pending"}, CASE WHEN ${confirmed} THEN now() END, ${staleAfter}::timestamptz,
                       ${key}, ${contentHash},
                       (${json({ source_refs: req.source_refs, models_used: req.models_used, retention: req.retention, writeback_schema_version: req.schema_version,
-                        written: { provenance_status: req.provenance.default_status, review_status: confirmed ? "confirmed" : "pending", thought_id: thoughtId } })}::text)::jsonb)
+                        written: { provenance_status: status, review_status: confirmed ? "confirmed" : "pending", thought_id: thoughtId } })}::text)::jsonb)
               ON CONFLICT (workspace_id, md5(idempotency_key)) WHERE idempotency_key IS NOT NULL DO NOTHING
               RETURNING id::text AS id`;
             if (!made) {
@@ -485,7 +465,7 @@ export default definePlugin({
                 VALUES (${made.id}::uuid, ${row.artifact.kind}, ${row.artifact.uri}, ${row.artifact.description ?? null})`;
             }
             await audit(sql, "memory_written", { workspace_id: req.workspace_id, project_id: req.project_id, memory_id: made.id, runtime_name: req.runtime.name, task_id: req.task_id, actor_kind: "agent", actor_label: ctx.caller.name },
-              { provenance_status: req.provenance.default_status, review_status: confirmed ? "confirmed" : "pending" });
+              { provenance_status: status, review_status: confirmed ? "confirmed" : "pending" });
             return made.id;
           });
           // The race's loser with other text: its thought stays, as any captured thought does, and no memory names it.
@@ -494,17 +474,15 @@ export default definePlugin({
         }
         return ctx.db.tx(async (sql) => {
           const stored = await memoriesOf(sql, ids);
-          const memories = await asMemories(sql, stored);
-          // A key that can only capture reads nothing a reviewer did since: a memory it finds already written is
-          // answered as its write-back made it (asWritten), never as it stands now.
-          const capture = ctx.caller.scope === "capture";
-          return ok({
-            schema_version: writebackAnswerVersion(req.schema_version),
-            memories: memories.map((m, i) => {
-              const row = capture ? heldRows.get(m.memory_id) : undefined;
-              return row ? asWritten(m, stored[i], row) : m;
-            }),
-          });
+          // A key that can only capture reads no memory: it is answered each memory's id and the thought its write-back
+          // captured, as the core answers its capture, never the memory or a reviewer's change to it.
+          if (ctx.caller.scope !== "write") {
+            return ok({
+              schema_version: writebackAnswerVersion(req.schema_version),
+              memories: stored.map((r) => ({ memory_id: r.id, thought_id: writtenThought(r) })),
+            });
+          }
+          return ok({ schema_version: writebackAnswerVersion(req.schema_version), memories: await asMemories(sql, stored) });
         });
       },
     }),
@@ -550,7 +528,7 @@ export default definePlugin({
     }),
     review_queue: operation({
       title: "Agent memories waiting for review",
-      description: "A workspace's memories still waiting for a person's confirmation (pending, or restricted while still unconfirmed, and neither rejected, stale nor disputed), newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
+      description: "A workspace's memories still waiting for a person's confirmation (pending, or restricted while still unconfirmed, and neither rejected, stale, disputed nor superseded), newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
