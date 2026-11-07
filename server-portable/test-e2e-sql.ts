@@ -4120,6 +4120,84 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
   }
 }
 
+console.log("\n[25] priority_weight and min_priority over the live database (SMD-3668): at 0 the search is byte-identical to one without it; above 0 the window is ranked by effective priority, so of four High tickets the one due tomorrow is no longer last; min_priority keeps a known priority at or above it — a note filed under a ticket reads the ticket's, a mention reads nothing — and says what it kept; a ranked search is not logged");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const capture = async (content: string, extra: Record<string, unknown> = {}) => idIn(await call("capture_thought", { content, ...extra }))!;
+  const KEYS = ["PWT-1", "PWT-2", "PWT-3", "PWT-4"];
+  const made: string[] = [];
+  // A statement counts from a key the operator classified (docs/priority.md decision 4): the suite's key has no kind,
+  // so its statements would land in the inferred tier, which no read counts yet (SMD-3670). Classified for this
+  // section, and put back after.
+  const [{ kind: kindBefore }] = await sql`SELECT (SELECT kind FROM ob1_agents WHERE label = 'MCP_ACCESS_KEY') AS kind`;
+  await sql`SELECT set_agent_kind('MCP_ACCESS_KEY', 'operator')`;
+  try {
+    // Four High tickets in the backlog, board-sync's shape: 11-02's filter would find all four.
+    const rowOf: Record<string, string> = {};
+    for (const k of KEYS) {
+      rowOf[k] = await capture(`[25] priority weight: ${k}, a High backlog ticket about the egress gate`, { metadata: { issue: k, status: "Backlog", status_type: "backlog", priority: "High" } });
+      made.push(rowOf[k]);
+      const s = await result("set_priority", { kind: "ticket", key: k, level: 3 });
+      assert(!s.isError, `${k} stated High (${s.text.slice(0, 120)})`);
+    }
+    const query = `"[25] priority weight"`;
+    const ids = (r: Awaited<ReturnType<typeof result>>) => ((r.sc?.hits ?? []) as { id: string }[]).map((h) => h.id);
+    const base = await result("search_thoughts", { query, limit: 4, threshold: -1 });
+    const zero = await result("search_thoughts", { query, limit: 4, threshold: -1, priority_weight: 0 });
+    assert(!base.isError && ids(base).length === 4 && zero.text === base.text && JSON.stringify(zero.sc) === JSON.stringify(base.sc) && base.sc?.priority === null,
+      `at priority_weight 0 the reply is byte-identical to one without it, text and value, its priority null (${ids(base).map((id) => KEYS.find((k) => rowOf[k] === id)).join(",")})`);
+    // A floor no match reaches: four Highs (3), none critical.
+    const none = await result("search_thoughts", { query, limit: 10, threshold: -1, min_priority: 5 });
+    assert(!none.isError && ids(none).length === 0 && none.text.includes("kept 0 at critical (5) or above") && (none.sc?.priority as { kept?: number } | undefined)?.kept === 0,
+      `a floor no match reaches answers none and says so (${none.text.slice(0, 200)})`);
+    // The one the search ranks last by meaning is made due tomorrow: High plus urgency (+2) over the others' High.
+    const last = KEYS.find((k) => rowOf[k] === ids(base)[3])!;
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const due = await result("set_priority", { kind: "ticket", key: last, level: 3, due_at: tomorrow });
+    assert(!due.isError, `${last}, last by meaning, made due tomorrow (${due.text.slice(0, 120)})`);
+    const loggedBefore = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
+    const half = await result("search_thoughts", { query, limit: 4, threshold: -1, priority_weight: 0.5 });
+    const full = await result("search_thoughts", { query, limit: 4, threshold: -1, priority_weight: 1 });
+    const p = full.sc?.priority as { weight: number; min: number | null; window: number; read: number; kept: number; known: number } | undefined;
+    assert(!full.isError && ids(full)[0] === rowOf[last] && JSON.stringify(ids(full).slice(1)) === JSON.stringify(ids(base).filter((id) => id !== rowOf[last]))
+        && ids(half).indexOf(rowOf[last]) < 3,
+      `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order, and is no longer last at 0.5 (${ids(half).indexOf(rowOf[last])})`);
+    // threshold -1 admits every thought, so the window is full: 16 read for a limit of 4, the four Highs the known ones.
+    assert(p?.weight === 1 && p.min === null && p.window === 16 && p.read === 16 && p.kept === 4 && p.known === 4
+        && full.text.includes("Ranked by priority (priority_weight 1): the top 16 matches ordered by") && full.text.includes("4 of them carry a known priority.")
+        && full.text.includes("A match past the top 16 was not read — raise limit to read further."),
+      `the value and the note say the weight, the window (16 for a limit of 4), what it read and how many carry a priority (${JSON.stringify(p)})`);
+    // min_priority: a note filed under a ticket reads the ticket's; one only mentioning it reads nothing; a thought's own Low.
+    const filed = await capture(`[25] priority weight: a note filed under ${last}`, { metadata: { ticket: last } });
+    const mention = await capture(`[25] priority weight: a note that only mentions ${last}`);
+    const low = await capture(`[25] priority weight: a thought of its own, stated Low`);
+    made.push(filed, mention, low);
+    assert(!(await result("set_priority", { kind: "thought", key: low, level: 1 })).isError, "a thought stated Low");
+    const atHigh = await result("search_thoughts", { query, limit: 10, threshold: -1, min_priority: 3 });
+    const atLow = await result("search_thoughts", { query, limit: 10, threshold: -1, min_priority: 1 });
+    const has = (r: typeof atHigh, id: string) => ids(r).includes(id);
+    assert(!atHigh.isError && KEYS.every((k) => has(atHigh, rowOf[k])) && has(atHigh, filed) && !has(atHigh, mention) && !has(atHigh, low) && ids(atHigh).length === 5
+        && has(atLow, low) && !has(atLow, mention) && ids(atLow).length === 6
+        && atHigh.text.includes("kept 5 at high (3) or above (min_priority, a known priority alone)"),
+      `min_priority 3 keeps the four Highs and the note filed under one, not the mention nor the Low; at 1 the Low too, the mention never (${ids(atHigh).length}, ${ids(atLow).length})`);
+    // Urgency counts toward the floor (decision 5's composition): the High due tomorrow (3 + 2) and its filed note pass at critical.
+    const urgent = await result("search_thoughts", { query, limit: 10, threshold: -1, min_priority: 5 });
+    assert(!urgent.isError && JSON.stringify([...ids(urgent)].sort()) === JSON.stringify([rowOf[last], filed].sort()),
+      `urgency counts: at 5 the High due tomorrow and the note filed under it pass, the other Highs do not (${ids(urgent).length})`);
+    const loggedAfter = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
+    await result("search_thoughts", { query, limit: 4, threshold: -1 });
+    const loggedPlain = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
+    assert(loggedAfter === loggedBefore && loggedPlain === loggedAfter + 1,
+      `a priority-ranked search is not logged (the log has no column for it), a plain one is (${loggedBefore} → ${loggedAfter} → ${loggedPlain})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+    // set_agent_kind takes no NULL: the kind the key had, put back by hand.
+    await sql`UPDATE ob1_agents SET kind = ${kindBefore}, updated_at = now() WHERE label = 'MCP_ACCESS_KEY'`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

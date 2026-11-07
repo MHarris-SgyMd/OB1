@@ -6941,4 +6941,53 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   assert(problems.join(",") === "kind,key,key,level,not_before,due_ref,due_ref,reason,key_name,other", `a 22023's words name their argument (${problems.join(",")})`);
 }
 
+console.log("\n[36] priority_weight and min_priority in the core and the words (SMD-3668): the blend's order, a tie in the window's order, the floor on a known priority alone, one read of a row's item and its filed tickets, and the header note");
+{
+  const { rankByPriority, prioritiesOf, PRIORITY_SPAN, priorityWindow } = await import("./core/reads.ts");
+  const { priorityNote } = await import("./render.ts");
+  const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
+  const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
+  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n).map((r) => r.id).join("");
+  // 11-02's case in miniature: four Highs, the one with urgency last by meaning.
+  assert(order(0) === "abcd" && order(1) === "dabc" && order(0.5).indexOf("d") < 3,
+    `four of one level: at 0 the window's order, at 1 the higher priority first and the rest in theirs, at 0.5 the urgent one no longer last (${order(0)}, ${order(1)}, ${order(0.5)})`);
+  // (1 − w) × relevance + w × priority: 0.2 × (0.7 / 1) + 0.8 × (5 / 9) = 0.584 against a's 0.2 + 0.8 × (3 / 9) = 0.467.
+  assert(PRIORITY_SPAN === 9 && order(0.8) === "dabc" && order(0.1) === "abcd",
+    `the blend weighs relevance over the window's top and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
+  const mixed = { a: { effective: 2, known: false }, b: { effective: 1, known: true }, c: { effective: 3, known: true }, d: { effective: 4, known: true } };
+  assert(order(0, 3, 4, mixed) === "cd" && order(0, 1, 4, mixed) === "bcd" && order(0, 0, 4, mixed) === "bcd" && order(0, 5, 4, mixed) === "",
+    `the floor keeps a known priority at or above it alone, in the window's order at weight 0; an unknown, ordered as 2, never passes, not even at 0 (${order(0, 3, 4, mixed)}, ${order(0, 1, 4, mixed)}, ${order(0, 0, 4, mixed)})`);
+  assert(order(1, null, 2) === "da" && priorityWindow(10) === 40 && priorityWindow(30) === 100,
+    `the top limit after the order, of a window of min(100, 4 × limit) (${order(1, null, 2)}, ${priorityWindow(10)}, ${priorityWindow(30)})`);
+  // prioritiesOf: one read, of each row's own item and the tickets it is filed under; a mentioned ticket not read.
+  const asked: { kind: string; key: string }[][] = [];
+  const ep = (kind: string, key: string, effective: number, level: number | null, inherited = false) =>
+    ({ item: { kind, key }, effective, level, inheritedFrom: inherited ? { kind: "ticket", key: "X-9", level: 4, hops: 1 } : null });
+  const answers: Record<string, ReturnType<typeof ep>> = {
+    "thought:t1": ep("thought", "t1", 2, null), "ticket:PRI-1": ep("ticket", "PRI-1", 3, 3),
+    "thought:t2": ep("thought", "t2", 2, null), "thought:t3": ep("thought", "t3", 4, 4),
+    "thought:t4": ep("thought", "t4", 3, null, true), "ticket:PRI-2": ep("ticket", "PRI-2", 2, null),
+  };
+  const store = { effectivePriority: async (items: { kind: string; key: string }[]) => { asked.push(items); return items.map((i) => answers[`${i.kind}:${i.key}`]).filter(Boolean); } };
+  const got = await prioritiesOf(store as never, [
+    { id: "t1", metadata: { ticket: "pri-1" } }, { id: "t2", metadata: { topics: ["PRI-1 mentioned"] } },
+    { id: "t3", metadata: { issue: "PRI-1" } }, { id: "t4", metadata: { ticket: "PRI-2" } },
+  ]);
+  assert(asked.length === 1 && JSON.stringify(asked[0].map((i) => `${i.kind}:${i.key}`)) === JSON.stringify(["thought:t1", "ticket:PRI-1", "thought:t2", "thought:t3", "thought:t4", "ticket:PRI-2"]),
+    `one read for the page: each row's thought and its filed tickets, a ticket asked once (${JSON.stringify(asked.map((a) => a.length))})`);
+  assert(JSON.stringify(got) === JSON.stringify({ t1: { effective: 3, known: true }, t2: { effective: 2, known: false }, t3: { effective: 4, known: true }, t4: { effective: 3, known: true } }),
+    `a note filed under a High ticket reads its 3; a mention reads nothing (unknown, 2); the highest known wins (a ticket row's own 4 over its ticket's 3); an inherited level is known, an unknown filed ticket is not (${JSON.stringify(got)})`);
+  const none = await prioritiesOf({ effectivePriority: async () => [] } as never, [{ id: "z", metadata: null }]);
+  assert(JSON.stringify(none) === JSON.stringify({ z: { effective: 0, known: false } }), `a row the read answered nothing for is unknown, at 0 (${JSON.stringify(none)})`);
+  // The header note.
+  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6 });
+  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5 });
+  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0 });
+  assert(priorityNote(null) === null && priorityNote(undefined) === null
+      && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × effective priority, a match's priority the highest of its own and its filed tickets'; 6 of them carry a known priority."
+      && floored === "Read the top 40 matches for their priority; 5 of them carry a known priority; kept 2 at high (3) or above (min_priority, a known priority alone). A match past the top 40 was not read — raise limit to read further."
+      && capped!.endsWith("kept 0 at urgent (4) or above (min_priority, a known priority alone). A match past the top 100 was not read — the window is capped at 100."),
+    `the note: the blend and the known count; a floor's level and what it kept; a full window says a match past it was not read, and whether a larger limit reads further (${ranked} | ${floored} | ${capped})`);
+}
+
 report();

@@ -63,20 +63,22 @@ interface RunSearch {
   // provider call.
   // An embedding of null is a query the provider did not answer for, and
   // vectorFailed says why (SMD-2891).
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean }):
     Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }>;
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
 const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust;
+  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }> => {
   // min_trust (SMD-1724) is no column of query_log, so a search with it is not
   // logged: a replay (db/tier.ts) would run it without the floor and report
   // the rows it kept out as a difference (the maintainer's call; the column is
-  // SMD-2479). Every logged row replays as it ran.
-  const logged = opts.minTrust === undefined;
+  // SMD-2479). Every logged row replays as it ran. A priority-ranked search
+  // (SMD-3668: priority_weight, min_priority) is not logged for the same
+  // reason, and the window it reads is no row's limit either (`unlogged`).
+  const logged = opts.minTrust === undefined && opts.unlogged !== true;
   if (opts.arm === "keyword") {
     const rows = await (await ctx.store()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter, minTrust: opts.minTrust });
     // A keyword search takes no threshold or recency weight; log them as the
@@ -319,6 +321,8 @@ export type SearchThoughtsResult = {
   facts: QueryFacts | null;
   /** prefer_current's window (059): what it held, for the header note. Null without the flag. */
   window: NonNullable<ThoughtHybridMatch["window"]> | null;
+  /** The priority ranking (SMD-3668): its weight and floor, the window it read and what it kept. Null with neither set. */
+  priority: PriorityRanking | null;
   /** Present only when the provider did not answer for the query, and the hits are its exact matches alone (SMD-2891). */
   vectorFailed?: QueryVectorFailed;
 };
@@ -465,16 +469,89 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
   return c?.claimed.length ? { claimed: c.claimed, ...(c.claimedMore > 0 ? { claimedMore: c.claimedMore } : {}), ...(c.claimedNotRead > 0 ? { claimedNotRead: c.claimedNotRead } : {}) } : {};
 };
 
+// ── priority_weight and min_priority (SMD-3668) ─────────────────────────────
+
+/**
+ * The largest effective priority under the default weights (docs/priority.md, migration 122): a critical level (5),
+ * overdue (3) and unblocking many (1). A priority-ranked search reads a match's priority as its effective over this,
+ * capped at 1, so the blend's two halves share a 0–1 scale.
+ */
+export const PRIORITY_SPAN = 9;
+/** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
+export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
+
+/** What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known priority on. */
+export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number };
+/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a stated or inherited level). */
+export type MatchPriority = { effective: number; known: boolean };
+
+/** The tickets a row's metadata files it under (a ticket row's `issue`, a note's `ticket`): claimKeysOf's filed keys. */
+const filedTickets = (metadata: Record<string, unknown> | null | undefined): string[] =>
+  [...new Set([filedUnder(metadata?.issue), filedUnder(metadata?.ticket)].filter((k): k is string => k !== null))];
+
+/**
+ * Each row's priority (SMD-3668), from one effective_priority read (122) for the whole window: of the row's own item
+ * (a thought; a ticket's row reads as its ticket) and the tickets its metadata files it under, the highest effective
+ * among those whose level is known — stated, or inherited from what it serves; with none known, the row's own, whose
+ * unknown level counts as 122's `unknown` weight. A ticket its text only mentions is not read: inheritance through
+ * mentions waits for SMD-3662's numbers (docs/priority.md, "Not decided here").
+ */
+export async function prioritiesOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly { id: string; metadata?: Record<string, unknown> | null }[]): Promise<Record<string, MatchPriority>> {
+  const itemsOf = (r: (typeof rows)[number]) => [{ kind: "thought", key: r.id }, ...filedTickets(r.metadata).map((k) => ({ kind: "ticket", key: k }))];
+  const asked = new Map<string, { kind: string; key: string }>();
+  for (const r of rows) for (const i of itemsOf(r)) asked.set(`${i.kind}:${i.key}`, i);
+  const read = await store.effectivePriority([...asked.values()]);
+  const by = new Map(read.map((p) => [`${p.item.kind}:${p.item.key}`, p]));
+  // 122 answers a ticket key in its normal form; the filed key is already upper-cased (filedUnder), as 115's is.
+  const out: Record<string, MatchPriority> = {};
+  for (const r of rows) {
+    const found = itemsOf(r).map((i) => by.get(`${i.kind}:${i.key}`)).filter((p) => p !== undefined);
+    const known = found.filter((p) => p.level !== null || p.inheritedFrom !== null);
+    const best = known.length ? known.reduce((a, b) => (b.effective > a.effective ? b : a)) : found[0];
+    out[r.id] = best ? { effective: best.effective, known: known.length > 0 } : { effective: 0, known: false };
+  }
+  return out;
+}
+
+/**
+ * The window re-ranked and filtered (SMD-3668): each match scored (1 − weight) × relevance + weight × priority —
+ * relevance its score over the window's top score, priority its effective over PRIORITY_SPAN, capped at 1 — in that
+ * order, a tie in the window's own; then, with a floor, only matches whose priority is known and at least it; then
+ * the first `limit`. Pure, for the unit test.
+ */
+export function rankByPriority<T extends { id: string; score: number }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number): T[] {
+  const top = Math.max(0, ...rows.map((r) => r.score));
+  const relevance = (r: T) => (top > 0 ? Math.max(0, r.score) / top : 0);
+  const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / PRIORITY_SPAN);
+  const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * relevance(r) + weight * priority(r) }));
+  // The window's own order breaks a tie, so a weight of 0 with a floor keeps it.
+  scored.sort((a, b) => b.s - a.s || a.i - b.i);
+  const kept = min === null ? scored : scored.filter(({ r }) => prio[r.id]?.known === true && prio[r.id].effective >= min);
+  return kept.slice(0, limit).map(({ r }) => r);
+}
+
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
-  const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
+  const { query, limit, threshold, recency_weight, prefer_current, min_trust, priority_weight, min_priority } = input;
+  // SMD-3668: a weight above 0 or a floor reads a window and its priorities; neither is today's search, untouched.
+  const ranked = priority_weight > 0 || min_priority !== undefined;
+  const window = ranked ? priorityWindow(limit) : limit;
   // parseFilter refuses a shape jsonb should not run.
   const f = searchFilter(input);
   if ("refusal" in f) return refuse(f.refusal);
   // The one search op, hybrid arm (SMD-1490): it gates the query
   // (SMD-1903), embeds it, runs the filter and logs.
-  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust });
+  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit: window, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust, unlogged: ranked });
   if (r.refusal) return refuse(r.refusal);
-  const data = r.rows;
+  let data = r.rows;
+  let priority: PriorityRanking | null = null;
+  if (ranked && data.length) {
+    const prio = await prioritiesOf(await ctx.store(), data);
+    const read = data.length;
+    data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit);
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length };
+  } else if (ranked) {
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read: 0, kept: 0, known: 0 };
+  }
   const failed = r.vectorFailed ? { vectorFailed: r.vectorFailed } : {};
 
   if (data.length === 0) {
@@ -488,7 +565,8 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // the facts are the query's, not the filtered scope's.
     // Without a vector the facts are answerWithoutVector's (SMD-2891).
     const facts = r.vectorFailed ? (r.facts ?? null) : factsOf((await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} }))[0]);
-    return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, ...failed });
+    // A floor that kept none of the window's matches says so (SMD-3668): the facts are still the query's.
+    return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, priority, ...failed });
   }
 
   // 025 (SMD-1253): which of these hits a newer thought has superseded,
@@ -512,6 +590,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // A text match has no literal-only reading: unknown, not false (review pass 6).
     facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
     window: data[0].window ?? null,
+    priority,
     ...failed,
   });
 }
