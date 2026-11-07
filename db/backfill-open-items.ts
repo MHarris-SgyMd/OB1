@@ -60,21 +60,29 @@ try {
   // (review pass 2: a thought of over-long strings alone opened nothing and was taken again by every run). Each
   // thought's strings as 117 will read them — ob1_work_claim_text cleans — and one past 4000 characters is counted
   // too long before any cleaning (review pass 1: a megabyte's string made the cleaning raise and the whole query fail).
+  // `items` is the action items where they are an array and NULL where they are anything else (null, a string, an
+  // object, a number — board-sync wrote JSON null on ten of stable's rows): every array read below takes `items`
+  // alone, so no plan can hand jsonb_array_length or jsonb_array_elements a scalar. A CASE is evaluated in order; an
+  // AND is not, and `jsonb_typeof(x) = 'array' AND jsonb_array_length(x) > 0` failed the whole query on such a row
+  // (SMD-4141).
   const rows = await sql`
-    WITH t AS (
-      SELECT th.id, th.metadata FROM thoughts th
-       WHERE jsonb_typeof(th.metadata->'action_items') = 'array' AND jsonb_array_length(th.metadata->'action_items') > 0
-         AND NOT EXISTS (SELECT 1 FROM open_items i WHERE i.origin_thought_id = th.id)
-         AND EXISTS (SELECT 1 FROM jsonb_array_elements(th.metadata->'action_items') v
+    WITH a AS (
+      SELECT th.id, CASE WHEN jsonb_typeof(th.metadata->'action_items') = 'array' THEN th.metadata->'action_items' END AS items
+        FROM thoughts th),
+    t AS (
+      SELECT a.id, a.items FROM a
+       WHERE jsonb_array_length(a.items) > 0
+         AND NOT EXISTS (SELECT 1 FROM open_items i WHERE i.origin_thought_id = a.id)
+         AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.items) v
                       WHERE jsonb_typeof(v) = 'string'
                         AND CASE WHEN length(v #>> '{}') <= 4000
                                  THEN length(ob1_work_claim_text(v #>> '{}', 4000, 'an action item')) <= 1000 END)
-       ORDER BY th.id
+       ORDER BY a.id
        LIMIT ${limit || null}::bigint),
     e AS (
-      SELECT t.id AS thought, a.v #>> '{}' AS raw, a.ord
-        FROM t CROSS JOIN LATERAL jsonb_array_elements(t.metadata->'action_items') WITH ORDINALITY AS a(v, ord)
-       WHERE jsonb_typeof(a.v) = 'string'),
+      SELECT t.id AS thought, x.v #>> '{}' AS raw, x.ord
+        FROM t CROSS JOIN LATERAL jsonb_array_elements(t.items) WITH ORDINALITY AS x(v, ord)
+       WHERE jsonb_typeof(x.v) = 'string'),
     c AS (
       SELECT thought, ord, length(raw) > 4000 AS long_raw,
              CASE WHEN length(raw) <= 4000 THEN ob1_work_claim_text(raw, 4000, 'an action item') END AS text
