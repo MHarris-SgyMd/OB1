@@ -1855,7 +1855,7 @@ console.log("\n[14] Open items through both doors (migration 117, SMD-3665 PR 2)
     `a plugin's hook through ctx.call opens its row's item, the plugin stamped by the call; it moves the due time and states a priority on it; another plugin's hook is ITEM_NOT_YOURS; with no row, ITEM_UNOWNABLE (no agent id, final); its own item with the registry set up wrong or refusing, ITEM_UNATTRIBUTED final, each its cause; a read key's open, READ_ONLY_KEY naming it (${JSON.stringify({ open: rowOpen.ok, stamp, move: rowMove.ok, prio: rowPrio.ok, other: otherHook.refusal?.code, none: noRowHook.refusal, misconfigured: ownMisconfigured.refusal, refused: ownRefused.refusal, reader: readerDirect.ok ? "opened" : readerDirect.refusal })})`);
 }
 
-console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, at most 20, noted at its capture time; a re-capture opens none; a capture key's own; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts holding no item yet, classifying a new key an agent and stopping for a known one with no kind, no thought's metadata changed, and a second run opens nothing");
+console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extracted action items opened as proposed items from the captured thought, by the capturing key, distinct and non-blank, at most 20, noted at its capture time; a re-capture opens none; a capture key's own; the backfill counts in a dry run and writes nothing, then opens the rest as proposed from their thoughts holding no item yet, passing over action items that are not a list (null, a string, an object, a number), classifying a new key an agent and stopping for a known one with no kind, no thought's metadata changed, and a second run opens nothing");
 {
   type I = { id: string; status: string; text: string; originThoughtId: string | null; notedAt: string; openedBy: { name: string; scope: string | null; trust: string | null } };
   const listed = async (thought: string, key?: string) => ((await rest("GET", `/v1/items?status=all&origin_thought=${thought}`, undefined, key)).body.items ?? []) as I[];
@@ -1892,6 +1892,11 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   const b3Own = await rest("POST", "/v1/items", { text: "fold the laundry", origin_thought: b3 });
   // A thought holding no text 117 would take is never taken (review pass 2: it opened nothing and was taken again by every run).
   await raw("rho backfill: a ticket of one long line", ["z".repeat(1100)]);
+  // Action items that are not an array — JSON null, as board-sync wrote on ten of stable's rows, a string, an object,
+  // a number — are passed over, and never fail the query (SMD-4141: `jsonb_typeof(x) = 'array' AND
+  // jsonb_array_length(x) > 0` handed the length a scalar, and the dry run died before it counted anything).
+  for (const [i, shape] of ([null, "water the ferns", { first: "water the ferns" }, 7] as unknown[]).entries())
+    await raw(`rho backfill: a ticket whose action items are not a list (${i})`, shape);
   const meta = async () => JSON.stringify(await sql`SELECT id, metadata, updated_at::text AS u FROM thoughts WHERE id IN (${b1}::uuid, ${b2}::uuid) ORDER BY id`);
   const itemCount = async () => Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
   const before = await meta(), itemsBefore = await itemCount();
