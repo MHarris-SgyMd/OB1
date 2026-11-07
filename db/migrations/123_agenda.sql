@@ -239,7 +239,7 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('not an agenda scope: %s (the scopes are label, project and source)', left(v_bad, 200)), ERRCODE = 'invalid_parameter_value';
   END IF;
   SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad FROM jsonb_each(COALESCE(p_scope, '{}')) e(k, v)
-   WHERE jsonb_typeof(v) <> 'string' OR (v #>> '{}') !~ '[^[:space:]]' OR length(v #>> '{}') > 200;
+   WHERE jsonb_typeof(v) <> 'string' OR (v #>> '{}') !~ '[^[:space:]\u00a0\u2007\u202f\ufeff]' OR length(v #>> '{}') > 200;
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = format('an agenda scope is a non-empty string of at most 200 characters: %s', v_bad), ERRCODE = 'invalid_parameter_value';
   END IF;
@@ -265,6 +265,12 @@ BEGIN
      WHERE w.released_at IS NULL AND w.expires_at > p_now
        AND CASE WHEN v_agent IS NOT NULL THEN w.holder_agent_id = v_agent OR (w.holder_agent_id IS NULL AND w.holder_name = v_name)
                 ELSE w.holder_name = v_name END;
+  END IF;
+
+  -- The weights checked whatever the scope holds: 122 refuses a bad one, and a
+  -- scope matching nothing would otherwise never call it (review pass 7).
+  IF p_weights IS NOT NULL THEN
+    PERFORM count(*) FROM effective_priority('[]'::jsonb, p_weights, p_now);
   END IF;
 
   -- The candidates, in the scope.

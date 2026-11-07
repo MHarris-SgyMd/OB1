@@ -18129,11 +18129,11 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   });
   await db.transaction(async (tx) => {
     await tx.exec(`SET LOCAL ROLE ag110_noclaims`);
-    try { await tx.query(`SELECT agenda(NULL, '{"name": "ag-bot"}'::jsonb)`); } catch (e) { softMine = String((e as { code?: string }).code ?? "?"); }
+    try { await tx.query(`SELECT agenda(NULL, '{"name": "ag-bot"}'::jsonb)`); } catch (e) { softMine = `${String((e as { code?: string }).code ?? "?")} ${(e as Error).message}`; }
   });
   const softA = soft as Ag | null;
-  assert(softA !== null && (softA as unknown as { claims_read: boolean }).claims_read === false && softA.items.some((i) => i.key === "SMD-9801") && softA.left_out.claimed === 0 && softMine === "42501",
-    `without the claims group the claimed ticket is listed, nothing counted as claimed, claims_read false; mine refused 42501 (${softA?.items.length}; ${softMine})`);
+  assert(softA !== null && (softA as unknown as { claims_read: boolean }).claims_read === false && softA.items.some((i) => i.key === "SMD-9801") && softA.left_out.claimed === 0 && /^42501 agenda: holder mine reads work_claims/.test(softMine),
+    `without the claims group the claimed ticket is listed, nothing counted as claimed, claims_read false; mine refused 42501 in 123's own words, which the core maps to CLAIMS_UNREADABLE (${softA?.items.length}; ${softMine})`);
   await db.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ag110_noclaims; DROP ROLE ag110_noclaims`);
 
   // Open items: open ones listed, proposed only when asked; source scopes; a project or label scope leaves them out.
@@ -18169,6 +18169,27 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
          && onceB.left_out.blocked === 0 && onceB.left_out.claimed === 1 && onceB.left_out.waiting === 1,
     `a waiting and blocked ticket counts once, as waiting; a blocked and claimed one once, as blocked, and as claimed once blocked work is shown (${JSON.stringify(once.left_out)}; ${JSON.stringify(onceB.left_out)})`);
 
+  // The sooner due time breaks a tie in score, before kind and key: a High with no date (3) and a Medium within the week
+  // (2 + 1) tie, the dated one first though its key sorts after; two Mediums within the week, the sooner first.
+  const PD = "Agenda [110] ties";
+  await ticket("SMD-9850", { project: PD }); await ticket("SMD-9851", { project: PD }); await ticket("SMD-9852", { project: PD }); await ticket("SMD-9853", { project: PD });
+  await put("SMD-9850", 3); await put("SMD-9851", 2, { due: "2027-03-15T00:00:00Z" });
+  await put("SMD-9852", 2, { due: "2027-03-16T00:00:00Z" }); await put("SMD-9853", 2, { due: "2027-03-13T00:00:00Z" });
+  const ties = await ag({ project: PD });
+  assert(keys(ties) === "SMD-9853 SMD-9851 SMD-9852 SMD-9850" && ties.items.every((i) => i.effective === 3),
+    `four tied at 3 sort by the sooner due time, the undated last, before kind and key (${keys(ties)})`);
+  // An unknown status type makes no candidate.
+  await ticket("SMD-9854", { project: PD, st: "custom" });
+  assert(!(await ag({ project: PD })).items.some((i) => i.key === "SMD-9854"), "a ticket whose head's status type is unknown is no candidate");
+  // mine lists live claims alone: one released and one lapsed are not the key's work.
+  const rel = (await db.query<{ r: { outcome: string; claim: { id: string }; token: string } }>(`SELECT claim_work('SMD-9850', NULL, 'to release', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
+  await db.query(`SELECT release_work_claim($1::uuid, $2, 'done', false, $3::jsonb)`, [rel.claim.id, rel.token, JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })]);
+  const t2 = new Date().toISOString();
+  const mineNow = await ag(null, { now: t2, holder: { name: "ag-bot", agent_id: BOT_ID } });
+  const mineLater = await ag(null, { now: new Date(Date.now() + 86_400_000).toISOString(), holder: { name: "ag-bot", agent_id: BOT_ID } });
+  assert(rel.outcome === "claimed" && !mineNow.items.some((i) => i.key === "SMD-9850") && mineNow.items.some((i) => i.key === "SMD-9801") && mineLater.items.length === 0,
+    `mine leaves out a released claim's ticket, and a day on, every lapsed one (${keys(mineNow)}; ${mineLater.items.length})`);
+
   // Board-sync's heartbeat; refusals.
   const before = (await ag({ project: P })).board_sync;
   await db.exec(`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:board-sync', '{"outcome": "ok", "every_s": 300}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
@@ -18183,9 +18204,11 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   await db.exec(`UPDATE ob1_config SET value = '{"outcome": "ok", "every_s": 300}' WHERE key = 'heartbeat:board-sync'`);
   const codes = [await raisedCode(`SELECT agenda(NULL, NULL, 0)`), await raisedCode(`SELECT agenda(NULL, NULL, 101)`), await raisedCode(`SELECT agenda('{"team": "x"}')`),
                  await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`),
-                 await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`), await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: "\t" })])];
+                 await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`), await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: "\t" })]),
+                 await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: String.fromCharCode(0xa0) + String.fromCharCode(0xfeff) })]),
+                 await raisedCode(`SELECT agenda('{"project": "nothing in scope [110]"}', NULL, 20, false, false, false, '{"bogus": 1}')`)];
   assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && nul?.outcome === null && typeof nul?.at === "string" && codes.every((c) => c === "22023"),
-    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown, empty or white-space scope, a holder with no name and a NULL flag each 22023 (${JSON.stringify(after)}; ${codes})`);
+    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown, empty or white-space scope (a no-break space and a byte-order mark among it), a holder with no name, a NULL flag and a bad weight with nothing in scope each 22023 (${JSON.stringify(after)}; ${codes})`);
 
   await reapply(file.slice(0, 4));
   assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");
