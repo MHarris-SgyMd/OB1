@@ -3494,12 +3494,13 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       `a capture key resending another key's memory with other provenance and project is answered the memory as it was written, not as it asked (${JSON.stringify([asked?.scope, asked?.review_status, asked?.provenance])})`);
     const mine = { ...Y, provenance: { default_status: "user_confirmed", confidence: 0.555, requires_review: false }, memory_payload: { decisions: ["y_mem mine, confirmed."] } };
     const firstAnswer = bodyOf(await am("writeback", mine, { as: KEYS.capture }))[0];
+    await reviewY(firstAnswer?.memory_id, { action: "confirm" });
     await reviewY(firstAnswer?.memory_id, { action: "edit", content: "y_mem mine, edited by a reviewer.", summary: "a reviewer's summary" });
     await reviewY(firstAnswer?.memory_id, { action: "dispute" });
     await reviewY(firstAnswer?.memory_id, { action: "reject" });
     const resendAnswer = bodyOf(await am("writeback", mine, { as: KEYS.capture }))[0];
     assert(firstAnswer !== undefined && JSON.stringify(resendAnswer) === JSON.stringify(firstAnswer),
-      `a capture key's resend is answered exactly what its first write was, after an edit, a dispute and a reject (${JSON.stringify(firstAnswer).slice(0, 120)} / ${JSON.stringify(resendAnswer).slice(0, 120)})`);
+      `a capture key's resend is answered exactly what its first write was, after a confirm, an edit, a dispute and a reject (${JSON.stringify(firstAnswer).slice(0, 120)} / ${JSON.stringify(resendAnswer).slice(0, 120)})`);
     const waiting = { ...Y, memory_payload: { decisions: ["y_mem waiting, then confirmed."] } };
     const waitingFirst = bodyOf(await am("writeback", waiting, { as: KEYS.capture }))[0];
     await reviewY(waitingFirst?.memory_id, { action: "confirm" });
@@ -3524,9 +3525,37 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const redacted = (await reviewY(redact.memory_id, { action: "edit", content: "y_mem a customer's address is on file." })).body.memory as Body;
     assert(redacted.summary === "y_mem a customer's address is on file." && redacted.source.title === redacted.summary && !JSON.stringify(redacted).includes("Elm St"),
       `an edit of the content alone takes its summary, so the old text leaves the memory (${redacted.summary})`);
+    // Pass 4: an edit with the same text keeps a custom summary; the queue leaves out a rejected or stale memory restricted since.
+    await reviewY(redact.memory_id, { action: "edit", summary: "a custom summary" });
+    const sameText = (await reviewY(redact.memory_id, { action: "edit", content: "y_mem a customer's address is on file." })).body.memory as Body;
+    assert(sameText.summary === "a custom summary", `an edit whose text is the memory's own keeps its summary (${sameText.summary})`);
+    const rejectedThenRestricted = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem rejected, then restricted."] } }))[0]!;
+    await reviewY(rejectedThenRestricted.memory_id, { action: "reject" });
+    await reviewY(rejectedThenRestricted.memory_id, { action: "restrict_scope" });
+    // A row with no record of its write-back (none the README's copy block leaves) is answered unconfirmed, its stored provenance, never what the resend asks.
+    const bare = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem no written record."] } }))[0]!;
+    await sql`UPDATE plugin_agent_memory.memories SET metadata = metadata - 'written' WHERE id = ${bare.memory_id}::uuid`;
+    const bareAsked = bodyOf(await am("writeback", { ...Y, provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["y_mem no written record."] } }, { as: KEYS.capture }))[0];
+    assert(bareAsked?.memory_id === bare.memory_id && bareAsked.review_status === "pending" && bareAsked.provenance.status === "generated" && bareAsked.use_policy.can_use_as_instruction === false
+      && bareAsked.thought_id === bare.thought_id,
+      `a memory with no record of its write-back is answered to a capture key unconfirmed, its stored provenance (${JSON.stringify([bareAsked?.review_status, bareAsked?.provenance?.status])})`);
+    // An edit's own summary is cut and run together; a review that is no edit leaves the summary, whatever it is sent.
+    const longText = `y_mem   long   edit ${"word ".repeat(50)}`;
+    const longEdit = (await reviewY(redact.memory_id, { action: "edit", content: longText })).body.memory as Body;
+    const notEdit = (await reviewY(redact.memory_id, { action: "confirm", summary: "not an edit's summary" })).body.memory as Body;
+    assert(longEdit.summary === longText.replace(/\s+/g, " ").slice(0, 140) && notEdit.summary === longEdit.summary,
+      `an edit's summary is its new text's first 140 characters, whitespace run together; a confirm sent a summary keeps the memory's (${longEdit.summary.length}, ${notEdit.summary === longEdit.summary})`);
+    // Each item of a capture key's resend is answered its own write-back's record.
+    const pair = { ...Y, memory_payload: { decisions: ["y_mem pair one.", "y_mem pair two."] } };
+    const pairFirst = bodyOf(await am("writeback", pair, { as: KEYS.capture }));
+    await reviewY(pairFirst[1]?.memory_id, { action: "confirm" });
+    await reviewY(pairFirst[1]?.memory_id, { action: "edit", content: "y_mem pair two, edited." });
+    const pairAgain = bodyOf(await am("writeback", pair, { as: KEYS.capture }));
+    assert(pairFirst.length === 2 && pairFirst[0].thought_id !== pairFirst[1].thought_id && JSON.stringify(pairAgain) === JSON.stringify(pairFirst),
+      `a capture key's resend of two memories answers each its own write-back, one confirmed and edited since (${JSON.stringify(pairAgain.map((m) => [m.review_status, m.thought_id === pairFirst[pairAgain.indexOf(m)]?.thought_id]))})`);
     const queueY = ids(await am("review_queue", { workspace_id: "ws-y" }, { as: KEYS.reader }));
-    assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id),
-      `review_queue lists a restricted memory no one confirmed, and not a confirmed one (${queueY.length})`);
+    assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id) && !queueY.includes(rejectedThenRestricted.memory_id),
+      `review_queue lists a restricted memory no one confirmed, not a confirmed one, nor a rejected one restricted since (${queueY.length})`);
   }
 
   // ── The embedding provider down ──

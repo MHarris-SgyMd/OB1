@@ -122,15 +122,16 @@ function asMemory(m: Row, artifacts: Map<string, z.output<typeof Artifact>[]>): 
  * answered for a memory it finds already written, so no reviewer's change since
  * (text, summary, thought, visibility, provenance, policy, review) is read
  * through it. What no review changes (project, channel, runtime, model,
- * confidence, created_by, times) is the stored row's; what one changes is the
- * write-back's own, kept in metadata.written. A migrated memory has none: its
- * provenance and review are then this write-back's as it would make them.
+ * confidence, created_by, artifacts, times) is the stored row's; what one
+ * changes is the write-back's own, kept in metadata.written (the README's copy
+ * block writes it for a migrated memory, as it stood at the copy). A row with
+ * none is answered unconfirmed, its stored provenance: never what this resend
+ * asks for.
  */
-function asWritten(m: Memory, stored: Row, row: { memory_type: (typeof MEMORY_TYPES)[number]; content: string; artifact?: { kind: string; uri: string; description?: string | null } },
-  fallback: { status: string; confirmed: boolean }): Memory {
+function asWritten(m: Memory, stored: Row, row: { memory_type: (typeof MEMORY_TYPES)[number]; content: string }): Memory {
   const written = (stored.metadata?.written ?? null) as { provenance_status?: unknown; review_status?: unknown; thought_id?: unknown } | null;
-  const status = typeof written?.provenance_status === "string" ? written.provenance_status : fallback.status;
-  const confirmed = typeof written?.review_status === "string" ? written.review_status === "confirmed" : fallback.confirmed;
+  const status = typeof written?.provenance_status === "string" ? written.provenance_status : m.provenance.status;
+  const confirmed = written?.review_status === "confirmed";
   return {
     ...m,
     thought_id: typeof written?.thought_id === "string" ? written.thought_id : m.thought_id,
@@ -144,7 +145,6 @@ function asWritten(m: Memory, stored: Row, row: { memory_type: (typeof MEMORY_TY
     freshness: { ...m.freshness, last_confirmed_at: confirmed ? m.freshness.created_at : null },
     review_status: confirmed ? "confirmed" : "pending",
     lifecycle_status: "active",
-    related_artifacts: row.artifact ? [{ kind: row.artifact.kind, uri: row.artifact.uri, description: row.artifact.description ?? null }] : [],
   };
 }
 
@@ -502,7 +502,7 @@ export default definePlugin({
             schema_version: writebackAnswerVersion(req.schema_version),
             memories: memories.map((m, i) => {
               const row = capture ? heldRows.get(m.memory_id) : undefined;
-              return row ? asWritten(m, stored[i], row, { status: req.provenance.default_status, confirmed }) : m;
+              return row ? asWritten(m, stored[i], row) : m;
             }),
           });
         });
@@ -510,7 +510,7 @@ export default definePlugin({
     }),
     record_usage: operation({
       title: "Record which recalled memories were used",
-      description: "Marks the memories a traced recall returned (request_id, from recall under a write key) as used, or ignored with a reason, and audits each. A memory id the recall did not return changes nothing, each memory is marked once however often one list names it, and one in both lists is left ignored; recorded counts the memories marked. Refused: a request_id no recall has (NO_SUCH_RECALL).",
+      description: "Marks the memories a traced recall returned (request_id, from recall under a write key) as used, or ignored with a reason, and audits each. A memory id the recall did not return changes nothing, each memory is marked once however often one list names it, and one in both lists is counted and audited in both and left ignored; recorded counts the memories marked. Refused: a request_id no recall has (NO_SUCH_RECALL).",
       scope: "write",
       annotations: CHANGES,
       method: "POST",
@@ -550,7 +550,7 @@ export default definePlugin({
     }),
     review_queue: operation({
       title: "Agent memories waiting for review",
-      description: "A workspace's memories still waiting for a person's confirmation (pending, or restricted before anyone confirmed them), newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
+      description: "A workspace's memories still waiting for a person's confirmation (pending, or restricted while still unconfirmed, and neither rejected, stale nor disputed), newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
@@ -561,7 +561,7 @@ export default definePlugin({
         return ctx.db.tx(async (sql) => {
           const rows = await chosen(sql, await sql<{ id: string }>`
             SELECT id FROM memories
-             WHERE workspace_id = ${workspace_id} AND requires_user_confirmation AND review_status IN ('pending', 'restricted')
+             WHERE workspace_id = ${workspace_id} AND requires_user_confirmation AND review_status IN ('pending', 'restricted') AND lifecycle_status = 'active'
                AND (${project_id ?? null}::text IS NULL OR project_id = ${project_id ?? null})
              ORDER BY created_at DESC, id LIMIT 100`);
           return ok({ memories: await asMemories(sql, rows) });
@@ -637,7 +637,7 @@ export default definePlugin({
     }),
     review_memory: operation({
       title: "Review an agent memory",
-      description: "A person's verdict on a memory: confirm (user_confirmed, active again from any lifecycle, usable as an instruction and as evidence), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default, never wider than the memory's own: personal, channel, project, workspace, organization, narrowest first), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left; new content with no summary takes its own first 140 characters as the summary), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), a restriction to a wider visibility (NOT_NARROWER), an edit's text that looks like a key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
+      description: "A person's verdict on a memory: confirm (user_confirmed, active again from any lifecycle, usable as an instruction and as evidence), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default, never wider than the memory's own: personal, channel, project, workspace, organization, narrowest first), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left; new content with no summary, if it differs from the old, takes its own first 140 characters as the summary), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), a restriction to a wider visibility (NOT_NARROWER), an edit's text that looks like a key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -692,7 +692,9 @@ export default definePlugin({
               visibility = CASE ${a} WHEN 'restrict_scope' THEN ${r.visibility ?? "personal"} ELSE visibility END,
               content = coalesce(${a === "edit" ? r.content ?? null : null}::text, content),
               thought_id = coalesce(${thoughtId}::uuid, thought_id),
-              summary = coalesce(${a === "edit" ? r.summary ?? (r.content !== undefined ? summaryOf(r.content) : null) : null}::text, summary),
+              summary = CASE WHEN ${a === "edit" ? r.summary ?? null : null}::text IS NOT NULL THEN ${a === "edit" ? r.summary ?? null : null}::text
+                             WHEN ${a === "edit" ? r.content ?? null : null}::text IS DISTINCT FROM content AND ${a === "edit" ? r.content ?? null : null}::text IS NOT NULL THEN ${a === "edit" && r.content !== undefined ? summaryOf(r.content) : null}::text
+                             ELSE summary END,
               updated_at = now()
             WHERE id = ${r.memory_id}::uuid`;
           const [after] = await sql<{ row: unknown }>`SELECT to_jsonb(m) AS row FROM memories m WHERE id = ${r.memory_id}::uuid`;
