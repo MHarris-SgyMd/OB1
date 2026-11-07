@@ -6914,6 +6914,18 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     ["PROPOSAL_YOURS", R({ code: "PROPOSAL_YOURS", retryable: false, proposal: A }), /^Refused: proposal \S+ is yours; another key accepts it/],
     ["CONFIRM_NOT_YOURS", R({ code: "CONFIRM_NOT_YOURS", retryable: false, item: T }), /^Refused: open item 3333\S+ was proposed, not stated; a write key confirms it/],
   ];
+  // The core's mapping (review passes 2 and 3): 123's own 42501 under mine is CLAIMS_UNREADABLE; another table's is a fault.
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const raising = (message: string) => ({ store: async () => ({ agenda: async () => { throw Object.assign(new Error(message), { errno: "42501" }); } }), logAgenda: async () => {} });
+    const P = { name: "k", scope: "read", agentId: undefined } as never;
+    const I = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, holder: "mine" } as never;
+    const mapped = await agendaRead(raising("agenda: holder mine reads work_claims, which this role may not (the claims group)") as never, P, I);
+    let other = "";
+    try { await agendaRead(raising("permission denied for table priority_assertions") as never, P, I); } catch (e) { other = (e as Error).message; }
+    assert(!mapped.ok && (mapped as { refusal: { code: string } }).refusal.code === "CLAIMS_UNREADABLE" && /priority_assertions/.test(other),
+      `123's own refusal under mine maps to CLAIMS_UNREADABLE; another table's 42501 stays a fault naming the table (${other})`);
+  }
   // The agenda (SMD-3669 review pass 2): holder mine on a role without the claims group is a refusal, in words.
   const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);
   assert(unreadable.isError === true && /^Refused: holder mine needs the claims this server's database role cannot read \(the claims group\); ask without holder$/.test(text(unreadable)),

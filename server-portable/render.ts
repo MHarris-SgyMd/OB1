@@ -2099,7 +2099,7 @@ const agendaTerm = (t: AgendaResult["items"][number]["terms"][number]): string =
   }
   if (t.term === "unknown") return `no priority stated (read as ${t.value})`;
   if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}`;
-  if (t.term === "overdue") return `+${t.value} overdue since ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
+  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
   if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
   return `${t.term} ${t.value}`;
 };

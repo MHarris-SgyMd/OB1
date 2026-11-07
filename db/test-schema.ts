@@ -18148,6 +18148,27 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
          && !base.items.some((i) => i.kind === "item"),
     `an open item is listed, a proposed one only when asked; source items lists items alone, linear tickets alone; a project scope lists no item (${all.items.length}, ${allP.items.length}, ${items.items.length}, ${linear.items.length})`);
 
+  // A plugin's own source: its open items alone, and source items leaves them out.
+  const plug = (await db.query<{ r: { outcome: string; item: { id: string } | null } }>(`SELECT open_item('[110] replace the furnace filter', NULL, NULL, NULL, 'task-110', false, $1::jsonb) AS r`,
+    [JSON.stringify({ ...OP, plugin: "hm110" })])).rows[0].r;
+  const plugItems = await ag({ source: "hm110" });
+  const plainItems = await ag({ source: "items" });
+  assert(plug.outcome === "opened" && keys(plugItems) === plug.item?.id && plugItems.items[0].source === "hm110" && !plainItems.items.some((i) => i.key === plug.item?.id),
+    `source hm110 lists that plugin's item alone, and source items leaves it out (${plug.outcome}; ${keys(plugItems)})`);
+
+  // Each left-out item counted once, under its first reason: waiting before blocked, blocked before claimed.
+  const PW = "Agenda [110] counted once";
+  await ticket("SMD-9840", { project: PW, links: [["blocked_by", "SMD-9841"]] }); await ticket("SMD-9841", { project: PW });
+  await put("SMD-9840", 2, { notBefore: "2099-01-01T00:00:00Z" });
+  await ticket("SMD-9842", { project: PW, links: [["blocked_by", "SMD-9843"]] }); await ticket("SMD-9843", { project: PW });
+  const held = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9842', NULL, 'ag-bot', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
+  const t1 = new Date().toISOString();
+  const once = await ag({ project: PW }, { now: t1 });
+  const onceB = await ag({ project: PW }, { now: t1, blocked: true });
+  assert(held.outcome === "claimed" && once.left_out.waiting === 1 && once.left_out.blocked === 1 && once.left_out.claimed === 0
+         && onceB.left_out.blocked === 0 && onceB.left_out.claimed === 1 && onceB.left_out.waiting === 1,
+    `a waiting and blocked ticket counts once, as waiting; a blocked and claimed one once, as blocked, and as claimed once blocked work is shown (${JSON.stringify(once.left_out)}; ${JSON.stringify(onceB.left_out)})`);
+
   // Board-sync's heartbeat; refusals.
   const before = (await ag({ project: P })).board_sync;
   await db.exec(`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:board-sync', '{"outcome": "ok", "every_s": 300}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
@@ -18162,9 +18183,9 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   await db.exec(`UPDATE ob1_config SET value = '{"outcome": "ok", "every_s": 300}' WHERE key = 'heartbeat:board-sync'`);
   const codes = [await raisedCode(`SELECT agenda(NULL, NULL, 0)`), await raisedCode(`SELECT agenda(NULL, NULL, 101)`), await raisedCode(`SELECT agenda('{"team": "x"}')`),
                  await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`),
-                 await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`)];
+                 await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`), await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: "\t" })])];
   assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && nul?.outcome === null && typeof nul?.at === "string" && codes.every((c) => c === "22023"),
-    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown or empty scope, a holder with no name and a NULL flag each 22023 (${JSON.stringify(after)}; ${codes})`);
+    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown, empty or white-space scope, a holder with no name and a NULL flag each 22023 (${JSON.stringify(after)}; ${codes})`);
 
   await reapply(file.slice(0, 4));
   assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");

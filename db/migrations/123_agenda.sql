@@ -236,11 +236,11 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('not an agenda scope: %s (the scopes are label, project and source)', left(v_bad, 200)), ERRCODE = 'invalid_parameter_value';
   END IF;
   SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad FROM jsonb_each(COALESCE(p_scope, '{}')) e(k, v)
-   WHERE jsonb_typeof(v) <> 'string' OR btrim(v #>> '{}') = '' OR length(v #>> '{}') > 200;
+   WHERE jsonb_typeof(v) <> 'string' OR (v #>> '{}') !~ '[^[:space:]]' OR length(v #>> '{}') > 200;
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = format('an agenda scope is a non-empty string of at most 200 characters: %s', v_bad), ERRCODE = 'invalid_parameter_value';
   END IF;
-  v_source := btrim(p_scope->>'source'); v_project := p_scope->>'project'; v_label := p_scope->>'label';
+  v_source := p_scope->>'source'; v_project := p_scope->>'project'; v_label := p_scope->>'label';
   IF v_mine THEN
     IF jsonb_typeof(p_holder) <> 'object' OR COALESCE(btrim(p_holder->>'name'), '') = '' THEN
       RAISE EXCEPTION USING MESSAGE = 'agenda: a holder is the calling key''s {name, agent_id}', ERRCODE = 'invalid_parameter_value';

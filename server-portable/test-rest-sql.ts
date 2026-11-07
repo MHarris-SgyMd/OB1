@@ -1954,6 +1954,14 @@ console.log("\n[16] The agenda through both doors (migration 123, SMD-3669): RES
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
   assert(blank.status === 400, `a blank scope is refused 400 by the schema, never a database fault (${blank.status} ${blank.body.code})`);
+  // An open item through both doors: read by the store's normaliser, rendered over MCP.
+  const opened = await rest("POST", "/v1/items", { text: "[16] water the ferns", due_at: tomorrow });
+  const its = await rest("GET", "/v1/agenda?source=items&limit=100");
+  const itsMcp = await mcp("agenda", { source: "items", limit: 100 });
+  const mine16 = ((its.body.items ?? []) as (It & { kind: string })[]).find((i) => i.key === String((opened.body.item as { id?: string } | undefined)?.id));
+  assert(opened.status === 200 && its.status === 200 && mine16?.kind === "item" && mine16.effective === 4 && !itsMcp.isError
+      && new RegExp(`\\d+\\. open item ${mine16.key} "\\[16\\] water the ferns" — 4: no priority stated \\(read as 2\\); \\+2 due by the end of `).test(itsMcp.text),
+    `an open item due tomorrow is listed over REST and said over MCP, unknown 2 plus its urgency (${its.status} ${mine16?.effective} | ${itsMcp.text.split("\n").find((l) => l.includes("water the ferns"))})`);
   const reader = await rest("GET", q, undefined, KEYS.reader);
   const hook = await rest("GET", q, undefined, KEYS.hook);
   assert(reader.status === 200 && same(reader.body.items, r.body.items) && hook.status === 403,

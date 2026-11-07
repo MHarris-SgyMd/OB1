@@ -3049,7 +3049,8 @@ if (configFailed) {
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
               : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
             // SELECT is every read's too since SMD-3599: the claimed label says its claims could not be read (review pass 2).
-            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599)" : ", and nothing else does";
+            // The agenda (SMD-3669) answers unfiltered by claims without SELECT, and refuses holder mine.
+            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599); agenda answers unfiltered by claims and refuses holder mine (SMD-3669)" : ", and nothing else does";
             add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table${also}`,
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
           } else if (logging.length) {
@@ -3103,7 +3104,8 @@ if (configFailed) {
             const eventsOnly = pr.ungranted.every((g) => g.startsWith("open_item_events "));
             const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
               : itemOnly ? "set_priority and priority_history on an open item (kind item)"
-              : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
+              : pr.ungranted.some((g) => g === "priority_assertions SELECT") ? "set_priority, clear_priority, priority_history and agenda (SMD-3669)"
+              : pr.ungranted.some((g) => g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
@@ -3142,7 +3144,7 @@ if (configFailed) {
             // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
             // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
             const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
-            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, and set_priority on an open item"
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, set_priority on an open item, and agenda (SMD-3669)"
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
