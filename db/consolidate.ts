@@ -1672,7 +1672,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pair, the first pair of a retry included (review pass 1).
    */
   async function processRow(row: Row, workerId: string, asked: { at: number }): Promise<Outcome> {
-    /** Pairs of this thought the judge answered, this claim: whether its finish got past the provider. */
+    /** Pairs of this thought the judge answered, this attempt (a retry after a pause starts again): whether its finish got past the provider. */
     let answered = 0;
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each

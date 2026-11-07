@@ -4218,8 +4218,9 @@ if (want("9f")) {
   /** Every row's embedding answers rowsStatus while the probe's passes, as a tokens-per-minute limit the probe's few tokens slip under. */
   let rowsLimited = false;
   let rowsStatus = 429;
-  /** While set, every probe hangs (SMD-2636 PR 2, review pass 5). */
+  /** While set, every probe hangs, counted (SMD-2636 PR 2, review passes 5 and 6). */
   let embedProbeHangs = false;
+  let embedProbesHung = 0;
   /** A hemlock note answers 500 every time; each row's call is held slowMs; the probe's calls are counted. */
   let poison = false;
   let slowMs = 0;
@@ -4238,7 +4239,10 @@ if (want("9f")) {
       const probe = input === PROBE;
       if (probe) probeCalls++;
       // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 5).
-      if (probe && embedProbeHangs) return neverAnswers();
+      if (probe && embedProbeHangs) {
+        embedProbesHung++;
+        return neverAnswers();
+      }
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
       if (modelGone404) return Response.json({ error: { message: `model "stub-embed" not found, try pulling it first` } }, { status: 404 });
@@ -4500,10 +4504,13 @@ if (want("9f")) {
     await sql`DELETE FROM thoughts WHERE id = ${throttledThought}::uuid`;
 
     // A stop while the wait's probe hangs ends re-embed's follower at once, as extract's and consolidate's do (SMD-2636
-    // PR 2, review pass 5, mutant: the probe given a signal of its own waited out the embedder's timeout).
-    const hungFollower = liveFollower();
+    // PR 2, review passes 5 and 6): its calls' timeout 20 s, past the 3 s bar, so a probe deaf to the stop holds the
+    // exit until its own deadline (at this section's 2 s it ended inside the bar).
+    const hungFollower = liveFollower({ env: { ...env, OB1_LLM_TIMEOUT: "20" } });
     await hungFollower.idle();
     const hungProbesBefore = probeCalls;
+    const hungBefore = embedProbesHung;
+    let hungAtStop = 0;
     let hungThought = "";
     let hungExit = "";
     let hungStopMs = -1;
@@ -4511,18 +4518,20 @@ if (want("9f")) {
       rowsLimited = true;
       embedProbeHangs = true;
       hungThought = await newThought("a thought whose outage's probe hangs");
-      await pollUntil(async () => probeCalls > hungProbesBefore, 15_000);
+      await pollUntil(async () => embedProbesHung > hungBefore, 15_000);
       await Bun.sleep(300);
+      hungAtStop = embedProbesHung - hungBefore;
       const stopAt = Date.now();
       hungExit = String(await hungFollower.stop());
       hungStopMs = Date.now() - stopAt;
     } finally {
       rowsLimited = false;
       embedProbeHangs = false;
+      if (hungExit === "") await hungFollower.stop();
     }
     const hungWaited = hungFollower.lines.some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
-    assert(hungWaited && hungExit === "exit 0" && hungStopMs >= 0 && hungStopMs < 3_000,
-      `a stop while the wait's probe hangs ends re-embed's follower at once (SMD-2636 PR 2, review pass 5; waited ${hungWaited}, ${hungExit} ${hungStopMs} ms after the stop; ${hungFollower.lines.filter((l) => /not answering|answers|stopp/.test(l)).join(" | ").slice(0, 300)})`);
+    assert(hungWaited && hungAtStop >= 1 && hungExit === "exit 0" && hungStopMs >= 0 && hungStopMs < 3_000,
+      `a stop while the wait's probe hangs ends re-embed's follower at once (SMD-2636 PR 2, review passes 5 and 6; waited ${hungWaited}, ${hungAtStop} probe(s) hanging, ${hungExit} ${hungStopMs} ms after the stop; ${hungFollower.lines.filter((l) => /not answering|answers|stopp/.test(l)).join(" | ").slice(0, 300)})`);
     if (hungThought) await sql`DELETE FROM thoughts WHERE id = ${hungThought}::uuid`;
 
     // The write's database errors are no thought's (review pass 3: each was recorded as its failure). A trigger on thoughts raises them for a marker.
@@ -15171,7 +15180,7 @@ if (want("16")) {
   const judgeDownPrompts: string[] = [];
   /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
   let judgeProbeHangs = false;
-  /** While set, the pair holding both words answers 429 (SMD-2636 PR 2, review pass 5); every pair asked meanwhile, kept. */
+  /** While set, the pair holding both words answers 429 (SMD-2636 PR 2, review pass 5); every other pair answered meanwhile, kept. */
   let tideLimited: string[] | null = null;
   const tideSeen: string[] = [];
   /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
@@ -15229,8 +15238,8 @@ if (want("16")) {
       }
       // A pair whose two thoughts hold both words is limited, every time (SMD-2636 PR 2, review pass 5).
       if (tideLimited) {
-        tideSeen.push(`${a}\n${b}`);
         if (tideLimited.every((w) => a.includes(w) || b.includes(w))) return new Response(JSON.stringify({ error: { message: "too many tokens per minute" } }), { status: 429 });
+        tideSeen.push(`${a}\n${b}`);
       }
       if (judgeLimitConcurrent) {
         if (judgeCallsInFlight > 0) return new Response(JSON.stringify({ error: { message: "too many concurrent requests" } }), { status: 429 });
@@ -16818,10 +16827,14 @@ if (want("16")) {
     const backstop = setTimeout(() => ac.abort(), 60_000);
     const tideSeeds: string[] = [];
     let twice = false;
+    let newestDone = false;
+    const waitAt: number[] = [];
+    let loneSeed = "";
+    let thrice = false;
     let running: Promise<number> | null = null;
     try {
       const startJudgeProbes = judgeProbes;
-      running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      running = runConsolidate({ url: URL_!, env, workers: 2, batch: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => { lines.push(l); if (/^ {2}the provider is not answering \(/.test(l)) waitAt.push(Date.now()); } } });
       await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
       // The two neighbours first, judged and done, so neither finishes between the newest's outages.
       tideSeeds.push(await seed("The tide table names the first neighbour.", 74, 3, ["tide-table"]));
@@ -16835,7 +16848,18 @@ if (want("16")) {
       await pollUntil(async () => (await Promise.all(tideSeeds.map(async (id) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status))).every((st) => st === "succeeded"), 20_000);
       tideLimited = ["newest reading", "second neighbour"];
       tideSeeds.push(await seed("The tide table names the newest reading.", 74, 0, ["tide-table"]));
+      // During the first wait, a thought with no candidate: the pass after the answer finishes it with no call, beside
+      // the newest's second cycle, and that is no work got past (review pass 6, mutant: a finish counted without a call).
+      await pollUntil(async () => waitAt.length >= 1, 30_000);
+      loneSeed = await seed("The lone note on the far side of the tide.", 75, 0, ["lone-tide"]);
       twice = await pollUntil(async () => lines.filter((l) => /^ {2}the provider is not answering \(/.test(l)).length >= 2, 30_000);
+      // Then the newest finishes, having asked: work got past, so the next outage starts over (review pass 6: no row
+      // held this half — a count that never moved passed).
+      tideLimited = null;
+      newestDone = await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${tideSeeds[2]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === "succeeded", 20_000);
+      tideLimited = ["fourth reading", "second neighbour"];
+      tideSeeds.push(await seed("The tide table names the fourth reading.", 74, 0, ["tide-table"]));
+      thrice = await pollUntil(async () => lines.filter((l) => /^ {2}the provider is not answering \(/.test(l)).length >= 3, 30_000);
     } finally {
       tideLimited = null;
       ac.abort();
@@ -16848,7 +16872,12 @@ if (want("16")) {
     const firstAsked = tideSeen.filter((p) => p.includes("newest reading") && p.includes("first neighbour")).length;
     assert(twice && firstAsked >= 2 && !/ \(back within /.test(tideWaits[0] ?? "") && (tideWaits[1] ?? "").endsWith(" (back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on)"),
            `a thought whose first pair is judged each cycle and its second never carries the schedule on: pairs asked again are no work got past (SMD-2636 PR 2, review pass 5; first pair asked ${firstAsked} times; ${tideWaits.map((l) => l.slice(-110)).join(" | ")})`);
-    for (const id of tideSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    const loneAt = loneSeed ? ((await sql`SELECT extract(epoch FROM finished_at) * 1000 AS at, status FROM thought_work_claims WHERE thought_id = ${loneSeed}::uuid AND work_type = ${KEY}`)[0] as { at: number | null; status: string } | undefined) : undefined;
+    assert(loneAt?.status === "succeeded" && loneAt.at !== null && Number(loneAt.at) < (waitAt[1] ?? 0),
+           `…a thought with no candidate finished between the two outages, so the carry above held a finish with no call uncounted (review pass 6; ${loneAt?.status}, ${loneAt?.at !== undefined && loneAt?.at !== null ? Math.round(Number(loneAt.at) - (waitAt[1] ?? 0)) : "?"} ms from the second wait)`);
+    assert(newestDone && thrice && !/ \(back within /.test(tideWaits[2] ?? ""),
+           `…and once it finishes, having asked the judge, the next outage starts the schedule over (review pass 6; finished ${newestDone}, ${tideWaits.length} waits; ${(tideWaits[2] ?? "").slice(-110)})`);
+    for (const id of [...tideSeeds, loneSeed]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —
