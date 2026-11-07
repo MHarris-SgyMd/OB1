@@ -303,15 +303,6 @@ async function synthesize(cfg: EmbedConfig, model: string, userPrompt: string, k
   return text;
 }
 
-/** A URL with the bot token taken out, as written and percent-encoded (either case), for a message to print. */
-export function maskToken(url: string, token: string): string {
-  if (!token) return url;
-  let out = url.split(token).join("<token>");
-  const encoded = encodeURIComponent(token);
-  if (encoded !== token) out = out.replace(new RegExp(encoded.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%[0-9A-F]{2}/g, (m) => `(?:${m}|${m.toLowerCase()})`), "g"), "<token>");
-  return out;
-}
-
 /**
  * The digest's text to Telegram, in chunks. Exported for test-local-provider.ts [13]: a redirect is refused, never
  * followed, and the token in its path is never printed (SMD-2908).
@@ -328,8 +319,9 @@ export async function deliverTelegram(at: ProviderEndpoint, token: string, chatI
         // Never followed: the gate judged this base, not where a 3xx points (SMD-2908).
         redirect: "manual",
       });
-      // The target masked: a redirect to the same path elsewhere carries the token in it, as written or percent-encoded.
-      const redirected = refuseRedirect("Telegram sendMessage", at.base, r, (shown) => maskToken(shown, token));
+      // The target's host alone: a redirect to the same path elsewhere carries the token in it, in any spelling a
+      // server picks, so no mask of the path holds (review pass 2).
+      const redirected = refuseRedirect("Telegram sendMessage", at.base, r, { hostOnly: true });
       if (redirected) throw redirected;
       if (!r.ok) {
         const err = new Error(`Telegram sendMessage failed: ${r.status} ${await r.text()}`) as Error & { status?: number };

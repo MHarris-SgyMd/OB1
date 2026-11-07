@@ -2395,13 +2395,15 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
   const { extractEntities } = await import("./entities.ts");
   const { resolveJevConfig, jevInfo } = await import("./jev.ts");
   const { probeChat, probeTier, modelListed, classifyError } = await import("../db/worker-bootstrap.ts");
-  const { deliverTelegram, maskToken } = await import("../db/weekly-digest.ts");
+  const { deliverTelegram } = await import("../db/weekly-digest.ts");
   // The far origin: anything that reaches it went past the gate's judgement of the base.
   const farSeen: string[] = [];
   const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farSeen.push(`${req.method} ${new URL(req.url).pathname} ${await req.text()}`); return Response.json({ data: [], choices: [] }); } });
   // The base the gate judged: a stand-in declared local that redirects every request to the same path at the far origin.
   let status = 307;
-  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response("moved", { status, headers: { location: `http://127.0.0.1:${far.port}${new URL(req.url).pathname}` } }) });
+  /** Set, a relative Location the stand-in answers instead (review pass 2: it must resolve against the URL that answered). */
+  let relative = "";
+  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response("moved", { status, headers: { location: relative || `http://127.0.0.1:${far.port}${new URL(req.url).pathname}` } }) });
   const NEAR = `http://127.0.0.1:${near.port}/v1`;
   const FAR = `127.0.0.1:${far.port}`;
   try {
@@ -2436,10 +2438,16 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     const token = "123456:private-bot-token";
     const tg = await failure(deliverTelegram(providerEndpoint(NEAR, undefined, true), token, "42", "the digest's private text"));
     const tgMsg = tg instanceof Error ? tg.message : String(tg);
-    assert(tg instanceof ProviderError && tg.status === 307 && /never followed/.test(tgMsg) && !tgMsg.includes("private-bot-token") && tgMsg.includes("<token>"),
-      `the digest's Telegram post fails as a redirect, its token masked in the target named (${tgMsg})`);
-    assert(maskToken(`https://x/bot${encodeURIComponent(token)}/sendMessage`, token) === "https://x/bot<token>/sendMessage" && maskToken(`https://x/bot${encodeURIComponent(token).toLowerCase()}/m`, token) === "https://x/bot<token>/m",
-      "…and a token percent-encoded in the target, in either case, is masked too");
+    // Its target is named by host alone: a path that echoes the token can spell it any way a server likes (review pass 2).
+    assert(tg instanceof ProviderError && tg.status === 307 && /never followed/.test(tgMsg) && tgMsg.includes(`redirecting to http://${FAR}/…:`) && !/private-bot-token|bot123456/.test(tgMsg) && !/sendMessage/.test(tgMsg.split("redirecting to")[1] ?? ""),
+      `the digest's Telegram post fails as a redirect, naming only the target's host, never the token in its path (${tgMsg})`);
+    // A relative target is resolved against the URL that answered, as fetch would, not the base: the base's last
+    // segment is kept (review pass 2: against the base, `embeddings-v2` read as http://host/embeddings-v2).
+    relative = "embeddings-v2";
+    const rel = await failure(createEmbedder(() => cfg).getEmbedding("private text", { kind: "re-embed" }));
+    relative = "";
+    const relMsg = rel instanceof Error ? rel.message : String(rel);
+    assert(relMsg.includes(`redirecting to ${NEAR}/embeddings-v2:`), `a relative target resolves against the URL that answered (${relMsg})`);
     // The Linear client, which board-findings posts brain rows through under the gate: refused, its key sent nowhere else.
     const gql = linearClient("lin_api_private", fetch, { url: `${NEAR}/graphql`, timeoutMs: 5000 });
     const lin = await failure(gql("query { viewer { id } }"));
@@ -2458,10 +2466,15 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     near.stop(true);
     far.stop(true);
   }
-  // A guard over the files, as [11]'s: every bare fetch (or an injected fetchImpl) in the servers', the REST core's,
-  // db/'s, the MCP server's and the plugins' files passes redirect: "manual" or "error" in its call, so a dialler added
-  // later cannot follow one by leaving it out — whatever its URL says, since the digest's builds its URL a line before
-  // (a guard keyed on a model path in the call missed it). Two are not diallers of brain text, each named with why.
+  // A guard over the files, as [11]'s: every fetch call (fetch, globalThis.fetch, Bun.fetch, an injected fetchImpl) in
+  // the servers', the REST core's, db/'s, the MCP server's and the plugins' files passes redirect: "manual" or "error"
+  // in its options, so a dialler added later cannot follow one by leaving it out — whatever its URL says, since the
+  // digest's builds its URL a line before (a guard keyed on a model path in the call missed it). Read by the
+  // TypeScript parser (review pass 2: a scanner of its own read a comment's or a string's `redirect: "manual"` as the
+  // option, a spread after it as nothing, and skipped a call after a regex literal's quote). `fetch` named but not
+  // called — passed, assigned, a default — is counted too, so an alias cannot dial unread. Each call or alias that
+  // dials no brain text is named with why.
+  const ts = (await import("typescript")).default;
   const { readdirSync, readFileSync, statSync } = await import("node:fs");
   const here = dirname(fileURLToPath(import.meta.url));
   /** A directory's .ts files, its subdirectories' too when `deep`, node_modules and the test files left out. */
@@ -2472,80 +2485,84 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     return p.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(p) ? [p] : [];
   });
   const files = [...[here, join(here, "core"), join(here, "rest"), join(here, "../db"), join(here, "../mcp-server")].flatMap((d) => tsIn(d, false)), ...tsIn(join(here, "../plugins"), true)];
-  /** A call longer than this is one the scanner lost (a regex literal's paren, say), and counts as unguarded. */
-  const CALL_CHARS = 3000;
-  /** The call starting at `from` (its open paren), comments, quoted strings and template literals skipped; null when it does not close within CALL_CHARS. */
-  const callAt = (src: string, from: number): string | null => {
-    let depth = 0;
-    const stop = Math.min(src.length, from + CALL_CHARS);
-    for (let i = from; i < stop; i++) {
-      const c = src[i];
-      // A comment's words ("the caller's deadline") are not code: an apostrophe there opens no string.
-      if (c === "/" && src[i + 1] === "/") {
-        i = src.indexOf("\n", i);
-        if (i < 0) return null;
-        continue;
-      }
-      if (c === "/" && src[i + 1] === "*") {
-        i = src.indexOf("*/", i + 2) + 1;
-        if (i <= 0) return null;
-        continue;
-      }
-      if (c === "'" || c === '"' || c === "`") {
-        for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++;
-        continue;
-      }
-      if (c === "(") depth++;
-      else if (c === ")" && --depth === 0) return src.slice(from, i + 1);
+  type Node = import("typescript").Node;
+  type Expression = import("typescript").Expression;
+  /** fetch, fetchImpl, globalThis.fetch or Bun.fetch. */
+  const isFetch = (e: Expression): boolean =>
+    (ts.isIdentifier(e) && (e.text === "fetch" || e.text === "fetchImpl"))
+    || (ts.isPropertyAccessExpression(e) && e.name.text === "fetch" && ts.isIdentifier(e.expression) && (e.expression.text === "globalThis" || e.expression.text === "Bun"));
+  /** Whether a call's options say redirect "manual" or "error", with no spread after it that could say otherwise. */
+  const refuses = (init: Expression | undefined): boolean => {
+    if (!init || !ts.isObjectLiteralExpression(init)) return false;
+    let ok = false;
+    for (const p of init.properties) {
+      if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && p.name.text === "redirect") ok = ts.isStringLiteral(p.initializer) && (p.initializer.text === "manual" || p.initializer.text === "error");
+      else if (ts.isShorthandPropertyAssignment(p) && p.name.text === "redirect") ok = false;
+      else if (ts.isSpreadAssignment(p)) ok = false;
     }
-    return null;
+    return ok;
   };
-  const CALL = /(?<![.\w])(?:fetch|fetchImpl)\s*\(/g;
-  const REDIRECT_OPTION = /\bredirect\s*:\s*["'](?:manual|error)["']/;
-  /** A source's calls: the guarded count, and each unguarded one by its line. */
-  const scan = (src: string): { guarded: number; unguarded: number[] } => {
-    const out = { guarded: 0, unguarded: [] as number[] };
-    for (const m of src.matchAll(CALL)) {
-      // A fetch( in a comment, or inside a string still open on its line, is no call. The line's closed strings are
-      // taken out first, so a URL's // in one ("http://h") is not read as a comment (review pass 1).
-      const line = src.slice(src.lastIndexOf("\n", m.index) + 1, m.index).replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`/g, "");
-      if (/\/\/|^\s*\*|["'`]/.test(line)) continue;
-      const call = callAt(src, m.index + m[0].length - 1);
-      if (call !== null && REDIRECT_OPTION.test(call)) out.guarded++;
-      else out.unguarded.push(src.slice(0, m.index).split("\n").length);
-    }
+  /** A source's fetch calls, guarded or not by line, and `fetch` named but not called (an alias, a default, an argument) by line. */
+  const scan = (src: string): { guarded: number; unguarded: number[]; aliases: number[] } => {
+    const sf = ts.createSourceFile("scanned.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const out = { guarded: 0, unguarded: [] as number[], aliases: [] as number[] };
+    const line = (n: Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+    const visit = (n: Node): void => {
+      if (ts.isCallExpression(n) && isFetch(n.expression)) {
+        if (refuses(n.arguments[1])) out.guarded++;
+        else out.unguarded.push(line(n));
+      } else if (ts.isIdentifier(n) && n.text === "fetch") {
+        const p = n.parent;
+        // Not an alias: the callee itself, a property's name (x.fetch, { fetch }, a method), a type (typeof fetch), a declaration's own name.
+        const named = (ts.isCallExpression(p) && p.expression === n) || (ts.isPropertyAccessExpression(p) && p.name === n)
+          || ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isMethodSignature(p) || ts.isPropertySignature(p)) && p.name === n)
+          || ts.isTypeQueryNode(p) || ts.isQualifiedName(p) || ((ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p) || ts.isParameter(p)) && p.name === n);
+        if (!named) out.aliases.push(line(n));
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
     return out;
   };
-  // The scanner's own teeth, on the shapes a cold read found it passing (review pass 1).
-  const fixtures: [string, string, number][] = [
-    ["a redirect that follows", 'await fetch(u, { method: "POST", redirect: "follow" });', 1],
-    ["a regex literal's paren, a guarded call after it", 'await fetch(base.replace(/\\($/, "") + "/chat", { method: "POST" });\nawait fetch(x, { redirect: "manual" });', 1],
-    ["a URL's // in a string before the call", 'const u = "http://h"; await fetch(u, { method: "POST" });', 1],
-    ["an injected fetchImpl", 'const r = await fetchImpl(url, { method: "POST" });', 1],
-    ["a guarded call, a comment's apostrophe inside", 'await fetch(u, {\n  // the caller\'s deadline\n  redirect: "manual",\n});', 0],
+  // The scanner's own teeth, on the shapes two cold reads found a scanner of its own passing (review passes 1 and 2).
+  const fixtures: [string, string, { unguarded: number; aliases?: number }][] = [
+    ["a redirect that follows", 'await fetch(u, { method: "POST", redirect: "follow" });', { unguarded: 1 }],
+    ["a regex literal's paren and quote, then a call", 'const re = /"\\(/; await fetch(u, { method: "POST" });\nawait fetch(x, { redirect: "manual" });', { unguarded: 1 }],
+    ["a URL's // in a string before the call", 'const u = "http://h"; await fetch(u, { method: "POST" });', { unguarded: 1 }],
+    ["an injected fetchImpl", 'const r = await fetchImpl(url, { method: "POST" });', { unguarded: 1 }],
+    ["globalThis.fetch and Bun.fetch", 'await globalThis.fetch(u, { method: "POST" }); await Bun.fetch(u, { method: "POST" });', { unguarded: 2 }],
+    ["the option in a comment", 'await fetch(u, { method: "POST", // redirect: "manual"\n body });', { unguarded: 1 }],
+    ["the option in a string", "await fetch(u, { body: JSON.stringify({ x: 'redirect: \"manual\"' }) });", { unguarded: 1 }],
+    ["a spread after the option", 'await fetch(u, { redirect: "manual", ...opts });', { unguarded: 1 }],
+    ["an alias", "const f = fetch; await f(u, {});", { unguarded: 0, aliases: 1 }],
+    ["a guarded call, a comment's apostrophe inside, a spread before", 'await fetch(u, {\n  ...base,\n  // the caller\'s deadline\n  redirect: "manual",\n});', { unguarded: 0, aliases: 0 }],
   ];
-  const teeth = fixtures.map(([what, src, want]) => ({ what, got: scan(src).unguarded.length, want }));
-  assert(teeth.every((t) => t.got === t.want), `the guard's scanner counts each shape it was found passing as unguarded, and a guarded call as guarded (${JSON.stringify(teeth)})`);
-  /** Bare fetches that dial no provider, by file and the count of them there. */
-  const NOT_DIALLERS = new Map([
-    ["db/bench-live.ts", 1], // the benchmark's calls to the brain's own /mcp
-    ["server-portable/oauth-edge.ts", 1], // a pass-through: its caller passes redirect: "manual"
+  const teeth = fixtures.map(([what, src, want]) => { const s = scan(src); return { what, got: { unguarded: s.unguarded.length, aliases: s.aliases.length }, want }; });
+  assert(teeth.every((t) => t.got.unguarded === t.want.unguarded && (t.want.aliases === undefined || t.got.aliases === t.want.aliases)),
+    `the guard's scanner counts each shape a cold read found passing as unguarded or an alias, and a guarded call as guarded (${JSON.stringify(teeth.filter((t) => t.got.unguarded !== t.want.unguarded || (t.want.aliases !== undefined && t.got.aliases !== t.want.aliases)))})`);
+  /** Calls and aliases that dial no brain text, by file and kind, with the count there and why. */
+  const NOT_DIALLERS = new Map<string, { calls?: number; aliases?: number }>([
+    ["db/bench-live.ts", { calls: 1 }], // the benchmark's calls to the brain's own /mcp
+    ["server-portable/oauth-edge.ts", { calls: 1 }], // a pass-through: its caller passes redirect: "manual"
+    ["mcp-server/exchange.ts", { calls: 1 }], // globalThis.fetch(request): the Request it builds carries redirect: "manual"
+    ["db/linear-api.ts", { aliases: 1 }], // fetchImpl's default, whose every call is read above
+    ["db/board-findings.ts", { aliases: 2 }], // handed to linearClient as its fetchImpl, whose calls are read above
+    ["db/sync-linear.ts", { aliases: 4 }], // a local array named fetch (the identifiers to fetch), not the global
   ]);
-  const unguarded: string[] = [];
-  const allowed = new Map<string, number>();
+  const unread: string[] = [];
+  const allowed = new Map<string, { calls: number; aliases: number }>();
   let guarded = 0;
   for (const f of files) {
     const name = f.split("/").slice(-2).join("/");
     const found = scan(readFileSync(f, "utf8"));
     guarded += found.guarded;
-    for (const line of found.unguarded) {
-      if (NOT_DIALLERS.has(name)) allowed.set(name, (allowed.get(name) ?? 0) + 1);
-      else unguarded.push(`${name}:${line}`);
-    }
+    const known = NOT_DIALLERS.get(name);
+    if (known) allowed.set(name, { calls: found.unguarded.length, aliases: found.aliases.length });
+    else unread.push(...found.unguarded.map((l) => `${name}:${l}`), ...found.aliases.map((l) => `${name}:${l} (an alias)`));
   }
-  const allowedRight = [...NOT_DIALLERS].every(([name, n]) => allowed.get(name) === n);
-  assert(unguarded.length === 0 && allowedRight && guarded >= 15,
-    `every bare fetch and fetchImpl call passes redirect "manual" or "error", the two that dial no provider aside (${guarded} do; ${unguarded.join(", ") || "none without"}; allowed ${JSON.stringify([...allowed])})`);
+  const allowedRight = [...NOT_DIALLERS].every(([name, want]) => allowed.get(name)?.calls === (want.calls ?? 0) && allowed.get(name)?.aliases === (want.aliases ?? 0));
+  assert(unread.length === 0 && allowedRight && guarded >= 15,
+    `every fetch call passes redirect "manual" or "error", and none is aliased, those that dial no brain text aside (${guarded} do; ${unread.join(", ") || "none unread"}; allowed ${JSON.stringify([...allowed])})`);
 }
 
 server.stop();

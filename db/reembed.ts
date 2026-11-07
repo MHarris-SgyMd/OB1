@@ -482,7 +482,7 @@ import {
   UPDATE_THOUGHT_SIGNATURE_10,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
+import { createEmbedder, isRedirect, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
 import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
@@ -1788,15 +1788,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   /**
    * Whether a failure reads as the configuration's — a wrong width, no
    * embedding in the reply, a body that is not JSON, a model or a route the
-   * endpoint refuses (400–404) — rather than this row's or the moment's: a
+   * endpoint refuses (400–404), a redirect — rather than this row's or the moment's: a
    * timeout, a 408/429, a 5xx, a dropped connection and a database error are
    * all left to the row, since the probe's stand-in must not halt a run on a
    * rate limit (third review pass).
    */
   function configShaped(e: unknown): boolean {
     // 402 included (fifth review pass): a hosted provider out of credit answers
-    // it, and that is the account's state, not the row's.
-    if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 402, 403, 404].includes(e.status ?? 0));
+    // it, and that is the account's state, not the row's. A redirect too
+    // (SMD-2908): never followed, so the base redirects every row's call.
+    if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && ([400, 401, 402, 403, 404].includes(e.status ?? 0) || isRedirect(e.status ?? 0)));
     const msg = (e as Error).message ?? "";
     return /Embedding width mismatch|returned no embedding/.test(msg);
   }

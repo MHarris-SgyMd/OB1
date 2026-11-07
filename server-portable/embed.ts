@@ -341,16 +341,18 @@ export function isRedirect(status: number): boolean {
  * pointed (userinfo masked), so the operator can set the base there, where the
  * gate judges it. providerDown reads it as no outage, and a worker's
  * classifyError as fatal: a base that redirects one call redirects them all.
- * The answer's body is let go unread, and the target is shownLocation's.
- * `mask` hides a secret its path carries (the digest's Telegram token: a
- * redirect to the same path on another scheme echoes it), before the cap.
+ * The answer's body is let go unread, and the target is shownLocation's,
+ * resolved against the URL that answered (`r.url`, the request's own under
+ * `redirect: "manual"`), else `base`. `hostOnly`: a dialler whose path carries
+ * a secret (the digest's Telegram token, which a redirect to the same path on
+ * another scheme echoes, in any spelling) prints the target's host alone.
  */
-export function refuseRedirect(what: string, base: string, r: Response, mask: (shown: string) => string = (s) => s): ProviderError | null {
+export function refuseRedirect(what: string, base: string, r: Response, opts: { hostOnly?: boolean } = {}): ProviderError | null {
   if (!isRedirect(r.status)) return null;
   const to = r.headers.get("location");
   void r.body?.cancel().catch(() => {});
   return new ProviderError(
-    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, base, mask)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
+    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, r.url || base, opts)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
     "http", r.status);
 }
 
@@ -362,16 +364,18 @@ export const LOCATION_CHARS = 200;
  * the URL it answered for, so a relative or protocol-relative one
  * (`//user:pass@host/…`, which shownUrl's parse refuses) is read as fetch
  * would; userinfo as `***@`; a query as `?…`, since a key may ride there; and
- * capped at LOCATION_CHARS, after `mask`.
+ * capped at LOCATION_CHARS. `hostOnly`: the scheme and host, the path as `/…`.
  */
-export function shownLocation(to: string, from: string, mask: (shown: string) => string = (s) => s): string {
+export function shownLocation(to: string, from: string, opts: { hostOnly?: boolean } = {}): string {
   let u: URL;
   try {
     u = new URL(to, from);
   } catch {
     return "an address that does not parse";
   }
-  const shown = mask(`${u.protocol}//${u.username || u.password ? "***@" : ""}${u.host}${u.pathname}${u.search ? "?…" : ""}`);
+  const origin = `${u.protocol}//${u.username || u.password ? "***@" : ""}${u.host}`;
+  if (opts.hostOnly) return `${origin}/…`.slice(0, LOCATION_CHARS);
+  const shown = `${origin}${u.pathname}${u.search ? "?…" : ""}`;
   return shown.length > LOCATION_CHARS ? `${shown.slice(0, LOCATION_CHARS)}…` : shown;
 }
 
