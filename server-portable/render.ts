@@ -25,7 +25,7 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
+import { parseListCursor, parseProposalCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
@@ -33,6 +33,7 @@ import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemH
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
+import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
@@ -82,7 +83,7 @@ function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   // list_supersession_proposals' (SMD-3249) likewise: a tag, its selection's tokens and pass key, a confidence, a
   // timestamp's text and a uuid.
-  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v))) return v;
+  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v) || parseThreadCursor(v))) return v;
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
@@ -90,6 +91,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
   // A priority item's key (SMD-3664): a uuid, which carries no sentence; a ticket's key is a token already.
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
+  // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
+  if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -801,6 +804,61 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_thoughts cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out for the first page."
     : unknownRefusal(r), safeList);
+}
+
+/** A subject key a structured value may carry: a ticket's, a pull request's or a version's, each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */
+const SHAPED_KEY = /^(?:ticket:[A-Z][A-Z0-9]*-[0-9]+|pr:[0-9]{1,9}|version:v[0-9]+(?:\.[0-9]+){1,3})$/;
+/** thread (SMD-3306 PR 7a-2a): per thread its key (a shaped one), size, place, page bounds and cursor, each member's id, time, place, superseding thought and ticket, and its linked threads. */
+const safeThread: Safe<ThreadResult> = (v) => ({
+  id: v.id,
+  threads: v.threads.map((t) => ({
+    key: SHAPED_KEY.test(t.key) ? t.key : null, total: t.total, place: t.place, earlier: t.earlier, cursor: t.cursor,
+    members: t.members.map((m) => ({ id: m.id, created_at: m.created_at, place: m.place, supersededBy: m.supersededBy, ticket: m.ticket ? { issue: m.ticket.issue, statusType: m.ticket.statusType } : null })),
+    linked: t.linked.map((l) => ({ key: l.key, relation: l.relation, total: l.total })), linkedMore: t.linkedMore,
+  })),
+});
+/** How a linked ticket stands to the thread's, in words. */
+const LINKED_WORDS: Record<ThreadShown["linked"][number]["relation"], string> = { parent: "its parent", child: "its child", blocks: "blocks it", blocked_by: "blocked by it", relates_to: "relates to it" };
+const membersWord = (n: number) => `${n} thought${n === 1 ? "" : "s"}`;
+/** A thread's key in the text: a phrase, the judge model's words, quoted and cut. */
+const threadKeyText = (key: string) => SHAPED_KEY.test(key) ? key : JSON.stringify(oneLine(snipText(key, 120)));
+/** A thread's linked threads as one line, or nothing. */
+const linkedLine = (t: ThreadShown) => t.linked.length
+  ? `Linked threads (no thread runs across a link): ${t.linked.map((l) => `${l.key} ${LINKED_WORDS[l.relation]} (${membersWord(l.total)})`).join("; ")}${t.linkedMore ? "; and more the board holds" : ""}.`
+  : "";
+/** One thread as the text says it: its key and size, its linked threads, each member with its marks, and how to page on. */
+function threadText(t: ThreadShown, thought: string | null): string {
+  const first = t.members[0]?.place ?? 1, last = t.members[t.members.length - 1]?.place ?? 0;
+  const head = `Thread ${threadKeyText(t.key)} — ${membersWord(t.total)}${t.members.length && (t.earlier || t.cursor) ? `, ${first}–${last} shown` : ""}${t.place !== null ? `; this thought is #${t.place}` : ""}:`;
+  const linked = linkedLine(t);
+  const members = t.members.map((m) => {
+    const marks = [
+      m.id === thought ? "   ◀ this thought" : "",
+      m.supersededBy ? `   ⚠ Superseded by a newer thought — ID ${m.supersededBy} (it stays in the thread, which keeps its history)` : "",
+      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status now, quoted, the row's own words.
+      m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status now ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
+    ].filter(Boolean);
+    return `${m.place}. ${JSON.stringify(oneLine(m.title))}\n   ID: ${m.id}${marks.length ? `\n${marks.join("\n")}` : ""}`;
+  });
+  const before = t.earlier ? `\n(${first - 1} earlier: read the key's thread from its start for them.)` : "";
+  const more = t.cursor ? `\n\nMore follow. Cursor: ${t.cursor} — pass it as \`after\` with key ${threadKeyText(t.key)} for the next page.` : "";
+  return `${head}${linked ? `\n${linked}` : ""}${before}\n\n${members.join("\n\n")}${more}`;
+}
+
+export function renderThread(o: Outcome<ThreadResult>): Reply {
+  return render(o, ({ id, threads }) => {
+    if (id !== null && threads.length === 0) return `Thought ${id} stands in no thread: no subject has been found for it yet (the extraction worker's rules find a ticket's, its --subjects sweep asks the judge model for the rest).`;
+    const t = threads[0];
+    if (id === null && t && t.total === 0) return `No thought holds subject ${threadKeyText(t.key)}: its thread is empty.${linkedLine(t) ? `\n${linkedLine(t)}` : ""}`;
+    const lead = id === null ? "" : `Thought ${id} stands in ${threads.length === 1 ? "one thread" : `${threads.length} threads`}.\n\n`;
+    return lead + threads.map((x) => threadText(x, id)).join("\n\n———\n\n");
+  }, (r) => r.code === "REFUSED_THREAD_INPUT"
+    ? r.problem === "key_or_id" ? "Refused: give exactly one of `key` (a subject key, such as ticket:SMD-3306) or `id` (a thought's id)."
+      : r.problem === "after_needs_key" ? "Refused: `after` continues one thread — give it with that thread's `key`, as the page that ended with it said."
+        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>.`
+    : r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a thread cursor — pass the `cursor` a thread's page ended with, as it was given, with that thread's key."
+      : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
+        : unknownRefusal(r), safeThread);
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {

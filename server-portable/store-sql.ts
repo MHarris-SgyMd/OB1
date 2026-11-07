@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1447,6 +1447,95 @@ export class SqlStore implements ThoughtStore {
     }
     labelReadOk();
     return normaliseTicketStatusInputs(rows);
+  }
+
+  async threadPage(key: string, w: ThreadWindow): Promise<ThreadPage> {
+    // SMD-3306 PR 7a-2a: the thread from its standing subjects (111's key index), numbered in 120's order — created_at,
+    // ties by id, an undated thought last — then the page cut from it. A thread is read whole to number it: its size
+    // is a subject's: stable's largest held 47 thoughts on 11-06.
+    const after = w.after ?? null;
+    const cut = w.around !== undefined
+      ? this.sql`place >= (SELECT place FROM thread WHERE id = ${w.around}::uuid) - ${w.before}::int`
+      : after === null ? this.sql`TRUE`
+        : after.at === null ? this.sql`created_at IS NULL AND id > ${after.id}::uuid`
+          : this.sql`(created_at > ${after.at}::timestamptz OR (created_at = ${after.at}::timestamptz AND id > ${after.id}::uuid) OR created_at IS NULL)`;
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        WITH thread AS (
+          SELECT t.id, t.created_at, t.created_at::text AS at, left(t.content, ${THREAD_HEAD_CHARS}::int) AS content,
+                 t.metadata->>'issue' AS issue, t.metadata->>'status' AS status, t.metadata->>'status_type' AS status_type,
+                 row_number() OVER (ORDER BY t.created_at, t.id) AS place
+            FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id
+           WHERE f.kind = 'subject' AND f.valid_until IS NULL AND f.payload->>'key' = ${key}::text),
+        page AS (SELECT * FROM thread WHERE ${cut} ORDER BY place LIMIT ${w.limit}::int)
+        SELECT (SELECT count(*) FROM thread)::int AS total,
+               COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id, 'place', place, 'at', at, 'created_at', created_at, 'content', content,
+                                                             'issue', issue, 'status', status, 'status_type', status_type) ORDER BY place)
+                           FROM page), '[]'::jsonb) AS members`;
+    } catch (e) {
+      // A cursor's time Postgres cannot read is the caller's, as list_thoughts' is.
+      if (!after?.at || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    const head = rows[0] ?? {};
+    const raw = typeof head.members === "string" ? JSON.parse(head.members) : head.members;
+    const members = (Array.isArray(raw) ? raw : []).map((m: Record<string, unknown>) => normaliseThreadMember(m));
+    const ticket = /^ticket:([A-Z][A-Z0-9]*-[0-9]+)$/.exec(key)?.[1] ?? null;
+    if (ticket === null) return { key, total: Number(head.total ?? 0), members, links: [], linksMore: false };
+    // A ticket's linked threads (the maintainer's linked threads, 11-05): the linear links 053 keeps on the ticket's
+    // own rows (thoughts_issue_key_idx), and those other tickets' rows hold naming it (thought_facets_link_target_idx),
+    // each turned to how the other ticket stands to this one. This ticket's row saying `X child_of Y` makes Y its parent,
+    // `X blocks Y` makes Y blocked by it, `X blocked_by Y` makes Y block it; another's row saying `Y <relation> X` is
+    // Y's relation as it stands, child_of a child. A text reference and duplicate_of join no thread. One row past the
+    // shown says more follow.
+    const links = await this.sql`
+      WITH own AS (
+        SELECT id FROM thoughts WHERE metadata ? 'issue' AND md5(metadata->>'issue')::uuid = md5(${ticket}::text)::uuid AND metadata->>'issue' = ${ticket}::text),
+      l AS (
+        SELECT CASE f.payload->>'relation' WHEN 'child_of' THEN 'parent' WHEN 'blocks' THEN 'blocked_by' WHEN 'blocked_by' THEN 'blocks' ELSE 'relates_to' END AS relation,
+               f.payload->>'target' AS other
+          FROM thought_facets f JOIN own ON own.id = f.thought_id
+         WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'system' = 'linear'
+           AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to')
+        UNION
+        SELECT CASE f.payload->>'relation' WHEN 'child_of' THEN 'child' ELSE f.payload->>'relation' END,
+               t.metadata->>'issue'
+          FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id
+         WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'system' = 'linear' AND f.payload->>'target' = ${ticket}::text
+           AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to') AND t.metadata ? 'issue')
+      SELECT relation, other,
+             (SELECT count(*) FROM thought_facets s WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = 'ticket:' || l.other)::int AS total
+        FROM l
+       WHERE other ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND other <> ${ticket}::text
+       ORDER BY array_position(ARRAY['parent', 'child', 'blocks', 'blocked_by', 'relates_to'], relation), other
+       LIMIT ${THREAD_LINKS_SHOWN + 1}::int`;
+    const read = links.map((r: Record<string, unknown>) => normaliseThreadLink(r)).filter((l: ThreadLink | null): l is ThreadLink => l !== null);
+    return { key, total: Number(head.total ?? 0), members, links: read.slice(0, THREAD_LINKS_SHOWN), linksMore: read.length > THREAD_LINKS_SHOWN };
+  }
+
+  async threadPlaces(id: string): Promise<ThreadPlace[]> {
+    if (!UUID_RE.test(id)) return [];
+    // Each standing subject's thread, numbered as threadPage numbers it, and the thought's neighbours there.
+    const rows = await this.sql`
+      WITH k AS (
+        SELECT DISTINCT payload->>'key' AS key FROM thought_facets WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL),
+      thread AS (
+        SELECT k.key, t.id, t.created_at, left(t.content, ${THREAD_HEAD_CHARS}::int) AS content,
+               row_number() OVER (PARTITION BY k.key ORDER BY t.created_at, t.id) AS place, count(*) OVER (PARTITION BY k.key) AS total
+          FROM k JOIN thought_facets f ON f.kind = 'subject' AND f.valid_until IS NULL AND f.payload->>'key' = k.key
+          JOIN thoughts t ON t.id = f.thought_id)
+      SELECT me.key, me.place, me.total,
+             p.id::text AS prev_id, p.created_at AS prev_created_at, p.content AS prev_content,
+             n.id::text AS next_id, n.created_at AS next_created_at, n.content AS next_content
+        FROM thread me
+        LEFT JOIN thread p ON p.key = me.key AND p.place = me.place - 1
+        LEFT JOIN thread n ON n.key = me.key AND n.place = me.place + 1
+       WHERE me.id = ${id}::uuid
+       ORDER BY me.key`;
+    return rows.map((r: Record<string, unknown>) => normaliseThreadPlace(r));
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {

@@ -1927,6 +1927,99 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
     `a key the registry knows with no kind is left unclassified and stops the run before it writes, its dry run too (${unkinded.code} ${unkinded.err.trim()} | ${unkindedKind} | ${b4Items.length} | ${unkindedDry.code} ${unkindedDry.out.trim().replace(/\n/g, " | ")})`);
 }
 
+console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status now; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought in no thread, a phrase key's value, and each refusal by its rule");
+{
+  type M = { id: string; place: number; supersededBy: string | null; ticket: { issue: string; status?: string | null; statusType: string | null } | null; title?: string };
+  type T = { key: string | null; total: number; place: number | null; members: M[]; earlier: boolean; cursor: string | null; linked: { key: string; relation: string; total: number }[]; linkedMore: boolean };
+  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as T[];
+  const capture = async (content: string) => String((await rest("POST", "/v1/thoughts", { content })).body.id);
+  // A ticket's own row (board-sync's shape: metadata.issue and its status), two notes on it, a parent's and a blocker's rows.
+  const [row, note1, note2, parent, blocker, dup, loose, phrased, child] = await Promise.all([
+    "Ticket SMD-9700: the thread read's own ticket", "First note on SMD-9700, before the work", "Second note on SMD-9700, the work landed",
+    "Ticket SMD-9701: the parent", "Ticket SMD-9702: the blocker", "Ticket SMD-9703: a duplicate", "A loose thought on nothing in particular",
+    "A thought on the retry budget", "Ticket SMD-9705: a child",
+  ].map(capture));
+  const at = (id: string, ts: string) => sql`UPDATE thoughts SET created_at = ${ts}::timestamptz WHERE id = ${id}::uuid`;
+  await at(row, "2026-10-01T00:00:00Z"); await at(note1, "2026-10-02T00:00:00Z"); await at(note2, "2026-10-03T00:00:00Z");
+  const issue = (id: string, key: string, status: string, type: string) =>
+    sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
+  await issue(row, "SMD-9700", "In Progress", "started"); await issue(parent, "SMD-9701", "Backlog", "backlog");
+  await issue(blocker, "SMD-9702", "Todo", "unstarted"); await issue(dup, "SMD-9703", "Duplicate", "canceled"); await issue(child, "SMD-9705", "Todo", "unstarted");
+  // note2 supersedes note1: note1 stays in the thread, labelled.
+  await sql`UPDATE thoughts SET supersedes = ${note1}::uuid WHERE id = ${note2}::uuid`;
+  // As the extraction pass records them: a ticket's row by its metadata, a note by the judge model (113's door refuses a model's subject on a ticket's row).
+  const subject = async (id: string, key: string, by: "metadata" | "model") =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
+  const written = [];
+  for (const [id, key, by] of [[row, "ticket:SMD-9700", "metadata"], [note1, "ticket:SMD-9700", "model"], [note2, "ticket:SMD-9700", "model"], [parent, "ticket:SMD-9701", "metadata"], [blocker, "ticket:SMD-9702", "metadata"], [dup, "ticket:SMD-9703", "metadata"], [phrased, "phrase:retry budget", "model"], [child, "ticket:SMD-9705", "metadata"]] as const) written.push(await subject(id, key, by));
+  assert(written.every((w) => w.ok === true), `the case's eight subjects are written (${JSON.stringify(written.filter((w) => !w.ok))})`);
+  // The board's links: the row is a child of SMD-9701, blocks SMD-9704 (a ticket no thought holds) and duplicates SMD-9703;
+  // SMD-9702's row blocks SMD-9700, and SMD-9705's is its child.
+  await sql`SELECT record_source_links(${row}::uuid, 'linear', ${JSON.stringify([{ relation: "child_of", target: "SMD-9701" }, { relation: "blocks", target: "SMD-9704" }, { relation: "duplicate_of", target: "SMD-9703" }])}::text::jsonb)`;
+  await sql`SELECT record_source_links(${blocker}::uuid, 'linear', ${JSON.stringify([{ relation: "blocks", target: "SMD-9700" }])}::text::jsonb)`;
+  await sql`SELECT record_source_links(${child}::uuid, 'linear', ${JSON.stringify([{ relation: "child_of", target: "SMD-9700" }])}::text::jsonb)`;
+
+  const [page1, page1Mcp, prefixed] = await Promise.all([
+    rest("GET", "/v1/thread?key=SMD-9700&limit=2"), mcp("thread", { key: "smd-9700", limit: 2 }), rest("GET", "/v1/thread?key=ticket%3ASMD-9700&limit=2"),
+  ]);
+  const [t1] = threadsOf(page1.body), [s1] = threadsOf(page1Mcp.sc);
+  assert(page1.status === 200 && t1?.key === "ticket:SMD-9700" && t1.total === 3 && same(t1.members.map((m) => m.id), [row, note1]) && same(t1.members.map((m) => m.place), [1, 2])
+      && t1.earlier === false && typeof t1.cursor === "string" && t1.place === null && page1.body.id === null && same(threadsOf(prefixed.body)[0]?.members.map((m) => m.id), [row, note1]),
+    `a key's thread: the ticket alone or with its prefix, three thoughts in created_at order, the first page of two and a cursor (${JSON.stringify(t1?.members.map((m) => m.place))} ${t1?.total} ${prefixed.status})`);
+  assert(same(t1.members[0].ticket, { issue: "SMD-9700", status: "In Progress", statusType: "started" }) && t1.members[1].ticket === null && t1.members[1].supersededBy === note2 && t1.members[0].supersededBy === null,
+    `the ticket's own row carries its status now; the superseded note stays, labelled with the thought superseding it (${JSON.stringify(t1.members.map((m) => [m.ticket, m.supersededBy]))})`);
+  assert(same(t1.linked, [{ key: "ticket:SMD-9701", relation: "parent", total: 1 }, { key: "ticket:SMD-9705", relation: "child", total: 1 }, { key: "ticket:SMD-9702", relation: "blocks", total: 1 }, { key: "ticket:SMD-9704", relation: "blocked_by", total: 0 }]) && t1.linkedMore === false,
+    `the linked threads, each as it stands to this one: its own row's child_of a parent and its blocks a ticket blocked by it (no thought holds it: 0), another row's child_of a child and its blocks a blocker, none through duplicate_of (${JSON.stringify(t1.linked)})`);
+  assert(!page1Mcp.isError && s1?.key === "ticket:SMD-9700" && same(s1.members.map((m) => m.id), [row, note1]) && s1.cursor === t1.cursor && same(s1.members[0].ticket, { issue: "SMD-9700", statusType: "started" })
+      && page1Mcp.text.startsWith("Thread ticket:SMD-9700 — 3 thoughts, 1–2 shown:") && page1Mcp.text.includes(`⚠ Superseded by a newer thought — ID ${note2} (it stays in the thread`)
+      && page1Mcp.text.includes(`Ticket SMD-9700's own row — status now "In Progress" (started)`) && page1Mcp.text.includes("Linked threads (no thread runs across a link): ticket:SMD-9701 its parent (1 thought); ticket:SMD-9705 its child (1 thought); ticket:SMD-9702 blocks it (1 thought); ticket:SMD-9704 blocked by it (0 thoughts).")
+      && page1Mcp.text.includes(`Cursor: ${t1.cursor} — pass it as \`after\` with key ticket:SMD-9700`),
+    `MCP says the same page: its header, the superseded mark, the row's status (its words in the text, its type in the value), the linked threads and the cursor (${page1Mcp.text.slice(0, 140).replace(/\n/g, " | ")})`);
+  const page2 = await rest("GET", `/v1/thread?key=SMD-9700&limit=2&after=${t1.cursor}`);
+  const [t2] = threadsOf(page2.body);
+  assert(page2.status === 200 && same(t2?.members.map((m) => m.id), [note2]) && t2.members[0].place === 3 && t2.earlier === true && t2.cursor === null,
+    `the cursor's page: the third thought, earlier ones before it, no cursor at the end (${JSON.stringify(t2?.members.map((m) => m.place))} ${t2?.cursor})`);
+  // By a thought's id: its threads, around it.
+  const [byId, byIdMcp] = await Promise.all([rest("GET", `/v1/thread?id=${note1}&limit=3`), mcp("thread", { id: note1, limit: 3 })]);
+  const [ti] = threadsOf(byId.body);
+  assert(byId.status === 200 && byId.body.id === note1 && ti?.place === 2 && same(ti.members.map((m) => m.id), [row, note1, note2]) && ti.earlier === false && ti.cursor === null
+      && byIdMcp.text.startsWith(`Thought ${note1} stands in one thread.`) && byIdMcp.text.includes(`2. "`) && new RegExp(`ID: ${note1}\\n   ◀ this thought`).test(byIdMcp.text),
+    `an id's read: its thread around it, its place marked (${ti?.place} ${JSON.stringify(ti?.members.map((m) => m.place))})`);
+  const around = threadsOf((await rest("GET", `/v1/thread?id=${note2}&limit=2`)).body)[0];
+  assert(same(around?.members.map((m) => m.id), [note1, note2]) && around.earlier === true && around.cursor === null,
+    `around the last: half the page before it, the earlier ones said (${JSON.stringify(around?.members.map((m) => m.place))})`);
+  // fetch: continues and continued by, a superseded neighbour labelled; a thought in no thread carries no `threads`.
+  const [f1, f2, fLoose, fMcp] = await Promise.all([rest("GET", `/v1/thoughts/${note1}`), rest("GET", `/v1/thoughts/${note2}`), rest("GET", `/v1/thoughts/${loose}`), mcp("fetch", { id: note1 })]);
+  type FT = { key: string; place: number; total: number; continues: { id: string; supersededBy: string | null } | null; continuedBy: { id: string; supersededBy: string | null } | null };
+  const ft1 = (f1.body.threads as FT[] | undefined)?.[0], ft2 = (f2.body.threads as FT[] | undefined)?.[0];
+  assert(ft1?.key === "ticket:SMD-9700" && ft1.place === 2 && ft1.total === 3 && ft1.continues?.id === row && ft1.continuedBy?.id === note2 && ft1.continuedBy.supersededBy === null
+      && ft2?.continues?.id === note1 && ft2.continues.supersededBy === note2 && ft2.continuedBy === null && !("threads" in fLoose.body)
+      && same((JSON.parse(fMcp.text) as { threads?: FT[] }).threads?.[0]?.continues?.id, row),
+    `fetch says what a thought continues and what continues it, a superseded neighbour labelled; none on a thought in no thread (${JSON.stringify(ft1)} ${JSON.stringify(Object.keys(fLoose.body))})`);
+  // A thought in no thread; a phrase key's value carries no key, its text the key quoted.
+  const [noThread, noThreadMcp, phrase] = await Promise.all([rest("GET", `/v1/thread?id=${loose}`), mcp("thread", { id: loose }), mcp("thread", { key: "phrase:retry budget" })]);
+  assert(noThread.status === 200 && same(noThread.body.threads, []) && noThreadMcp.text.startsWith(`Thought ${loose} stands in no thread`)
+      && threadsOf(phrase.sc)[0]?.key === null && threadsOf(phrase.sc)[0]?.total === 1 && phrase.text.startsWith(`Thread "phrase:retry budget" — 1 thought:`),
+    `a thought in no thread says so; a phrase key rides the text quoted and not the value (${noThreadMcp.text.slice(0, 60)} | ${phrase.text.slice(0, 50)})`);
+  // Refusals, each by its rule, through both doors.
+  const refusals = await Promise.all([
+    [rest("GET", "/v1/thread"), mcp("thread", {}), "key_or_id"],
+    [rest("GET", `/v1/thread?key=SMD-9700&id=${row}`), mcp("thread", { key: "SMD-9700", id: row }), "key_or_id"],
+    [rest("GET", "/v1/thread?key=Not%20A%20Key"), mcp("thread", { key: "Not A Key" }), "key_shape"],
+    [rest("GET", `/v1/thread?id=${row}&after=${t1.cursor}`), mcp("thread", { id: row, after: t1.cursor }), "after_needs_key"],
+  ].map(async ([r, m, problem]) => ({ r: await r as Answer, m: await m as Reply, problem: problem as string })));
+  assert(refusals.every(({ r, m, problem }) => r.status === 400 && r.body.code === "REFUSED_THREAD_INPUT" && r.body.problem === problem && m.isError && m.sc.code === "REFUSED_THREAD_INPUT" && m.sc.problem === problem)
+      && !("value" in refusals[2].m.sc) && refusals[2].m.text.includes(`"Not A Key" is no subject key`),
+    `neither or both of key and id, a key that is no subject key and an id's cursor are refused by their rule, the key in MCP's text and not its value (${refusals.map(({ r }) => `${r.status}:${r.body.problem}`).join(" ")})`);
+  const [badCursor, gone, goneMcp] = await Promise.all([rest("GET", `/v1/thread?key=SMD-9700&after=${listCursor("newest", null, row)}`), rest("GET", "/v1/thread?id=00000000-0000-4000-8000-000000000000"), mcp("thread", { id: "00000000-0000-4000-8000-000000000000" })]);
+  assert(badCursor.status === 400 && badCursor.body.code === "REFUSED_CURSOR" && gone.status === 404 && gone.body.code === "NOT_FOUND" && goneMcp.isError && goneMcp.text.startsWith("Refused: no thought with id"),
+    `another tool's cursor is refused, and an id no thought has is not found (${badCursor.status} ${gone.status})`);
+  const read = await rest("GET", "/v1/thread?key=SMD-9700", undefined, KEYS.reader);
+  const captureOnly = await rest("GET", "/v1/thread?key=SMD-9700", undefined, KEYS.hook);
+  assert(read.status === 200 && threadsOf(read.body)[0]?.total === 3 && captureOnly.status === 403,
+    `a read key reads a thread; a capture-only key reads none (${read.status} ${captureOnly.status})`);
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

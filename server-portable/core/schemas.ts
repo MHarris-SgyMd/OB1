@@ -229,6 +229,25 @@ export const SPECS = {
       after: z.string().max(512).optional().describe("Keyset cursor — the previous page's `cursor`, given with the same `sort`; omit for the first page (an empty one is refused)"),
     },
   },
+  // Work threads (SMD-3306 PR 7a-2a): a subject's thoughts in order, read from their standing subjects (111).
+  thread: {
+    title: "Read a Work Thread",
+    description:
+      "Read a work thread: the thoughts holding one subject — a ticket (ticket:SMD-3306, or SMD-3306 alone), a pull request (pr:12), a version (version:v2.0.0) or a phrase (phrase:<lower-case words>) — in the order they were captured (created_at, ties by id, an undated thought last). Give exactly one of `key` or `id`. " +
+      "`key` reads that subject's thread from its start, `limit` thoughts a page; when more follow the thread carries a `cursor`, passed as `after` with the same `key` for the next page. `id` reads each thread that thought stands in, around it: up to half the page before it, then it and those after it, its `place` marked (1 is the first); its `cursor` continues the thread with its `key`. A thought stands in no thread until its subject is found (the extraction worker's rules, or its --subjects sweep). " +
+      "Each member carries its id, title, time and place; `supersededBy` when a newer thought supersedes it (the thread keeps its whole history); and a board ticket's own row its `ticket` — the ticket and its status now, since the row is rewritten in place and keeps its first place. " +
+      "A ticket's thread names the threads its ticket's board links reach (`linked`): each ticket's key, how it stands to this one (parent, child, blocks, blocked_by, relates_to) and how many thoughts its thread holds; the first 50, `linkedMore` when more. No thread runs across a link. " +
+      "Refused: neither or both of key and id, a key that is no subject key, or `after` without `key` (REFUSED_THREAD_INPUT); a cursor that is not this tool's (REFUSED_CURSOR); an id no thought has (NOT_FOUND).",
+    annotations: {
+      readOnlyHint: true,
+    },
+    inputSchema: {
+      key: z.string().max(220).optional().describe("A subject key — ticket:SMD-3306 (or SMD-3306), pr:12, version:v2.0.0, phrase:<lower-case words> — whose thread to read; or give id"),
+      id: z.string().max(100).optional().describe("A thought's id: each thread it stands in, around it; or give key"),
+      after: z.string().max(512).optional().describe("A thread's `cursor` from the previous page, given with that thread's key"),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe("Thoughts per thread, 1–100 (default 20)"),
+    },
+  },
   list_supersession_proposals: {
     title: "List Supersession Proposals",
     description:
