@@ -569,6 +569,8 @@ async function selfCheck(): Promise<number> {
     const badRepo = conf({ repo: "evil/../x" });
     await ok(() => "error" in badRepo && !badRepo.error.includes("evil"), "a refused repo isn't echoed");
     await ok(() => "error" in conf({ maintainerLinearId: "<the maintainer's Linear user id>" }) && "error" in conf({ maintainerLinearId: "u1" }) && !("error" in conf({ maintainerLinearId: MAINTAINER.toUpperCase() })), "the maintainer's id must be a Linear user id, a UUID");
+    const nulls = conf({ botRepo: null, restUrl: null });
+    await ok(() => !("error" in nulls) && nulls.botRepo === null && nulls.restUrl === null && "error" in conf({ initiative: null }) && "error" in conf({ team: null }), "null is taken for a key whose default is null, and refused for any other");
     const url = (u: string) => conf({ restUrl: u });
     const okUrl = url("http://127.0.0.1:8010/api/");
     await ok(() => !("error" in okUrl) && okUrl.restUrl === "http://127.0.0.1:8010/api" && !("error" in url("https://brain.example.com/api")) && !("error" in url("http://localhost:8010/api")) && !("error" in url("http://[::1]:8010/api")), "a loopback http URL and an https one are taken, the trailing slash dropped");
@@ -700,7 +702,7 @@ async function selfCheck(): Promise<number> {
 
   await section("the board", async () => {
     await ok(() => boardReasons(ticket()).length === 0, "Backlog, unassigned, undelegated, unblocked and plain passes");
-    await ok(() => boardReasons(ticket({ stateType: "unstarted", stateName: "Todo" })).includes("in Todo, not Backlog") && boardReasons(ticket({ stateType: "triage", stateName: "Triage" })).length === 1 && boardReasons(ticket({ stateName: "Icebox" })).some((r) => r.includes("Icebox")) && boardReasons(ticket({ stateType: "unstarted", stateName: "Backlog" })).length === 1, "Todo, Triage, a backlog state not named Backlog, and a state named Backlog of another type are refused");
+    await ok(() => boardReasons(ticket({ stateType: "unstarted", stateName: "Todo" })).includes("in Todo, not Backlog") && boardReasons(ticket({ stateType: "triage", stateName: "Triage" })).length === 1 && boardReasons(ticket({ stateName: "Icebox" })).some((r) => r.includes("Icebox")) && boardReasons(ticket({ stateType: "unstarted", stateName: "Backlog" })).join() === "in a state named Backlog but of type unstarted", "Todo, Triage, a backlog state not named Backlog, and a state named Backlog of another type are refused, each saying which");
     await ok(() => boardReasons(ticket({ assigneeId: "u" })).includes("assigned to someone") && boardReasons(ticket({ delegateId: "a" })).includes("delegated to an agent"), "an assignee and a delegate are refused");
     await ok(() => boardReasons(ticket({ blockers: [{ identifier: "SMD-1", stateType: "completed" }, { identifier: "SMD-2", stateType: "canceled" }, { identifier: "SMD-3", stateType: "duplicate" }] })).length === 0, "blockers Done, Canceled or a Duplicate no longer block");
     await ok(() => ["started", "unstarted", "backlog", "triage", "something-new"].every((s) => boardReasons(ticket({ blockers: [{ identifier: "SMD-2", stateType: s }] })).includes("blocked by SMD-2")), "a blocker in any other state blocks: started, Todo, Backlog, Triage or one the rule doesn't know");
@@ -863,9 +865,25 @@ async function selfCheck(): Promise<number> {
     const into = (state: string, merged_at: string | null, sha: string, baseRef = "main") => ({ state, merged_at, head: { sha }, base: { ref: baseRef } });
     await ok(async () => (await readBranchPrs(prAnswer([]), cfg, null, "b")) === null && JSON.stringify(await readBranchPrs(prAnswer([into("closed", "x", "h1"), into("open", null, "h2"), into("closed", null, "h3")]), cfg, null, "b")) === JSON.stringify({ open: true, merged: true, closedHeads: ["h1", "h3"] }), "a branch's PRs: none, or whether any is open or merged, with the merged and closed ones' heads");
     await ok(async () => JSON.stringify(await readBranchPrs(prAnswer([into("closed", "x", "h1", "smd-1-base"), into("closed", null, "h2", "smd-1-base")]), cfg, null, "b")) === JSON.stringify({ open: false, merged: false, closedHeads: [] }), "a PR merged or closed into another branch, a stacked one, frees nothing");
-    await ok(() => prUrls.length === 3 && prUrls.every((u) => u === `https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=all&per_page=100&head=${encodeURIComponent("MHarris-SgyMd:b")}`), "a branch's PRs are looked up in this repo, state=all, 100 a page, with the owner in the head filter");
+    await ok(() => prUrls.length === 3 && prUrls.every((u) => u === `https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=all&per_page=100&head=${encodeURIComponent("MHarris-SgyMd:b")}&page=1`), "a branch's PRs are looked up in this repo, state=all, 100 a page, with the owner in the head filter");
+    const pagesAsked: string[] = [];
+    const fullPage100 = () => Array.from({ length: 100 }, (_, i) => into("closed", null, `s${i}`));
+    await ok(async () => {
+      const paged = await readBranchPrs(async (u) => {
+        pagesAsked.push(u);
+        return json(u.endsWith("&page=1") ? fullPage100() : [into("open", null, "last")]);
+      }, cfg, null, "b");
+      return paged?.open === true && paged.closedHeads.length === 100 && pagesAsked.map((u) => /&page=(\d+)$/.exec(u)?.[1]).join() === "1,2";
+    }, "a branch's PRs are read page by page: an open one on the second page still counts");
+    await ok(() => throws(() => readBranchPrs(async () => json(fullPage100()), cfg, null, "b"), "more than 1,000"), "more PRs from one branch than the dry run reads is an error, not a branch freed");
     await ok(async () => (await throws(() => readBranchPrs(prAnswer({}, 403, { "x-ratelimit-remaining": "0" }), cfg, null, "b"), "rate limit is spent")) && (await throws(() => readBranchPrs(prAnswer({}, 429, { "x-ratelimit-remaining": "0" }), cfg, null, "b"), "rate limit is spent")) && (await throws(() => readBranchPrs(prAnswer({}, 403), cfg, null, "b"), "answered 403")), "a spent rate limit is named as such, and another refusal by its status");
     await ok(() => throws(() => readBranchPrs(answering(new Response("reflected-secret <html>", { status: 200 })), cfg, null, "b"), "isn't JSON", "reflected-secret"), "a GitHub body that isn't JSON is an error that doesn't quote it");
+    await ok(async () => (await throws(() => readBranchPrs(answering(json(null)), cfg, null, "b"), "isn't a list")) && (await throws(() => readOpenPrs(answering(json({ message: "x" })), cfg, null), "isn't a list")), "GitHub JSON that isn't a list, null among it, is an error that says so");
+    await ok(async () => {
+      const brainNull = await readClaims(answering(json(null)), cfg, "k", ["SMD-1"]);
+      const claimsNull = await readClaims(stable(json(null)), cfg, "k", ["SMD-1"]);
+      return "unreadable" in brainNull && brainNull.unreadable.includes("isn't an object") && !("unreadable" in claimsNull) && (claimsNull.get("SMD-1") as { unreadable: string }).unreadable.includes("shape");
+    }, "JSON null from the brain, as its tier or a claim list, is a reason that names its shape, not a body that isn't JSON");
     await ok(() => throws(() => readOpenPrs(prAnswer({}, 500), cfg, null), "answered 500"), "a failed open-PR list is an error, not an empty list");
     const openUrls: string[] = [];
     const openHeaders: unknown[] = [];
@@ -922,6 +940,7 @@ async function selfCheck(): Promise<number> {
       issue({ identifier: "SMD-14", priority: 4 }),
       issue({ identifier: "SMD-15", priority: 4, assignee: { id: "u" } }),
       issue({ identifier: "SMD-16", priority: 4 }),
+      issue({ identifier: "SMD-17", priority: 4 }),
     ];
     const gql: Gql = async <T>(query: string) => {
       queries.push(query);
@@ -929,36 +948,39 @@ async function selfCheck(): Promise<number> {
     };
     const run: Runner = async (cmd, opts) => {
       commands.push({ cmd, cwd: opts?.cwd });
-      const out = cmd.includes("ls-remote") ? "a1a1\trefs/heads/main\nb12b\trefs/heads/smd-12-merged\nc15c\trefs/heads/smd-15-x\n" : cmd.includes("worktree") ? "worktree /r\nHEAD e11e\nbranch refs/heads/smd-11-wip\n" : "a1a1 main\nd13d smd-13-local\n";
+      const out = cmd.includes("ls-remote") ? "a1a1\trefs/heads/main\nb12b\trefs/heads/smd-12-merged\nc15c\trefs/heads/smd-15-x\n" : cmd.includes("worktree") ? "worktree /r\nHEAD e11e\nbranch refs/heads/smd-11-wip\n\nworktree /w/smd-12-tree\nHEAD f12f\nbranch refs/heads/feature-x\n" : "a1a1 main\nd13d smd-13-local\n";
       return { code: 0, stderr: "", stdout: out };
     };
     const GH = "https://api.github.com/repos/MHarris-SgyMd/OB1/pulls";
-    const lookup = (b: string) => `${GH}?state=all&per_page=100&head=${encodeURIComponent(`MHarris-SgyMd:${b}`)}`;
-    const fullPage = Array.from({ length: 100 }, (_, i) => (i === 0 ? { number: 999, title: "work", body: "Closes SMD-16.", head: { ref: "feature" }, user: { login: "MHarris-SgyMd" } } : { number: 1000 + i, title: "other", body: "Mentions SMD-10 in passing.", head: { ref: `other-${i}` }, user: { login: "someone" } }));
+    const lookup = (b: string) => `${GH}?state=all&per_page=100&head=${encodeURIComponent(`MHarris-SgyMd:${b}`)}&page=1`;
+    const fullPage = Array.from({ length: 100 }, (_, i) => (i === 0 ? { number: 999, title: "work", body: "Closes SMD-16.", head: { ref: "feature" }, user: { login: "MHarris-SgyMd" } } : i === 1 ? { number: 1001, title: "bot work", body: "Fixes SMD-17.", head: { ref: "agent/fix" }, user: { login: "bot-user" } } : { number: 1000 + i, title: "other", body: "Mentions SMD-10 in passing.", head: { ref: `other-${i}` }, user: { login: "someone" } }));
     const fetchStub: Fetch = async (u, init) => {
       sent.push({ url: u, init });
       if (u === `${GH}?state=open&per_page=100&page=1`) return json(fullPage);
       if (u === `${GH}?state=open&per_page=100&page=2`) return json([]);
       if (u === lookup("smd-12-merged")) return json([{ state: "closed", merged_at: "2026-11-01T00:00:00Z", head: { sha: "b12b" }, base: { ref: "main" } }]);
       if (u === lookup("michaelharris/smd-14-x")) return json([{ state: "closed", merged_at: null, head: { sha: "c14" }, base: { ref: "main" } }]);
+      if (u === lookup("feature-x")) return json([{ state: "closed", merged_at: "2026-11-01T00:00:00Z", head: { sha: "f12f" }, base: { ref: "main" } }]);
       if (u.startsWith(`${GH}?state=all&per_page=100&head=`)) return json([]);
       if (u === "http://127.0.0.1:8010/api/v1/brain") return json({ tier: "stable" });
-      if (u.startsWith("http://127.0.0.1:8010/api/v1/claims?ticket=")) return json({ claims: u.includes("ticket=SMD-14&") ? [claim({ issue: "SMD-14", state: "lapsed", label: "codex@laptop michaelharris/smd-14-x" })] : [], truncated: false });
+      if (u.startsWith("http://127.0.0.1:8010/api/v1/claims?ticket=")) return json({ claims: u.includes("ticket=SMD-14&") ? [claim({ issue: "SMD-14", state: "lapsed", label: "codex@laptop michaelharris/smd-14-x" })] : u.includes("ticket=SMD-13&") ? [claim({ issue: "SMD-13", piece: "PR 2", state: "lapsed", label: "codex@laptop michaelharris/smd-13-piece" })] : [], truncated: false });
       return json({ message: "the stub doesn't know this URL" }, 404);
     };
     const result = await dryRun(cfg, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: GH_TOKEN } });
     const verdict = (id: string) => result.verdicts.find((v) => v.identifier === id) as Verdict;
     const hdr = (s: { init?: RequestInit }) => (s.init?.headers ?? {}) as Record<string, string>;
     await ok(() => result.taken === "SMD-10" && result.verdicts[0].identifier === "SMD-11" && verdict("SMD-11").reasons.join() === "worktree /r (on smd-11-wip: no PR)", "the dry run skips the urgent ticket a worktree holds, and takes the next");
-    await ok(() => verdict("SMD-12").reasons.join() === "a run takes one ticket, and SMD-10 comes first" && verdict("SMD-14").reasons.join() === "a run takes one ticket, and SMD-10 comes first", "a branch merged into main at its head, and a lapsed claim whose labelled branch's PR closed, free their tickets");
-    await ok(() => verdict("SMD-13").reasons.join() === "branch smd-13-local (no PR)", "a local branch of the main checkout, with no PR, holds its ticket");
+    await ok(() => verdict("SMD-12").reasons.join() === "a run takes one ticket, and SMD-10 comes first" && verdict("SMD-14").reasons.join() === "a run takes one ticket, and SMD-10 comes first", "a branch merged into main at its head, a worktree named by its path on such a branch, and a lapsed claim whose labelled branch's PR closed, free their tickets");
+    await ok(() => verdict("SMD-13").reasons[0] === "branch smd-13-local (no PR)", "a local branch of the main checkout, with no PR, holds its ticket");
+    await ok(() => verdict("SMD-13").reasons[1] === 'a lapsed claim on its piece "PR 2" by codex (codex@laptop michaelharris/smd-13-piece)' && !sent.some((s) => s.url === lookup("michaelharris/smd-13-piece")), "a piece claim holds its ticket, and its label's branch isn't looked up");
     await ok(() => verdict("SMD-15").reasons.join() === "assigned to someone" && !sent.some((s) => s.url.includes("smd-15") || s.url.includes("SMD-15")), "a ticket failing the board checks gets no claim or PR lookup");
-    await ok(() => verdict("SMD-16").reasons.join() === "open PR 999 by MHarris-SgyMd" && verdict("SMD-10").reasons.length === 0, "a PR body of the maintainer's holds its ticket, and other people's bodies hold none");
+    await ok(() => verdict("SMD-16").reasons.join() === "open PR 999 by MHarris-SgyMd" && verdict("SMD-17").reasons.join() === "open PR 1001 by bot-user" && verdict("SMD-10").reasons.length === 0, "a PR body of the maintainer's or the bot's holds its ticket, and other people's bodies hold none");
     await ok(() => sent.length > 0 && sent.every((s) => (s.init?.method ?? "GET") === "GET" && s.init?.redirect === "manual" && (s.init as { verbose?: boolean }).verbose === false && (s.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true) && queries.every((q) => !/^\s*mutation\b/.test(q)), "every request is a GET or a GraphQL query, follows no redirect, logs nothing and checks TLS: it writes nothing");
+    await ok(() => sent.length > 0 && sent.every((s) => s.init?.signal instanceof AbortSignal), "every request carries a time limit");
     const claimUrls = sent.filter((s) => s.url.includes("/v1/claims"));
-    await ok(() => claimUrls.length === 6 && claimUrls.every((s) => /^http:\/\/127\.0\.0\.1:8010\/api\/v1\/claims[?]ticket=SMD-1[0-46]&include_ended=true&limit=1000$/.test(s.url) && hdr(s)["x-brain-key"] === SENTINEL) && sent.every((s) => !s.url.includes(SENTINEL)), "each candidate's claims are asked of the configured brain by ticket, with include_ended and limit 1000, the key in a header and in no URL");
+    await ok(() => claimUrls.length === 7 && claimUrls.every((s) => /^http:\/\/127\.0\.0\.1:8010\/api\/v1\/claims[?]ticket=SMD-1[0-467]&include_ended=true&limit=1000$/.test(s.url) && hdr(s)["x-brain-key"] === SENTINEL) && sent.every((s) => !s.url.includes(SENTINEL)), "each candidate's claims are asked of the configured brain by ticket, with include_ended and limit 1000, the key in a header and in no URL");
     await ok(() => sent.filter((s) => s.url.startsWith("https://api.github.com/")).every((s) => hdr(s).Authorization === `Bearer ${GH_TOKEN}` && !JSON.stringify(hdr(s)).includes(SENTINEL)) && sent.filter((s) => !s.url.startsWith("https://api.github.com/")).every((s) => !JSON.stringify(hdr(s)).includes(GH_TOKEN)), "the GitHub token goes to GitHub alone, and the brain key to the brain alone");
-    await ok(() => ["smd-12-merged", "smd-13-local", "smd-11-wip", "michaelharris/smd-14-x"].every((b) => sent.some((s) => s.url === lookup(b))), "each branch naming a candidate, and each claim's labelled branch, is looked up with state=all and the owner");
+    await ok(() => ["smd-12-merged", "smd-13-local", "smd-11-wip", "feature-x", "michaelharris/smd-14-x"].every((b) => sent.some((s) => s.url === lookup(b))), "each branch or worktree naming a candidate, and each claim's labelled branch, is looked up with state=all and the owner");
     await ok(() => sent.filter((s) => s.url.includes("pulls?state=open")).map((s) => s.url).join() === `${GH}?state=open&per_page=100&page=1,${GH}?state=open&per_page=100&page=2`, "the open PRs are listed with state=open, 100 a page, and a full first page brings the second");
     const lsRemotes = commands.filter((c) => c.cmd.includes("ls-remote"));
     await ok(() => lsRemotes.length === 2 && lsRemotes.some((c) => c.cmd.includes("https://github.com/MHarris-SgyMd/OB1.git")) && lsRemotes.some((c) => c.cmd.includes("https://github.com/bot-user/OB1.git")) && lsRemotes.every((c) => c.cwd === "/"), "ls-remote reads this repo and the bot's copy, from outside any repository");
@@ -966,10 +988,14 @@ async function selfCheck(): Promise<number> {
     await ok(() => commands.every((c) => c.cmd[0] === "git" && c.cmd.slice(1, 1 + GIT_SAFE.length).join(" ") === GIT_SAFE.join(" ")) && local("for-each-ref")?.cmd.slice(1 + GIT_SAFE.length).join(" ") === "-C /home/x/src/repo for-each-ref --format=%(objectname) %(refname:lstrip=2) refs/heads" && local("worktree")?.cmd.slice(1 + GIT_SAFE.length).join(" ") === "-C /home/x/src/repo worktree list --porcelain", "every git call starts with the safe arguments, and the main checkout's branches, named whole, and worktrees are read there");
     const text = render(result, cfg);
     await ok(() => text.includes("A run would take SMD-10.") && text.includes("  SMD-13     skip  t\n      - branch smd-13-local (no PR)") && text.includes("reads only"), "the text names the ticket a run would take, and lists each skip with its reasons");
+    await ok(() => render({ tickets: 1, claimsNote: null, taken: null, verdicts: [{ identifier: "SMD-1", title: "t", take: false, reasons: ["x"] }] }, cfg).endsWith("A run would take nothing: every ticket has a reason above.") && render({ tickets: 0, claimsNote: null, taken: null, verdicts: [] }, cfg).endsWith("A run would take nothing."), "with nothing taken, the last line says why: every ticket has a reason, or there is none");
     const before = sent.length;
     const blind = await dryRun(noUrl, { gql, run, fetch: fetchStub, keys: { brain: SENTINEL, github: null } });
     await ok(() => blind.taken === null && blind.claimsNote !== null && render(blind, noUrl).includes("would take nothing, since claims can't be read") && !sent.slice(before).some((s) => s.url.includes("pulls?state=all")), "with claims unreadable it takes nothing, says why, and looks up no branch's PRs");
     await ok(() => blind.verdicts.find((v) => v.identifier === "SMD-13")?.reasons.includes("branch smd-13-local (its PRs not looked up)") === true, "with claims unreadable, a branch's reason says its PRs weren't looked up, not that it is unmerged");
+    const quiet = sent.length;
+    const onlyAssigned = await dryRun(cfg, { gql: async <T>(query: string) => ({ data: linearData(query, boardNodes.filter((n) => n.identifier === "SMD-15")) as T, errors: [] }), run, fetch: fetchStub, keys: { brain: SENTINEL, github: GH_TOKEN } });
+    await ok(() => onlyAssigned.taken === null && onlyAssigned.verdicts.length === 1 && !sent.slice(quiet).some((s) => s.url.startsWith("https://api.github.com/")), "with no ticket past the label and board checks, nothing is asked of GitHub");
   });
 
   await section("the whole of main, on a temporary runner directory and stubs", async () => {
@@ -1034,7 +1060,7 @@ async function selfCheck(): Promise<number> {
       await ok(() => JSON.stringify(spawned.find((c) => c[0] === "/bin/ls")) === JSON.stringify(["/bin/ls", "-lde", runnerDir, configPath, join(runnerDir, "linear.key"), join(runnerDir, "brain.key")]), "the access lists are read with ls -lde, of the directory, the config and each key there is");
       await ok(async () => (await main(io({ platform: "linux", spawnImpl: aclSpawn }))) === 0, "off macOS, no ls -lde is run");
       const linearCall = mainSent.find((s) => s.url === "https://api.linear.app/graphql");
-      await ok(() => linearCall?.init?.redirect === "manual" && (linearCall?.init as { verbose?: boolean }).verbose === false && (linearCall?.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true && JSON.stringify(linearCall?.init?.headers).includes(linearKey), "main hands Linear's client the no-redirect fetch, with the runner's own key");
+      await ok(() => linearCall?.init?.redirect === "manual" && (linearCall?.init as { verbose?: boolean }).verbose === false && (linearCall?.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true && JSON.stringify(linearCall?.init?.headers).includes(linearKey) && linearCall?.init?.signal instanceof AbortSignal, "main hands Linear's client the no-redirect fetch, with the runner's own key and a time limit");
       await ok(() => readdirSync(tmpRoot).length === 0, "main removes the temporary home git ran with");
       title = `Fix ${chr(0x202e)}gnp.exe`;
       await ok(async () => (await main(io({ argv: ["--json"] }))) === 0 && JSON.parse(lines.at(-1) ?? "{}").verdicts?.[0]?.title === title && !(lines.at(-1) ?? "").includes(chr(0x202e)), "--json prints the verdicts as JSON, a bidi character escaped");

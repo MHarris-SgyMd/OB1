@@ -177,7 +177,7 @@ export function labelReasons(t: Ticket, rules: Rules): string[] {
 /** The board checks: state Backlog, assigned to no one and delegated to no agent, every blocker settled, and a title with nothing hidden in it. */
 export function boardReasons(t: Ticket): string[] {
   const out: string[] = [];
-  if (t.stateType !== "backlog" || t.stateName !== "Backlog") out.push(`in ${t.stateName}, not Backlog`);
+  if (t.stateType !== "backlog" || t.stateName !== "Backlog") out.push(t.stateName === "Backlog" ? `in a state named Backlog but of type ${t.stateType}` : `in ${t.stateName}, not Backlog`);
   if (t.assigneeId) out.push("assigned to someone");
   if (t.delegateId) out.push("delegated to an agent");
   if (!t.blockersComplete) out.push("it has more relations than the dry run reads, so an open blocker could be among the rest");

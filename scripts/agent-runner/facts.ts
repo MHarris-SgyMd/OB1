@@ -237,22 +237,26 @@ const githubInit = (token: string | null): RequestInit => ({
   signal: AbortSignal.timeout(20_000),
 });
 
+/** What jsonOf answers for a body that isn't JSON, so a body that is the JSON `null` reads as itself. */
+const NOT_JSON = Symbol("not JSON");
+
 /**
- * A response's JSON, or null when its body isn't JSON. Never the parser's message: it quotes the body, which can hold
- * anything a server chose to send back, a key among it.
+ * A response's JSON, or NOT_JSON when its body isn't JSON. Never the parser's message: it quotes the body, which can
+ * hold anything a server chose to send back, a key among it.
  */
-async function jsonOrNull(res: Response): Promise<unknown> {
+async function jsonOf(res: Response): Promise<unknown> {
   try {
     return await res.json();
   } catch {
-    return null;
+    return NOT_JSON;
   }
 }
 
-/** A GitHub answer's JSON, or an error that says only that it wasn't JSON. */
-async function githubJson(res: Response, what: string): Promise<unknown> {
-  const body = await jsonOrNull(res);
-  if (body === null) throw new Error(`GitHub answered a body that isn't JSON (${what})`);
+/** A GitHub answer's list, or an error that says only what came instead: no JSON, or JSON that isn't a list. */
+async function githubList(res: Response, what: string): Promise<unknown[]> {
+  const body = await jsonOf(res);
+  if (body === NOT_JSON) throw new Error(`GitHub answered a body that isn't JSON (${what})`);
+  if (!Array.isArray(body)) throw new Error(`GitHub answered JSON that isn't a list (${what})`);
   return body;
 }
 
@@ -270,31 +274,41 @@ export async function readOpenPrs(fetchImpl: Fetch, cfg: Config, token: string |
   for (let page = 1; page <= 10; page++) {
     const res = await fetchImpl(`https://api.github.com/repos/${cfg.repo}/pulls?state=open&per_page=100&page=${page}`, githubInit(token));
     if (!res.ok) throw githubError(res, "listing open pull requests");
-    const rows = (await githubJson(res, "listing open pull requests")) as { number: number; title: string; body: string | null; head: { ref: string }; user: { login: string } | null }[];
+    const rows = (await githubList(res, "listing open pull requests")) as { number: number; title: string; body: string | null; head: { ref: string }; user: { login: string } | null }[];
     prs.push(...rows.map((r) => ({ number: r.number, title: r.title, body: r.body ?? "", head: r.head.ref, author: r.user?.login ?? "" })));
     if (rows.length < 100) return prs;
   }
   throw new Error("more than 1,000 open pull requests: the dry run reads no further");
 }
 
+/** A pull request as a branch's lookup reads it. */
+type PrRow = { state: string; merged_at: string | null; head: { sha: string }; base: { ref: string } };
+
 /**
- * The pull requests whose head is `branch` in this repo's owner's account: whether any is open, and of those into
- * DEFAULT_BRANCH, whether any merged and the head commits of the merged and closed ones; null when there is none.
- * GitHub ignores a `head` filter with no owner and lists every PR, so the owner is always given. A PR from another
- * account's copy reads as none, which holds the work.
+ * The pull requests whose head is `branch` in this repo's owner's account, read page by page: whether any is open,
+ * and of those into DEFAULT_BRANCH, whether any merged and the head commits of the merged and closed ones; null when
+ * there is none. GitHub ignores a `head` filter with no owner and lists every PR, so the owner is always given. A PR
+ * from another account's copy reads as none, which holds the work.
  */
 export async function readBranchPrs(fetchImpl: Fetch, cfg: Config, token: string | null, branch: string): Promise<BranchPrs | null> {
   const owner = cfg.repo.split("/")[0];
-  const res = await fetchImpl(`https://api.github.com/repos/${cfg.repo}/pulls?state=all&per_page=100&head=${encodeURIComponent(`${owner}:${branch}`)}`, githubInit(token));
-  if (!res.ok) throw githubError(res, `the pull requests of ${branch}`);
-  const rows = (await githubJson(res, `the pull requests of ${branch}`)) as { state: string; merged_at: string | null; head: { sha: string }; base: { ref: string } }[];
-  if (!rows.length) return null;
-  const intoDefault = rows.filter((r) => r.state !== "open" && r.base?.ref === DEFAULT_BRANCH);
-  return {
-    open: rows.some((r) => r.state === "open"),
-    merged: intoDefault.some((r) => r.merged_at),
-    closedHeads: intoDefault.map((r) => r.head.sha),
-  };
+  const rows: PrRow[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const res = await fetchImpl(`https://api.github.com/repos/${cfg.repo}/pulls?state=all&per_page=100&head=${encodeURIComponent(`${owner}:${branch}`)}&page=${page}`, githubInit(token));
+    if (!res.ok) throw githubError(res, `the pull requests of ${branch}`);
+    const got = (await githubList(res, `the pull requests of ${branch}`)) as PrRow[];
+    rows.push(...got);
+    if (got.length < 100) {
+      if (!rows.length) return null;
+      const intoDefault = rows.filter((r) => r.state !== "open" && r.base?.ref === DEFAULT_BRANCH);
+      return {
+        open: rows.some((r) => r.state === "open"),
+        merged: intoDefault.some((r) => r.merged_at),
+        closedHeads: intoDefault.map((r) => r.head.sha),
+      };
+    }
+  }
+  throw new Error(`more than 1,000 pull requests from ${branch}: the dry run reads no further`);
 }
 
 /**
@@ -309,8 +323,9 @@ export async function readClaims(fetchImpl: Fetch, cfg: Config, key: string | nu
   const init = (): RequestInit => ({ ...SAFE_REQUEST, headers: { "x-brain-key": key, Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
   const brain = await fetchImpl(`${base}/v1/brain`, init());
   if (!brain.ok) return { unreadable: `${base}/v1/brain answered ${brain.status}` };
-  const brainBody = await jsonOrNull(brain);
-  if (brainBody === null || typeof brainBody !== "object") return { unreadable: `${base}/v1/brain answered a body that isn't a JSON object` };
+  const brainBody = await jsonOf(brain);
+  if (brainBody === NOT_JSON) return { unreadable: `${base}/v1/brain answered a body that isn't JSON` };
+  if (brainBody === null || typeof brainBody !== "object") return { unreadable: `${base}/v1/brain answered JSON that isn't an object` };
   const tier = (brainBody as { tier?: string | null }).tier ?? null;
   if (tier !== "stable") return { unreadable: `the brain at ${base} says its tier is ${tier ?? "unset"}, not stable` };
   const out = new Map<string, ClaimsRead>();
@@ -321,8 +336,9 @@ export async function readClaims(fetchImpl: Fetch, cfg: Config, key: string | nu
       out.set(ticket, { unreadable: `list_claims answered ${res.status}` });
       continue;
     }
-    const body = (await jsonOrNull(res)) as { claims?: Claim[]; truncated?: boolean } | null;
-    out.set(ticket, body && Array.isArray(body.claims) && typeof body.truncated === "boolean" ? { claims: body.claims, truncated: body.truncated } : { unreadable: "list_claims answered in a shape the dry run doesn't know" });
+    const body = await jsonOf(res);
+    const read = body !== NOT_JSON && body !== null && typeof body === "object" ? (body as { claims?: Claim[]; truncated?: boolean }) : null;
+    out.set(ticket, read && Array.isArray(read.claims) && typeof read.truncated === "boolean" ? { claims: read.claims, truncated: read.truncated } : { unreadable: body === NOT_JSON ? "list_claims answered a body that isn't JSON" : "list_claims answered in a shape the dry run doesn't know" });
   }
   return out;
 }
