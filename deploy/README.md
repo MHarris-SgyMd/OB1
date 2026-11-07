@@ -1412,10 +1412,12 @@ for a call that failed, its `error.type`: the provider's status (`503`;
 `timeout`, `invalid_body` (a 2xx that is no JSON), or the runtime's code
 (`ECONNREFUSED`). A call the egress gate refuses is never made, and has none.
 The decide tier's calls are client spans the same way, `decide <model>` with
-`gen_ai.operation.name` `decide` (SMD-3379 PR 2b-2a) — none sent today: the
-tier runs in the workers, which export nothing, and preflight dials it after
-its telemetry is sent — and every one of these points also carries
-`ob1.call.class`, `live` inside a request and `background` outside one.
+`gen_ai.operation.name` `decide` (SMD-3379 PR 2b-2a) — the REST core's, as
+the genre classifier asks the tier live on a capture where
+`OB1_JEV_BASE_URL` names one; the workers' export nothing, and preflight dials
+the tier after its telemetry is sent — and every one of these points also
+carries `ob1.call.class`, `live` inside a request and `background` outside
+one. The provider alert leaves the decide tier's out ("Alerts" below).
 
 Every model call, whatever makes it, is also one point on
 `ob1.model.call.duration` at the model-call seam (SMD-3379 PR 2b-2a): its own
@@ -1424,24 +1426,27 @@ the same bounds, labelled `ob1.model.type` (`embed`, `chat`, `decide`), the
 model, the host and port, `ob1.call.class`, `ob1.call.purpose` (`capture`,
 `extraction`, `judge`, `writer`, `decision`, `probe` and the like), `ob1.pass`
 where a pass made it, and how it failed, in the provider point's words (a
-status, `timeout`, `invalid_body`, the runtime's code). In the servers it
+status, `timeout`, `invalid_body`, the runtime's code) — but extraction's,
+the judge's and the writer's, which throw their own errors, read
+`TimeoutError` for their own deadline and `SyntaxError` for a body that is
+no JSON. In the servers it
 stands beside the provider's own point, adding the purpose and the pass; and it
 counts calls no `gen_ai` point counts, extraction's, the judge's and the
 writer's, in any process that runs telemetry — today none does, so theirs are
 on the pass stamps below.
-A background call that waits for a slot under `OB1_BACKGROUND_SLOTS` is a
-point on `ob1.model.slot.wait.duration`, its wait in seconds from a
-millisecond to five minutes, by type, model, host and port, pass,
+Each background call's ask for a slot under `OB1_BACKGROUND_SLOTS` is a
+point on `ob1.model.slot.wait.duration`, its time in seconds from a
+millisecond to five minutes, whether it waited or not, by type, model, host and port, pass,
 `ob1.slot.outcome` — `held` (a slot taken), `open` (the semaphore's database
 did not answer, so it ran without one) or `stopped` — and `ob1.slot.waited`,
-false for a slot taken at once. These are recorded where telemetry runs, the
-servers. The claim engines under `--follow`, the sleep scheduler and
+false for a slot taken at once. These are recorded where telemetry runs: the
+servers, where a collector is named (`OTEL_EXPORTER_OTLP_ENDPOINT`). The claim engines under `--follow`, the sleep scheduler and
 board-sync under `--trigger` run none, so each one's pass stamp carries its
 tallies instead (`models` on `heartbeat:*`):
-its calls by pass and class, their own time, and their asks for a slot by how
+its calls by pass and class, how many failed, their own time, and their asks for a slot by how
 each ended and how many waited, which `brain_info`'s Model calls row says; the
 servers' own background calls (the vector mender, the provider reprobe, a
-detached job) are in the metrics alone. A run that stamps nothing — a claim
+detached job) are in the metrics alone, and without a collector nowhere. A run that stamps nothing — a claim
 engine's one-shot run, the weekly digest, the evals — is measured nowhere.
 
 Each operation the core calls on the store is a client span named for the
@@ -1795,7 +1800,8 @@ folder, each evaluated every 30 s:
 - **The model provider failed calls**: about three or more of a server's
   failed provider calls of one operation and error type over 10 minutes, for 5
   minutes; `preflight.ts --deep`'s probes are not counted (it says how they
-  went itself).
+  went itself), nor the decide tier's calls, whose failure leaves a capture's
+  genre `other` (SMD-3379 PR 2b-2a).
 - **The exporter does not reach Postgres**: the collector reads pg-exporter
   `up` 0, or pg-exporter reads Postgres `pg_up` 0, or either series is gone,
   for a minute (measured: pg-exporter stopped, pending in 26 s and firing in

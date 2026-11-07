@@ -1112,7 +1112,7 @@ if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
   const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
   if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
   else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
-  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model server's slots across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics`);
+  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────

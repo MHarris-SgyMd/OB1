@@ -149,11 +149,13 @@ export type SlotWaitEnd = "held" | "open" | "stopped";
 
 /**
  * One pass's model calls in this process since it started — `-` for calls of no pass: a timer's, a request's, a
- * script's — what its pass stamp carries, where no telemetry runs (SMD-3379 PR 2b-2a): the calls by class and their
- * own time, and the waits for a slot by how each ended, their time in all and the longest.
+ * script's — what its pass stamp carries, where no telemetry runs (SMD-3379 PR 2b-2a): the calls by class, how many
+ * of them failed, and their own time, and the waits for a slot by how each ended, their time in all and the longest.
  */
 export type ModelCallTally = {
   calls: Record<CallClass, number>;
+  /** Of the calls, those that threw: a provider down answers fast, so their time alone would read as a fast server (review pass 3). */
+  failed: number;
   callMs: number;
   /** Each ask for a slot by how it ended, how many of them waited at all — the rest took a slot at once — their time in all and the longest. */
   slotWaits: Record<SlotWaitEnd, number> & { waited: number; totalMs: number; maxMs: number };
@@ -162,7 +164,7 @@ const tallies = new Map<string, ModelCallTally>();
 function tallyOf(pass: string | undefined): ModelCallTally {
   const key = pass ?? "-";
   let t = tallies.get(key);
-  if (!t) tallies.set(key, (t = { calls: { live: 0, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } }));
+  if (!t) tallies.set(key, (t = { calls: { live: 0, background: 0 }, failed: 0, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } }));
   return t;
 }
 
@@ -172,6 +174,7 @@ export function modelCallTallies(): Record<string, ModelCallTally> {
   for (const [pass, t] of tallies) {
     out[pass] = {
       calls: { ...t.calls },
+      failed: t.failed,
       callMs: Math.round(t.callMs),
       slotWaits: { ...t.slotWaits, totalMs: Math.round(t.slotWaits.totalMs), maxMs: Math.round(t.slotWaits.maxMs) },
     };
@@ -239,6 +242,7 @@ function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise
       }));
       const t = tallyOf(call.pass);
       t.calls[call.cls] += 1;
+      if (threw) t.failed += 1;
       t.callMs += ms;
     }
   };

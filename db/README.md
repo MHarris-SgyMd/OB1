@@ -5197,7 +5197,7 @@ server-portable/brain-info.ts, SMD-2679 PR 4b).
 Since SMD-3379 PR 2b-2a it carries `models`, as every worker's stamp does
 once its process has made a model call: its calls by pass (`extract`,
 `consolidate`, `reembed`, `subjects`, `-` for none) since the process began —
-by class, their own time, and their asks for a slot by how each ended (`held`,
+by class, how many failed, their own time, and their asks for a slot by how each ended (`held`,
 `open`, `stopped`), how many waited at all, their time in all and the longest.
 No telemetry runs in a worker, so the stamp carries what the servers'
 `ob1.model.call.duration` and `ob1.model.slot.wait.duration` points do;

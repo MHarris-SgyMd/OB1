@@ -210,11 +210,11 @@ export interface WorkerHeartbeat {
   waitingMidPass?: SleepPass[];
   /**
    * The worker's model calls by pass since its process began, `-` for calls of no pass (SMD-3379 PR 2b-2a): by
-   * class, their own time, and their asks for a slot by how each ended — a slot taken, run without one (the
+   * class, how many failed, their own time, and their asks for a slot by how each ended — a slot taken, run without one (the
    * semaphore failed open), stopped — how many waited at all, their time in all and the longest. No telemetry runs in a worker, so its
    * stamp carries them. Absent from a row with none, or not of the shape, and from an earlier worker's.
    */
-  models?: Record<string, { calls: { live: number; background: number }; callMs: number; slotWaits: { held: number; open: number; stopped: number; waited: number; totalMs: number; maxMs: number } }>;
+  models?: Record<string, { calls: { live: number; background: number }; failed: number; callMs: number; slotWaits: { held: number; open: number; stopped: number; waited: number; totalMs: number; maxMs: number } }>;
   /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
@@ -747,15 +747,17 @@ function parseModels(m: unknown): WorkerHeartbeat["models"] {
   const out: NonNullable<WorkerHeartbeat["models"]> = {};
   for (const [pass, t] of entries) {
     if (!MODELS_PASS.test(pass) || t === null || typeof t !== "object") return undefined;
-    const { calls, callMs, slotWaits } = t as Record<string, Record<string, unknown> | unknown>;
+    const { calls, failed, callMs, slotWaits } = t as Record<string, Record<string, unknown> | unknown>;
     const c = calls as Record<string, unknown> | null;
     const w = slotWaits as Record<string, unknown> | null;
     if (c === null || typeof c !== "object" || w === null || typeof w !== "object") return undefined;
-    if (![c.live, c.background, callMs, w.held, w.open, w.stopped, w.waited, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
-    // The figures as one process writes them: no more waits than asks, no longer wait than all of them (review pass 2).
-    if ((w.waited as number) > (w.held as number) + (w.open as number) + (w.stopped as number) || (w.maxMs as number) > (w.totalMs as number)) return undefined;
+    if (![c.live, c.background, failed, callMs, w.held, w.open, w.stopped, w.waited, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
+    // The figures as one process writes them: no more waits than asks, no longer wait than all of them (review pass 2),
+    // no more failures than calls (pass 3).
+    if ((failed as number) > (c.live as number) + (c.background as number) || (w.waited as number) > (w.held as number) + (w.open as number) + (w.stopped as number) || (w.maxMs as number) > (w.totalMs as number)) return undefined;
     out[pass] = {
       calls: { live: c.live as number, background: c.background as number },
+      failed: failed as number,
       callMs: callMs as number,
       slotWaits: { held: w.held as number, open: w.open as number, stopped: w.stopped as number, waited: w.waited as number, totalMs: w.totalMs as number, maxMs: w.maxMs as number },
     };
@@ -2107,7 +2109,8 @@ function modelCallsLine(db: DatabaseSummary): string | null {
 
 /** A time in milliseconds as the row says it: whole milliseconds under a second, else seconds to a tenth (review pass 1: "0.0 s" lost an embedding's time). */
 function duration(ms: number): string {
-  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+  // Compared once rounded, so 999.6 ms reads "1.0 s", not "1000 ms" (review pass 3).
+  return Math.round(ms) < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
 /** The Model calls row's words for these heartbeats, null where none carries a call or a wait. */
@@ -2120,7 +2123,8 @@ export function modelCallsWords(beats: readonly WorkerHeartbeat[]): string | nul
       const asks = t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped;
       if (n === 0 && asks === 0) continue;
       const classes = [t.calls.background ? `${t.calls.background} background` : "", t.calls.live ? `${t.calls.live} live` : ""].filter(Boolean).join(", ");
-      const each = n ? `, ${duration(t.callMs / n)} each` : "";
+      // Failures said beside the time: a provider down answers fast (review pass 3).
+      const each = n ? `, ${duration(t.callMs / n)} each${t.failed ? `, ${t.failed} failed` : ""}` : "";
       // Asks and waits apart: a slot taken at once is no wait (review pass 1); the times the asks', round trips and a
       // stalled database's bound included, said before the waits so they do not read as theirs (review pass 2).
       const waited = asks
