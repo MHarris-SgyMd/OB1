@@ -133,6 +133,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     decide_item_close: { id: ID, accept: true, reason: "agreed" },
     item_history: { id: ID },
     list_items: { status: "unsettled", overdue: true, origin_thought: ID, plugin: "home-maintenance", limit: 7 },
+    // The agenda (SMD-3669): its scope and flags ride the query string.
+    agenda: { source: "linear", project: "Retrieval & more?", label: "bug", holder: "mine", limit: 7, include_blocked: true, include_claimed: true, include_proposed: true },
   } satisfies { [K in ToolName]: InputOf<K> };
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   for (const name of TOOL_NAMES) {

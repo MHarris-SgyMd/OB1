@@ -1096,6 +1096,7 @@ it, each over REST and MCP alike:
 | `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
+| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, now}`: open tickets and open items ranked by effective priority (migration 123), each with its terms, claims and blockers |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at

@@ -136,6 +136,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },
+  // The agenda (SMD-3669, migration 123): the scope and flags in the query string.
+  agenda: { method: "GET", path: "/v1/agenda", ok: 200, call: CALLS.agenda },
   open_item: { method: "POST", path: "/v1/items", ok: 200, call: CALLS.open_item },
   item_history: { method: "GET", path: "/v1/items/{id}", ok: 200, call: CALLS.item_history },
   update_item: { method: "PATCH", path: "/v1/items/{id}", ok: 200, call: CALLS.update_item },

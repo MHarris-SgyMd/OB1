@@ -2,6 +2,7 @@
 
 /** Each REST operation's method and path, by its operationId — the MCP tool's name for a core operation. */
 export const OPERATIONS = {
+  agenda: { method: "GET", path: "/v1/agenda" },
   brain_info: { method: "GET", path: "/v1/brain" },
   capture_thought: { method: "POST", path: "/v1/thoughts" },
   claim_work: { method: "POST", path: "/v1/claims" },

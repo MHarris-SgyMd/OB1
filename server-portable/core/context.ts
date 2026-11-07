@@ -44,6 +44,8 @@ export interface Ctx {
   logSearch(principal: Principal, tool: string, args: SearchLogArgs, data: { id: string; score?: number | null }[]): Promise<void>;
   /** The action-log rows of one call, in one write; best-effort, a no-op unless OB1_QUERY_LOG=on. */
   logActions(principal: Pick<Principal, "agentId">, rows: ActionRow[]): Promise<void>;
+  /** An agenda call's query_log row (migration 123): its scope and the items it returned; best-effort, a no-op unless OB1_QUERY_LOG=on. */
+  logAgenda(principal: Pick<Principal, "agentId">, filter: Record<string, unknown>, limit: number, items: { kind: string; key: string; effective: number }[]): Promise<void>;
   /** The embedding provider as this server last saw it (SMD-2890): every embedding call says, and the keyed /health and brain_info read it. */
   providerHealth: ProviderHealth;
   /** Seconds between re-probes of a provider that does not answer, once the server started its loop; null for none (a hosted endpoint, or OB1_PROVIDER_REPROBE_INTERVAL=off). */
@@ -93,6 +95,15 @@ export function createContext(deps: CoreDeps): Ctx {
   // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
   // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
   // is the follow-up (SMD-1950), not a durability trade here.
+  // The agenda's row (SMD-3669), as best-effort as a search's: a log write never fails the read.
+  const logAgenda: Ctx["logAgenda"] = async (principal, filter, limit, items) => {
+    if (!queryLogEnabled(deps.env())) return;
+    try {
+      await (await deps.store()).logAgenda({ agentId: principal.agentId, filter, matchCount: limit, items, tier: tier() });
+    } catch {
+      // best-effort: a log failure must never reach the caller.
+    }
+  };
   const logSearch: Ctx["logSearch"] = async (principal, tool, args, data) => {
     if (!queryLogEnabled(deps.env())) return;
     try {
@@ -148,6 +159,7 @@ export function createContext(deps: CoreDeps): Ctx {
     citationBase: () => deps.env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts",
     logSearch,
     logActions,
+    logAgenda,
     providerHealth: createProviderHealth({ base: () => shownBase(embedConfig().embeddings) }),
     reprobeS: null,
     reprobeByCall: false,

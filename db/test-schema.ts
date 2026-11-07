@@ -4001,8 +4001,8 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'query_log' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
   // 045 (SMD-1490) appended `tier` (the pipeline tier the writer runs as) and
-  // `arm` (the retrieval arm a search ran) after 034's thirteen.
-  const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id", "tier", "arm"];
+  // `arm` (the retrieval arm a search ran) after 034's thirteen; 123 (SMD-3669) `result_items`, an agenda row's typed items.
+  const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id", "tier", "arm", "result_items"];
   assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
 
   // The three indexes: 034's btree on (agent_id, logged_at) and partial GIN on
@@ -17988,6 +17988,119 @@ console.log("\n[109] Migration 122: effective priority — the counted level, el
 
   await reapply(file.slice(0, 4));
   assert(Number((await one("ticket", "SMD-9401"))?.effective) === 4, "a re-apply is a no-op");
+}
+
+console.log("\n[110] Migration 123: the agenda — unsettled tickets and open items, ranked by effective priority; a ticket blocked by an open item, one under a live claim and an item not yet startable left out and counted; proposed items only when asked; scoped by source, Linear project and label, or the tickets a key holds a live claim on; a lapsed claim named, hiding nothing; how many carry no priority, and board-sync's heartbeat; query_log's agenda kind; a re-apply a no-op (SMD-3669)");
+{
+  const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
+  await reapply(file.slice(0, 4));
+  // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
+  // or compares this section's own items among themselves.
+  const P = "Agenda [110]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag-op', 'operator')`);
+  const BOT_ID = "3a4b5c6d-7e8f-4a1b-9c2d-3e4f5a6b7c8d";
+  await db.query(`INSERT INTO ob1_agents (canonical_agent_id, label, kind) VALUES ($1::uuid, 'ag-bot', 'agent')`, [BOT_ID]);
+  const OP = { name: "ag-op", scope: "write" };
+  type It = { kind: string; key: string; rank: number; effective: number; level: number | null; overdue: boolean; claimed: { holder: string }[] | null;
+    lapsed_claim: { holder: string }[] | null; blockers: string[]; title: string; status?: string; source: string };
+  type Ag = { items: It[]; total: number; unknown: number; left_out: { blocked: number; claimed: number; waiting: number }; board_sync: { at: string; outcome: unknown } | null };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  const ticket = async (issue: string, o: { st?: string; project?: string; labels?: string[]; links?: [string, string][] } = {}) => {
+    const st = o.st ?? "backlog";
+    const content = `${issue} — [110] ${issue}\nbody`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: st, status_type: st, project: o.project ?? P, labels: o.labels ?? [], linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (o.links?.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(o.links.map(([relation, target]) => ({ relation, target })))]);
+  };
+  const put = (key: string, level: number, o: { due?: string; notBefore?: string } = {}) =>
+    db.query(`SELECT assert_priority('ticket', $1, $2, $3::timestamptz, $4::timestamptz, NULL, NULL, NULL, false, $5::jsonb)`, [key, level, o.due ?? null, o.notBefore ?? null, JSON.stringify(OP)]);
+  const ag = async (scope: object | null, o: { holder?: object; limit?: number; blocked?: boolean; claimed?: boolean; proposed?: boolean; now?: string } = {}) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, $2::jsonb, $3, $4, $5, $6, NULL, $7::timestamptz) AS a`,
+      [scope === null ? null : JSON.stringify(scope), o.holder ? JSON.stringify(o.holder) : null, o.limit ?? 100, o.blocked ?? false, o.claimed ?? false, o.proposed ?? false, o.now ?? NOW])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => i.key).join(" ");
+  const raisedCode = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+
+  // The shape: two functions, STABLE and commented; query_log's agenda kind, its items required.
+  const fns = (await db.query<{ n: string; v: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('agenda', 'ob1_item_blockers') ORDER BY 1`)).rows;
+  const noItems = await raisedCode(`INSERT INTO query_log (kind, tool) VALUES ('agenda', 'agenda')`);
+  await db.exec(`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', '[{"kind": "ticket", "key": "SMD-1", "effective": 3}]')`);
+  const logged = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)).rows[0].n;
+  assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 123 \/ SMD-3669/.test(f.c ?? "")) && noItems === "23514" && logged === 1,
+    `two functions, STABLE and commented; an agenda row in query_log needs its items (${fns.map((f) => `${f.n}:${f.v}`).join(", ")}; ${noItems}; ${logged})`);
+
+  // The order, and what is left out: in the section's project.
+  await ticket("SMD-9801"); await ticket("SMD-9802"); await ticket("SMD-9803", { st: "completed" }); await ticket("SMD-9804");
+  await ticket("SMD-9805", { links: [["blocked_by", "SMD-9806"]] }); await ticket("SMD-9806"); await ticket("SMD-9807");
+  await ticket("SMD-9808", { labels: ["l110"] });
+  await put("SMD-9801", 3); await put("SMD-9802", 2, { due: "2027-03-12T00:00:00Z" }); await put("SMD-9803", 5);
+  await put("SMD-9807", 4, { notBefore: "2027-04-01T00:00:00Z" }); await put("SMD-9808", 1);
+  const base = await ag({ project: P });
+  assert(keys(base) === "SMD-9802 SMD-9801 SMD-9806 SMD-9804 SMD-9808" && base.items[0].effective === 4 && base.items[2].effective === 2.5
+         && base.total === 5 && base.left_out.blocked === 1 && base.left_out.waiting === 1 && base.left_out.claimed === 0
+         && base.items.every((i) => i.blockers.length === 0) && base.items[0].title === "SMD-9802 — [110] SMD-9802",
+    `a Medium due tomorrow (4) first, then a High (3), then the blocker of one (2.5), an unknown (2) and a Low (1); the completed ticket out; the blocked one and the one not yet startable left out and counted (${keys(base)}; ${base.items.map((i) => i.effective)}; ${JSON.stringify(base.left_out)})`);
+  const withBlocked = await ag({ project: P }, { blocked: true });
+  const b5 = withBlocked.items.find((i) => i.key === "SMD-9805");
+  assert(withBlocked.total === 6 && JSON.stringify(b5?.blockers) === JSON.stringify(["SMD-9806"]) && withBlocked.left_out.blocked === 0,
+    `include_blocked lists the blocked ticket with its blocker (${JSON.stringify(b5?.blockers)})`);
+  await db.query(`SELECT record_source_links((SELECT thought_id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9806'), 'linear', '[]'::jsonb)`);
+  await db.exec(`UPDATE thoughts SET metadata = metadata || '{"status": "completed", "status_type": "completed"}'::jsonb WHERE metadata->>'issue' = 'SMD-9806'`);
+  const freed = await ag({ project: P });
+  assert(freed.items.some((i) => i.key === "SMD-9805") && freed.left_out.blocked === 0 && !freed.items.some((i) => i.key === "SMD-9806"),
+    `once its blocker is completed the blocked ticket is listed and the blocker is not (${keys(freed)})`);
+
+  // Scope: a label; a limit; the coverage.
+  const lab = await ag({ project: P, label: "l110" });
+  const lim = await ag({ project: P }, { limit: 2 });
+  assert(keys(lab) === "SMD-9808" && lim.items.length === 2 && lim.total === freed.total && freed.unknown === 2,
+    `a label scope lists its one ticket; limit 2 shows two of the total; two listed carry no priority (${keys(lab)}; ${lim.items.length}/${lim.total}; unknown ${freed.unknown})`);
+
+  // Claims, on the real clock (a claim's lease is the database's now()).
+  const claimed = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9801', NULL, 'ag-bot laptop', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
+  const live = await ag({ project: P }, { now: new Date().toISOString() });
+  const shown = await ag({ project: P }, { now: new Date().toISOString(), claimed: true });
+  const mine = await ag(null, { now: new Date().toISOString(), holder: { name: "ag-bot", agent_id: BOT_ID } });
+  const notMine = await ag(null, { now: new Date().toISOString(), holder: { name: "ag-op" } });
+  const later = await ag({ project: P }, { now: new Date(Date.now() + 86_400_000).toISOString() });
+  assert(claimed.outcome === "claimed" && !live.items.some((i) => i.key === "SMD-9801") && live.left_out.claimed === 1
+         && shown.items.find((i) => i.key === "SMD-9801")?.claimed?.[0]?.holder === "ag-bot"
+         && keys(mine) === "SMD-9801" && mine.items[0].claimed?.[0]?.holder === "ag-bot" && notMine.items.length === 0
+         && later.items.find((i) => i.key === "SMD-9801")?.lapsed_claim?.[0]?.holder === "ag-bot" && later.left_out.claimed === 0,
+    `a live claim hides its ticket, counted; include_claimed names the holder; mine lists the key's claimed tickets alone, another key's none; a day on, the lapsed claim hides nothing and is named (${claimed.outcome}; ${live.left_out.claimed}; ${keys(mine)}; ${notMine.items.length})`);
+
+  // Open items: open ones listed, proposed only when asked; source scopes; a project or label scope leaves them out.
+  const open = (await db.query<{ r: { item: { id: string } } }>(`SELECT open_item('[110] pay the water bill', NULL, '2027-03-11', NULL, NULL, false, $1::jsonb) AS r`, [JSON.stringify(OP)])).rows[0].r.item.id;
+  const proposed = (await db.query<{ r: { item: { id: string } } }>(`SELECT open_item('[110] maybe clean the garage', NULL, NULL, NULL, NULL, true, $1::jsonb) AS r`, [JSON.stringify(OP)])).rows[0].r.item.id;
+  const all = await ag(null);
+  const allP = await ag(null, { proposed: true });
+  const items = await ag({ source: "items" }, { proposed: true });
+  const linear = await ag({ source: "linear" });
+  assert(all.items.some((i) => i.key === open) && !all.items.some((i) => i.key === proposed) && allP.items.find((i) => i.key === proposed)?.status === "proposed"
+         && items.items.every((i) => i.kind === "item") && items.items.some((i) => i.key === open) && linear.items.every((i) => i.kind === "ticket")
+         && !base.items.some((i) => i.kind === "item"),
+    `an open item is listed, a proposed one only when asked; source items lists items alone, linear tickets alone; a project scope lists no item (${all.items.length}, ${allP.items.length}, ${items.items.length}, ${linear.items.length})`);
+
+  // Board-sync's heartbeat; refusals.
+  const before = (await ag({ project: P })).board_sync;
+  await db.exec(`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:board-sync', '{"outcome": "ok", "every_s": 300}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  const after = (await ag({ project: P })).board_sync;
+  const codes = [await raisedCode(`SELECT agenda(NULL, NULL, 0)`), await raisedCode(`SELECT agenda(NULL, NULL, 101)`), await raisedCode(`SELECT agenda('{"team": "x"}')`),
+                 await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`)];
+  assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && codes.every((c) => c === "22023"),
+    `no heartbeat is null, one names its outcome and time; a limit outside 1 to 100, an unknown or empty scope and a holder with no name each 22023 (${JSON.stringify(after)}; ${codes})`);
+
+  await reapply(file.slice(0, 4));
+  assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
