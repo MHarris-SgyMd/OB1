@@ -814,16 +814,17 @@ whole before `db/threads.ts` has linked it.
 
 - **`thread`** (read scope; REST `GET /v1/thread`) takes exactly one of `key` or `id`.
   - `key` reads that subject's thread from its start, read as the extractor writes keys: `ticket:` and its id in any
-    case; a ticket alone (`smd-3306`) when its prefix is one a text means as a ticket (not `PR-12` or `UTF-8`, whose
-    filed tickets are read with the prefix, `ticket:ES-5`); a pull request's and a version's numbers without leading
-    zeros.
+    case; a ticket alone (`smd-3306`) when its team is one a text means as a ticket (not `PR-12` or `UTF-8`; a ticket
+    filed under such a team is read with `ticket:` before it, `ticket:ES-5`); `pr:` and `version:` in any case, their
+    numbers without leading zeros.
   - `id` reads each thread the thought stands in, around it: up to half the page before it, then it and those after,
     its `place` marked.
   - **Paging.** `limit` members a page, 1–100, default 20. A thread with more carries a `cursor`, which is passed back as
     `after` with the same key.
   - **Each member** carries its id, title, time and place. A superseded member carries `supersededBy` and stays in its
-    thread, which keeps its history. A board ticket's own row — board-sync's (`metadata.source` `linear`, which no key may write) — carries
-    `ticket`, its status as board-sync last wrote it: the row is rewritten in
+    thread, which keeps its history. A board ticket's own row — board-sync's (`metadata.source` `linear`, which no key may write), and the
+    ticket's head row (068's `ob1_ticket_head`; board-sync chains a ticket's older rows under it) — carries
+    `ticket`, its status as that row records it: the row is rewritten in
     place, so it keeps its first place.
   - **Linked threads.** A ticket's thread names the threads its ticket's board links reach (`linked`): from 053's
     `linear` links in either direction, `parent`, `child`, `blocks`, `blocked_by` or `relates_to`, each with how many
@@ -837,6 +838,9 @@ whole before `db/threads.ts` has linked it.
 - **`fetch`** carries `threads` where the thought stands in a thread: each one's key, the thought's place and the
   thread's size, and the member it `continues` and the one that `continuedBy` it, each labelled when superseded. It is
   `threads: null` when they couldn't be read, such as for a role without `thought_facets`, and the log says why.
+
+The `thread` read reads `thought_facets` and 068's `ob1_ticket_head`, as `prefer_current` does: a role without SELECT on
+either faults it, the error naming the table.
 
 A thought stands in no thread until its subject is found. The extraction worker's rules find a ticket's subject, and its
 `--subjects` sweep asks the judge model for the rest.

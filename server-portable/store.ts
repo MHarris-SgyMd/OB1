@@ -957,15 +957,18 @@ const textOrNull = (v: unknown): string | null => (typeof v === "string" ? v : n
 /**
  * A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a board ticket's own
  * row — `metadata.source` `linear`, which board-sync alone writes (capture and update_thought refuse it to every key,
- * REFUSED_SOURCE_RESERVED), and `metadata.issue` a ticket's shape (a team of one letter or more, as board-sync's
+ * REFUSED_SOURCE_RESERVED); the ticket's head row (`head`: 068's ob1_ticket_head, the rule node_state and the
+ * stated-status label read — board-sync chains a ticket's older rows under its head, and a former head kept its
+ * status: review pass 3); and `metadata.issue` a ticket's shape (a team of one letter or more, as board-sync's
  * identifiers are). Its status type is kept only as one lower-case word, as Linear's are (backlog, started, …).
- * A write key may set `issue`, `status` and `status_type` to any text: review pass 1 found a forged issue, newlines
- * and all, printed as a ticket's row, and pass 2 a forged status type forging lines of the text; such a row carries no
- * ticket.
+ * A write key may set `issue`, `status` and `status_type` on its own rows to any text (review pass 1 found a forged
+ * issue printed as a ticket's row, pass 2 a forged status type forging lines of the text): such a row carries no
+ * ticket. On board-sync's row it may patch them too, as it may for node_state's reading; the status is said as the
+ * row records it.
  */
 export function normaliseThreadMember(r: Record<string, unknown>): ThreadMember {
   const raw = textOrNull(r.issue), type = textOrNull(r.status_type);
-  const issue = r.source === "linear" && raw !== null && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(raw) ? raw : null;
+  const issue = r.source === "linear" && r.head === true && raw !== null && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(raw) ? raw : null;
   return {
     id: String(r.id), place: Number(r.place), at: textOrNull(r.at), created_at: isoTimestampOrNull(r.created_at ?? null),
     content: String(r.content ?? ""),

@@ -1942,7 +1942,7 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
   const at = (id: string, ts: string) => sql`UPDATE thoughts SET created_at = ${ts}::timestamptz WHERE id = ${id}::uuid`;
   await at(row, "2026-10-01T00:00:00Z"); await at(note1, "2026-10-02T00:00:00Z"); await at(note2, "2026-10-03T00:00:00Z");
   const issue = (id: string, key: string, status: string, type: string) =>
-    sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('source', 'linear', 'issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
+    sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('source', 'linear', 'linear_updated_at', '2026-01-01T00:00:00.000Z', 'issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
   await issue(row, "SMD-9700", "In Progress", "started"); await issue(parent, "SMD-9701", "Backlog", "backlog");
   await issue(blocker, "SMD-9702", "Todo", "unstarted"); await issue(dup, "SMD-9703", "Duplicate", "canceled"); await issue(child, "SMD-9705", "Todo", "unstarted");
   // note2 supersedes note1: note1 stays in the thread, labelled.
@@ -1967,12 +1967,12 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
       && t1.earlier === false && typeof t1.cursor === "string" && t1.place === null && page1.body.id === null && same(threadsOf(prefixed.body)[0]?.members.map((m) => m.id), [row, note1]),
     `a key's thread: the ticket alone or with its prefix, three thoughts in created_at order, the first page of two and a cursor (${JSON.stringify(t1?.members.map((m) => m.place))} ${t1?.total} ${prefixed.status})`);
   assert(same(t1.members[0].ticket, { issue: "SMD-9700", status: "In Progress", statusType: "started" }) && t1.members[1].ticket === null && t1.members[1].supersededBy === note2 && t1.members[0].supersededBy === null,
-    `the ticket's own row carries its status as board-sync last wrote it; the superseded note stays, labelled with the thought superseding it (${JSON.stringify(t1.members.map((m) => [m.ticket, m.supersededBy]))})`);
+    `the ticket's own row carries its status as the row records it; the superseded note stays, labelled with the thought superseding it (${JSON.stringify(t1.members.map((m) => [m.ticket, m.supersededBy]))})`);
   assert(same(t1.linked, [{ key: "ticket:SMD-9701", relation: "parent", total: 1 }, { key: "ticket:SMD-9705", relation: "child", total: 1 }, { key: "ticket:SMD-9702", relation: "blocks", total: 1 }, { key: "ticket:SMD-9704", relation: "blocked_by", total: 0 }]) && t1.linkedMore === false,
     `the linked threads, each as it stands to this one: its own row's child_of a parent and its blocks a ticket blocked by it (no thought holds it: 0), another row's child_of a child and its blocks a blocker, none through duplicate_of (${JSON.stringify(t1.linked)})`);
   assert(!page1Mcp.isError && s1?.key === "ticket:SMD-9700" && same(s1.members.map((m) => m.id), [row, note1]) && s1.cursor === t1.cursor && same(s1.members[0].ticket, { issue: "SMD-9700", statusType: "started" })
       && page1Mcp.text.startsWith("Thread ticket:SMD-9700 — 3 thoughts, 1–2 shown:") && page1Mcp.text.includes(`⚠ Superseded by a newer thought — ID ${note2} (it stays in the thread`)
-      && page1Mcp.text.includes(`Ticket SMD-9700's own row — status as board-sync last wrote it: "In Progress" (started)`) && page1Mcp.text.includes("Linked threads (no thread runs across a link): ticket:SMD-9701 its parent (1 thought); ticket:SMD-9705 its child (1 thought); ticket:SMD-9702 blocks it (1 thought); ticket:SMD-9704 blocked by it (0 thoughts).")
+      && page1Mcp.text.includes(`Ticket SMD-9700's own row — status as the row records it: "In Progress" (started)`) && page1Mcp.text.includes("Linked threads (no thread runs across a link): ticket:SMD-9701 its parent (1 thought); ticket:SMD-9705 its child (1 thought); ticket:SMD-9702 blocks it (1 thought); ticket:SMD-9704 blocked by it (0 thoughts).")
       && page1Mcp.text.includes(`Cursor: ${t1.cursor} — pass it as \`after\` with key ticket:SMD-9700`),
     `MCP says the same page: its header, the superseded mark, the row's status (its words in the text, its type in the value), the linked threads and the cursor (${page1Mcp.text.slice(0, 140).replace(/\n/g, " | ")})`);
   const page2 = await rest("GET", `/v1/thread?key=SMD-9700&limit=2&after=${t1.cursor}`);
@@ -2083,7 +2083,7 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
   // relates_to 9809 written then closed, and another system's link. Other rows: 9805 child_of, 9806 blocks, 9807 blocked_by, 9808 relates_to 9800.
   const ticketRow = async (key: string) => {
     const id = await capture(`Ticket ${key}: a board row for the links case`);
-    await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('source', 'linear', 'issue', ${key}::text, 'status', 'Todo', 'status_type', 'unstarted') WHERE id = ${id}::uuid`;
+    await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('source', 'linear', 'linear_updated_at', '2026-01-01T00:00:00.000Z', 'issue', ${key}::text, 'status', 'Todo', 'status_type', 'unstarted') WHERE id = ${id}::uuid`;
     return id;
   };
   const links = (id: string, system: string, ls: { relation: string; target: string }[]) => sql`SELECT record_source_links(${id}::uuid, ${system}::text, ${JSON.stringify(ls)}::text::jsonb)`;
@@ -2163,7 +2163,7 @@ console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket f
     ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
   const boardRow = async (key: string, status: string | null, type: string, at: string) => {
     const id = await capture(`Ticket ${key}: a board row for review pass 2`);
-    await sql`UPDATE thoughts SET created_at = ${at}::timestamptz, metadata = metadata || jsonb_build_object('source', 'linear', 'issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
+    await sql`UPDATE thoughts SET created_at = ${at}::timestamptz, metadata = metadata || jsonb_build_object('source', 'linear', 'linear_updated_at', '2026-01-01T00:00:00.000Z', 'issue', ${key}::text, 'status', ${status}::text, 'status_type', ${type}::text) WHERE id = ${id}::uuid`;
     return id;
   };
   // A team keyed ES: its row's filed ticket keeps the prefix (metadataTicket), so its key is ticket:ES-5.
@@ -2186,7 +2186,7 @@ console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket f
   const [ftRest, ftMcp] = await Promise.all([rest("GET", "/v1/thread?key=SMD-9970"), mcp("thread", { key: "SMD-9970" })]);
   const ft = threadsOf(ftRest.body)[0];
   assert(ft?.total === 2 && same(ft.members[0].ticket, { issue: "SMD-9970", status: null, statusType: null }) && ft.members[1].ticket === null
-      && !ftMcp.text.includes("More follow") && !ftMcp.text.includes("SMD-6666") && ftMcp.text.includes("Ticket SMD-9970's own row — status as board-sync last wrote it: not stated\n")
+      && !ftMcp.text.includes("More follow") && !ftMcp.text.includes("SMD-6666") && ftMcp.text.includes("Ticket SMD-9970's own row — status as the row records it: not stated\n")
       && (ftMcp.text.match(/own row/g) ?? []).length === 1,
     `a board row's status type that is no one word is dropped, its null status said "not stated"; a row whose source is not board-sync's carries no ticket (${JSON.stringify(ft?.members.map((m) => m.ticket))})`);
   // A version past 2^53 keeps its digits; a version's leading zeros still go.
@@ -2222,6 +2222,34 @@ console.log("\n[16c] Work threads, review pass 2 (SMD-3306 PR 7a-2a): a ticket f
   assert(emptyLinked.text === "No thought holds subject ticket:SMD-9804: its thread is empty.\nLinked threads (no thread runs across a link): ticket:SMD-9800 relates to it (1 thought)."
       && threadsOf(cased.body)[0]?.key === "ticket:SMD-9700" && threadsOf(cased.body)[0].total === 3 && !blankId.isError && threadsOf(blankId.sc)[0]?.total === 3 && !blankKey.isError && blankKey.sc.id === es,
     `an empty thread names its linked threads; a key's case and spaces are read; a blank id or key beside the other is no input (${emptyLinked.text.replace(/\n/g, " | ")})`);
+}
+
+console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket whose board rows are chained (an older row superseded by its head) has one own row, its head, with the head's status; pr: and version: in any case");
+{
+  type M = { id: string; place: number; supersededBy: string | null; ticket: { issue: string; status?: string | null; statusType: string | null } | null };
+  const threadsOf = (b: Record<string, unknown>) => (b.threads ?? []) as { total: number; members: M[] }[];
+  const capture = async (content: string) => String((await rest("POST", "/v1/thoughts", { content })).body.id);
+  const subject = async (id: string) =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, 'ticket:SMD-9980', 'metadata', 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
+  const row = async (status: string, type: string, at: string, synced: string) => {
+    const id = await capture(`Ticket SMD-9980: a board row, ${status}`);
+    await sql`UPDATE thoughts SET created_at = ${at}::timestamptz, metadata = metadata || jsonb_build_object('source', 'linear', 'issue', 'SMD-9980', 'status', ${status}::text, 'status_type', ${type}::text, 'linear_updated_at', ${synced}::text) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  // board-sync's twin chain (sync-linear.ts): the older row superseded by the head.
+  const older = await row("Backlog", "backlog", "2026-06-01T00:00:00Z", "2026-06-01T00:00:00.000Z");
+  const head = await row("Done", "completed", "2026-06-03T00:00:00Z", "2026-06-03T00:00:00.000Z");
+  await sql`UPDATE thoughts SET supersedes = ${older}::uuid WHERE id = ${head}::uuid`;
+  const written = [await subject(older), await subject(head)];
+  const [chain, chainMcp] = await Promise.all([rest("GET", "/v1/thread?key=SMD-9980"), mcp("thread", { key: "SMD-9980" })]);
+  const t = threadsOf(chain.body)[0];
+  assert(written.every((w) => w.ok) && t?.total === 2 && t.members[0].id === older && t.members[0].ticket === null && t.members[0].supersededBy === head
+      && same(t.members[1].ticket, { issue: "SMD-9980", status: "Done", statusType: "completed" })
+      && (chainMcp.text.match(/own row/g) ?? []).length === 1 && chainMcp.text.includes(`Ticket SMD-9980's own row — status as the row records it: "Done" (completed)`) && !chainMcp.text.includes('"Backlog"'),
+    `a ticket's chained board rows: the older, superseded, is no own row; the head alone is, with its status (${JSON.stringify(t?.members.map((m) => [m.ticket?.status ?? null, m.supersededBy !== null]))})`);
+  const [prUpper, versionUpper] = await Promise.all([rest("GET", "/v1/thread?key=PR:012"), rest("GET", "/v1/thread?key=VERSION:V1.2")]);
+  assert(prUpper.status === 200 && (threadsOf(prUpper.body)[0] as unknown as { key: string })?.key === "pr:12" && versionUpper.status === 200 && (threadsOf(versionUpper.body)[0] as unknown as { key: string })?.key === "version:v1.2",
+    `PR:012 reads pr:12 and VERSION:V1.2 version:v1.2 (${prUpper.status} ${versionUpper.status})`);
 }
 
 apiServer.stop();

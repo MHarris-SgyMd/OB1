@@ -839,9 +839,10 @@ function threadText(t: ThreadShown, thought: string | null): string {
     const marks = [
       m.id === thought ? "   ◀ this thought" : "",
       m.supersededBy ? `   ⚠ Superseded by a newer thought — ID ${m.supersededBy} (it stays in the thread, which keeps its history)` : "",
-      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status as board-sync last
-      // wrote it, quoted, the row's own words; its issue a ticket's shape (store.ts normaliseThreadMember).
-      m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status as board-sync last wrote it: ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
+      // The row is rewritten in place and keeps its first place (the maintainer, 11-06): its status as that row records
+      // it, quoted, the row's own words — a write key may patch it, so not "board-sync's" (review pass 3); the ticket's
+      // head row alone, board-sync's, its issue a ticket's shape (store.ts normaliseThreadMember).
+      m.ticket ? `   Ticket ${m.ticket.issue}'s own row — status as the row records it: ${m.ticket.status === null ? "not stated" : JSON.stringify(oneLine(snipText(m.ticket.status, 60)))}${m.ticket.statusType ? ` (${m.ticket.statusType})` : ""}` : "",
     ].filter(Boolean);
     return `${m.place}. ${JSON.stringify(oneLine(m.title))}\n   ID: ${m.id}${marks.length ? `\n${marks.join("\n")}` : ""}`;
   });
@@ -851,7 +852,7 @@ function threadText(t: ThreadShown, thought: string | null): string {
   // two reads said nothing).
   const before = t.members.length === 0 && thought !== null ? "\n(This thought left the thread while it was read: read it again, or read the key's thread from its start.)"
     : !t.earlier ? "" : t.members.length > 0 ? `\n(${first - 1} earlier: read the key's thread from its start for them.)`
-      : "\n(No member stands past the cursor now: those after it left the thread since that page. Read the key's thread from its start.)";
+      : "\n(No member stands past the cursor now: those after it left the thread since that page, or the cursor came from another thread's page. Read the key's thread from its start.)";
   const more = t.cursor ? `\n\nMore follow. Cursor: ${t.cursor} — pass it as \`after\` with key ${threadKeyText(t.key)} for the next page.` : "";
   return `${head}${linked ? `\n${linked}` : ""}${before}\n\n${members.join("\n\n")}${more}`;
 }
@@ -866,7 +867,7 @@ export function renderThread(o: Outcome<ThreadResult>): Reply {
   }, (r) => r.code === "REFUSED_THREAD_INPUT"
     ? r.problem === "key_or_id" ? "Refused: give exactly one of `key` (a subject key, such as ticket:SMD-3306) or `id` (a thought's id)."
       : r.problem === "after_needs_key" ? "Refused: `after` continues one thread — give it with that thread's `key`, as the page that ended with it said."
-        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>. A ticket alone whose prefix a text never means as a ticket (PR-12, UTF-8, ES-5) is read only with its prefix, ticket:ES-5, as a ticket filed under it is keyed; a pull request is pr:12, and a word such as UTF-8 a phrase, phrase:utf-8.`
+        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8, ES-5) is read only with ticket: before it (ticket:ES-5), as a ticket filed under such a team is keyed; a pull request is pr:12, and a word such as UTF-8 a phrase, phrase:utf-8.`
     : r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a thread cursor — pass the `cursor` a thread's page ended with, as it was given, with that thread's key."
       : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
         : unknownRefusal(r), safeThread);

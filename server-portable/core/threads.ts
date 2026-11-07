@@ -4,7 +4,7 @@
 // thought last. Both reads find it from the subjects, not from 120's edges: the subjects define it, so a read is right
 // on a brain db/threads.ts has not linked yet. The maintainer's decisions (2026-11-06) are read here: a superseded
 // member stays in its thread and is labelled; a ticket's own row, rewritten in place, keeps its first place and shows
-// its status as board-sync last wrote it; a ticket's thread names the threads its board links reach, and no thread runs across one.
+// its status as that row records it; a ticket's thread names the threads its board links reach, and no thread runs across one.
 
 import { thoughtTitle } from "../thoughts.ts";
 import { isTicket, subjectKeyValid } from "../subject.ts";
@@ -36,7 +36,7 @@ const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
  * alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or `UTF-8` is
  * no ticket a text names (review pass 1); a pull request's and a version's numbers lose their leading zeros (`pr:012`
  * is `pr:12`, `version:v01.2` `version:v1.2`). Any other key is taken as written, trimmed. Null for what is no subject
- * key (111's subject_key_valid, mirrored by subjectKeyValid).
+ * key (111's subject_key_valid, mirrored by subjectKeyValid). `pr:` and `version:v` are read in any case (review pass 3).
  */
 export function threadKey(raw: string): string | null {
   const k = raw.trim();
@@ -44,9 +44,9 @@ export function threadKey(raw: string): string | null {
   if (prefixed) return subjectKeyValid(`ticket:${prefixed[1].toUpperCase()}`) ? `ticket:${prefixed[1].toUpperCase()}` : null;
   const bare = /^([A-Za-z][A-Za-z0-9]*-[0-9]+)$/.exec(k);
   if (bare) return isTicket(bare[1].toUpperCase()) ? `ticket:${bare[1].toUpperCase()}` : null;
-  const pr = /^pr:([0-9]{1,9})$/.exec(k);
+  const pr = /^pr:([0-9]{1,9})$/i.exec(k);
   if (pr) return `pr:${noLeadingZeros(pr[1])}`;
-  const version = /^version:v([0-9]+(?:\.[0-9]+){1,3})$/.exec(k);
+  const version = /^version:v([0-9]+(?:\.[0-9]+){1,3})$/i.exec(k);
   if (version) {
     const v = `version:v${version[1].split(".").map(noLeadingZeros).join(".")}`;
     return subjectKeyValid(v) ? v : null;
