@@ -120,6 +120,11 @@ BEGIN
     ALTER TABLE query_log ADD COLUMN result_items jsonb;
     COMMENT ON COLUMN query_log.result_items IS
       'An agenda row''s items in the order returned, each {kind, key, effective}: tickets are keys, not thought ids, so result_ids cannot hold them. NULL on search and action rows. Migration 123 / SMD-3669.';
+    -- The comments that named search and action rows alone, re-issued with the agenda's row (review pass 11).
+    COMMENT ON TABLE query_log IS
+      'Opt-in (OB1_QUERY_LOG=on), off by default: one row per search call (the query, its arguments, and the ids returned in rank order with scores) and one per follow-up fetch/edit/delete of a returned id, or a write that cited a returned id as its source (the target; the tool is <writer>/<pointer> on a cite, and the tool column''s comment has both shapes, SMD-1719); and one per agenda call (kind agenda: the caller, its scope and flags in filter, its limit in match_count, and the tickets and items shown, in order, in result_items; migration 123, SMD-3669). Personal data at rest — every query typed. Nothing reads it on the hot path; the write is best-effort and never fails a search. An action is linked to its search at export time by (agent_id, target_id, time window), not at write time — there is no request/session token in the handlers. Pruned by prune_query_log(); default retention 30 days (OB1_QUERY_LOG_RETENTION_DAYS).';
+    COMMENT ON COLUMN query_log.filter IS
+      'The metadata containment filter a search ran with (jsonb; the search applies metadata @> filter). Populated from the search tools'' filter argument (SMD-1490); {} is unfiltered, and an absent or empty argument normalises to {} at the tool boundary. The argument is a shallow object — top-level keys mapping to a scalar or an array of scalars — so the containment stays GIN-indexable (SMD-1625 is the row-level-security cost of exposing it). NULL on an action row. On an agenda row, no containment filter: the call''s scope (source, project, label), its holder and its three include flags (migration 123).';
   END IF;
 END
 $col$;

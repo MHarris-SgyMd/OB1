@@ -5561,7 +5561,7 @@ console.log("\n[20bm] Migration 122: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20bn] Migration 123: onto a populated brain at the file before it — refused by name without 122's effective_priority, nothing made; then applied: the agenda ranks a ticket due tomorrow above its High, leaves the completed one out, and an agenda row logs to query_log; nothing stored moved; a re-apply a no-op (SMD-3669)");
+console.log("\n[20bn] Migration 123: onto a populated brain at the file before it — refused by name without 122's effective_priority, nothing made; then applied: the agenda ranks a ticket due tomorrow above its High, leaves the completed one out, and an agenda row logs to query_log; nothing stored moved, the log's search and action rows among it; a re-apply a no-op (SMD-3669)");
 {
   const the123 = MIGRATIONS.find((f) => /^\d{3}_agenda\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -5578,7 +5578,13 @@ console.log("\n[20bn] Migration 123: onto a populated brain at the file before i
   await ticket("SMD-9601"); await ticket("SMD-9602"); await ticket("SMD-9603", "completed");
   await sql`SELECT assert_priority('ticket', 'SMD-9601', 3, NULL, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
   await sql`SELECT assert_priority('ticket', 'SMD-9602', 2, '2027-03-12T00:00:00Z'::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
-  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h);
+  // The log 123 alters already holds a search row and an action row (review pass 11: it held none, so nothing showed
+  // they come through the new column and CHECKs unchanged).
+  const target = String((await sql`SELECT id FROM thoughts WHERE content = 'upgrade 123: SMD-9601'`)[0].id);
+  await sql`INSERT INTO query_log (kind, tool, query, result_ids) VALUES ('search', 'search_thoughts', 'upgrade 123', ARRAY[${target}::uuid])`;
+  await sql`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', ${target}::uuid)`;
+  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h)
+    + " " + String((await sql`SELECT md5(string_agg((to_jsonb(q) - 'result_items')::text, '|' ORDER BY q.id)) AS h FROM query_log q WHERE kind <> 'agenda'`)[0].h);
   const storedBefore = await stored();
 
   // Without 122's read: refused by name, nothing made.
@@ -5596,7 +5602,7 @@ console.log("\n[20bn] Migration 123: onto a populated brain at the file before i
   await sql`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', (${JSON.stringify(r.items.map((i) => ({ kind: "ticket", key: i.key, effective: i.effective })))}::text)::jsonb)`;
   const rows = Number((await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)[0].n);
   assert(r.items.map((i) => i.key).join(" ") === "SMD-9602 SMD-9601" && r.total === 2 && rows === 1 && (await stored()) === storedBefore,
-    `applied: the Medium due tomorrow ranks above the High, the completed ticket left out; an agenda row logs; no stored statement moved (${r.items.map((i) => `${i.key} ${i.effective}`).join(", ")}; ${rows})`);
+    `applied: the Medium due tomorrow ranks above the High, the completed ticket left out; an agenda row logs; no stored statement and no search or action row moved (${r.items.map((i) => `${i.key} ${i.effective}`).join(", ")}; ${rows})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the123 });
   assert(JSON.stringify(await read()) === JSON.stringify(r), "a re-apply is a no-op: the same read");
   await sql.close();

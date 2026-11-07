@@ -18237,8 +18237,15 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   for (let c = 1; c <= 65535; c++) if ((c < 0xd800 || c > 0xdfff) && String.fromCharCode(c).trim() === "") trimmed.push(c);
   assert(JSON.stringify(ws) === JSON.stringify(trimmed), `the scope's white space is trim()'s, code point for code point (${ws}; ${trimmed})`);
 
+  // The log's column and CHECKs behind catalog checks (review passes 1, 3 and 5): a re-apply leaves each where it is,
+  // not dropped and made again (review pass 11: no row held it).
+  const catalog = async () => JSON.stringify((await db.query(`SELECT (SELECT array_agg(oid ORDER BY conname) FROM pg_constraint WHERE conrelid = 'query_log'::regclass AND conname IN ('query_log_kind_check', 'query_log_agenda_has_items')) AS cons,
+      (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'result_items' AND NOT attisdropped) AS col`)).rows[0]);
+  const catalogBefore = await catalog();
   await reapply(file.slice(0, 4));
-  assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");
+  const catalogAfter = await catalog();
+  assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
+    `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
