@@ -18065,6 +18065,15 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   assert(keys(lab) === "SMD-9808" && lim.items.length === 2 && lim.total === freed.total && freed.unknown === 2,
     `a label scope lists its one ticket; limit 2 shows two of the total; two listed carry no priority (${keys(lab)}; ${lim.items.length}/${lim.total}; unknown ${freed.unknown})`);
 
+  // An inherited level is a priority: in a project of its own, an Urgent parent, its child (inheriting 3) and a ticket
+  // with none — one unknown, not two.
+  const PI = "Agenda [110] inherited";
+  await ticket("SMD-9820", { project: PI }); await ticket("SMD-9821", { project: PI, links: [["child_of", "SMD-9820"]] }); await ticket("SMD-9822", { project: PI });
+  await put("SMD-9820", 4);
+  const inh = await ag({ project: PI });
+  assert(keys(inh) === "SMD-9820 SMD-9821 SMD-9822" && inh.unknown === 1,
+    `the child inheriting from its Urgent parent is not counted as carrying no priority; the ticket with none is (${keys(inh)}; unknown ${inh.unknown})`);
+
   // Claims, on the real clock (a claim's lease is the database's now()).
   const claimed = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9801', NULL, 'ag-bot laptop', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
   const live = await ag({ project: P }, { now: new Date().toISOString() });
