@@ -111,6 +111,7 @@ const deny = resolveEgressPolicy({});
   ok(classifyError({ status: 401 }) === "fatal", "a 401 (the key) is fatal");
   ok(classifyError({ status: 404 }) === "fatal", "a 404 (the model) is fatal");
   ok(classifyError({ status: 400, message: "bad request shape" }) === "fatal", "a 400 that is not about length is fatal");
+  ok(classifyError({ status: 307 }) === "fatal" && classifyError({ status: 301 }) === "fatal", "a redirect, which no call follows, is fatal: the base redirects every call (SMD-2908)");
   ok(classifyError({}) === "thought", "an error the rules do not recognise is the thought's");
   // The one rule extract adds: a 400 about the answer budget. Without the option
   // it reads as this thought's length (refusesLength matches "tokens") and is the

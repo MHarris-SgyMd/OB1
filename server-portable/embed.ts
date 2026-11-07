@@ -118,7 +118,8 @@ export const PROVIDER_ERROR_CHARS = 500;
 /**
  * What a provider call can fail with, told apart without parsing messages:
  * the deadline passed (`timeout`), the provider answered with an error status
- * (`http`, with the status), or it answered 2xx with a body that is not JSON
+ * (`http`, with the status — a redirect among them, never followed:
+ * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON
  * (`body`) — or the call was never made, because the egress gate refused to
  * send the text to an endpoint not declared local (`egress`, SMD-1903; no
  * status, and nothing about the provider). Anything else — a refused
@@ -265,6 +266,8 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
       // an unstreamed call at its own 300 s idle timeout, so a longer value
       // here never took effect (measured for SMD-1879; entities.ts).
       timeout: false,
+      // Never followed: the gate judged this base, not where a 3xx points (SMD-2908).
+      redirect: "manual",
     });
   } catch (e) {
     // The caller's stop first: a caller's own timeout signal is its stop, not
@@ -275,6 +278,8 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
     if ((e as Error).name === "TimeoutError") throw timedOut();
     throw e;
   }
+  const redirected = refuseRedirect(what, at.base, r);
+  if (redirected) throw redirected;
   // The status is known from here on and must not be lost: a body that fails
   // to arrive after a 413 is still a 413 (the third review found a reset
   // mid-body turning a refusal into a transient, and failing a capture that
@@ -318,6 +323,60 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
  */
 export function refuseEgress(what: string, base: string, gate: EgressDecision): ProviderError {
   return new ProviderError(`${what} request to ${base} refused by the egress gate: ${gate.reason}`, "egress");
+}
+
+/** Whether a status is a redirect: 300 to 399. */
+export function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/**
+ * A redirect, refused (SMD-2908); null for any other status. Every dialler that
+ * sends brain text passes `redirect: "manual"`, and so does every probe, for
+ * parity: the egress gate judged the endpoint's base, and a redirect followed
+ * would carry the body past that judgement to wherever it points, off the box
+ * included — Bun re-sends a 307's POST, body and all, to another origin,
+ * dropping only Authorization (measured on Bun 1.4.3). So a 3xx is this
+ * ProviderError, never followed: kind `http` with its status, naming where it
+ * pointed (userinfo masked), so the operator can set the base there, where the
+ * gate judges it. providerDown reads it as no outage, and a worker's
+ * classifyError as fatal: a base that redirects one call redirects them all.
+ * The answer's body is let go unread, and the target is shownLocation's,
+ * resolved against the URL that answered (`r.url`, the request's own under
+ * `redirect: "manual"`), else `base`. `hostOnly`: a dialler whose path carries
+ * a secret (the digest's Telegram token, which a redirect to the same path on
+ * another scheme echoes, in any spelling) prints the target's host alone.
+ */
+export function refuseRedirect(what: string, base: string, r: Response, opts: { hostOnly?: boolean } = {}): ProviderError | null {
+  if (!isRedirect(r.status)) return null;
+  const to = r.headers.get("location");
+  void r.body?.cancel().catch(() => {});
+  return new ProviderError(
+    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, r.url || base, opts)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
+    "http", r.status);
+}
+
+/** How long a redirect's target may print: a hostile endpoint's `Location` lands in every log line naming it. */
+export const LOCATION_CHARS = 200;
+
+/**
+ * A redirect's `Location` as a message prints it (SMD-2908): resolved against
+ * the URL it answered for, so a relative or protocol-relative one
+ * (`//user:pass@host/…`, which shownUrl's parse refuses) is read as fetch
+ * would; userinfo as `***@`; a query as `?…`, since a key may ride there; and
+ * capped at LOCATION_CHARS. `hostOnly`: the scheme and host, the path as `/…`.
+ */
+export function shownLocation(to: string, from: string, opts: { hostOnly?: boolean } = {}): string {
+  let u: URL;
+  try {
+    u = new URL(to, from);
+  } catch {
+    return "an address that does not parse";
+  }
+  const origin = `${u.protocol}//${u.username || u.password ? "***@" : ""}${u.host}`;
+  if (opts.hostOnly) return `${origin}/…`.slice(0, LOCATION_CHARS);
+  const shown = `${origin}${u.pathname}${u.search ? "?…" : ""}`;
+  return shown.length > LOCATION_CHARS ? `${shown.slice(0, LOCATION_CHARS)}…` : shown;
 }
 
 /** The endpoint a path is served by: /embeddings by the embeddings one, /chat/completions by the chat one. */

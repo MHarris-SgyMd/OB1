@@ -27,7 +27,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, maskUrl, missingDatabaseUrl, POSTGREST_RETIRED, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
@@ -926,6 +926,14 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
     const ms = Math.max(1, Math.round(performance.now() - started));
+    // A redirect is an answer from this address, but the brain's calls follow none (SMD-2908): if they are redirected
+    // too, each fails. A warning, not a failure: /models may redirect where the calls do not, which --deep tells.
+    if (isRedirect(r.status)) {
+      const to = r.headers.get("location");
+      add(row, "warn", `${shown} answers with a redirect — HTTP ${r.status} to GET /models${to ? `, to ${shownLocation(to, `${at.base}/models`)}` : ""}, in ${ms} ms; the brain's calls follow no redirect (SMD-2908), so if they are redirected too, each fails`,
+          `Set ${knob} to where it points, or run --deep to see whether the calls are redirected.`);
+      return;
+    }
     // An outage's status (5xx, 408, 429) is the provider there and not ready — a
     // server still loading, a proxy whose backend is down: the runtime's probe
     // reads it as an outage, so the start does too (review pass 2).
@@ -5512,6 +5520,20 @@ let probes = 0;
 const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line, kind) => telemetrySaid.push({ line, kind }), undefined, { oneShot: true }) : false;
 
 /**
+ * A --deep probe's redirect (SMD-2908), or null: the row's words and its fix. The probes follow none, as the
+ * server's calls follow none — following one would dial, under a row naming the base, wherever it points.
+ */
+function redirectRow(r: Response, at: ProviderEndpoint, knob: string): { detail: string; fix: string } | null {
+  if (!isRedirect(r.status)) return null;
+  const to = r.headers.get("location");
+  void r.body?.cancel().catch(() => {});
+  return {
+    detail: `${shownBase(at)} answered ${r.status}${to ? `, redirecting to ${shownLocation(to, r.url || at.base)}` : ""} — the brain's calls follow no redirect, which would carry the text past the egress gate (SMD-2908)`,
+    fix: `Set ${knob} to where it points; the egress gate then judges that base.`,
+  };
+}
+
+/**
  * A probe as a provider call's span and point, marked `ob1.probe` so a backend
  * tells it from the server's calls when both carry one service's name: its
  * time to the answer's headers, its error the status a provider refused with
@@ -5547,8 +5569,12 @@ if (!deep) {
         input: "preflight",
         ...(wantsTruncation ? { dimensions: embDim } : {}),
       }),
+      redirect: "manual",
     }));
-    if (!r.ok) {
+    const redirected = redirectRow(r, embEndpoint, "OB1_LLM_BASE_URL");
+    if (redirected) {
+      add("embedding provider", "fail", redirected.detail, redirected.fix);
+    } else if (!r.ok) {
       add("embedding provider", "fail", `${shownBase(embEndpoint)} returned ${r.status}`,
           r.status === 401 ? rejectedRemedy(embEndpoint, "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)", "OB1_LLM_BASE_URL") : "Check the provider's status and credit balance.");
     } else {
@@ -5611,8 +5637,12 @@ if (deep) {
           response_format: { type: "json_object" },
           messages: [{ role: "user", content: 'Reply with only this JSON: {"ok":true}' }],
         }),
+        redirect: "manual",
       }));
-      if (!m.ok) {
+      const redirected = redirectRow(m, chatEndpoint, chatEndpoint === embEndpoint ? "OB1_LLM_BASE_URL" : "OB1_CHAT_BASE_URL");
+      if (redirected) {
+        add(row, "fail", `${model}: ${redirected.detail}`, `${redirected.fix} ${consequence}`);
+      } else if (!m.ok) {
         add(row, "fail", `${model} returned ${m.status} from ${shownBase(chatEndpoint)}`,
             (m.status === 401
               ? `${chatEndpoint === embEndpoint
