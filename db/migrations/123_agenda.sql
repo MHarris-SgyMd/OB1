@@ -72,8 +72,10 @@
 --   006 (ob1_config), 034 (query_log), 053, 068, 071 (the links, heads and
 --   gate), 115 (work_claims), 117 (open_items), 122 (effective_priority).
 --   Applied by `bun db/migrate.ts`. Re-applied: the functions are replaced,
---   the column and both CHECKs kept as they are, the log neither locked nor
---   re-scanned.
+--   the column and both CHECKs kept as they are. Reading the catalog takes a
+--   momentary ACCESS SHARE on query_log and nothing more, so the log is
+--   neither re-scanned nor held from its inserts (review pass 5: it waits only
+--   behind another session's ACCESS EXCLUSIVE).
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not
@@ -122,8 +124,9 @@ BEGIN
 END
 $col$;
 -- Changed only when it lacks the agenda kind, and the items CHECK added only
--- when missing, so a re-apply neither locks nor re-scans the log (review
--- pass 1).
+-- when missing, so a re-apply neither re-scans the log nor holds it from its
+-- inserts: reading the constraint takes a momentary ACCESS SHARE (review
+-- passes 1 and 5).
 DO $kind$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass

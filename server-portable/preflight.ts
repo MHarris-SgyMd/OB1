@@ -3104,9 +3104,11 @@ if (configFailed) {
             const eventsOnly = pr.ungranted.every((g) => g.startsWith("open_item_events "));
             const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
               : itemOnly ? "set_priority and priority_history on an open item (kind item)"
-              : pr.ungranted.some((g) => g === "priority_assertions SELECT") ? "set_priority, clear_priority, priority_history and agenda (SMD-3669)"
-              : pr.ungranted.some((g) => g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+              : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
+            // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
+            // alone was left out, and the items row said otherwise).
+            const agendaToo = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669)" : "";
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${agendaToo}${agendaToo ? "" : ", and nothing else does"}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
