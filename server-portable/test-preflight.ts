@@ -5485,7 +5485,9 @@ if (want("9")) {
   // no credential even when a key is set — a key is never sent to prove reachability.
   const seen: { method: string; path: string; auth: string | null; length: string | null }[] = [];
   let status = 200;
-  const answering = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { seen.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), length: req.headers.get("content-length") }); return new Response(status === 200 ? '{"object":"list","data":[]}' : "not here", { status }); } });
+  /** Where a 3xx points: the same path at another origin (SMD-2908). */
+  let redirectTo = "";
+  const answering = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { seen.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), length: req.headers.get("content-length") }); return new Response(status === 200 ? '{"object":"list","data":[]}' : "not here", { status, headers: status >= 300 && status < 400 ? { location: `${redirectTo}${new URL(req.url).pathname}` } : {} }); } });
   const ANSWERS = `http://127.0.0.1:${answering.port}/v1`;
   const up = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS, OB1_LLM_API_KEY: "k-local" });
   assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 200 to GET /models in \d+ ms; what it serves is checked under --deep`).test(up.out),
@@ -5504,6 +5506,27 @@ if (want("9")) {
   status = 429;
   const limited = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
   assert(/!\s+provider endpoint\s+\S+ answers, but not yet — HTTP 429/.test(limited.out), "…and so is a 429");
+  // A redirect (SMD-2908) is an answer from this address, but the brain's calls follow none: the row warns, naming where
+  // it points, since /models may redirect where the calls do not; --deep's probes, following none either, fail by name;
+  // and the origin it points at hears nothing.
+  let farHits = 0;
+  const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farHits++; await req.text(); return Response.json({ object: "list", data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }], choices: [{ message: { content: '{"ok":true}' } }] }); } });
+  try {
+    status = 307;
+    redirectTo = `http://127.0.0.1:${far.port}`;
+    const moved = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
+    assert(new RegExp(String.raw`^\s*!\s+provider endpoint\s+${rx(ANSWERS)} answers with a redirect — HTTP 307 to GET /models, to ${rx(redirectTo)}/v1/models, in \d+ ms; the brain's calls follow no redirect \(SMD-2908\), so if they are redirected too, each fails$`).test(row(moved.out, "provider endpoint"))
+      && /→ Set OB1_LLM_BASE_URL to where it points, or run --deep to see whether the calls are redirected\./.test(fix(moved.out, "provider endpoint")),
+      `a /models that redirects warns, naming where it points (${row(moved.out, "provider endpoint").slice(0, 200)})`);
+    const movedDeep = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS }, "--deep");
+    assert(new RegExp(String.raw`✗\s+embedding provider\s+${rx(ANSWERS)} answered 307, redirecting to ${rx(redirectTo)}/v1/embeddings — the brain's calls follow no redirect`).test(movedDeep.out)
+      && new RegExp(String.raw`✗\s+metadata model\s+\S+: ${rx(ANSWERS)} answered 307, redirecting to ${rx(redirectTo)}/v1/chat/completions`).test(movedDeep.out)
+      && /→ Set OB1_LLM_BASE_URL to where it points; the egress gate then judges that base\./.test(fix(movedDeep.out, "embedding provider")),
+      `--deep's probes follow no redirect: each fails by name, naming where it points (${row(movedDeep.out, "embedding provider").slice(0, 200)}; ${row(movedDeep.out, "metadata model").slice(0, 200)})`);
+    assert(farHits === 0, `…and the origin the redirect points at receives nothing (${farHits} request(s))`);
+  } finally {
+    far.stop(true);
+  }
   answering.stop(true);
 
   // One that accepts the connection and never answers: the timeout, in words,
@@ -5524,13 +5547,15 @@ if (want("9")) {
   // says 3xx, the target is never dialled — so a redirector cannot make the
   // row name one address and judge another, on or off the box (first review
   // pass: `fetch` followed it, and a 302 to a dead port read as refused).
+  // Since SMD-2908 the row warns, naming the target: the brain's calls follow
+  // no redirect either, so one that is redirected too fails.
   let targetHits = 0;
   const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { targetHits++; return new Response("here", { status: 200 }); } });
   const redirector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 302, headers: { Location: `http://127.0.0.1:${target.port}/elsewhere` } }) });
   const redirected = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${redirector.port}/v1` });
   redirector.stop(true); target.stop(true);
-  assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 302 to GET \/models/.test(redirected.out) && targetHits === 0,
-         `a 302 passes as an answer from the base and its target is not dialled (${targetHits} hit(s) on the target)`);
+  assert(/!\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers with a redirect — HTTP 302 to GET \/models, to http:\/\/127\.0\.0\.1:\d+\/elsewhere,/.test(redirected.out) && targetHits === 0,
+         `a 302 is an answer from the base, warned of with its target named, and its target is not dialled (${targetHits} hit(s) on the target)`);
 
   // A hosted endpoint is not dialled without --deep (unchanged): a name that
   // cannot resolve, with a key, prints no endpoint row and no resolver error.

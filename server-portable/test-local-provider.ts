@@ -2387,6 +2387,124 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     `a pausable deadline stops while its calls wait and goes on with what was left: paused at ${pausedAt}, resumed at ${resumedAt}, fired at ${firedAt} ms (expected ${expected}), a TimeoutError`);
 }
 
+console.log("\n[13] A redirect is never followed: each call that sends brain text refuses a 3xx where it lands, each probe reads it as refused, and the origin it points at receives nothing (SMD-2908)");
+{
+  const { resolveEmbedConfig, createEmbedder, providerCall, providerEndpoint, ProviderError, providerDown } = await import("./embed.ts");
+  const { judgePair } = await import("./consolidate.ts");
+  const { extractEntities } = await import("./entities.ts");
+  const { resolveJevConfig, jevInfo } = await import("./jev.ts");
+  const { probeChat, probeTier, modelListed, classifyError } = await import("../db/worker-bootstrap.ts");
+  const { deliverTelegram, maskToken } = await import("../db/weekly-digest.ts");
+  // The far origin: anything that reaches it went past the gate's judgement of the base.
+  const farSeen: string[] = [];
+  const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farSeen.push(`${req.method} ${new URL(req.url).pathname} ${await req.text()}`); return Response.json({ data: [], choices: [] }); } });
+  // The base the gate judged: a stand-in declared local that redirects every request to the same path at the far origin.
+  let status = 307;
+  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response("moved", { status, headers: { location: `http://127.0.0.1:${far.port}${new URL(req.url).pathname}` } }) });
+  const NEAR = `http://127.0.0.1:${near.port}/v1`;
+  const FAR = `127.0.0.1:${far.port}`;
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: NEAR, OB1_METADATA_MODEL: META_MODEL, OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM) });
+    const failure = (p: Promise<unknown>) => p.then(() => "answered", (e: unknown) => e);
+    const asRedirect = (e: unknown, s: number) => e instanceof ProviderError && e.kind === "http" && e.status === s && /never followed/.test(e.message) && e.message.includes(FAR);
+    // Every 3xx a provider might send, through providerCall: the embedder's and a chat call's.
+    for (const s of [301, 302, 303, 307, 308]) {
+      status = s;
+      const emb = await failure(createEmbedder(() => cfg).getEmbedding("private text", { kind: "re-embed" }));
+      const chat = await failure(providerCall(cfg, "/chat/completions", { model: META_MODEL, messages: [{ role: "user", content: "private text" }] }, { kind: "capture" }));
+      assert(asRedirect(emb, s) && asRedirect(chat, s), `a ${s}: providerCall's embedding and chat calls each fail as a redirect never followed, naming where it pointed (${String(emb)}; ${String(chat)})`);
+    }
+    status = 307;
+    const judged = await failure(judgePair({ content: "private older", createdAt: null }, { content: "private newer", createdAt: null }, cfg));
+    const extracted = await failure(extractEntities("Ada works on private text.", cfg, undefined, { kind: "extraction" }));
+    assert(asRedirect(judged, 307) && asRedirect(extracted, 307), `the judge and extraction fail as a redirect never followed (${String(judged)}; ${String(extracted)})`);
+    // A refused redirect is no outage, and a worker stops its pass on it: every call to that base would meet it.
+    assert(providerDown(judged) === null && classifyError(judged) === "fatal" && classifyError(extracted, { maxTokensFatal: true }) === "fatal",
+      `a redirect is no outage (providerDown null) and fatal to a worker's pass (${JSON.stringify(providerDown(judged))}, ${classifyError(judged)})`);
+    // The probes: a worker's chat probe reads a redirect as refused, never up; the model list as unknown.
+    const probe = await probeChat({ base: NEAR, headers: {} }, META_MODEL, 5000);
+    const listed = await modelListed({ base: NEAR, headers: {} }, META_MODEL, META_MODEL, 5000);
+    assert(probe.state === "refused" && "why" in probe && /never followed/.test(probe.why) && listed === "unknown",
+      `a worker's probe reads a redirect as refused, not up, and the model list as unknown (${JSON.stringify(probe)}; ${listed})`);
+    // The decide tier's client already refused one (jev.ts); its probe now reads that as refused, not an outage waited out.
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${near.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
+    const tierInfo = await failure(jevInfo(jev));
+    const tier = await probeTier(jev, "stub-decider", 5000);
+    assert((tierInfo as { status?: number }).status === 307 && tier.state === "refused", `the decide tier's client fails on a redirect and its probe reads it as refused (${String(tierInfo)}; ${JSON.stringify(tier)})`);
+    // The digest's Telegram post: refused, not retried, and the bot token in the redirect's target never printed.
+    const token = "123456:private-bot-token";
+    const tg = await failure(deliverTelegram(providerEndpoint(NEAR, undefined, true), token, "42", "the digest's private text"));
+    const tgMsg = tg instanceof Error ? tg.message : String(tg);
+    assert(tg instanceof ProviderError && tg.status === 307 && /never followed/.test(tgMsg) && !tgMsg.includes("private-bot-token") && tgMsg.includes("<token>"),
+      `the digest's Telegram post fails as a redirect, its token masked in the target named (${tgMsg})`);
+    assert(maskToken(`https://x/bot${encodeURIComponent(token)}/sendMessage`, token) === "https://x/bot<token>/sendMessage" && maskToken(`https://x/bot${encodeURIComponent(token).toLowerCase()}/m`, token) === "https://x/bot<token>/m",
+      "…and a token percent-encoded in the target, in either case, is masked too");
+    assert(farSeen.length === 0, `the far origin received nothing from any of them (${JSON.stringify(farSeen).slice(0, 300)})`);
+  } finally {
+    near.stop(true);
+    far.stop(true);
+  }
+  // A guard over the files, as [11]'s: every bare fetch in the servers', the REST core's and db/'s files passes a
+  // `redirect` option in its call, so a dialler added later cannot follow one by leaving it out — whatever its URL
+  // says, since the digest's builds its URL a line before (a guard keyed on a model path in the call missed it).
+  // Two are not diallers of brain text, each named with why.
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const dirs = [here, join(here, "core"), join(here, "rest"), join(here, "../db")];
+  const files = dirs.flatMap((d) => readdirSync(d).map((f) => join(d, f))).filter((f) => f.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(f));
+  /** The call starting at `from` (its open paren), comments, quoted strings and template literals skipped. */
+  const callAt = (src: string, from: number): string => {
+    let depth = 0;
+    for (let i = from; i < src.length; i++) {
+      const c = src[i];
+      // A comment's words ("the caller's deadline") are not code: an apostrophe there opens no string.
+      if (c === "/" && src[i + 1] === "/") {
+        i = src.indexOf("\n", i);
+        if (i < 0) break;
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "*") {
+        i = src.indexOf("*/", i + 2) + 1;
+        if (i <= 0) break;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === "`") {
+        for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) return src.slice(from, i + 1);
+    }
+    return src.slice(from);
+  };
+  /** Bare fetches that dial no provider, by file and the count of them there. */
+  const NOT_DIALLERS = new Map([
+    ["db/bench-live.ts", 1], // the benchmark's calls to the brain's own /mcp
+    ["server-portable/oauth-edge.ts", 1], // a pass-through: its caller passes redirect: "manual"
+  ]);
+  const BARE_FETCH = /(?<![.\w])fetch\s*\(/g;
+  const unguarded: string[] = [];
+  const allowed = new Map<string, number>();
+  let guarded = 0;
+  for (const f of files) {
+    const src = readFileSync(f, "utf8");
+    const name = f.split("/").slice(-2).join("/");
+    for (const m of src.matchAll(BARE_FETCH)) {
+      // A fetch( in a comment or inside a string (an odd count of its quote before it on the line) is no call.
+      const line = src.slice(src.lastIndexOf("\n", m.index) + 1, m.index);
+      const open = (q: string) => (line.split(q).length - 1) % 2 === 1;
+      if (/\/\/|^\s*\*/.test(line) || open('"') || open("`")) continue;
+      const call = callAt(src, m.index + m[0].length - 1);
+      if (/\bredirect\s*:/.test(call)) guarded++;
+      else if (NOT_DIALLERS.has(name)) allowed.set(name, (allowed.get(name) ?? 0) + 1);
+      else unguarded.push(`${name}:${src.slice(0, m.index).split("\n").length}`);
+    }
+  }
+  const allowedRight = [...NOT_DIALLERS].every(([name, n]) => allowed.get(name) === n);
+  assert(unguarded.length === 0 && allowedRight && guarded >= 14,
+    `every bare fetch passes a redirect option, the two that dial no provider aside (${guarded} do; ${unguarded.join(", ") || "none without"}; allowed ${JSON.stringify([...allowed])})`);
+}
+
 server.stop();
 provider.stop();
 

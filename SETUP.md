@@ -182,7 +182,10 @@ the embeddings endpoint is on this machine or its private network, and
 `OB1_CHAT_LOCAL=1` says the same of a chat endpoint of its own (one at the same
 base is the same box: either knob declares it). A loopback URL, `host.containers.internal` and the
 stack's own `ollama` service are all remote to the gate until the flag says
-otherwise — which is why both blocks above carry the line. A refused capture is
+otherwise — which is why both blocks above carry the line. The gate judges the
+base you set, so no call follows a redirect: a 3xx would carry the text to
+wherever it points. It is refused, naming the address, and you set the base
+there (SMD-2908). A refused capture is
 not lost: it lands with its text and fingerprint and no vector, the reply says
 so and names the rule, the decision sits on the row's audit entry, and the
 servers' vector mender fills the vector in once the policy allows the call — a

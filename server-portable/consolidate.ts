@@ -29,7 +29,7 @@
  * definition of the candidate set.
  */
 
-import { refuseEgress, type EmbedConfig } from "./embed.ts";
+import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
@@ -805,9 +805,9 @@ async function judgeExchange(older: PairSide, newer: PairSide, cfg: EmbedConfig,
   return verdict || supersedes ? { ...j, probabilities: { ...(verdict ? { verdict } : {}), ...(supersedes ? { supersedes } : {}) } } : j;
 }
 
-/** The judge's HTTP call, with or without `logprobs`. */
-function judgeRequest(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal: AbortSignal | undefined, logprobs: number | undefined): Promise<Response> {
-  return fetch(`${cfg.chat.base}/chat/completions`, {
+/** The judge's HTTP call, with or without `logprobs`; a redirect refused, never followed (SMD-2908). */
+async function judgeRequest(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal: AbortSignal | undefined, logprobs: number | undefined): Promise<Response> {
+  const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
     // The caller's deadline, else OB1_LLM_TIMEOUT — always one: Bun's own 300 s
@@ -816,6 +816,7 @@ function judgeRequest(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal
     // a call with no signal would wait for ever (fourth review pass).
     signal: signal ?? AbortSignal.timeout(cfg.timeoutMs),
     timeout: false,
+    redirect: "manual",
     body: JSON.stringify({
       model: cfg.judgeModel,
       response_format: { type: "json_object" },
@@ -825,6 +826,9 @@ function judgeRequest(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal
       ...(logprobs ? { logprobs: true, top_logprobs: logprobs } : {}),
     }),
   });
+  const redirected = refuseRedirect("Judge", cfg.chat.base, r);
+  if (redirected) throw redirected;
+  return r;
 }
 
 /**
