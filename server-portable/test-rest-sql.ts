@@ -1950,7 +1950,7 @@ console.log("\n[16] The agenda through both doors (migration 123, SMD-3669): RES
     `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
   const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
   assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 "SMD-9912 — \[16\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
-      && /\n1 of 3 carry no stated priority \(read as medium, not low\)\./.test(m.text),
+      && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
   assert(blank.status === 400, `a blank scope is refused 400 by the schema, never a database fault (${blank.status} ${blank.body.code})`);

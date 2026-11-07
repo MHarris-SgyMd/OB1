@@ -2087,7 +2087,7 @@ export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>
 
 /**
  * The agenda (SMD-3669): one line an item — its place, what it is, its score and the terms behind it — then what was
- * left out, how many carry no priority and when the board last synced. A title and a holder are other keys' words:
+ * left out, how many carry no priority (stated or inherited) and board-sync's last heartbeat. A title and a holder are other keys' words:
  * quoted and cut, never a line of their own.
  */
 const agendaTerm = (t: AgendaResult["items"][number]["terms"][number]): string => {
@@ -2122,7 +2122,7 @@ export const renderAgenda = (o: Outcome<AgendaResult, "CLAIMS_UNREADABLE">): Rep
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
-  if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no stated priority (read as medium, not low).` : "Every item listed carries a priority.");
+  if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
   // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
   lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
   if (!v.claimsRead) lines.push("Claims could not be read (this key's role lacks the claims group): claimed work is not left out or named.");

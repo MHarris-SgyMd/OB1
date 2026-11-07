@@ -18059,6 +18059,28 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   assert(freed.items.some((i) => i.key === "SMD-9805") && freed.left_out.blocked === 0 && !freed.items.some((i) => i.key === "SMD-9806"),
     `once its blocker is completed the blocked ticket is listed and the blocker is not (${keys(freed)})`);
 
+  // ob1_item_blockers' other paths: a blocks link another ticket's row holds (the blocks direction), in a project of
+  // its own; a thought in another gating system named system:key; a link in a system that states no status, none.
+  const PB = "Agenda [110] blocks";
+  await ticket("SMD-9830", { project: PB, links: [["blocks", "SMD-9831"]] }); await ticket("SMD-9831", { project: PB });
+  const blk = await ag({ project: PB }, { blocked: true });
+  const blkDefault = await ag({ project: PB });
+  const viaSystem = async (system: string, identity: string, meta: object, links: [string, string][] = []) => {
+    const id = await thoughtAs(`[110] ${system} ${identity}`, meta);
+    await db.query(`SELECT record_thought_source($1::uuid, $2, $3, 'x', 'text/markdown')`, [id, system, identity]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+    return id;
+  };
+  const jBlocked = await viaSystem("jira110", "J-2", { status_type: "backlog" }, [["blocked_by", "J-1"]]);
+  await viaSystem("jira110", "J-1", { status_type: "backlog" });
+  const nBlocked = await viaSystem("notes110", "b", {}, [["blocked_by", "a"]]);
+  await viaSystem("notes110", "a", {});
+  const sysForm = (await db.query<{ b: string[] }>(`SELECT ob1_item_blockers('thought', $1) AS b`, [jBlocked])).rows[0].b;
+  const noGate = (await db.query<{ b: string[] }>(`SELECT ob1_item_blockers('thought', $1) AS b`, [nBlocked])).rows[0].b;
+  assert(JSON.stringify(blk.items.find((i) => i.key === "SMD-9831")?.blockers) === JSON.stringify(["SMD-9830"]) && blkDefault.left_out.blocked === 1
+         && JSON.stringify(sysForm) === JSON.stringify(["jira110:J-1"]) && noGate.length === 0,
+    `a blocks link another ticket's row holds blocks it, named; another gating system's blocker is system:key; a system with no status blocks nothing (${JSON.stringify(blk.items.map((i) => [i.key, i.blockers]))}; ${JSON.stringify(sysForm)}; ${JSON.stringify(noGate)})`);
+
   // Scope: a label; a limit; the coverage.
   const lab = await ag({ project: P, label: "l110" });
   const lim = await ag({ project: P }, { limit: 2 });

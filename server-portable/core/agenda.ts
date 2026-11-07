@@ -28,7 +28,10 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     });
   } catch (e) {
     // mine on a role without the claims group (123 raises 42501): designed, so a refusal, not a fault (review pass 2).
-    if (holder && String((e as { errno?: unknown }).errno ?? "") === "42501") return refuse({ code: "CLAIMS_UNREADABLE", retryable: false });
+    // Only 123's own refusal, by its words: another table's 42501 is a fault naming that table (review pass 3).
+    if (holder && String((e as { errno?: unknown }).errno ?? "") === "42501" && /holder mine reads work_claims/.test(String((e as Error).message ?? ""))) {
+      return refuse({ code: "CLAIMS_UNREADABLE", retryable: false });
+    }
     throw e;
   }
   await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed },

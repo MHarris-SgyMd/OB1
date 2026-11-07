@@ -109,9 +109,18 @@ $qc$;
 -- ---------------------------------------------------------------------------
 -- query_log: the agenda's kind and its typed items
 -- ---------------------------------------------------------------------------
-ALTER TABLE query_log ADD COLUMN IF NOT EXISTS result_items jsonb;
-COMMENT ON COLUMN query_log.result_items IS
-  'An agenda row''s items in the order returned, each {kind, key, effective}: tickets are keys, not thought ids, so result_ids cannot hold them. NULL on search and action rows. Migration 123 / SMD-3669.';
+-- Each change behind a catalog check: ADD COLUMN IF NOT EXISTS takes ACCESS
+-- EXCLUSIVE before it looks (review pass 3), and a re-apply must not queue the
+-- search log's inserts behind a long reader.
+DO $col$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'result_items' AND NOT attisdropped) THEN
+    ALTER TABLE query_log ADD COLUMN result_items jsonb;
+    COMMENT ON COLUMN query_log.result_items IS
+      'An agenda row''s items in the order returned, each {kind, key, effective}: tickets are keys, not thought ids, so result_ids cannot hold them. NULL on search and action rows. Migration 123 / SMD-3669.';
+  END IF;
+END
+$col$;
 -- Changed only when it lacks the agenda kind, and the items CHECK added only
 -- when missing, so a re-apply neither locks nor re-scans the log (review
 -- pass 1).

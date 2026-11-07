@@ -1843,13 +1843,6 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
   };
 }
 
-/**
- * A 'search' row for the opt-in query log (migration 034, SMD-1295): the query
- * and its arguments, and the ids returned in rank order with their fused scores.
- * `agentId` is 010's agent when a key was presented, else absent (NULL in the
- * row). `resultScores` is aligned to `resultIds`; a null element is a returned
- * id whose score the retrieval path did not carry.
- */
 /** An agenda call's row (migration 123): the scope asked, the items returned in order, the limit. */
 export type QueryAgendaLog = {
   agentId?: string;
@@ -1859,6 +1852,13 @@ export type QueryAgendaLog = {
   tier?: string;
 };
 
+/**
+ * A 'search' row for the opt-in query log (migration 034, SMD-1295): the query
+ * and its arguments, and the ids returned in rank order with their fused scores.
+ * `agentId` is 010's agent when a key was presented, else absent (NULL in the
+ * row). `resultScores` is aligned to `resultIds`; a null element is a returned
+ * id whose score the retrieval path did not carry.
+ */
 export type QuerySearchLog = {
   tool: string;
   agentId?: string;
