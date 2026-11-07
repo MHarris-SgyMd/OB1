@@ -1340,6 +1340,42 @@ export type PriorityAnswer = {
 export type PriorityRecord = { item: PriorityItem; exists: boolean; level: number | null; winner: PriorityAssertion | null; history: PriorityAssertion[] };
 
 /**
+ * docs/priority.md's weights, as migration 122's effective_priority names them (SMD-3667). A read passes the ones it
+ * overrides; the read's defaults stand for the rest (unknown 2, hop 1, hops 2, soon 2 by the end of soon_days 1, week 1
+ * by the end of week_days 7, overdue 3, unblocks_one 0.5, unblocks_many 1 from unblocks_many_at 3, depth 3, cap 50,
+ * count_inferred false).
+ */
+export type PriorityWeights = {
+  unknown: number; hop: number; hops: number; soon: number; soon_days: number; week: number; week_days: number; overdue: number;
+  unblocks_one: number; unblocks_many: number; unblocks_many_at: number; depth: number; cap: number; count_inferred: boolean;
+};
+/** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from). */
+export type PriorityTerm = { term: "level" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
+/**
+ * One item's effective priority (migration 122, SMD-3667): the order a ranking read uses and every term that made
+ * it. `level` is the counted statement's (null: unknown, or inherited); `inheritedFrom` the item it inherits from, its
+ * level and how many hops; `dueFrom` where the due time came from; `waiting`, a not_before still ahead; `passedOver`
+ * every other open statement, inferred ones among them when they are not counted.
+ */
+export type EffectivePriority = {
+  item: PriorityItem;
+  effective: number;
+  level: number | null;
+  inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
+  dueAt: string | null;
+  dueFrom: "stated" | "due_ref" | "item" | null;
+  urgency: number;
+  overdue: boolean;
+  unblocks: number;
+  settled: boolean;
+  notBefore: string | null;
+  waiting: boolean;
+  terms: PriorityTerm[];
+  winner: PriorityAssertion | null;
+  passedOver: PriorityAssertion[];
+};
+
+/**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
  * is the database's, which quotes the argument it could not read, cut. Any other
@@ -1351,9 +1387,9 @@ export class PriorityRefused extends Error {
     this.name = "PriorityRefused";
   }
 }
-export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "other";
+export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "weight" | "other";
 
-/** Which argument a 22023 from 116 names, by its message's opening words (116's and 115's own wording, one rule each). */
+/** Which argument a 22023 from 116 or 122 names, by its message's opening words (116's, 115's and 122's own wording, one rule each). */
 export function priorityProblemOf(message: string): PriorityProblem {
   if (/^not an item kind\b/.test(message)) return "kind";
   if (/^not a (?:thought|entity|item) id\b|^not a ticket key\b/.test(message)) return "key";
@@ -1362,6 +1398,8 @@ export function priorityProblemOf(message: string): PriorityProblem {
   if (/^a due reference takes\b|due reference may not name itself/.test(message)) return "due_ref";
   if (/^a reason is at most\b/.test(message)) return "reason";
   if (/a maker's key name is at most\b|p_actor must be a JSON object/.test(message)) return "key_name";
+  if (/^not a weight\b|^a weight out of range\b|^effective_priority's weights\b/.test(message)) return "weight";
+  if (/^effective_priority's clock is a moment\b/.test(message)) return "time";
   return "other";
 }
 
@@ -1397,6 +1435,40 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
     maker: { name: m.name, agentId: text(m.agent_id), kind: text(m.kind), trust: text(m.trust), scope: text(m.scope), source: m.source === true },
     tier: tier as PriorityAssertion["tier"], tierName: o.tier_name as PriorityAssertion["tierName"],
     assertedAt: time(o.asserted_at) as string, closedAt: time(o.closed_at), closeReason: (o.close_reason ?? null) as PriorityAssertion["closeReason"], closedBy: text(o.closed_by),
+  };
+}
+
+const TERM_NAMES = new Set(["level", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
+const DUE_FROM = new Set(["stated", "due_ref", "item"]);
+
+/** One row of 122's effective_priority; a row that is not one throws, naming the call and nothing of the row. */
+export function normaliseEffectivePriority(r: unknown, what: string): EffectivePriority {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const item = o ? priorityItemOf({ kind: o.item_kind, key: o.item_key }) : null;
+  const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
+  const time = (v: unknown): string | null => (v === null || v === undefined ? null : isoTimestamp(v as string | Date));
+  const inh = o?.inherited_from !== null && typeof o?.inherited_from === "object" ? (o.inherited_from as Record<string, unknown>) : null;
+  const inhItem = inh ? priorityItemOf(inh) : null;
+  const terms = Array.isArray(o?.terms) ? (o.terms as unknown[]) : null;
+  const termOk = (t: unknown) => t !== null && typeof t === "object" && TERM_NAMES.has((t as Record<string, unknown>).term as string) && Number.isFinite(num((t as Record<string, unknown>).value));
+  const level = o?.level === null || o?.level === undefined ? null : num(o.level);
+  if (!o || !item || !Number.isFinite(num(o.effective)) || (level !== null && !Number.isInteger(level)) || (inh !== null && (!inhItem || !Number.isInteger(num(inh.level)) || !Number.isInteger(num(inh.hops))))
+      || (o.due_from !== null && o.due_from !== undefined && !DUE_FROM.has(o.due_from as string)) || !Number.isFinite(num(o.urgency)) || !Number.isInteger(num(o.unblocks))
+      || typeof o.overdue !== "boolean" || typeof o.settled !== "boolean" || typeof o.waiting !== "boolean" || !terms || !terms.every(termOk) || !Array.isArray(o.passed_over)) {
+    throw new Error(`${what} answered a row this server cannot read`);
+  }
+  return {
+    item, effective: num(o.effective), level,
+    inheritedFrom: inh && inhItem ? { ...inhItem, level: num(inh.level), hops: num(inh.hops) } : null,
+    dueAt: time(o.due_at), dueFrom: (o.due_from ?? null) as EffectivePriority["dueFrom"],
+    urgency: num(o.urgency), overdue: o.overdue, unblocks: num(o.unblocks), settled: o.settled,
+    notBefore: time(o.not_before), waiting: o.waiting,
+    terms: terms.map((t) => {
+      const { term, value, ...detail } = t as Record<string, unknown>;
+      return { term: term as PriorityTerm["term"], value: num(value), detail };
+    }),
+    winner: o.winner === null || o.winner === undefined ? null : normalisePriorityAssertion(o.winner, what),
+    passedOver: (o.passed_over as unknown[]).map((a) => normalisePriorityAssertion(a, what)),
   };
 }
 
@@ -2117,6 +2189,14 @@ export interface ThoughtStore {
   /** An item as 116 keys it (ob1_priority_item) and whether the brain holds it (ob1_priority_item_exists): what a refusal names. Throws PriorityRefused for a malformed item. */
   priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }>;
   /**
+   * Effective priority (migration 122, SMD-3667): effective_priority's rows for the items, in the order asked, an item
+   * asked twice answered once — the counted level, else the inherited one, else unknown's; urgency from the due time
+   * in calendar days in UTC; the open items it blocks; every term named. `weights` overrides docs/priority.md's by
+   * name, and `now` pins the clock (an eval, a test). Throws PriorityRefused for a malformed item (`kind`, `key`) or
+   * weight (`weight`), or a clock that is no moment (`time`). A database before 122 throws.
+   */
+  effectivePriority(items: { kind: string; key: string }[], opts?: { weights?: Partial<PriorityWeights>; now?: string }): Promise<EffectivePriority[]>;
+  /**
    * Open items (migration 117, SMD-3665 PR 2): 117's writers, each one statement in its own transaction, the actor
    * as the maker's envelope with `scope` stated (as 116's) and `plugin` the plugin a call came through (a plugin's
    * ctx.call; never a caller's argument). A malformed argument throws ItemRefused; any other raise is the store's
@@ -2407,7 +2487,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
