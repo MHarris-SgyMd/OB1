@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS memories (
 
 -- A workspace's own: the same key in another workspace is another memory (the old schema's index was global, so a
 -- write-back to one workspace was answered another's memory, or refused, by a key the two happened to share).
-CREATE UNIQUE INDEX IF NOT EXISTS memories_idempotency_key ON memories (workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- The key by its md5: a default key holds four ids of up to 200 characters, past what a btree row may hold beside the workspace.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_idempotency_key ON memories (workspace_id, md5(idempotency_key)) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS memories_scope ON memories (workspace_id, project_id, visibility);
 CREATE INDEX IF NOT EXISTS memories_review ON memories (review_status, lifecycle_status, created_at DESC);
 CREATE INDEX IF NOT EXISTS memories_runtime_task ON memories (runtime_name, task_id, flow_id);

@@ -23,7 +23,7 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- The brain's [agent-memory plugin](../../plugins/agent-memory/) turned on: it was the `integrations/agent-memory-api` server and the `schemas/agent-memory` tables until SMD-2690. This client still calls the old server's routes, which the plugin does not answer, until SMD-2690 PR 2b moves it onto the plugin's: until then, run it against the old server and tables from 2.0.0, the last release with them.
+- A brain on 2.0.0, the last release with the Agent Memory API server and its `schemas/agent-memory` tables, with both deployed as 2.0.0's READMEs say (tag `v2.0.0`, `integrations/agent-memory-api/`). This client calls that server's routes; the brain's [agent-memory plugin](../../plugins/agent-memory/), which replaces them after 2.0.0, does not answer them until SMD-2690 PR 2b moves this client onto it.
 - OpenClaw installed
 - Node.js 20+
 

@@ -2095,8 +2095,9 @@ export function memoryRows(s, { ledger = { state: "pending" }, plan = { steps: "
  * match_thoughts clamps match_count to this INSIDE the function (migration
  * 014, templated as {{MATCH_COUNT_CEILING}}). 500 was set to cover every
  * caller the repo had: enhanced-mcp asked for up to 500 under a date filter
- * and rest-api up to 200, both retired since (SMD-1931); agent-memory-api asks
- * for up to 200. The bound is kept for direct SQL and community callers, as
+ * and rest-api up to 200, both retired since (SMD-1931), and agent-memory-api
+ * up to 200, the agent-memory plugin since SMD-2690, which asks search_thoughts
+ * for at most 100. The bound is kept for direct SQL and community callers, as
  * the bench measures it. The servers' own search_thoughts tools
  * clamp their `limit` to 100 separately — a tool-level choice about what to
  * hand a model, not this cost bound. The bench measures asked-500.

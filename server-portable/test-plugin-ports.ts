@@ -3027,8 +3027,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const mems = (r: { body: Body }) => (r.body.memories ?? []) as Mem[];
   const ids = (r: { body: Body }) => mems(r).map((m) => m.memory_id);
   const rows = async (table: string) => (await one<{ n: number }>(sql.unsafe(`SELECT count(*)::int AS n FROM plugin_agent_memory.${table}`))).n;
-  const thoughtOf = (id: string | null) => one<{ source: string; ws: string; type: string; runtime: string; task: string | null; actor: string | null; vector: boolean } | undefined>(sql`
-    SELECT t.metadata->>'source' AS source, t.metadata->>'agent_memory_workspace' AS ws, t.metadata->>'agent_memory_type' AS type, t.metadata->>'agent_memory_task' AS task,
+  const thoughtOf = (id: string | null) => one<{ content: string; source: string; ws: string; type: string; runtime: string; task: string | null; actor: string | null; vector: boolean } | undefined>(sql`
+    SELECT t.content, t.metadata->>'source' AS source, t.metadata->>'agent_memory_workspace' AS ws, t.metadata->>'agent_memory_type' AS type, t.metadata->>'agent_memory_task' AS task,
            t.metadata->>'agent_memory_runtime' AS runtime, t.embedding IS NOT NULL AS vector,
            (SELECT a.actor_name FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.seq LIMIT 1) AS actor
       FROM thoughts t WHERE t.id = ${id}::uuid`);
@@ -3112,9 +3112,23 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const won = raced.find((r) => r.status === 200);
   const lost = raced.find((r) => r.status !== 200);
   const raceRows = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.memories WHERE workspace_id = 'ws-race'`);
-  assert(won !== undefined && lost?.status === 409 && lost.body.code === "IDEMPOTENCY_KEY_REUSED" && raceRows.n === 1
+  assert(won !== undefined && lost?.status === 409 && lost.body.code === "IDEMPOTENCY_KEY_REUSED" && lost.body.idempotency_key === "race-key:0" && raceRows.n === 1
     && mems(won)[0]?.content === (raced.indexOf(won) === 0 ? "am_ledger race one." : "am_ledger race two."),
     `two write-backs racing on one key with other texts: one memory, its own text answered to its sender, the other refused (${raced.map((r) => r.status).join(", ")}; ${raceRows.n} row)`);
+  // The same write-back twice at once (a runtime's retry while its first call runs): one memory, answered to both,
+  // never another workspace's, which holds that key and text too.
+  const sameText = { ...base, idempotency_key: "race-same", memory_payload: { decisions: ["am_ledger the same race."] } };
+  const elsewhereSame = ids(await am("writeback", { ...sameText, workspace_id: "ws-race-other" }))[0];
+  chatDelayMs = 300;
+  let twins: Called[];
+  try {
+    twins = await Promise.all([0, 1].map(() => am("writeback", { ...sameText, workspace_id: "ws-race-2" }, { as: KEYS.capture })));
+  } finally {
+    chatDelayMs = 0;
+  }
+  const twinRows = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.memories WHERE workspace_id = 'ws-race-2'`);
+  assert(twins.every((r) => r.status === 200) && ids(twins[0]).join() === ids(twins[1]).join() && ids(twins[0])[0] !== elsewhereSame && twinRows.n === 1,
+    `the same write-back racing itself: one memory answered to both, its own workspace's (${twins.map((r) => r.status).join(", ")}; ${twinRows.n} row)`);
   const beforeUnsafe = await rows("memories");
   const unsafe = await am("writeback", { ...base, memory_payload: { decisions: ["am_ledger is fine."], lessons: [`am_ledger uses sk-${"a".repeat(24)}`] } });
   const rejected = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_rejected' AND workspace_id = 'ws-am'`);
@@ -3196,13 +3210,21 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     `edit: the new text captured as a thought of its own the memory now names; the old thought, another workspace's memory's too, left as it was (${JSON.stringify(em).slice(0, 160)})`);
   const editedThought = await thoughtOf(em?.thought_id ?? null);
   const resent = await am("writeback", firstBody);
-  assert(editedThought?.task === "task-1" && editedThought.ws === "ws-am" && resent.status === 200 && ids(resent).join() === ids(first).join()
+  assert(editedThought?.task === "task-1" && editedThought.ws === "ws-am" && editedThought.source === "agent-memory" && editedThought.content === em?.content && resent.status === 200 && ids(resent).join() === ids(first).join()
     && mems(resent)[0]?.content === "am_ledger keeps the ledger in Postgres, replayed hourly.",
     `…the new thought keeps the memory's agent_memory_* keys, its task among them; the first write-back sent again still answers its memories, the edited one as it stands (${JSON.stringify(editedThought)}; ${resent.status} ${JSON.stringify(resent.body).slice(0, 120)})`);
-  const unsafeEdit = await review(w[1]!.memory_id, { action: "edit", content: "user: a\nassistant: b\n".repeat(5) });
+  const transcript = "user: a\nassistant: b\n".repeat(5);
+  const unsafeEdit = await review(w[1]!.memory_id, { action: "edit", content: transcript });
   const keptLesson = await am("get_memory", { memory_id: w[1]!.memory_id }, { as: KEYS.reader });
-  assert(unsafeEdit.status === 422 && unsafeEdit.body.code === "UNSAFE_WRITEBACK" && unsafeEdit.body.unsafe?.[0]?.reason === "raw_transcript_like" && keptLesson.body.memory?.content === "am_ledger replays nightly.",
-    `an edit whose text looks like a transcript is refused as a write-back is, the memory left as it was (${unsafeEdit.status} ${JSON.stringify(unsafeEdit.body)})`);
+  const transcriptThoughts = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${transcript}`);
+  assert(unsafeEdit.status === 422 && unsafeEdit.body.code === "UNSAFE_WRITEBACK" && unsafeEdit.body.unsafe?.[0]?.reason === "raw_transcript_like" && unsafeEdit.body.unsafe?.[0]?.memory_type === "lesson"
+    && keptLesson.body.memory?.content === "am_ledger replays nightly." && transcriptThoughts.n === 0,
+    `an edit whose text looks like a transcript is refused as a write-back is, before any capture: the memory left as it was, no thought holding the text (${unsafeEdit.status} ${JSON.stringify(unsafeEdit.body)}; ${transcriptThoughts.n} thoughts)`);
+  const thoughtBefore = (await am("get_memory", { memory_id: w[0]!.memory_id }, { as: KEYS.reader })).body.memory?.thought_id;
+  const summaryOnly = await review(w[0]!.memory_id, { action: "edit", summary: "Postgres, replayed hourly" });
+  assert(summaryOnly.status === 200 && summaryOnly.body.memory?.summary === "Postgres, replayed hourly" && summaryOnly.body.memory?.thought_id === thoughtBefore
+    && summaryOnly.body.memory?.content === "am_ledger keeps the ledger in Postgres, replayed hourly.",
+    `an edit of the summary alone changes the summary, the thought and text as they were (${summaryOnly.status} ${JSON.stringify(summaryOnly.body).slice(0, 160)})`);
   const nothing = await review(w[0]!.memory_id, { action: "edit" });
   const self = await review(w[2]!.memory_id, { action: "merge", related_memory_id: w[2]!.memory_id });
   const missing = await review(w[2]!.memory_id, { action: "merge", related_memory_id: NO_ROW });
@@ -3269,7 +3291,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const X = { schema_version: WB, workspace_id: "ws-x", project_id: "px", task_id: "tx-1", step_id: "s1", runtime: { name: "rx" } };
     const body = (r: { body: Body }) => (r.body.memories ?? []) as Body[];
     const confirmedX = { default_status: "user_confirmed", requires_review: false };
-    const one_ = async (text: string, over: Body = {}) => body(await am("writeback", { ...X, memory_payload: { decisions: [text] }, ...over }))[0]!;
+    // An empty object for a refused write-back, so a 409 fails the row that reads it rather than ending the section.
+    const one_ = async (text: string, over: Body = {}) => body(await am("writeback", { ...X, memory_payload: { decisions: [text] }, ...over }))[0] ?? {};
 
     // requires_review keeps even a person's word waiting; a generated memory is an agent's.
     const held = await one_("xmem_held decision.", { provenance: { default_status: "user_confirmed", requires_review: true } });
@@ -3386,6 +3409,73 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const farRefs = (await am("get_memory", { memory_id: farYear?.memory_id }, { as: KEYS.reader })).body.source_refs as Body[] | undefined;
     assert(farRefs?.find((r) => r.kind === "doc")?.timestamp === null && farRefs?.find((r) => r.kind === "doc2")?.timestamp === "9999-12-31T23:59:59.000Z",
       `a source time past year 9999 is stored as none, year 9999 kept (${JSON.stringify(farRefs)})`);
+  }
+
+  // ── Review pass 2's holds, on a workspace of their own ──
+  {
+    const Y = { schema_version: WB, workspace_id: "ws-y", project_id: "py", task_id: "ty", runtime: { name: "ry" } };
+    const bodyOf = (r: { body: Body }) => (r.body.memories ?? []) as Body[];
+    const reviewY = (memory_id: string, f: Body) => am("review_memory", { memory_id, ...f });
+    // A key that can only capture is answered a memory as its write-back made it, never as a reviewer changed it.
+    const orig = { ...Y, idempotency_key: "yk", memory_payload: { decisions: ["ymem orig decision."] } };
+    const written = bodyOf(await am("writeback", orig))[0]!;
+    await reviewY(written.memory_id, { action: "edit", content: "ymem reviewer-private correction." });
+    await reviewY(written.memory_id, { action: "restrict_scope" });
+    const viaCapture = bodyOf(await am("writeback", orig, { as: KEYS.capture }))[0];
+    const viaWriter = bodyOf(await am("writeback", orig))[0];
+    assert(viaCapture?.memory_id === written.memory_id && viaCapture.content === "ymem orig decision." && viaCapture.scope.visibility === "project"
+      && viaCapture.review_status === "pending" && !JSON.stringify(viaCapture).includes("reviewer-private")
+      && viaWriter?.content === "ymem reviewer-private correction." && viaWriter.scope.visibility === "personal" && viaWriter.review_status === "restricted",
+      `a capture key resending a memory is answered it as its write-back made it, a write key as it stands (${JSON.stringify([viaCapture?.content, viaCapture?.review_status, viaWriter?.content])})`);
+    // Ids at their bound in a script of three bytes a character: the key fits its index.
+    // Distinct characters, so Postgres cannot compress the index row under its bound.
+    const wide = (seed: number) => Array.from({ length: 200 }, (_, i) => String.fromCodePoint(0x4e00 + seed * 211 + i * 7)).join("");
+    const big = { schema_version: WB, workspace_id: wide(1), project_id: "py", task_id: wide(2), step_id: wide(3), runtime: { name: wide(4) }, memory_payload: { decisions: ["ymem wide ids."] } };
+    const bigOne = await am("writeback", big);
+    const bigAgain = await am("writeback", big);
+    assert(bigOne.status === 200 && bigAgain.status === 200 && ids(bigAgain).join() === ids(bigOne).join(),
+      `four ids of 200 three-byte characters make a key its index holds, and the same write-back again its memory (${bigOne.status} ${JSON.stringify(bigOne.body).slice(0, 120)})`);
+    // A colon in a part of the default key is not the separator.
+    const colonA = ids(await am("writeback", { ...Y, runtime: { name: "x:y" }, task_id: "z", memory_payload: { decisions: ["ymem colon."] } }))[0];
+    const colonB = ids(await am("writeback", { ...Y, runtime: { name: "x" }, task_id: "y:z", memory_payload: { decisions: ["ymem colon."] } }))[0];
+    assert(colonA !== undefined && colonB !== undefined && colonA !== colonB, `runtime x:y with task z and runtime x with task y:z are two memories (${colonA}, ${colonB})`);
+    // The summary is cut at characters.
+    const emojiText = `${"a".repeat(139)}😀 and more`;
+    const emoji = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: [emojiText] } }))[0];
+    assert(emoji?.summary === `${"a".repeat(139)}😀` && !emoji.summary.includes("�"), `a summary ends on a whole character, an emoji at its 140th kept whole (${emoji?.summary.slice(-4)})`);
+    // A record past its key count is refused.
+    const keys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, true]));
+    const recallY = { schema_version: RC, workspace_id: "ws-y", project_id: "py", query: "what ymem says" };
+    const fifty = await am("recall", { ...recallY, sensitivity: keys(50) }, { as: KEYS.reader });
+    const fiftyOne = await am("recall", { ...recallY, sensitivity: keys(51) }, { as: KEYS.reader });
+    const manyEntities = await am("writeback", { ...Y, memory_payload: { decisions: ["ymem entities."], entities: keys(51) } });
+    assert(fifty.status === 200 && fiftyOne.status === 400 && fiftyOne.body.code === "REFUSED_INPUT" && manyEntities.status === 400,
+      `a record of 50 keys is taken, one of 51 refused (${fifty.status}, ${fiftyOne.status}, ${manyEntities.status})`);
+    // Confirm after reject restores the memory; restrict_scope never widens.
+    const back = bodyOf(await am("writeback", { ...Y, memory_payload: { lessons: ["ymem rejected then confirmed."] } }))[0]!;
+    await reviewY(back.memory_id, { action: "reject" });
+    const restored = (await reviewY(back.memory_id, { action: "confirm" })).body.memory as Body;
+    assert(restored.lifecycle_status === "active" && restored.use_policy.can_use_as_evidence === true && restored.use_policy.can_use_as_instruction === true,
+      `confirm after reject: active again, evidence and instruction (${JSON.stringify([restored.lifecycle_status, restored.use_policy])})`);
+    const wider = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "organization" });
+    const narrower = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "channel" });
+    assert(wider.status === 400 && wider.body.code === "NOT_NARROWER" && wider.body.current === "project" && narrower.status === 200 && narrower.body.memory?.scope?.visibility === "channel",
+      `restrict_scope to a wider visibility is refused, to a narrower one taken (${wider.status} ${wider.body.code}, ${narrower.body.memory?.scope?.visibility})`);
+    // A memory a person never confirmed stays out of a recall without include_unconfirmed, restricted or not.
+    const unconfirmed = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["ymem never confirmed, restricted."] } }))[0]!;
+    await reviewY(unconfirmed.memory_id, { action: "restrict_scope" });
+    const ask = async (scope: Body) => ids(await am("recall", { ...recallY, query: "what ymem says", scope: { project_only: false, visibility: "personal", ...scope } }, { as: KEYS.reader }));
+    const [without, withUnconfirmed] = [await ask({}), await ask({ include_unconfirmed: true })];
+    assert(!without.includes(unconfirmed.memory_id) && withUnconfirmed.includes(unconfirmed.memory_id),
+      `a restricted memory no one confirmed is recalled only with include_unconfirmed (${without.length}, ${withUnconfirmed.length})`);
+    // record_usage counts each memory once.
+    const tr = await rest("POST", "/v1/plugins/agent-memory/recall", { ...recallY, query: "what ymem says", scope: { include_unconfirmed: true } }, KEYS.writer);
+    const m0 = (tr.body.memories as Body[] | undefined)?.[0]?.memory_id as string | undefined;
+    const twice = m0 ? await am("record_usage", { request_id: tr.body.request_id, used_memory_ids: [m0, m0.toUpperCase(), m0], ignored: [{ memory_id: m0 }, { memory_id: m0 }] }) : undefined;
+    const usedRows = m0 ? await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events a JOIN plugin_agent_memory.recall_traces t ON t.id = a.trace_id
+      WHERE t.request_id = ${String(tr.body.request_id)}::uuid AND a.event_type = 'memory_used'`) : { n: -1 };
+    assert(m0 !== undefined && JSON.stringify(twice?.body.recorded) === JSON.stringify({ used: 1, ignored: 1 }) && usedRows.n === 1,
+      `record_usage marks a memory named three times once, used and then ignored once (${JSON.stringify(twice?.body)}, ${usedRows.n} used rows)`);
   }
 
   // ── The embedding provider down ──

@@ -16,8 +16,8 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 
 ## Quick Path
 
-1. Turn on the brain's [agent-memory plugin](../../plugins/agent-memory/) (the Agent Memory schema and API until SMD-2690). This recipe's steps still name the old server's routes, which the plugin does not answer, until SMD-2690 PR 2b: until then, follow it against the old server and tables from 2.0.0, the last release with them.
-2. (The Agent Memory API is the plugin now: nothing more to deploy.)
+1. Keep the brain on 2.0.0, the last release with the Agent Memory API server and its schema: this recipe calls that server's routes, which the brain's [agent-memory plugin](../../plugins/agent-memory/) replaces after 2.0.0, until SMD-2690 PR 2b moves the recipe onto the plugin.
+2. Install the Agent Memory schema and deploy the Agent Memory API as 2.0.0's READMEs say (tag `v2.0.0`: `schemas/agent-memory/`, `integrations/agent-memory-api/`).
 3. Install the live OpenClaw plugin:
 
    ```bash
