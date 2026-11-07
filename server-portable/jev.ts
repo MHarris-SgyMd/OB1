@@ -111,7 +111,7 @@ export function resolveJevConfig(env: JevEnv): JevConfig | null {
  * packed batch), not the call: a bound on the whole call is a `signal`, e.g.
  * AbortSignal.timeout(…), which every request of the call shares.
  */
-type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
+type CallOpts = { signal?: AbortSignal; timeoutMs?: number; probe?: string };
 
 /**
  * One exchange with the tier, through the model-call seam (SMD-3379 PR 2a): a decision, or the tier's /info, which
@@ -119,9 +119,10 @@ type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
  */
 function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
   // Under a client span, as a provider call's (SMD-3379 PR 2b-2a): `decide <model>`, its point labelled live or
-  // background.
+  // background, and preflight's probes marked so (`probe`), as its embedding and chat probes are, which the provider
+  // alert leaves out (review pass 1).
   return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
-    () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass() }));
+    () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass(), ...(opts.probe ? { "ob1.probe": opts.probe } : {}) }));
 }
 
 /** exchange's request, once the seam lets it run: the deadline, the status kept, the body capped in a message, the JSON parsed. */

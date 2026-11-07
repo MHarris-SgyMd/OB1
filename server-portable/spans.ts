@@ -113,9 +113,11 @@ let tracing: Tracing = UNTRACED;
  * the sleep passes, which start no telemetry, count their model calls on their pass stamps instead (SMD-3379 PR 2b-2a).
  * Never the work's undoing: a meter that throws loses the point.
  */
-export function recordPoint(name: string, spec: HistogramSpec, value: number, labels: SpanAttributes): void {
+export function recordPoint(name: string, spec: HistogramSpec, value: number, labels: () => SpanAttributes): void {
+  // The labels built only where a point is recorded: a worker's re-embed of millions of calls builds none (review pass 1).
+  if (!tracing.record) return;
   try {
-    tracing.record?.(name, spec, value, labels);
+    tracing.record(name, spec, value, labels());
   } catch {}
 }
 

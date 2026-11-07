@@ -49,7 +49,7 @@
  * a worker's pass stamp carries, where none runs.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { faultOf, modelLabel, recordPoint, serverOf, type HistogramSpec, type SpanAttributes } from "./spans.ts";
+import { faultOf, modelLabel, recordPoint, serverOf, statusType, type HistogramSpec, type SpanAttributes } from "./spans.ts";
 
 /** The model server a call reaches, by what it is asked: embeddings, a chat completion, or a typed decision (jev). */
 export type ModelType = "embed" | "chat" | "decide";
@@ -121,8 +121,10 @@ export function withCallWaits<T>(waits: CallWaits, fn: () => T): T {
 
 /**
  * A model call's own time, in seconds, from when its exchange starts — a wait for a slot is not in it — for every
- * call through the seam: the decide tier's, extraction's, the judge's and the writer's among them, which record no
- * `gen_ai.client.operation.duration` point (SMD-3379 PR 2b-2a). The GenAI conventions' bounds, as spans.ts's.
+ * call through the seam, labelled with its purpose and pass, where telemetry runs: the servers, beside the provider's
+ * `gen_ai.client.operation.duration` point. Extraction's, the judge's and the writer's calls, which record no such point,
+ * run in the workers, which export nothing: theirs are the stamp's tallies (SMD-3379 PR 2b-2a, its review pass 1).
+ * The GenAI conventions' bounds, as spans.ts's.
  */
 export const CALL_DURATION: HistogramSpec = {
   unit: "s",
@@ -148,13 +150,14 @@ export type SlotWaitEnd = "held" | "open" | "stopped";
 export type ModelCallTally = {
   calls: Record<CallClass, number>;
   callMs: number;
-  slotWaits: Record<SlotWaitEnd, number> & { totalMs: number; maxMs: number };
+  /** Each ask for a slot by how it ended, how many of them waited at all — the rest took a slot at once — their time in all and the longest. */
+  slotWaits: Record<SlotWaitEnd, number> & { waited: number; totalMs: number; maxMs: number };
 };
 const tallies = new Map<string, ModelCallTally>();
 function tallyOf(pass: string | undefined): ModelCallTally {
   const key = pass ?? "-";
   let t = tallies.get(key);
-  if (!t) tallies.set(key, (t = { calls: { live: 0, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, totalMs: 0, maxMs: 0 } }));
+  if (!t) tallies.set(key, (t = { calls: { live: 0, background: 0 }, callMs: 0, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } }));
   return t;
 }
 
@@ -176,13 +179,34 @@ function labelsOf(call: ResolvedModelCall): SpanAttributes {
   return { "ob1.model.type": call.type, "gen_ai.request.model": modelLabel(call.model), ...serverOf(call.base), ...(call.pass ? { "ob1.pass": call.pass } : {}) };
 }
 
-/** A wait for a slot ended, `ms` long: a point, and its pass's tally. The background-slots hook's (slots.ts). */
-export function noteSlotWait(call: ResolvedModelCall, ms: number, end: SlotWaitEnd): void {
-  recordPoint("ob1.model.slot.wait.duration", SLOT_WAIT, ms / 1000, { ...labelsOf(call), "ob1.slot.outcome": end });
+/**
+ * An ask for a slot ended, `ms` long: a point, and its pass's tally — `waited` where the hook said it waited, apart
+ * from a slot taken at once (review pass 1: every ask read as a wait). The background-slots hook's (slots.ts).
+ */
+export function noteSlotWait(call: ResolvedModelCall, ms: number, end: SlotWaitEnd, waited: boolean): void {
+  recordPoint("ob1.model.slot.wait.duration", SLOT_WAIT, ms / 1000, () => ({ ...labelsOf(call), "ob1.slot.outcome": end, "ob1.slot.waited": waited }));
   const w = tallyOf(call.pass).slotWaits;
   w[end] += 1;
+  if (waited) w.waited += 1;
   w.totalMs += ms;
   w.maxMs = Math.max(w.maxMs, ms);
+}
+
+/**
+ * How a call failed, in the provider point's words (embed.ts's providerErrorType, read by shape: this module imports
+ * neither embed.ts nor jev.ts): an answer's status (`503`, `_OTHER`), `timeout`, `invalid_body`, a kind of the
+ * provider's own; else the runtime's code (`ECONNREFUSED`) or the throw's kind — so an overload, a 429 or a 503, is
+ * told from a timeout and a body (review pass 1: every ProviderError read `ProviderError`).
+ */
+function errorTypeOf(e: unknown): string {
+  try {
+    const { kind, status } = (e ?? {}) as { kind?: unknown; status?: unknown };
+    if (typeof status === "number" && Number.isInteger(status)) return statusType(status);
+    if (kind === "body") return "invalid_body";
+    if (typeof kind === "string" && /^[a-z_]{1,40}$/.test(kind)) return kind;
+  } catch {}
+  const f = faultOf(e);
+  return f.code ?? f.kind;
 }
 
 /** `run`, timed from when it starts: a point, and its pass's tally, whether it answers or throws. */
@@ -199,9 +223,9 @@ function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise
       throw e;
     } finally {
       const ms = performance.now() - started;
-      recordPoint("ob1.model.call.duration", CALL_DURATION, ms / 1000, {
-        ...labelsOf(call), "ob1.call.class": call.cls, "ob1.call.purpose": call.purpose, ...(threw ? { "error.type": faultOf(failed).kind } : {}),
-      });
+      recordPoint("ob1.model.call.duration", CALL_DURATION, ms / 1000, () => ({
+        ...labelsOf(call), "ob1.call.class": call.cls, "ob1.call.purpose": call.purpose, ...(threw ? { "error.type": errorTypeOf(failed) } : {}),
+      }));
       const t = tallyOf(call.pass);
       t.calls[call.cls] += 1;
       t.callMs += ms;
@@ -214,7 +238,8 @@ export function modelCall<T>(call: ModelCall, plain: () => Promise<T>): Promise<
   const { cls, ...rest } = call;
   const store = context.getStore();
   const resolved: ResolvedModelCall = { ...rest, cls: cls ?? store?.cls ?? "background", pass: store?.pass };
-  const run = timed(resolved, plain);
+  // A class the call names, unlike its context's, is the one its provider span reads too (review pass 1).
+  const run = timed(resolved, cls !== undefined && cls !== store?.cls ? () => context.run({ ...store, cls }, plain) : plain);
   if (hook === null) return run();
   // The wait on the hook told to the worker's observer: waiting when the hook says it waits, running when it runs the
   // call — or, if the call ended without running (refused, stopped), running then, so its clocks start from there

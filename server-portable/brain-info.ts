@@ -210,11 +210,11 @@ export interface WorkerHeartbeat {
   waitingMidPass?: SleepPass[];
   /**
    * The worker's model calls by pass since its process began, `-` for calls of no pass (SMD-3379 PR 2b-2a): by
-   * class, their own time, and their waits for a slot by how each ended — a slot taken, run without one (the
-   * semaphore failed open), stopped — their time in all and the longest. No telemetry runs in a worker, so its
+   * class, their own time, and their asks for a slot by how each ended — a slot taken, run without one (the
+   * semaphore failed open), stopped — how many waited at all, their time in all and the longest. No telemetry runs in a worker, so its
    * stamp carries them. Absent from a row with none, or not of the shape, and from an earlier worker's.
    */
-  models?: Record<string, { calls: { live: number; background: number }; callMs: number; slotWaits: { held: number; open: number; stopped: number; totalMs: number; maxMs: number } }>;
+  models?: Record<string, { calls: { live: number; background: number }; callMs: number; slotWaits: { held: number; open: number; stopped: number; waited: number; totalMs: number; maxMs: number } }>;
   /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
@@ -751,11 +751,11 @@ function parseModels(m: unknown): WorkerHeartbeat["models"] {
     const c = calls as Record<string, unknown> | null;
     const w = slotWaits as Record<string, unknown> | null;
     if (c === null || typeof c !== "object" || w === null || typeof w !== "object") return undefined;
-    if (![c.live, c.background, callMs, w.held, w.open, w.stopped, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
+    if (![c.live, c.background, callMs, w.held, w.open, w.stopped, w.waited, w.totalMs, w.maxMs].every((n) => count(n))) return undefined;
     out[pass] = {
       calls: { live: c.live as number, background: c.background as number },
       callMs: callMs as number,
-      slotWaits: { held: w.held as number, open: w.open as number, stopped: w.stopped as number, totalMs: w.totalMs as number, maxMs: w.maxMs as number },
+      slotWaits: { held: w.held as number, open: w.open as number, stopped: w.stopped as number, waited: w.waited as number, totalMs: w.totalMs as number, maxMs: w.maxMs as number },
     };
   }
   return out;
@@ -2103,6 +2103,11 @@ function modelCallsLine(db: DatabaseSummary): string | null {
   return modelCallsWords(db.workers?.heartbeats ?? []);
 }
 
+/** A time in milliseconds as the row says it: whole milliseconds under a second, else seconds to a tenth (review pass 1: "0.0 s" lost an embedding's time). */
+function duration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
 /** The Model calls row's words for these heartbeats, null where none carries a call or a wait. */
 export function modelCallsWords(beats: readonly WorkerHeartbeat[]): string | null {
   const parts: string[] = [];
@@ -2110,17 +2115,20 @@ export function modelCallsWords(beats: readonly WorkerHeartbeat[]): string | nul
     if (!h.models) continue;
     for (const [pass, t] of Object.entries(h.models)) {
       const n = t.calls.live + t.calls.background;
-      if (n === 0 && t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped === 0) continue;
-      const waits = t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped;
+      const asks = t.slotWaits.held + t.slotWaits.open + t.slotWaits.stopped;
+      if (n === 0 && asks === 0) continue;
       const classes = [t.calls.background ? `${t.calls.background} background` : "", t.calls.live ? `${t.calls.live} live` : ""].filter(Boolean).join(", ");
-      const each = n ? `, ${(t.callMs / n / 1000).toFixed(1)} s each` : "";
-      const waited = waits
-        ? `; ${waits} waited for a slot, ${(t.slotWaits.totalMs / 1000).toFixed(1)} s in all, the longest ${(t.slotWaits.maxMs / 1000).toFixed(1)} s${t.slotWaits.open ? `, ${t.slotWaits.open} ran without one` : ""}${t.slotWaits.stopped ? `, ${t.slotWaits.stopped} stopped` : ""}`
+      const each = n ? `, ${duration(t.callMs / n)} each` : "";
+      // Asks and waits apart: a slot taken at once is no wait (review pass 1).
+      const waited = asks
+        ? ` — ${asks} asked for a slot, ${t.slotWaits.waited} waited, ${duration(t.slotWaits.totalMs)} in all, the longest ${duration(t.slotWaits.maxMs)}${t.slotWaits.open ? `, ${t.slotWaits.open} ran without one` : ""}${t.slotWaits.stopped ? `, ${t.slotWaits.stopped} stopped` : ""}`
         : "";
       parts.push(`${h.job ?? h.worker}${pass === "-" ? "" : ` ${pass}`}: ${classes || "0"} call(s)${each}${waited}`);
     }
   }
-  return parts.length ? parts.join("; ") : null;
+  // Workers apart by "; " as the Workers row has them, a worker's waits after " — "; the tallies a process's since it
+  // started, as its last stamp has them, an ended worker's included (review pass 1).
+  return parts.length ? `since each worker started, as last stamped: ${parts.join("; ")}` : null;
 }
 
 /** "4 pair two tickets the board does not link", `?` when that read did not answer, or nothing. */

@@ -421,14 +421,20 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (!share) return run();
     // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a).
     const asked = performance.now();
+    // Whether it waited at all, by the hook's own word, apart from a slot taken at once (review pass 1).
+    let waited = false;
+    const told = () => {
+      waited = true;
+      waiting();
+    };
     let held: Held | null;
     try {
-      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, waiting);
+      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told);
     } catch (e) {
-      noteSlotWait(call, performance.now() - asked, "stopped");
+      noteSlotWait(call, performance.now() - asked, "stopped", waited);
       throw e;
     }
-    noteSlotWait(call, performance.now() - asked, held ? "held" : "open");
+    noteSlotWait(call, performance.now() - asked, held ? "held" : "open", waited);
     try {
       return await run();
     } finally {

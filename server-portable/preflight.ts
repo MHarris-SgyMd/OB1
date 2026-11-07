@@ -1110,9 +1110,9 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
 // passes cannot read leaves them off, with a line in each process's log an operator may never read.
 if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
   const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
-  if (bs.problem) add("background slots", "warn", bs.problem, "Write types and per-model overrides, e.g. chat=1,embed=2,decide=1, or off, or unset it.");
+  if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
   else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
-  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model server's slots across the brain's processes, a live call never; brain_info's Model calls row says how long they waited`);
+  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model server's slots across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -5697,7 +5697,7 @@ if (!jevCfg) {
   if (unresolved) {
     add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
   } else try {
-    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
+    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
     // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
     // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
@@ -5748,7 +5748,7 @@ if (!jevCfg) {
   } else {
     try {
       const t0 = performance.now();
-      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
       add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };
