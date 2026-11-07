@@ -1843,15 +1843,6 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
   };
 }
 
-/** An agenda call's row (migration 123): the scope asked, the items returned in order, the limit. */
-export type QueryAgendaLog = {
-  agentId?: string;
-  filter: Record<string, unknown>;
-  matchCount: number;
-  items: { kind: string; key: string; effective: number }[];
-  tier?: string;
-};
-
 /**
  * A 'search' row for the opt-in query log (migration 034, SMD-1295): the query
  * and its arguments, and the ids returned in rank order with their fused scores.
@@ -1886,6 +1877,18 @@ export type QueryActionLog = {
   agentId?: string;
   targetId: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
+  tier?: string;
+};
+
+/**
+ * An 'agenda' row for the query log (migration 123, SMD-3669): the call's scope, holder and flags in `filter`, its
+ * limit as `matchCount`, and the items returned, in order, each with its effective priority.
+ */
+export type QueryAgendaLog = {
+  agentId?: string;
+  filter: Record<string, unknown>;
+  matchCount: number;
+  items: { kind: string; key: string; effective: number }[];
   tier?: string;
 };
 
@@ -2300,7 +2303,8 @@ export interface ThoughtStore {
   /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
-   * statement. A database before 123 throws; so does any raise, every argument being checked before it.
+   * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
+   * first, and the core answers holder mine's 42501 as CLAIMS_UNREADABLE.
    */
   agenda(opts: {
     scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;

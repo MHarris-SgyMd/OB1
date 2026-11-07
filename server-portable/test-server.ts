@@ -6914,6 +6914,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     ["PROPOSAL_YOURS", R({ code: "PROPOSAL_YOURS", retryable: false, proposal: A }), /^Refused: proposal \S+ is yours; another key accepts it/],
     ["CONFIRM_NOT_YOURS", R({ code: "CONFIRM_NOT_YOURS", retryable: false, item: T }), /^Refused: open item 3333\S+ was proposed, not stated; a write key confirms it/],
   ];
+  for (const [name, r, words] of itemRefusals) assert(r.isError === true && words.test(text(r)) && !text(r).includes("\n"), `${name} (an open item's): refused by its rule, in one line (${text(r)})`);
   // The core's mapping (review passes 2 and 3): 123's own 42501 under mine is CLAIMS_UNREADABLE; another table's is a fault.
   {
     const { agenda: agendaRead } = await import("./core/agenda.ts");
@@ -6948,7 +6949,6 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);
   assert(unreadable.isError === true && /^Refused: holder mine needs the claims this server's database role cannot read \(the claims group\); ask without holder$/.test(text(unreadable)),
     `CLAIMS_UNREADABLE: refused in words, one line (${text(unreadable)})`);
-  for (const [name, r, words] of itemRefusals) assert(r.isError === true && words.test(text(r)) && !text(r).includes("\n"), `${name} (an open item's): refused by its rule, in one line (${text(r)})`);
   // 117's words read as the argument they name (review pass 1): a client reading values knows which to mend.
   const { itemProblemOf } = await import("./open-items.ts");
   const itemProblems = ["not an open item's id: 'x' (a uuid)", "an item's text is at most 1000 characters; this one has 1001", "an owner is at most 200 characters; this one has 201",

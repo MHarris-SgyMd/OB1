@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, type AgendaResult, type QueryAgendaLog, normalisePriorityAssertion, PRIORITY_KINDS, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -43,6 +43,7 @@ import type {
   ResetStampResult,
   ProvenanceNode,
   QueryActionLog,
+  QueryAgendaLog,
   QuerySearchLog,
   SupersessionProposal,
   ThoughtHybridMatch,

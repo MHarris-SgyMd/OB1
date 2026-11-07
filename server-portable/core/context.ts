@@ -7,7 +7,7 @@
 import { createEmbedder, resolveEmbedConfig, shownBase, type EmbedConfig, type EmbedEnv, type Embedder } from "../embed.ts";
 import { createProviderHealth, type ProviderHealth } from "../provider-health.ts";
 import type { JevEnv } from "../jev.ts";
-import type { StoreEnv, ThoughtStore } from "../store.ts";
+import type { QueryAgendaLog, StoreEnv, ThoughtStore } from "../store.ts";
 import { queryLogEnabled } from "../../db/config.mjs";
 import type { Principal } from "../auth.ts";
 
@@ -45,7 +45,7 @@ export interface Ctx {
   /** The action-log rows of one call, in one write; best-effort, a no-op unless OB1_QUERY_LOG=on. */
   logActions(principal: Pick<Principal, "agentId">, rows: ActionRow[]): Promise<void>;
   /** An agenda call's query_log row (migration 123): its scope and the items it returned; best-effort, a no-op unless OB1_QUERY_LOG=on. */
-  logAgenda(principal: Pick<Principal, "agentId">, filter: Record<string, unknown>, limit: number, items: { kind: string; key: string; effective: number }[]): Promise<void>;
+  logAgenda(principal: Pick<Principal, "agentId">, filter: Record<string, unknown>, limit: number, items: QueryAgendaLog["items"]): Promise<void>;
   /** The embedding provider as this server last saw it (SMD-2890): every embedding call says, and the keyed /health and brain_info read it. */
   providerHealth: ProviderHealth;
   /** Seconds between re-probes of a provider that does not answer, once the server started its loop; null for none (a hosted endpoint, or OB1_PROVIDER_REPROBE_INTERVAL=off). */
@@ -95,15 +95,6 @@ export function createContext(deps: CoreDeps): Ctx {
   // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
   // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
   // is the follow-up (SMD-1950), not a durability trade here.
-  // The agenda's row (SMD-3669), as best-effort as a search's: a log write never fails the read.
-  const logAgenda: Ctx["logAgenda"] = async (principal, filter, limit, items) => {
-    if (!queryLogEnabled(deps.env())) return;
-    try {
-      await (await deps.store()).logAgenda({ agentId: principal.agentId, filter, matchCount: limit, items, tier: tier() });
-    } catch {
-      // best-effort: a log failure must never reach the caller.
-    }
-  };
   const logSearch: Ctx["logSearch"] = async (principal, tool, args, data) => {
     if (!queryLogEnabled(deps.env())) return;
     try {
@@ -143,6 +134,15 @@ export function createContext(deps: CoreDeps): Ctx {
       await (await deps.store()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId, tier: tier() })));
     } catch {
       // best-effort.
+    }
+  };
+  // The agenda's row (SMD-3669), as best-effort as a search's: a log write never fails the read.
+  const logAgenda: Ctx["logAgenda"] = async (principal, filter, limit, items) => {
+    if (!queryLogEnabled(deps.env())) return;
+    try {
+      await (await deps.store()).logAgenda({ agentId: principal.agentId, filter, matchCount: limit, items, tier: tier() });
+    } catch {
+      // best-effort: a log failure must never reach the caller.
     }
   };
 

@@ -4001,7 +4001,8 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'query_log' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
   // 045 (SMD-1490) appended `tier` (the pipeline tier the writer runs as) and
-  // `arm` (the retrieval arm a search ran) after 034's thirteen; 123 (SMD-3669) `result_items`, an agenda row's typed items.
+  // `arm` (the retrieval arm a search ran) after 034's thirteen; 123
+  // (SMD-3669) appended `result_items`, an agenda row's typed items.
   const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id", "tier", "arm", "result_items"];
   assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
 
@@ -18004,7 +18005,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const OP = { name: "ag-op", scope: "write" };
   type It = { kind: string; key: string; rank: number; effective: number; level: number | null; overdue: boolean; claimed: { holder: string }[] | null;
     lapsed_claim: { holder: string }[] | null; blockers: string[]; title: string; status?: string; source: string };
-  type Ag = { items: It[]; total: number; unknown: number; left_out: { blocked: number; claimed: number; waiting: number }; board_sync: { at: string; outcome: unknown } | null };
+  type Ag = { items: It[]; total: number; unknown: number; left_out: { blocked: number; claimed: number; waiting: number }; board_sync: { at: string; outcome: unknown } | null; claims_read: boolean };
   const thoughtAs = async (content: string, metadata: object | null = null) => {
     let id = "";
     await db.transaction(async (tx) => {
@@ -18144,7 +18145,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
     try { await tx.query(`SELECT agenda(NULL, '{"name": "ag-bot"}'::jsonb)`); } catch (e) { softMine = `${String((e as { code?: string }).code ?? "?")} ${(e as Error).message}`; }
   });
   const softA = soft as Ag | null;
-  assert(softA !== null && (softA as unknown as { claims_read: boolean }).claims_read === false && softA.items.some((i) => i.key === "SMD-9801") && softA.left_out.claimed === 0 && /^42501 agenda: holder mine reads work_claims/.test(softMine),
+  assert(softA !== null && softA.claims_read === false && softA.items.some((i) => i.key === "SMD-9801") && softA.left_out.claimed === 0 && /^42501 agenda: holder mine reads work_claims/.test(softMine),
     `without the claims group the claimed ticket is listed, nothing counted as claimed, claims_read false; mine refused 42501 in 123's own words, which the core maps to CLAIMS_UNREADABLE (${softA?.items.length}; ${softMine})`);
   await db.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ag110_noclaims; DROP ROLE ag110_noclaims`);
 

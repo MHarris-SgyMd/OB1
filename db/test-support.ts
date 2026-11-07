@@ -461,8 +461,6 @@ const FUNCTIONS = [
   "ob1_item_serves(text, text)",
   "ob1_item_unblocks(text, text, integer, integer)",
   "ob1_ticket_row_of(uuid)",
-  "ob1_item_blockers(text, text)",
-  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone)",
   "ob1_ticket_rows(text)",
   "ob1_priority_subject(text, text)",
   "ob1_priority_open(text, text)",
@@ -476,6 +474,9 @@ const FUNCTIONS = [
   // thought_facets.
   "thread_relink(text, boolean)",
   "ob1_thread_relink_subject()",
+  // 123 (SMD-3669): the agenda and the blockers it names.
+  "ob1_item_blockers(text, text)",
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone)",
 ];
 
 /**

@@ -79,6 +79,8 @@ const minTrustInput = z.enum(TRUST).optional()
 
 /** No lone UTF-16 surrogate: JSON.stringify writes one as an escape jsonb refuses (SMD-3669 review pass 6). */
 const WELL_FORMED = (v: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v);
+/** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
+const AGENDA_SCOPE = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
 
 export const SPECS = {
   search: {
@@ -716,9 +718,9 @@ export const SPECS = {
       "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed work: blocked items, items under a live claim and items not yet startable are left out and counted. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), and `claimsRead` false means claims could not be read, so none was left out. It orders and explains; the caller decides.",
     annotations: { readOnlyHint: true },
     inputSchema: {
-      source: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate").optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
-      project: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate").optional().describe("Only tickets in this Linear project"),
-      label: z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate").optional().describe("Only tickets with this Linear label"),
+      source: AGENDA_SCOPE.optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
+      project: AGENDA_SCOPE.optional().describe("Only tickets in this Linear project"),
+      label: AGENDA_SCOPE.optional().describe("Only tickets with this Linear label"),
       holder: z.enum(["mine"]).optional().describe("mine: only the work this key holds a live claim on"),
       limit: z.number().int().min(1).max(100).optional().default(20).describe("At most this many. Default 20"),
       include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),

@@ -37,12 +37,13 @@
 --     still ahead (waiting), always. A lapsed claim never released hides
 --     nothing: the item names it, so a client checks before starting.
 --   * COVERAGE: how many items that passed the filters (total, not the first
---     p_limit) carry no priority — no counted level and none inherited, read as unknown's value, never low (docs/priority.md
---     decision 3) — and board-sync's last heartbeat (its ob1_config row's
---     time and outcome), null on a brain without board-sync.
+--     p_limit) carry no priority — no counted level and none inherited, read
+--     as unknown's value, never low (docs/priority.md decision 3) — and
+--     board-sync's last heartbeat (its ob1_config row's time and outcome),
+--     null on a brain without board-sync.
 --   The answer: {items, total, unknown, left_out: {blocked, claimed, waiting},
---   board_sync, claims_read, now}. items is the first p_limit (1 to 100), total every item
---   that passed the filters.
+--   board_sync, claims_read, now}. items is the first p_limit (1 to 100),
+--   total every item that passed the filters.
 --
 --   ob1_item_blockers(kind, key) — the open items blocking a ticket or a
 --   thought, as identities (linear's bare, another system's system:key).
@@ -69,8 +70,9 @@
 --   under FORK.md's version rules. test-schema [110], test-upgrade [20bn].
 --
 -- Prerequisites
---   006 (ob1_config), 034 (query_log), 053, 068, 071 (the links, heads and
---   gate), 115 (work_claims), 117 (open_items), 122 (effective_priority).
+--   006 (ob1_config), 034 (query_log), 053, 058, 068, 071 (the links, status
+--   types, heads and gate), 115 (work_claims), 117 (open_items), 122
+--   (effective_priority).
 --   Applied by `bun db/migrate.ts`. Re-applied: the functions are replaced,
 --   the column and both CHECKs kept as they are. Reading the catalog takes a
 --   momentary ACCESS SHARE on query_log and nothing more, so the log is
@@ -252,17 +254,15 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('an agenda scope is a non-empty string of at most 200 characters: %s', v_bad), ERRCODE = 'invalid_parameter_value';
   END IF;
   v_source := p_scope->>'source'; v_project := p_scope->>'project'; v_label := p_scope->>'label';
+  IF p_now IS NULL OR NOT isfinite(p_now) THEN
+    RAISE EXCEPTION USING MESSAGE = 'agenda''s clock is a moment', ERRCODE = 'invalid_parameter_value';
+  END IF;
   IF v_mine THEN
     IF jsonb_typeof(p_holder) <> 'object' OR COALESCE(btrim(p_holder->>'name'), '') = '' THEN
       RAISE EXCEPTION USING MESSAGE = 'agenda: a holder is the calling key''s {name, agent_id}', ERRCODE = 'invalid_parameter_value';
     END IF;
     v_name := p_holder->>'name';
     v_agent := CASE WHEN p_holder->>'agent_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (p_holder->>'agent_id')::uuid END;
-  END IF;
-  IF p_now IS NULL OR NOT isfinite(p_now) THEN
-    RAISE EXCEPTION USING MESSAGE = 'agenda''s clock is a moment', ERRCODE = 'invalid_parameter_value';
-  END IF;
-  IF v_mine THEN
     IF NOT v_claims_ok THEN
       RAISE EXCEPTION USING MESSAGE = 'agenda: holder mine reads work_claims, which this role may not (the claims group)', ERRCODE = 'insufficient_privilege';
     END IF;
@@ -350,9 +350,9 @@ BEGIN
         FROM jsonb_array_elements(v_cands) c
         JOIN jsonb_array_elements(v_scored) s ON s->>'item_kind' = c->>'kind' AND s->>'item_key' = c->>'key'
     ), judged AS (
-      -- An absent ticket, or an empty half, reads as SQL NULL: jsonb_agg over
-      -- no rows built a JSON null.
-      SELECT sc.c, sc.s,
+      -- An absent ticket, or an empty half, reads as SQL NULL: an empty half's
+      -- jsonb_agg was NULL, which jsonb_build_object stored as JSON null.
+      SELECT sc.c, sc.s, COALESCE((sc.s->>'waiting')::boolean, false) AS waiting,
              CASE WHEN sc.c->>'kind' = 'ticket' THEN NULLIF(v_claims->(sc.c->>'key')->'live', 'null'::jsonb) END AS live,
              CASE WHEN sc.c->>'kind' = 'ticket' THEN NULLIF(v_claims->(sc.c->>'key')->'lapsed', 'null'::jsonb) END AS lapsed,
              CASE WHEN sc.c->>'kind' = 'ticket' THEN ob1_item_blockers('ticket', sc.c->>'key') ELSE '{}'::text[] END AS blockers
@@ -360,7 +360,7 @@ BEGIN
     ), kept AS (
       SELECT j.*
         FROM judged j
-       WHERE NOT COALESCE((j.s->>'waiting')::boolean, false)
+       WHERE NOT j.waiting
          AND (p_include_blocked OR cardinality(j.blockers) = 0)
          AND (p_include_claimed OR v_mine OR j.live IS NULL)
     ), ranked AS (
@@ -390,11 +390,11 @@ BEGIN
       'unknown', (SELECT count(*) FROM ranked r WHERE r.s->'level' = 'null'::jsonb AND r.s->'inherited_from' = 'null'::jsonb),
       'left_out', jsonb_build_object(
         'blocked', (SELECT count(*) FROM judged j WHERE NOT p_include_blocked AND cardinality(j.blockers) > 0
-                                                    AND NOT COALESCE((j.s->>'waiting')::boolean, false)),
+                                                    AND NOT j.waiting),
         'claimed', (SELECT count(*) FROM judged j WHERE NOT (p_include_claimed OR v_mine) AND j.live IS NOT NULL
-                                                    AND NOT COALESCE((j.s->>'waiting')::boolean, false)
+                                                    AND NOT j.waiting
                                                     AND (p_include_blocked OR cardinality(j.blockers) = 0)),
-        'waiting', (SELECT count(*) FROM judged j WHERE COALESCE((j.s->>'waiting')::boolean, false))),
+        'waiting', (SELECT count(*) FROM judged j WHERE j.waiting)),
       'board_sync', v_board,
       'claims_read', v_claims_ok,
       'now', p_now)
@@ -402,4 +402,4 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz) IS
-  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migration 123 / SMD-3669.';
+  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migration 123 / SMD-3669.';
