@@ -955,17 +955,21 @@ export type ThreadPlace = { key: string; place: number; total: number; previous:
 const textOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
 /**
- * A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a ticket's row — its
- * `metadata.issue` a ticket's shape (077's TEAM-123), as board-sync writes it. A write key may set `issue` to any text
- * (review pass 1: a forged one, newlines and all, was printed as a ticket's row); that member carries no ticket.
+ * A thread member's row (threadPage's jsonb element) → ThreadMember: its ticket only when it is a board ticket's own
+ * row — `metadata.source` `linear`, which board-sync alone writes (capture and update_thought refuse it to every key,
+ * REFUSED_SOURCE_RESERVED), and `metadata.issue` a ticket's shape (a team of one letter or more, as board-sync's
+ * identifiers are). Its status type is kept only as one lower-case word, as Linear's are (backlog, started, …).
+ * A write key may set `issue`, `status` and `status_type` to any text: review pass 1 found a forged issue, newlines
+ * and all, printed as a ticket's row, and pass 2 a forged status type forging lines of the text; such a row carries no
+ * ticket.
  */
 export function normaliseThreadMember(r: Record<string, unknown>): ThreadMember {
-  const raw = textOrNull(r.issue);
-  const issue = raw !== null && /^[A-Z][A-Z0-9]+-[0-9]+$/.test(raw) ? raw : null;
+  const raw = textOrNull(r.issue), type = textOrNull(r.status_type);
+  const issue = r.source === "linear" && raw !== null && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(raw) ? raw : null;
   return {
     id: String(r.id), place: Number(r.place), at: textOrNull(r.at), created_at: isoTimestampOrNull(r.created_at ?? null),
     content: String(r.content ?? ""),
-    ticket: issue === null ? null : { issue, status: textOrNull(r.status), statusType: textOrNull(r.status_type) },
+    ticket: issue === null ? null : { issue, status: textOrNull(r.status), statusType: type !== null && /^[a-z_]{1,20}$/.test(type) ? type : null },
   };
 }
 

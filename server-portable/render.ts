@@ -847,8 +847,10 @@ function threadText(t: ThreadShown, thought: string | null): string {
   });
   // An empty page of a thread with members (review pass 1): the members after the cursor left it between pages, or the
   // thought an id read was around left it between the two reads.
-  const before = !t.earlier ? "" : t.members.length > 0 ? `\n(${first - 1} earlier: read the key's thread from its start for them.)`
-    : thought !== null ? "\n(This thought left the thread while it was read: read it again, or read the key's thread from its start.)"
+  // An id read's page without its thought, whatever the thread then held (review pass 2: a thread emptied between the
+  // two reads said nothing).
+  const before = t.members.length === 0 && thought !== null ? "\n(This thought left the thread while it was read: read it again, or read the key's thread from its start.)"
+    : !t.earlier ? "" : t.members.length > 0 ? `\n(${first - 1} earlier: read the key's thread from its start for them.)`
       : "\n(No member stands past the cursor now: those after it left the thread since that page. Read the key's thread from its start.)";
   const more = t.cursor ? `\n\nMore follow. Cursor: ${t.cursor} — pass it as \`after\` with key ${threadKeyText(t.key)} for the next page.` : "";
   return `${head}${linked ? `\n${linked}` : ""}${before}\n\n${members.join("\n\n")}${more}`;
@@ -864,7 +866,7 @@ export function renderThread(o: Outcome<ThreadResult>): Reply {
   }, (r) => r.code === "REFUSED_THREAD_INPUT"
     ? r.problem === "key_or_id" ? "Refused: give exactly one of `key` (a subject key, such as ticket:SMD-3306) or `id` (a thought's id)."
       : r.problem === "after_needs_key" ? "Refused: `after` continues one thread — give it with that thread's `key`, as the page that ended with it said."
-        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>.`
+        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>. A ticket alone whose prefix a text never means as a ticket (PR-12, UTF-8, ES-5) is read only with its prefix, ticket:ES-5, as a ticket filed under it is keyed; a pull request is pr:12, and a word such as UTF-8 a phrase, phrase:utf-8.`
     : r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a thread cursor — pass the `cursor` a thread's page ended with, as it was given, with that thread's key."
       : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
         : unknownRefusal(r), safeThread);

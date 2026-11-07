@@ -1464,14 +1464,14 @@ export class SqlStore implements ThoughtStore {
       rows = await this.sql`
         WITH thread AS (
           SELECT t.id, t.created_at, t.created_at::text AS at, left(t.content, ${THREAD_HEAD_CHARS}::int) AS content,
-                 t.metadata->>'issue' AS issue, t.metadata->>'status' AS status, t.metadata->>'status_type' AS status_type,
+                 t.metadata->>'source' AS source, t.metadata->>'issue' AS issue, t.metadata->>'status' AS status, t.metadata->>'status_type' AS status_type,
                  row_number() OVER (ORDER BY t.created_at, t.id) AS place
             FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id
            WHERE f.kind = 'subject' AND f.valid_until IS NULL AND f.payload->>'key' = ${key}::text),
         page AS (SELECT * FROM thread WHERE ${cut} ORDER BY place LIMIT ${w.limit}::int)
         SELECT (SELECT count(*) FROM thread)::int AS total,
                COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id, 'place', place, 'at', at, 'created_at', created_at, 'content', content,
-                                                             'issue', issue, 'status', status, 'status_type', status_type) ORDER BY place)
+                                                             'source', source, 'issue', issue, 'status', status, 'status_type', status_type) ORDER BY place)
                            FROM page), '[]'::jsonb) AS members`;
     } catch (e) {
       // A cursor's time Postgres cannot read is the caller's, as list_thoughts' is.
