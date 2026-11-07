@@ -18053,11 +18053,15 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const b5 = withBlocked.items.find((i) => i.key === "SMD-9805");
   assert(withBlocked.total === 6 && JSON.stringify(b5?.blockers) === JSON.stringify(["SMD-9806"]) && withBlocked.left_out.blocked === 0,
     `include_blocked lists the blocked ticket with its blocker (${JSON.stringify(b5?.blockers)})`);
-  await db.query(`SELECT record_source_links((SELECT thought_id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9806'), 'linear', '[]'::jsonb)`);
+  // The link withdrawn (Linear dropped it) on SMD-9805's row, which holds it: listed while SMD-9806 is still open.
+  await db.query(`SELECT record_source_links((SELECT thought_id FROM thought_sources WHERE system = 'linear' AND identity = 'SMD-9805'), 'linear', '[]'::jsonb)`);
+  const unlinked = await ag({ project: P });
+  assert(unlinked.items.some((i) => i.key === "SMD-9805") && unlinked.items.some((i) => i.key === "SMD-9806") && unlinked.left_out.blocked === 0,
+    `a withdrawn blocked_by link blocks nothing: the ticket is listed while its old blocker is still open (${keys(unlinked)})`);
   await db.exec(`UPDATE thoughts SET metadata = metadata || '{"status": "completed", "status_type": "completed"}'::jsonb WHERE metadata->>'issue' = 'SMD-9806'`);
   const freed = await ag({ project: P });
   assert(freed.items.some((i) => i.key === "SMD-9805") && freed.left_out.blocked === 0 && !freed.items.some((i) => i.key === "SMD-9806"),
-    `once its blocker is completed the blocked ticket is listed and the blocker is not (${keys(freed)})`);
+    `once the blocker is completed it is not listed, and the ticket it blocked still is (${keys(freed)})`);
 
   // ob1_item_blockers' other paths: a blocks link another ticket's row holds (the blocks direction), in a project of
   // its own; a thought in another gating system named system:key; a link in a system that states no status, none.
@@ -18162,12 +18166,15 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   await put("SMD-9840", 2, { notBefore: "2099-01-01T00:00:00Z" });
   await ticket("SMD-9842", { project: PW, links: [["blocked_by", "SMD-9843"]] }); await ticket("SMD-9843", { project: PW });
   const held = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9842', NULL, 'ag-bot', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
+  await ticket("SMD-9844", { project: PW });
+  await put("SMD-9844", 2, { notBefore: "2099-01-01T00:00:00Z" });
+  const held2 = (await db.query<{ r: { outcome: string } }>(`SELECT claim_work('SMD-9844', NULL, 'ag-bot', 14400, NULL, $1::jsonb) AS r`, [JSON.stringify({ name: "ag-bot", agent_id: BOT_ID })])).rows[0].r;
   const t1 = new Date().toISOString();
   const once = await ag({ project: PW }, { now: t1 });
   const onceB = await ag({ project: PW }, { now: t1, blocked: true });
-  assert(held.outcome === "claimed" && once.left_out.waiting === 1 && once.left_out.blocked === 1 && once.left_out.claimed === 0
-         && onceB.left_out.blocked === 0 && onceB.left_out.claimed === 1 && onceB.left_out.waiting === 1,
-    `a waiting and blocked ticket counts once, as waiting; a blocked and claimed one once, as blocked, and as claimed once blocked work is shown (${JSON.stringify(once.left_out)}; ${JSON.stringify(onceB.left_out)})`);
+  assert(held.outcome === "claimed" && held2.outcome === "claimed" && once.left_out.waiting === 2 && once.left_out.blocked === 1 && once.left_out.claimed === 0
+         && onceB.left_out.blocked === 0 && onceB.left_out.claimed === 1 && onceB.left_out.waiting === 2,
+    `a waiting and blocked ticket counts once, as waiting, and so does a waiting and claimed one; a blocked and claimed one once, as blocked, and as claimed once blocked work is shown (${JSON.stringify(once.left_out)}; ${JSON.stringify(onceB.left_out)})`);
 
   // The sooner due time breaks a tie in score, before kind and key: a High with no date (3) and a Medium within the week
   // (2 + 1) tie, the dated one first though its key sorts after; two Mediums within the week, the sooner first.
