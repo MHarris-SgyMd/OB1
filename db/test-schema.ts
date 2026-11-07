@@ -18063,6 +18063,14 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   assert(freed.items.some((i) => i.key === "SMD-9805") && freed.left_out.blocked === 0 && !freed.items.some((i) => i.key === "SMD-9806"),
     `once the blocker is completed it is not listed, and the ticket it blocked still is (${keys(freed)})`);
 
+  // A settled blocker blocks nothing, its link left active (review pass 9: the row above withdrew the link first, so
+  // nothing held this): SMD-9860 blocked_by SMD-9861, completed.
+  const PS = "Agenda [110] settled blocker";
+  await ticket("SMD-9860", { project: PS, links: [["blocked_by", "SMD-9861"]] }); await ticket("SMD-9861", { project: PS, st: "completed" });
+  const settledBlocker = await ag({ project: PS });
+  assert(keys(settledBlocker) === "SMD-9860" && settledBlocker.left_out.blocked === 0,
+    `a ticket whose only blocker is completed, the link still active, is listed and not counted blocked (${keys(settledBlocker)}; ${settledBlocker.left_out.blocked})`);
+
   // ob1_item_blockers' other paths: a blocks link another ticket's row holds (the blocks direction), in a project of
   // its own; a thought in another gating system named system:key; a link in a system that states no status, none.
   const PB = "Agenda [110] blocks";
