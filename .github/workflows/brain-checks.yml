@@ -209,6 +209,11 @@ jobs:
         run: bun scripts/ci-step-times.ts --self-check
       - name: The suite-sections script's reading of a suite's output
         run: bun scripts/suite-sections.ts --self-check
+      # SMD-4087 cut 1: the agent runner's selection rule and its readers on
+      # fixtures — the label, board and nobody's-work checks, every claim case,
+      # and a whole dry run on stubs that sends nothing but reads.
+      - name: The agent runner's selection and dry run
+        run: bun scripts/agent-runner/dry-run.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
