@@ -1224,6 +1224,13 @@ export interface operations {
                      * @default false
                      */
                     prefer_current?: boolean;
+                    /**
+                     * @description How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's score over the top one's, priority its effective priority (a stated level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own stated level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less, counted only above medium, and nothing from a finished ticket; a ticket its text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.
+                     * @default 0
+                     */
+                    priority_weight?: number;
+                    /** @description Keep only matches whose priority is known — a level stated on it (on a ticket's row, on its ticket), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log. */
+                    min_priority?: number;
                 };
             };
         };

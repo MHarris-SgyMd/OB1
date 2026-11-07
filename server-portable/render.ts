@@ -34,7 +34,7 @@ import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
-import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -180,6 +180,9 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   // Unknown, not false, when the brain had no row to report the query's facts on (review pass 6).
   literalOnly: v.facts?.literalOnly ?? null,
   window: v.window,
+  // SMD-3668: the priority ranking's weight, floor and window; null with neither set. (A REST core older than this server
+  // refuses the inputs this one always sends, as it does prefer_current's, so it never answers without the field.)
+  priority: v.priority ?? null,
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
@@ -454,13 +457,20 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
  * limit), so a larger limit reads more only below 100 rows (first review
  * pass: the note told a caller at 100 to raise it). Null without the flag (no
  * window on the rows). Exported for the unit test.
+ *
+ * `reranked` (SMD-3668): a priority_weight above 0 ordered the rows after the
+ * demotion, so where a demoted row sits is the priority's doing, not the
+ * literal's, and what follows the current rows is no longer known to be the
+ * demoted ones: the note says what the demotion did and leaves the order to
+ * the priority note (review pass 1).
  */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[]): string | null {
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[], reranked = false): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   // The latest sync is a thought's own metadata (068: max over linear_updated_at),
   // which any capture key can set, so it is quoted as untrusted text is (review pass 6).
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${snipText(w.syncedAt, 40)})` : ""}`;
+  if (reranked) return `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled, superseded or about finished tickets, ${w.demoted === 1 ? "its" : "their"} score ×0.25 before the priority ranking below orders them; ${lifecycle}.`;
   // A demoted exact hit keeps a quarter of its literal bonus (1/61 per literal
   // it holds), so one can still rank above current rows — on a query of
   // literals only, or holding several literals. Rather than state when (the
@@ -481,6 +491,24 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
   // and clamps (second review pass: 24.6 binds as 25, a window of 100).
   const advice = w.rows < 100 ? " — raise limit to read further" : ` — the window is capped at ${w.rows}`;
   return `${note} ${held}, and a current match past the window may have been missed${advice}.`;
+}
+
+/**
+ * The header note under priority_weight or min_priority (SMD-3668): how the window was ranked, how many of its matches
+ * carry a known priority, and with a floor how many it kept; that a match past the window was not read, and whether a
+ * larger limit reads further (the window is min(100, 4 × limit), prefer_current's). Null with neither set, and from a
+ * REST core older than this server (no `priority`). Exported for the unit test.
+ */
+export function priorityNote(p: PriorityRanking | null | undefined): string | null {
+  if (!p) return null;
+  const ranked = p.weight > 0
+    ? `Ranked by priority (priority_weight ${p.weight}): the top ${p.read} match${p.read === 1 ? "" : "es"} ordered by (1 − ${p.weight}) × relevance + ${p.weight} × each one's own effective priority (a ticket's row reads as its ticket)`
+    : `Read the top ${p.read} match${p.read === 1 ? "" : "es"} for their priority`;
+  const known = `${p.known} of them carr${p.known === 1 ? "ies" : "y"} a known priority`;
+  const floor = p.min === null ? "" : `; kept ${p.kept} at ${levelText(p.min)} or above (min_priority, a known priority alone)`;
+  // Not full: the window held every match there was, so nothing past it was missed.
+  const past = p.read < p.window ? "" : ` A match past the top ${p.read} was not read${p.window < 100 ? " — raise limit to read further" : " — the window is capped at 100"}.`;
+  return `${ranked}; ${known}${floor}.${past}`;
 }
 
 /**
@@ -603,6 +631,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${thoughtCount(c)})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
       }
+      // SMD-3668: a floor that kept none of the window's matches.
+      const prio = priorityNote(v.priority);
+      if (prio && v.priority!.read > 0) why.push(prio);
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }
 
@@ -685,13 +716,16 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
       : `It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length} — raise limit or page with search_thoughts_keyword.`);
     if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
+    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}${v.priority?.min != null ? " (or below min_priority)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")}${v.priority?.min != null ? " — lower min_priority, raise limit" : " — raise limit"} or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     // prefer_current's window rides the value once; the note reads it off the first row.
-    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
+    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })), (v.priority?.weight ?? 0) > 0);
     if (current) notes.push(current);
+    // SMD-3668: how priority ranked or filtered the window.
+    const prio = priorityNote(v.priority);
+    if (prio) notes.push(prio);
     // Without a vector there is no similarity to rank the rest by (SMD-2891).
     if (head.literalOnly && !literal) {
       notes.push(matchedAny.size
