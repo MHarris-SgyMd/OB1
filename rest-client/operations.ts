@@ -39,6 +39,7 @@ export const OPERATIONS = {
   task_status: { method: "GET", path: "/v1/status" },
   thought_changes: { method: "GET", path: "/v1/changes" },
   thought_stats: { method: "GET", path: "/v1/stats" },
+  thread: { method: "GET", path: "/v1/thread" },
   update_item: { method: "PATCH", path: "/v1/items/{id}" },
   update_thought: { method: "PATCH", path: "/v1/thoughts/{id}" },
   whoami: { method: "GET", path: "/v1/whoami" },
