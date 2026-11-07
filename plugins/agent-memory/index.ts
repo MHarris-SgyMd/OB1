@@ -118,21 +118,28 @@ function asMemory(m: Row, artifacts: Map<string, z.output<typeof Artifact>[]>): 
 }
 
 /**
- * A memory as a write-back makes it: what a key that can only capture is
- * answered for a memory it finds already written, so a reviewer's changes since
- * (its text, scope, provenance, policy and review) are not read through it.
+ * A memory as its write-back made it: what a key that can only capture is
+ * answered for a memory it finds already written, so no reviewer's change since
+ * (text, summary, thought, visibility, provenance, policy, review) is read
+ * through it. What no review changes (project, channel, runtime, model,
+ * confidence, created_by, times) is the stored row's; what one changes is the
+ * write-back's own, kept in metadata.written. A migrated memory has none: its
+ * provenance and review are then this write-back's as it would make them.
  */
-function asWritten(m: Memory, row: { memory_type: (typeof MEMORY_TYPES)[number]; content: string; artifact?: { kind: string; uri: string; description?: string | null } },
-  req: { workspace_id: string; project_id?: string | null; channel: { id?: string | null }; runtime: { name: string }; provenance: { default_status: string; confidence: number } },
-  confirmed: boolean, model: string | null): Memory {
+function asWritten(m: Memory, stored: Row, row: { memory_type: (typeof MEMORY_TYPES)[number]; content: string; artifact?: { kind: string; uri: string; description?: string | null } },
+  fallback: { status: string; confirmed: boolean }): Memory {
+  const written = (stored.metadata?.written ?? null) as { provenance_status?: unknown; review_status?: unknown; thought_id?: unknown } | null;
+  const status = typeof written?.provenance_status === "string" ? written.provenance_status : fallback.status;
+  const confirmed = typeof written?.review_status === "string" ? written.review_status === "confirmed" : fallback.confirmed;
   return {
     ...m,
+    thought_id: typeof written?.thought_id === "string" ? written.thought_id : m.thought_id,
     memory_type: row.memory_type,
     summary: summaryOf(row.content),
     content: row.content,
     source: { ...m.source, title: summaryOf(row.content) },
-    provenance: { status: req.provenance.default_status, confidence: req.provenance.confidence, created_by: createdByOf(req.provenance.default_status), model, runtime: req.runtime.name },
-    scope: { workspace_id: req.workspace_id, project_id: req.project_id ?? null, channel_id: req.channel.id ?? null, visibility: req.project_id ? "project" : "personal" },
+    provenance: { ...m.provenance, status },
+    scope: { ...m.scope, visibility: m.scope.project_id ? "project" : "personal" },
     use_policy: { can_use_as_instruction: confirmed, can_use_as_evidence: true, requires_user_confirmation: !confirmed },
     freshness: { ...m.freshness, last_confirmed_at: confirmed ? m.freshness.created_at : null },
     review_status: confirmed ? "confirmed" : "pending",
@@ -162,16 +169,17 @@ export function unsafeReasons(t: string): string[] {
   return reasons;
 }
 
-/**
- * A part of the default idempotency key: a colon or a percent sign escaped, so
- * runtime `a:b` with task `c` and runtime `a` with task `b:c` are two keys. A
- * part with neither is as the old server wrote it, so a migrated memory keeps
- * its key.
- */
 /** Who made a memory, by its write-back's status. A template literal: check 31 reads a quoted "import" with a quote after it as an import statement. */
 const createdByOf = (status: string) => (status === "imported" ? `import` : "agent");
 /** A memory's summary: its first 140 characters (code points, so never half of one), whitespace run together. */
 const summaryOf = (content: string) => [...content.replace(/\s+/g, " ")].slice(0, 140).join("");
+/**
+ * A part of the default idempotency key: a colon or a percent sign escaped, so
+ * runtime `a:b` with task `c` and runtime `a` with task `b:c` are two keys. A
+ * part with neither is as the old server wrote it, so a migrated memory keeps
+ * its key (one whose workspace, runtime, task or step held either is written
+ * again as a memory of its own when its write-back is resent).
+ */
 const keyPart = (s: string) => s.replace(/%/g, "%25").replace(/:/g, "%3A");
 
 /** SHA-256 of a text, hex: the old server's content hash, so a memory migrated keeps its idempotency key. */
@@ -204,7 +212,7 @@ const RecallInput = {
   scope: z.object({
     visibility: Id.nullish().describe("personal to include personal memories"),
     project_only: z.boolean().default(true).describe("With a project_id, its memories alone"),
-    include_unconfirmed: z.boolean().default(false).describe("Include memories still waiting for review"),
+    include_unconfirmed: z.boolean().default(false).describe("Include memories still waiting for a person's confirmation, restricted ones among them"),
     include_stale: z.boolean().default(false).describe("Include stale, superseded, rejected and disputed memories"),
   }).default({ project_only: true, include_unconfirmed: false, include_stale: false }),
   limits: z.object({
@@ -221,7 +229,8 @@ function scopeMatches(m: Row, req: Recall): boolean {
   if (m.workspace_id !== req.workspace_id) return false;
   if (req.scope.project_only && req.project_id && m.project_id !== req.project_id) return false;
   if (!req.scope.include_stale && ["stale", "superseded", "rejected", "disputed"].includes(m.lifecycle_status)) return false;
-  // Not yet confirmed by a person, whatever review it had since (a restricted memory a person never confirmed among them).
+  // Still waiting for a person's word: never confirmed nor marked evidence (nor written back confirmed), whatever review it had
+  // since, a restricted one among them. The old server read review_status pending alone.
   if (!req.scope.include_unconfirmed && m.requires_user_confirmation) return false;
   if (m.visibility === "personal" && req.scope.visibility !== "personal") return false;
   return true;
@@ -345,7 +354,7 @@ export default definePlugin({
   operations: {
     recall: operation({
       title: "Recall agent memories",
-      description: "The workspace's memories that match the query by meaning, ranked by similarity and by what their provenance, use policy, review and confidence add: only those in scope (the project's with project_only, none stale, superseded, rejected or disputed unless include_stale, none still waiting for review unless include_unconfirmed, personal ones only with scope.visibility personal), at most limits.max_items. Each says whether it may be followed as an instruction or used only as evidence. Under a write key the recall is traced and request_id names it, for record_usage; under a read key nothing is stored and request_id is null. Refused PROVIDER_UNAVAILABLE (503, retryable) while the brain's embedding provider does not answer.",
+      description: "The workspace's memories that match the query by meaning, ranked by similarity and by what their provenance, use policy, review and confidence add: only those in scope (the project's with project_only, none stale, superseded, rejected or disputed unless include_stale, none still waiting for a person's confirmation unless include_unconfirmed (a restricted memory no one confirmed among them), personal ones only with scope.visibility personal), at most limits.max_items. Each says whether it may be followed as an instruction or used only as evidence. Under a write key the recall is traced and request_id names it, for record_usage; under a read key the plugin stores nothing and request_id is null (the core's query log, when on, logs the search as it logs any). Refused PROVIDER_UNAVAILABLE (503, retryable) while the brain's embedding provider does not answer.",
       scope: "read",
       annotations: CLOSED,
       method: "POST",
@@ -430,8 +439,7 @@ export default definePlugin({
           const [held] = await ctx.db.tx((sql) => sql<{ id: string; content_hash: string | null }>`
             SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND md5(idempotency_key) = md5(${key}) AND idempotency_key = ${key}`);
           if (held) {
-            // The same memory sent again. A key holding other text is refused, never answered with that text. (A key that
-            // can only capture and sends a memory's key and its text is answered that memory as it stands now, reviewed or not.)
+            // The same memory sent again. A key holding other text is refused, never answered with that text.
             if (held.content_hash !== contentHash) return keyReused(key);
             ids.push(held.id);
             heldRows.set(held.id, row);
@@ -453,16 +461,17 @@ export default definePlugin({
                       ${req.project_id ? "project" : "personal"}, ${row.memory_type}, ${summaryOf(row.content)}, ${row.content},
                       ${req.provenance.default_status}, ${req.provenance.confidence}, ${createdBy},
                       ${req.runtime.name}, ${req.runtime.version ?? null}, ${provider}, ${model}, ${req.task_id ?? null}, ${req.flow_id ?? null},
-                      ${confirmed}, true, ${!confirmed}, ${confirmed ? "confirmed" : "pending"}, ${confirmed ? new Date().toISOString() : null}::timestamptz, ${staleAfter}::timestamptz,
+                      ${confirmed}, true, ${!confirmed}, ${confirmed ? "confirmed" : "pending"}, CASE WHEN ${confirmed} THEN now() END, ${staleAfter}::timestamptz,
                       ${key}, ${contentHash},
-                      (${json({ source_refs: req.source_refs, models_used: req.models_used, retention: req.retention, writeback_schema_version: req.schema_version })}::text)::jsonb)
+                      (${json({ source_refs: req.source_refs, models_used: req.models_used, retention: req.retention, writeback_schema_version: req.schema_version,
+                        written: { provenance_status: req.provenance.default_status, review_status: confirmed ? "confirmed" : "pending", thought_id: thoughtId } })}::text)::jsonb)
               ON CONFLICT (workspace_id, md5(idempotency_key)) WHERE idempotency_key IS NOT NULL DO NOTHING
               RETURNING id::text AS id`;
             if (!made) {
               // Another write-back with this key landed first: its memory is this one if it holds this text, as above.
               const [first] = await sql<{ id: string; content_hash: string | null }>`
                 SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND md5(idempotency_key) = md5(${key}) AND idempotency_key = ${key}`;
-              return first.content_hash === contentHash ? first.id : null;
+              return first && first.content_hash === contentHash ? first.id : null;
             }
             for (const s of req.source_refs) {
               await sql`
@@ -484,15 +493,16 @@ export default definePlugin({
           ids.push(id);
         }
         return ctx.db.tx(async (sql) => {
-          const memories = await asMemories(sql, await memoriesOf(sql, ids));
+          const stored = await memoriesOf(sql, ids);
+          const memories = await asMemories(sql, stored);
           // A key that can only capture reads nothing a reviewer did since: a memory it finds already written is
-          // answered as this write-back makes it (its text, scope, provenance and review), never as it stands now.
+          // answered as its write-back made it (asWritten), never as it stands now.
           const capture = ctx.caller.scope === "capture";
           return ok({
             schema_version: writebackAnswerVersion(req.schema_version),
-            memories: memories.map((m) => {
+            memories: memories.map((m, i) => {
               const row = capture ? heldRows.get(m.memory_id) : undefined;
-              return row ? asWritten(m, row, req, confirmed, model) : m;
+              return row ? asWritten(m, stored[i], row, { status: req.provenance.default_status, confirmed }) : m;
             }),
           });
         });
@@ -500,7 +510,7 @@ export default definePlugin({
     }),
     record_usage: operation({
       title: "Record which recalled memories were used",
-      description: "Marks the memories a traced recall returned (request_id, from recall under a write key) as used, or ignored with a reason, and audits each. A memory id the recall did not return changes nothing; recorded counts the memories marked. Refused: a request_id no recall has (NO_SUCH_RECALL).",
+      description: "Marks the memories a traced recall returned (request_id, from recall under a write key) as used, or ignored with a reason, and audits each. A memory id the recall did not return changes nothing, each memory is marked once however often one list names it, and one in both lists is left ignored; recorded counts the memories marked. Refused: a request_id no recall has (NO_SUCH_RECALL).",
       scope: "write",
       annotations: CHANGES,
       method: "POST",
@@ -540,7 +550,7 @@ export default definePlugin({
     }),
     review_queue: operation({
       title: "Agent memories waiting for review",
-      description: "A workspace's memories still pending review, newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
+      description: "A workspace's memories still waiting for a person's confirmation (pending, or restricted before anyone confirmed them), newest first, at most 100 (project_id narrows to one project). Review each with review_memory.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
@@ -551,7 +561,8 @@ export default definePlugin({
         return ctx.db.tx(async (sql) => {
           const rows = await chosen(sql, await sql<{ id: string }>`
             SELECT id FROM memories
-             WHERE workspace_id = ${workspace_id} AND review_status = 'pending' AND (${project_id ?? null}::text IS NULL OR project_id = ${project_id ?? null})
+             WHERE workspace_id = ${workspace_id} AND requires_user_confirmation AND review_status IN ('pending', 'restricted')
+               AND (${project_id ?? null}::text IS NULL OR project_id = ${project_id ?? null})
              ORDER BY created_at DESC, id LIMIT 100`);
           return ok({ memories: await asMemories(sql, rows) });
         });
@@ -626,7 +637,7 @@ export default definePlugin({
     }),
     review_memory: operation({
       title: "Review an agent memory",
-      description: "A person's verdict on a memory: confirm (user_confirmed, active again, usable as an instruction and as evidence), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default, never wider than the memory's own), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), a restriction to a wider visibility (NOT_NARROWER), an edit's text that looks like a key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
+      description: "A person's verdict on a memory: confirm (user_confirmed, active again from any lifecycle, usable as an instruction and as evidence), evidence_only (usable as evidence, never as an instruction), restrict_scope (to visibility, personal by default, never wider than the memory's own: personal, channel, project, workspace, organization, narrowest first), mark_stale, reject (used for neither), dispute, edit (content and summary; new content is captured as a thought of its own, which the memory then names, and its old thought is left; new content with no summary takes its own first 140 characters as the summary), merge or supersede (with related_memory_id, recorded as a relation). Each review is kept with the memory before and after it, under your key's name. Refused: an id no memory has (NO_SUCH_MEMORY), an edit with nothing to change (NOTHING_TO_CHANGE), a restriction to a wider visibility (NOT_NARROWER), an edit's text that looks like a key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK), related_memory_id naming the memory itself (SAME_MEMORY) or none (NO_SUCH_MEMORY), and the core refusing the new text's capture (CORE_REFUSED).",
       scope: "write",
       annotations: CHANGES,
       method: "PATCH",
@@ -681,7 +692,7 @@ export default definePlugin({
               visibility = CASE ${a} WHEN 'restrict_scope' THEN ${r.visibility ?? "personal"} ELSE visibility END,
               content = coalesce(${a === "edit" ? r.content ?? null : null}::text, content),
               thought_id = coalesce(${thoughtId}::uuid, thought_id),
-              summary = coalesce(${a === "edit" ? r.summary ?? null : null}::text, summary),
+              summary = coalesce(${a === "edit" ? r.summary ?? (r.content !== undefined ? summaryOf(r.content) : null) : null}::text, summary),
               updated_at = now()
             WHERE id = ${r.memory_id}::uuid`;
           const [after] = await sql<{ row: unknown }>`SELECT to_jsonb(m) AS row FROM memories m WHERE id = ${r.memory_id}::uuid`;

@@ -3417,27 +3417,27 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const bodyOf = (r: { body: Body }) => (r.body.memories ?? []) as Body[];
     const reviewY = (memory_id: string, f: Body) => am("review_memory", { memory_id, ...f });
     // A key that can only capture is answered a memory as its write-back made it, never as a reviewer changed it.
-    const orig = { ...Y, idempotency_key: "yk", memory_payload: { decisions: ["ymem orig decision."] } };
+    const orig = { ...Y, idempotency_key: "yk", memory_payload: { decisions: ["y_mem orig decision."] } };
     const written = bodyOf(await am("writeback", orig))[0]!;
-    await reviewY(written.memory_id, { action: "edit", content: "ymem reviewer-private correction." });
+    await reviewY(written.memory_id, { action: "edit", content: "y_mem reviewer-private correction." });
     await reviewY(written.memory_id, { action: "restrict_scope" });
     const viaCapture = bodyOf(await am("writeback", orig, { as: KEYS.capture }))[0];
     const viaWriter = bodyOf(await am("writeback", orig))[0];
-    assert(viaCapture?.memory_id === written.memory_id && viaCapture.content === "ymem orig decision." && viaCapture.scope.visibility === "project"
+    assert(viaCapture?.memory_id === written.memory_id && viaCapture.content === "y_mem orig decision." && viaCapture.scope.visibility === "project"
       && viaCapture.review_status === "pending" && !JSON.stringify(viaCapture).includes("reviewer-private")
-      && viaWriter?.content === "ymem reviewer-private correction." && viaWriter.scope.visibility === "personal" && viaWriter.review_status === "restricted",
+      && viaWriter?.content === "y_mem reviewer-private correction." && viaWriter.scope.visibility === "personal" && viaWriter.review_status === "restricted",
       `a capture key resending a memory is answered it as its write-back made it, a write key as it stands (${JSON.stringify([viaCapture?.content, viaCapture?.review_status, viaWriter?.content])})`);
     // Ids at their bound in a script of three bytes a character: the key fits its index.
     // Distinct characters, so Postgres cannot compress the index row under its bound.
     const wide = (seed: number) => Array.from({ length: 200 }, (_, i) => String.fromCodePoint(0x4e00 + seed * 211 + i * 7)).join("");
-    const big = { schema_version: WB, workspace_id: wide(1), project_id: "py", task_id: wide(2), step_id: wide(3), runtime: { name: wide(4) }, memory_payload: { decisions: ["ymem wide ids."] } };
+    const big = { schema_version: WB, workspace_id: wide(1), project_id: "py", task_id: wide(2), step_id: wide(3), runtime: { name: wide(4) }, memory_payload: { decisions: ["y_mem wide ids."] } };
     const bigOne = await am("writeback", big);
     const bigAgain = await am("writeback", big);
     assert(bigOne.status === 200 && bigAgain.status === 200 && ids(bigAgain).join() === ids(bigOne).join(),
       `four ids of 200 three-byte characters make a key its index holds, and the same write-back again its memory (${bigOne.status} ${JSON.stringify(bigOne.body).slice(0, 120)})`);
     // A colon in a part of the default key is not the separator.
-    const colonA = ids(await am("writeback", { ...Y, runtime: { name: "x:y" }, task_id: "z", memory_payload: { decisions: ["ymem colon."] } }))[0];
-    const colonB = ids(await am("writeback", { ...Y, runtime: { name: "x" }, task_id: "y:z", memory_payload: { decisions: ["ymem colon."] } }))[0];
+    const colonA = ids(await am("writeback", { ...Y, runtime: { name: "x:y" }, task_id: "z", memory_payload: { decisions: ["y_mem colon."] } }))[0];
+    const colonB = ids(await am("writeback", { ...Y, runtime: { name: "x" }, task_id: "y:z", memory_payload: { decisions: ["y_mem colon."] } }))[0];
     assert(colonA !== undefined && colonB !== undefined && colonA !== colonB, `runtime x:y with task z and runtime x with task y:z are two memories (${colonA}, ${colonB})`);
     // The summary is cut at characters.
     const emojiText = `${"a".repeat(139)}😀 and more`;
@@ -3445,37 +3445,88 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(emoji?.summary === `${"a".repeat(139)}😀` && !emoji.summary.includes("�"), `a summary ends on a whole character, an emoji at its 140th kept whole (${emoji?.summary.slice(-4)})`);
     // A record past its key count is refused.
     const keys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, true]));
-    const recallY = { schema_version: RC, workspace_id: "ws-y", project_id: "py", query: "what ymem says" };
+    const recallY = { schema_version: RC, workspace_id: "ws-y", project_id: "py", query: "what y_mem says" };
     const fifty = await am("recall", { ...recallY, sensitivity: keys(50) }, { as: KEYS.reader });
     const fiftyOne = await am("recall", { ...recallY, sensitivity: keys(51) }, { as: KEYS.reader });
-    const manyEntities = await am("writeback", { ...Y, memory_payload: { decisions: ["ymem entities."], entities: keys(51) } });
-    assert(fifty.status === 200 && fiftyOne.status === 400 && fiftyOne.body.code === "REFUSED_INPUT" && manyEntities.status === 400,
-      `a record of 50 keys is taken, one of 51 refused (${fifty.status}, ${fiftyOne.status}, ${manyEntities.status})`);
+    const listed = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, ["v"]]));
+    const manyEntities = await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem entities."], entities: listed(51) } });
+    const fiftyEntities = await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem fifty entities."], entities: listed(50) } });
+    const recallEntities = await am("recall", { ...recallY, entities: listed(51) }, { as: KEYS.reader });
+    const longKey = await am("recall", { ...recallY, sensitivity: { ["k".repeat(201)]: true } }, { as: KEYS.reader });
+    assert(fifty.status === 200 && fiftyOne.status === 400 && fiftyOne.body.code === "REFUSED_INPUT" && manyEntities.status === 400 && fiftyEntities.status === 200
+      && recallEntities.status === 400 && longKey.status === 400,
+      `a record of 50 keys is taken, one of 51 refused, in a recall's sensitivity and entities and a write-back's entities, and a key past 200 characters refused (${[fifty, fiftyOne, manyEntities, fiftyEntities, recallEntities, longKey].map((r) => r.status).join(", ")})`);
     // Confirm after reject restores the memory; restrict_scope never widens.
-    const back = bodyOf(await am("writeback", { ...Y, memory_payload: { lessons: ["ymem rejected then confirmed."] } }))[0]!;
+    const back = bodyOf(await am("writeback", { ...Y, memory_payload: { lessons: ["y_mem rejected then confirmed."] } }))[0]!;
     await reviewY(back.memory_id, { action: "reject" });
     const restored = (await reviewY(back.memory_id, { action: "confirm" })).body.memory as Body;
     assert(restored.lifecycle_status === "active" && restored.use_policy.can_use_as_evidence === true && restored.use_policy.can_use_as_instruction === true,
       `confirm after reject: active again, evidence and instruction (${JSON.stringify([restored.lifecycle_status, restored.use_policy])})`);
     const wider = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "organization" });
+    const oneWider = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "workspace" });
+    const same = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "project" });
     const narrower = await reviewY(back.memory_id, { action: "restrict_scope", visibility: "channel" });
-    assert(wider.status === 400 && wider.body.code === "NOT_NARROWER" && wider.body.current === "project" && narrower.status === 200 && narrower.body.memory?.scope?.visibility === "channel",
+    const byDefault = await reviewY(back.memory_id, { action: "restrict_scope" });
+    assert(wider.status === 400 && wider.body.code === "NOT_NARROWER" && wider.body.current === "project" && oneWider.status === 400 && oneWider.body.code === "NOT_NARROWER"
+      && same.status === 200 && narrower.status === 200 && narrower.body.memory?.scope?.visibility === "channel" && byDefault.status === 200 && byDefault.body.memory?.scope?.visibility === "personal",
       `restrict_scope to a wider visibility is refused, to a narrower one taken (${wider.status} ${wider.body.code}, ${narrower.body.memory?.scope?.visibility})`);
     // A memory a person never confirmed stays out of a recall without include_unconfirmed, restricted or not.
-    const unconfirmed = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["ymem never confirmed, restricted."] } }))[0]!;
+    const unconfirmed = bodyOf(await am("writeback", { ...Y, memory_payload: { decisions: ["y_mem never confirmed, restricted."] } }))[0]!;
     await reviewY(unconfirmed.memory_id, { action: "restrict_scope" });
-    const ask = async (scope: Body) => ids(await am("recall", { ...recallY, query: "what ymem says", scope: { project_only: false, visibility: "personal", ...scope } }, { as: KEYS.reader }));
+    const ask = async (scope: Body) => ids(await am("recall", { ...recallY, query: "what y_mem says", scope: { project_only: false, visibility: "personal", ...scope } }, { as: KEYS.reader }));
     const [without, withUnconfirmed] = [await ask({}), await ask({ include_unconfirmed: true })];
     assert(!without.includes(unconfirmed.memory_id) && withUnconfirmed.includes(unconfirmed.memory_id),
       `a restricted memory no one confirmed is recalled only with include_unconfirmed (${without.length}, ${withUnconfirmed.length})`);
     // record_usage counts each memory once.
-    const tr = await rest("POST", "/v1/plugins/agent-memory/recall", { ...recallY, query: "what ymem says", scope: { include_unconfirmed: true } }, KEYS.writer);
+    const tr = await rest("POST", "/v1/plugins/agent-memory/recall", { ...recallY, query: "what y_mem says", scope: { include_unconfirmed: true } }, KEYS.writer);
     const m0 = (tr.body.memories as Body[] | undefined)?.[0]?.memory_id as string | undefined;
-    const twice = m0 ? await am("record_usage", { request_id: tr.body.request_id, used_memory_ids: [m0, m0.toUpperCase(), m0], ignored: [{ memory_id: m0 }, { memory_id: m0 }] }) : undefined;
+    const twice = m0 ? await am("record_usage", { request_id: tr.body.request_id, used_memory_ids: [m0, m0.toUpperCase(), m0], ignored: [{ memory_id: m0.toUpperCase() }, { memory_id: m0 }] }) : undefined;
     const usedRows = m0 ? await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events a JOIN plugin_agent_memory.recall_traces t ON t.id = a.trace_id
       WHERE t.request_id = ${String(tr.body.request_id)}::uuid AND a.event_type = 'memory_used'`) : { n: -1 };
     assert(m0 !== undefined && JSON.stringify(twice?.body.recorded) === JSON.stringify({ used: 1, ignored: 1 }) && usedRows.n === 1,
       `record_usage marks a memory named three times once, used and then ignored once (${JSON.stringify(twice?.body)}, ${usedRows.n} used rows)`);
+    // Pass 3: a capture key's answer is the stored memory as its write-back made it, never this request's fields.
+    const theirs = bodyOf(await am("writeback", { ...Y, project_id: "py-1", memory_payload: { decisions: ["y_mem theirs."] } }))[0]!;
+    const asked = bodyOf(await am("writeback", { ...Y, project_id: "py-2", provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+      memory_payload: { decisions: ["y_mem theirs."] } }, { as: KEYS.capture }))[0];
+    assert(asked?.memory_id === theirs.memory_id && asked.scope.project_id === "py-1" && asked.scope.visibility === "project" && asked.review_status === "pending"
+      && asked.provenance.status === "generated" && asked.provenance.confidence === 0.5 && asked.use_policy.can_use_as_instruction === false && asked.thought_id === theirs.thought_id,
+      `a capture key resending another key's memory with other provenance and project is answered the memory as it was written, not as it asked (${JSON.stringify([asked?.scope, asked?.review_status, asked?.provenance])})`);
+    const mine = { ...Y, provenance: { default_status: "user_confirmed", confidence: 0.555, requires_review: false }, memory_payload: { decisions: ["y_mem mine, confirmed."] } };
+    const firstAnswer = bodyOf(await am("writeback", mine, { as: KEYS.capture }))[0];
+    await reviewY(firstAnswer?.memory_id, { action: "edit", content: "y_mem mine, edited by a reviewer.", summary: "a reviewer's summary" });
+    await reviewY(firstAnswer?.memory_id, { action: "dispute" });
+    await reviewY(firstAnswer?.memory_id, { action: "reject" });
+    const resendAnswer = bodyOf(await am("writeback", mine, { as: KEYS.capture }))[0];
+    assert(firstAnswer !== undefined && JSON.stringify(resendAnswer) === JSON.stringify(firstAnswer),
+      `a capture key's resend is answered exactly what its first write was, after an edit, a dispute and a reject (${JSON.stringify(firstAnswer).slice(0, 120)} / ${JSON.stringify(resendAnswer).slice(0, 120)})`);
+    const waiting = { ...Y, memory_payload: { decisions: ["y_mem waiting, then confirmed."] } };
+    const waitingFirst = bodyOf(await am("writeback", waiting, { as: KEYS.capture }))[0];
+    await reviewY(waitingFirst?.memory_id, { action: "confirm" });
+    await reviewY(waitingFirst?.memory_id, { action: "evidence_only" });
+    const waitingAgain = bodyOf(await am("writeback", waiting, { as: KEYS.capture }))[0];
+    assert(waitingFirst?.review_status === "pending" && JSON.stringify(waitingAgain) === JSON.stringify(waitingFirst),
+      `…and after a confirm and evidence_only, still the pending memory it wrote (${JSON.stringify([waitingAgain?.review_status, waitingAgain?.freshness])})`);
+    // The default key's format, golden: each part escaped, the parts joined by colons, the text's hash, the item's index.
+    const golden = { schema_version: WB, workspace_id: "ws:y%", project_id: "py", task_id: "t:2:x", step_id: "s:3", runtime: { name: "r:1" }, memory_payload: { decisions: ["y_mem golden key."] } };
+    const goldenId = ids(await am("writeback", golden))[0];
+    const goldenKey = await one<{ k: string } | undefined>(sql`SELECT idempotency_key AS k FROM plugin_agent_memory.memories WHERE id = ${goldenId ?? NO_ROW}::uuid`);
+    const goldenHash = new Bun.CryptoHasher("sha256").update("decision:y_mem golden key.").digest("hex");
+    assert(goldenKey?.k === `ws%3Ay%25:r%3A1:t%3A2%3Ax:s%3A3:${goldenHash}:0`, `the default key: workspace, runtime, task and step escaped, then the hash and the index (${goldenKey?.k})`);
+    const plainKey = await one<{ k: string } | undefined>(sql`SELECT idempotency_key AS k FROM plugin_agent_memory.memories WHERE id = ${theirs.memory_id}::uuid`);
+    const plainHash = new Bun.CryptoHasher("sha256").update("decision:y_mem theirs.").digest("hex");
+    assert(plainKey?.k === `ws-y:ry:ty:step:${plainHash}:0`, `a default key with no colon or percent sign is the old server's (${plainKey?.k})`);
+    const pctA = ids(await am("writeback", { ...Y, runtime: { name: "a%3Ab" }, memory_payload: { decisions: ["y_mem percent."] } }))[0];
+    const pctB = ids(await am("writeback", { ...Y, runtime: { name: "a:b" }, memory_payload: { decisions: ["y_mem percent."] } }))[0];
+    assert(pctA !== undefined && pctB !== undefined && pctA !== pctB, "a runtime spelling an escaped colon and one holding a colon are two keys");
+    // A content-only edit takes the new content's summary; the queue lists a restricted memory no one confirmed.
+    const redact = bodyOf(await am("writeback", { ...Y, memory_payload: { lessons: ["y_mem Customer Jane Roe lives at 12 Elm St."] } }))[0]!;
+    const redacted = (await reviewY(redact.memory_id, { action: "edit", content: "y_mem a customer's address is on file." })).body.memory as Body;
+    assert(redacted.summary === "y_mem a customer's address is on file." && redacted.source.title === redacted.summary && !JSON.stringify(redacted).includes("Elm St"),
+      `an edit of the content alone takes its summary, so the old text leaves the memory (${redacted.summary})`);
+    const queueY = ids(await am("review_queue", { workspace_id: "ws-y" }, { as: KEYS.reader }));
+    assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id),
+      `review_queue lists a restricted memory no one confirmed, and not a confirmed one (${queueY.length})`);
   }
 
   // ── The embedding provider down ──
