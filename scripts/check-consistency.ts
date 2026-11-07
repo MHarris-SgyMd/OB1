@@ -11826,6 +11826,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["schemas/typed-reasoning-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
   ["schemas/typed-reasoning-edges/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["schemas/workflow-status/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
+  ["scripts/agent-runner/README.md", { name: { why: KEPT.BOARD, lines: 1 } }],
   ["scripts/assemble-release.ts", { fork: [{ why: KEPT.IDENT, lines: 3 }, { why: KEPT.HISTORY, lines: 4 }] }],
   ["scripts/changes-index.ts", { fork: { why: KEPT.HISTORY, lines: 1 } }],
   ["scripts/check-consistency.ts", { fork: { why: KEPT.SELF, lines: 64 }, name: { why: KEPT.SELF, lines: 2 } }],
