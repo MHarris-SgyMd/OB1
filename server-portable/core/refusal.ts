@@ -24,6 +24,7 @@ export type Refusal =
   | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key; review_supersession_proposal: no such proposal, or a thought it names is gone
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
+  | { code: "REFUSED_THREAD_INPUT"; retryable: false; problem: "key_or_id" | "key_shape" | "after_needs_key"; value?: string } // thread (SMD-3306 PR 7a-2a): neither or both of key and id; a key that is no subject key (value: it, in the text alone); after without key
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
   | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1)
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
@@ -140,6 +141,8 @@ const FACTS: Facts = {
   REFUSED_FILTER: none,
   REFUSED_EGRESS: (r) => ({ rule: r.rule }),
   REFUSED_SINCE: none,
+  // Which rule; a key that is no subject key is the caller's raw input, and stays in the text.
+  REFUSED_THREAD_INPUT: (r) => ({ problem: r.problem }),
   // list_thoughts' (SMD-2995): which way the cursor would not do, and the sort it was made under — never the cursor itself;
   // list_supersession_proposals' (SMD-3249) the filters it was made under.
   REFUSED_CURSOR: (r) => ({ ...(r.reason ? { reason: r.reason } : {}), ...(r.sort ? { sort: r.sort } : {}), ...(r.made ? { made: r.made } : {}) }),

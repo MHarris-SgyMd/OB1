@@ -202,6 +202,15 @@ text) — and a term that does not parse fails preflight and closes the gate.
 Preflight prints the mode and, per endpoint, what leaves; `deploy/.env.example`
 has the block.
 
+The gate judges the base you set, so no call that sends a thought's text
+follows a redirect: a 3xx would carry the text to wherever it points. Unlike
+a refusal or an outage, a redirect fails the call, as a 4xx does. On the
+embeddings endpoint that fails the capture, which is not stored. On a chat
+endpoint of its own the capture is stored untagged, as a 4xx there leaves it.
+The error names where the redirect pointed: set the base there, and the gate
+judges that address (SMD-2908). `preflight.ts --deep` shows one before it
+costs a capture.
+
 **With protected health information in the brain, keep every endpoint on the
 box** — Options A or B above, both declared local — and leave the policy at its
 default. The gate is deterministic on purpose: a classifier that tells PHI from

@@ -36,7 +36,24 @@ export function linearClient(key: string, fetchImpl: typeof fetch = fetch, opts:
       headers: { Authorization: auth, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
       ...(opts.timeoutMs !== undefined ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+      // Never followed (SMD-2908): board-findings posts brain rows here under the egress gate, which judged this URL,
+      // and the key rides along.
+      redirect: "manual",
     });
+    if (res.status >= 300 && res.status < 400) {
+      void res.body?.cancel().catch(() => {});
+      // The target's host, when it names one: with no Location there is no target, not Linear's own host (review pass 3).
+      const location = res.headers.get("location");
+      let to = "";
+      if (location !== null) {
+        try {
+          to = `, redirecting to ${new URL(location, url).host}`;
+        } catch {
+          to = ", redirecting to an address that does not parse";
+        }
+      }
+      throw Object.assign(new Error(`Linear answered HTTP ${res.status}${to}: a redirect is never followed (SMD-2908)`), { status: res.status });
+    }
     if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
     const json = (await res.json()) as { data?: T | null; errors?: { message: string; path?: (string | number)[] }[] };
     return { data: json.data ?? null, errors: json.errors ?? [] };

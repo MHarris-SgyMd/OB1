@@ -103,7 +103,8 @@ export const SPECS = {
     title: "Fetch Daemonic Brain Thought",
     description:
       "Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
-      "A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs.",
+      "A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs. " +
+      "A thought in a work thread — the thoughts holding one subject, such as a ticket, in the order they were captured — carries `threads`: per thread its `key`, the thought's `place` (1 the first) and the thread's `total`, and `continues` (the member captured just before it, not a judged evolution) and `continuedBy` (the one just after), each its id, title and `supersededBy` when a newer thought supersedes it; null at the thread's ends. A board ticket's own row (its head row) keeps its first place while its text and status change. `threads: null` says they could not be read; a thought in no thread carries no `threads`. The brain's `thread` tool reads a whole thread.",
     annotations: {
       readOnlyHint: true,
     },
@@ -232,6 +233,27 @@ export const SPECS = {
       // At most 512 characters, parseListCursor's own bound (review pass 4): a longer one, sent on as a query by the MCP
       // server, was the REST core's 431 and a fault there, where the other doors refused it.
       after: z.string().max(512).optional().describe("Keyset cursor — the previous page's `cursor`, given with the same `sort`; omit for the first page (an empty one is refused)"),
+    },
+  },
+  // Work threads (SMD-3306 PR 7a-2a): a subject's thoughts in order, read from their standing subjects (111).
+  thread: {
+    title: "Read a Work Thread",
+    description:
+      "Read a work thread: the thoughts holding one subject — a ticket (ticket:SMD-3306, or SMD-3306 alone), a pull request (pr:12), a version (version:v2.0.0) or a phrase (phrase:<lower-case words>) — in the order they were captured (created_at, ties by id, an undated thought last). Give exactly one of `key` or `id`. A key is read as the extractor writes it: `ticket:`, `pr:` and `version:` in any case, a ticket's id upper-cased, a pull request's or version's numbers without leading zeros. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8) is refused: a ticket filed under such a team is read with `ticket:` before it (ticket:ES-5), a pull request is pr:12, a word a phrase (phrase:utf-8). " +
+      "`key` reads that subject's thread from its start, `limit` thoughts a page; when more follow the thread carries a `cursor`, passed as `after` with the same `key` for the next page. `id` reads each thread that thought stands in, around it: up to half the page before it, then it and those after it, its `place` marked (1 is the first); its `cursor` continues the thread with its `key`. A thought stands in no thread until its subject is found (the extraction worker's rules, or its --subjects sweep). " +
+      "The reply is `{id, threads}`: `id` the thought an id read was about (null for a key's), `threads` one per thread — one for a key (with `total` 0 when no thought holds it), one per subject for an id (none when it stands in no thread). A thread is `{key, total, place, earlier, cursor, members, linked, linkedMore}`: `earlier` when members come before the page, `cursor` null at the thread's end. " +
+      "Each member carries its id, title, created_at and place; `supersededBy` when a newer thought supersedes it (the thread keeps its whole history); and the ticket's own row — the board's head row for it, which is rewritten in place and so keeps its first place — its `ticket`: the ticket and its status as that row records it. " +
+      "A ticket's thread names the threads its ticket's board links reach (`linked`): each ticket's key, how it stands to this one (parent, child, blocks, blocked_by, relates_to) and how many thoughts its thread holds; the first 50, `linkedMore` when more. No thread runs across a link. " +
+      "MCP's structured value leaves out each member's title and a ticket row's status, and gives a phrase key (the judge model's words) as null: the text carries them, the key whole as a JSON string — send it decoded, without its quotes or escapes. " +
+      "Refused: neither or both of key and id, a key that is no subject key, or `after` without `key` (REFUSED_THREAD_INPUT); a cursor that is not this tool's (REFUSED_CURSOR); an id no thought has (NOT_FOUND).",
+    annotations: {
+      readOnlyHint: true,
+    },
+    inputSchema: {
+      key: z.string().max(220).optional().describe("A subject key — ticket:SMD-3306 (or SMD-3306), pr:12, version:v2.0.0, phrase:<lower-case words> — whose thread to read; or give id"),
+      id: z.string().max(100).optional().describe("A thought's id: each thread it stands in, around it; or give key"),
+      after: z.string().max(512).optional().describe("A thread's `cursor` from the previous page, given with that thread's key"),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe("Thoughts per thread, 1–100 (default 20)"),
     },
   },
   list_supersession_proposals: {

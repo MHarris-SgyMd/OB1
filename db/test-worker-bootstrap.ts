@@ -16,7 +16,7 @@
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -111,6 +111,7 @@ const deny = resolveEgressPolicy({});
   ok(classifyError({ status: 401 }) === "fatal", "a 401 (the key) is fatal");
   ok(classifyError({ status: 404 }) === "fatal", "a 404 (the model) is fatal");
   ok(classifyError({ status: 400, message: "bad request shape" }) === "fatal", "a 400 that is not about length is fatal");
+  ok(classifyError({ status: 307 }) === "fatal" && classifyError({ status: 301 }) === "fatal", "a redirect, which no call follows, is fatal: the base redirects every call (SMD-2908)");
   ok(classifyError({}) === "thought", "an error the rules do not recognise is the thought's");
   // The one rule extract adds: a 400 about the answer budget. Without the option
   // it reads as this thought's length (refusesLength matches "tokens") and is the
@@ -648,6 +649,145 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   allBack.add("a1");
   await allBack.returnAtEnd(45, writer);
   ok(lines.length === 0, `Unreturned.returnAtEnd: nothing said when every lease went back (review pass 4; ${lines.join(" | ")})`);
+  // waitOutProvider (SMD-2636 PR 2): one outage wait, on re-embed's rules — said, stamped, the schedule carried when
+  // the outage comes back within the window with nothing settled, an answer ending the outage at its step, a refusal
+  // the request's, a stop null.
+  {
+    const providerStamps: boolean[] = [];
+    const stamper = { providerWait: async (on: boolean) => { providerStamps.push(on); } };
+    let settledNow = 0;
+    const base = { who: "the provider", calls: "m at b for one token", settled: () => settledNow, pollS: 0, pausesBefore: true, wake, writer, stamper, sleep: ticking };
+    const o = new ProviderOutage(() => clock);
+    o.begin("503 busy", "t1");
+    lines.length = 0;
+    const first = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "out", why: "503" }, { state: "up" }], "waitOutProvider's first") }));
+    ok(first === "answered" && o.reason === null && providerStamps.join() === "true,false"
+      && /^err {3}the provider is not answering \(503 busy\) — unfinished thoughts are back in the pool, recorded nothing; the follower calls m at b for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? "")
+      && /^out {3}the provider answers again after 15 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: said, stamped, probed until it answers, the outage ended, said again (${first}; ${providerStamps}; ${lines.join(" | ").slice(0, 300)})`);
+    // Back at once, nothing settled: the schedule goes on from the last outage's step, said so. Another thought's
+    // error begins it: t1's own again, right after the answer, is the thought's, not an outage.
+    o.begin("429 limited", "t3");
+    lines.length = 0;
+    const carried = await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's carried") }));
+    ok(carried === "answered" && /^err {3}the provider is not answering \(429 limited\) — .* for one token after 20 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on\)$/.test(lines[0] ?? "")
+      && /^out {3}the provider answers again after 20 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: an outage back within the window, nothing settled, carries the last schedule on, said and slept (${lines.join(" | ").slice(-200)})`);
+    // A third, nothing settled still: on from the carried wait's step, not the first one's (review pass 1, mutant).
+    o.begin("429 limited", "t6");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's third") }));
+    ok(/for one token after 40 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? "") && /^out {3}the provider answers again after 40 s; polling resumes$/.test(lines[1] ?? ""),
+      `waitOutProvider: a third outage goes on from the carried wait's step (${lines.join(" | ").slice(-200)})`);
+    // A thought settled since: the first wait again, no carry said.
+    settledNow = 1;
+    o.begin("429 limited", "t4");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's settled") }));
+    ok(/for one token after 5 s and then twice as long each time, up to 5 min$/.test(lines[0] ?? ""), `waitOutProvider: a thought settled since starts the schedule over (${lines[0]})`);
+    o.begin("429 limited", "t7");
+    lines.length = 0;
+    await onTheClock(() => waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "up" }], "waitOutProvider's settled, then unmoved") }));
+    ok(/for one token after 10 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
+      `waitOutProvider: the answer records the settled count, so the next outage with it unmoved carries (review pass 1, mutant; ${lines[0]})`);
+    // A refusal at the end of the wait is the request's: said, returned, the outage left standing.
+    o.begin("503 busy", "t5");
+    lines.length = 0;
+    providerStamps.length = 0;
+    const refused = await onTheClock(() => waitOutProvider({ ...base, who: "the judge", outage: o, probe: scripted([{ state: "refused", why: "401 invalid api key" }], "waitOutProvider's refused") }));
+    ok(refused !== null && refused !== "answered" && refused.refused === "401 invalid api key" && refused.tier === undefined && o.reason !== null && providerStamps.join() === "true,false"
+      && /^err {3}the judge answers now, refusing the request itself \(401 invalid api key\) — the follower stops; nothing is marked failed$/.test(lines[1] ?? ""),
+      `waitOutProvider: a refusal is the request's, said, the follower to stop (${JSON.stringify(refused)}; ${lines[1]})`);
+    // The decision tier's probe refused: said in the tier's name, not the caller's (review pass 3), and returned so, for
+    // the caller's remedy to name the tier (review pass 1).
+    lines.length = 0;
+    const byTier = await onTheClock(() => waitOutProvider({ ...base, who: "the judge", outage: o, probe: scripted([{ state: "refused", why: "not an ob1-jev/1 tier", tier: true }], "waitOutProvider's tier refused") }));
+    ok(byTier !== null && byTier !== "answered" && byTier.tier === true && byTier.refused === "not an ob1-jev/1 tier"
+      && /^err {3}the decision tier answers now, refusing the request itself \(not an ob1-jev\/1 tier\)/.test(lines[1] ?? ""),
+      `waitOutProvider: a refusal the tier's probe met says so, in the tier's name (${JSON.stringify(byTier)}; ${lines[1]})`);
+    // The count recorded at the answer, not at the wait's start: work another worker settled while it waited moves it,
+    // and the next outage with it unmoved since carries (review pass 4, mutant).
+    {
+      const a = new ProviderOutage(() => clock);
+      let n = 0;
+      a.begin("429 limited");
+      await onTheClock(() => waitOutProvider({ ...base, settled: () => n, outage: a, probe: async () => { n = 5; return { state: "up" }; } }));
+      a.begin("429 limited");
+      lines.length = 0;
+      await onTheClock(() => waitOutProvider({ ...base, settled: () => n, outage: a, probe: scripted([{ state: "up" }], "waitOutProvider's count at the answer") }));
+      ok(/for one token after 10 s and then .*so the last wait's schedule goes on\)$/.test(lines[0] ?? ""),
+        `waitOutProvider: the count is recorded at the answer, so work settled during the wait does not start the next one over (${lines[0]})`);
+    }
+    // A probe finding the model missing is still the outage: waited past, not an answer; the lines in the caller's
+    // words (review pass 1, mutant: re-embed's "embedding provider" unheld).
+    {
+      const m = new ProviderOutage(() => clock);
+      m.begin("model loading");
+      lines.length = 0;
+      const back = await onTheClock(() => waitOutProvider({ ...base, who: "the embedding provider", settled: () => 0, outage: m, probe: scripted([{ state: "missing", why: "404 model not found" }, { state: "up" }], "waitOutProvider's missing") }));
+      ok(back === "answered" && /^err {3}the embedding provider is not answering \(model loading\)/.test(lines[0] ?? "") && /^out {3}the embedding provider answers again after 15 s; polling resumes$/.test(lines[1] ?? ""),
+        `waitOutProvider: a missing model is waited past, the lines in the caller's words (${back}; ${lines.join(" | ").slice(0, 240)})`);
+    }
+    // At the cap the line says the probe's interval, not a doubling (review pass 1, mutant): a carry from step 6.
+    {
+      const c = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        c.end(6, 0);
+        c.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, outage: c, probe: scripted([{ state: "up" }], "waitOutProvider's cap") });
+      });
+      ok(/for one token every 5 min \(back within a minute and a poll of its last answer, its pauses aside/.test(lines[0] ?? ""), `waitOutProvider: a carry at the cap says every 5 min (${lines[0]})`);
+      // A step short of it, still the doubling (review pass 5, mutant: the wording a step early).
+      const d = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        d.end(5, 0);
+        d.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, outage: d, probe: scripted([{ state: "up" }], "waitOutProvider's step short of the cap") });
+      });
+      ok(/for one token after 160 s and then twice as long each time, up to 5 min \(back within/.test(lines[0] ?? ""), `waitOutProvider: a carry a step short of the cap says its 160 s (${lines[0]})`);
+    }
+    // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
+    // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
+    const pausesMs = TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0);
+    const carriesAfter = async (afterMs: number, pausesBefore: boolean): Promise<string> => {
+      const e = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        e.end(1, 0);
+        clock += afterMs;
+        e.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, pollS: 5, pausesBefore, outage: e, probe: scripted([{ state: "up" }], `waitOutProvider's edge at ${afterMs} ms`) });
+      });
+      return lines[0] ?? "";
+    };
+    const edges = [await carriesAfter(65_000 + pausesMs - 1, true), await carriesAfter(65_000 + pausesMs, true), await carriesAfter(64_999, false), await carriesAfter(65_000, false)];
+    ok(/for one token after 10 s and then .*of its last answer, its pauses aside/.test(edges[0]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[1])
+      && /for one token after 10 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(edges[2]) && /for one token after 5 s and then twice as long each time, up to 5 min$/.test(edges[3]),
+      `waitOutProvider: the carry's window is a minute and the poll, and the pauses for a follower that spends them first, strictly within (${edges.map((l) => l.slice(-110)).join(" | ")})`);
+    // A stop ends the wait: null, the stamp off.
+    providerStamps.length = 0;
+    ok((await waitOutProvider({ ...base, outage: o, probe: scripted([{ state: "out", why: "x" }], "waitOutProvider's stop"), wake: stop.signal, sleep: instant })) === null && providerStamps.join() === "true,false",
+      `waitOutProvider: a stop ends the wait, null, the stamp turned off (${providerStamps})`);
+    // The caller's stop reaches each probe, so a hung one ends with it; the reason cut at 200 and a refusal's why at
+    // 160; a probe that throws turns the stamp off and is thrown, not waited past (review pass 2, mutant).
+    {
+      const t = new ProviderOutage(() => clock);
+      t.begin("r".repeat(300));
+      const caller = new AbortController();
+      const seen: AbortSignal[] = [];
+      lines.length = 0;
+      const cut = await onTheClock(() => waitOutProvider({ ...base, settled: () => 0, outage: t, wake: caller.signal, probe: async (w) => { seen.push(w); return { state: "refused", why: "w".repeat(300) }; } }));
+      ok(seen.length === 1 && seen[0] === caller.signal && cut !== null && cut !== "answered" && cut.refused.length === 300
+        && (lines[0] ?? "").includes(`(${"r".repeat(200)})`) && !(lines[0] ?? "").includes("r".repeat(201))
+        && (lines[1] ?? "").includes(`(${"w".repeat(160)})`) && !(lines[1] ?? "").includes("w".repeat(161)),
+        `waitOutProvider: the caller's stop reaches the probe; the reason cut at 200, the refusal's at 160, returned whole (${seen.length}, ${seen[0] === caller.signal})`);
+      providerStamps.length = 0;
+      const thrown = await onTheClock(() => waitOutProvider({ ...base, settled: () => 0, outage: t, probe: async () => { throw new Error("probe crashed"); } })).then(() => "returned", (e) => (e as Error).message);
+      ok(thrown === "probe crashed" && providerStamps.join() === "true,false", `waitOutProvider: a probe that throws is thrown, the stamp turned off (${thrown}; ${providerStamps})`);
+    }
+  }
   ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
 }
 

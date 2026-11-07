@@ -45,6 +45,31 @@ export function parseListCursor(raw: string): { sort: ListSort; at: string | nul
 }
 
 /**
+ * thread's cursor (SMD-3306 PR 7a-2a): the last member's position in its thread's order, as base64url of
+ * `["thread", at, id]` — `at` Postgres's own text of its created_at, null undated — passed back with the key.
+ */
+export function threadCursor(at: string | null, id: string): string {
+  return Buffer.from(JSON.stringify(["thread", at, id])).toString("base64url");
+}
+
+/** A thread cursor read back, or null for anything that is not one, held as parseListCursor holds its own. */
+export function parseThreadCursor(raw: string): { at: string | null; id: string } | null {
+  const text = raw.trim();
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length !== 3 || v[0] !== "thread") return null;
+  const [, at, id] = v as unknown[];
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  if (at === null) return { at: null, id: id.toLowerCase() };
+  return pgStamp(at) ? { at, id: id.toLowerCase() } : null;
+}
+
+/**
  * Whether `at` is timestamptz's text as Postgres writes it — a date, a clock to
  * the microsecond, an offset, a BC, or ±infinity — held to a shape and a date
  * that exists before it reaches the SQL. One that still makes Postgres's cast

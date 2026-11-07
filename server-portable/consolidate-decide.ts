@@ -21,7 +21,7 @@
  * starts a fresh pass.
  */
 
-import { refuseEgress, type EmbedConfig } from "./embed.ts";
+import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
 import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, REASON_MAX, relationConfidence, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
@@ -436,8 +436,12 @@ async function writerExchange(cfg: EmbedConfig, messages: { role: "user"; conten
     // The caller's deadline, else OB1_LLM_TIMEOUT, as judgeRequest bounds its call.
     signal: signal ?? AbortSignal.timeout(cfg.timeoutMs),
     timeout: false,
+    // Never followed: the gate judged this base, not where a 3xx points (SMD-2908).
+    redirect: "manual",
     body: JSON.stringify({ model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages }),
   });
+  const redirected = refuseRedirect("Writer", cfg.chat.base, r);
+  if (redirected) throw redirected;
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
     const err = new Error(`Writer request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);

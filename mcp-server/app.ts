@@ -313,6 +313,8 @@ const WORDS: Record<ToolName, Words> = {
   search_thoughts: { render: (o, input: Input<"search_thoughts">) => say.renderSearchThoughts(o, input.prefer_current), fault: readFault((input: Input<"search_thoughts">) => say.searchHint(input)) },
   search_thoughts_keyword: { render: (o) => say.renderSearchThoughtsKeyword(o), fault: readFault((input: Input<"search_thoughts_keyword">) => say.searchHint(input)) },
   list_thoughts: { render: (o) => say.renderListThoughts(o), fault: readFault() },
+  // Work threads (SMD-3306 PR 7a-2a).
+  thread: { render: (o) => say.renderThread(o), fault: readFault() },
   list_supersession_proposals: { render: (o) => say.renderSupersessionProposals(o), fault: readFault(() => say.proposalsHint) },
   thought_stats: { render: (o) => say.renderThoughtStats(o), fault: readFault() },
   thought_changes: { render: (o) => say.renderThoughtChanges(o), fault: readFault(() => say.changesHint) },

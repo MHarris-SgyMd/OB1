@@ -35,7 +35,7 @@ SMD-4090 (one approving review on `main`, with the maintainer as bypass actor) i
 | # | Question | Decision | Why |
 |---|---|---|---|
 | 1 | Where it runs | On this Mac, the dogfood host, as a launchd agent (`local.ob1.agent-runner`). | The stable brain, the claim domain, runs here. The other long-running pieces already run as launch agents: Ollama (`local.ollama.serve`) and the decision tier (`com.openbrain.h2o-tier`). |
-| 2 | Its home | `scripts/agent-runner/`: maintainer tooling. Cut 1 adds it to `scripts/tsconfig.json`'s `include`, which today takes only `scripts/*.ts`, so CI's typecheck covers it. It runs from an install of its own ("Secrets and records"), which only the maintainer updates. | It encodes this repo's workflow (CLAUDE.md, the SMD board, the brain's claims). A general runner for any repo and brain would be an integration; that is a later question. |
+| 2 | Its home | `scripts/agent-runner/`: maintainer tooling. Cut 1 adds it to `scripts/tsconfig.json`'s `include`, beside `scripts/*.ts`, so CI's typecheck covers it. It runs from an install of its own ("Secrets and records"), which only the maintainer updates. | It encodes this repo's workflow (CLAUDE.md, the SMD board, the brain's claims). A general runner for any repo and brain would be an integration; that is a later question. |
 | 3 | The harness | `claude -p`, from a copy of a pinned Claude Code version in the runner's install, checked against its recorded checksum before each session, with `DISABLE_AUTOUPDATER=1`. It is spawned in a process group of its own, recorded in the run's record, with an environment the runner builds. Flags: `--permission-mode dontAsk --permission-prompts none`, `--settings` naming the session's profile by absolute path, `--setting-sources user`, `--strict-mcp-config`, `--max-turns`, `--max-budget-usd`, `--model`, `--effort`, `--output-format stream-json --verbose`. `CLAUDE_CONFIG_DIR` is the runner's own: it holds the CLAUDE.md of the run's base commit, which loads as user memory, and nothing else. | Every layer that enforces the profile (below) is a Claude Code feature that works the same in an interactive session, where it can be tried first. A call no rule allows is denied, and the model is told nobody can approve it. In `-p` a settings file that fails validation is ignored without a word, so the runner checks that its profile loaded rather than trusting it. No project or local source loads, so nothing in the clone (a settings file, a skill, its CLAUDE.md) configures a session. The maintainer's own updater prunes old versions from `~/.local/share/claude/versions/`, hence the copy. The Agent SDK is the alternative (below). |
 | 4 | The model | **Decided 2026-11-06:** `claude-opus-5-5` with `--effort xhigh`, the level for coding and agentic work, both in the runner's config. | The pilot measures cost per merged PR (SMD-4091). A cheaper model is the maintainer's choice, with those numbers in hand. |
 | 4a | Billing | **Decided 2026-11-06.** The runner authenticates with an Anthropic API key of its own, through `apiKeyHelper` reading a 0600 file, never the maintainer's subscription login. | Its spend shows apart from the maintainer's own sessions, and the key's workspace limit caps it whatever the runner counts. Claude Code's docs point anything built on it to API keys and keep subscription logins for ordinary use; unattended runs are not addressed directly. |
@@ -118,17 +118,19 @@ So each session's limits come in layers, set so that a layer that fails is caugh
 
 Each tick, after reconciling the runner's own runs (step 0, below), the runner takes the first ticket that passes every check, in order of priority and then age:
 
-* team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, state Backlog, assigned to no one and delegated to no agent;
-* carries SMD-4086's label, added by the maintainer (Linear's history says who) after the description was last edited, and not the label that hands a ticket to a person;
-* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL. SMD-3669's agenda read (`GET /v1/agenda`, migration 123) now carries startability: open blockers, live claims and `not_before`.
-* **nobody's work** (CLAUDE.md step 1, after a `git fetch` of the runner's bare repository):
-  * no branch, and no worktree, carries the ticket's id, matched as a whole id (`smd-408` is not `smd-4087`). This covers branches of this repo, of the bot's fork once it exists, and of the main checkout, and the main checkout's worktrees;
-  * there is no open PR (`gh pr list --search <id> --state open`);
-  * `list_claims` shows no piece claims and no live claim. It also shows no lapsed claim that was never released, unless that claim's PR has merged or closed. The runner asks with `ticket`, `include_ended: true` and `limit: 1000`. A reply still `truncated` at that cap means the ticket is skipped: the list has no cursor until SMD-3606.
+* team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, in the state named Backlog, of the backlog type, assigned to no one and delegated to no agent, with no character in its title that doesn't show;
+* carries SMD-4086's label and not the label that hands a ticket to a person. Linear's history, read whole, shows that every add of the label at or after its last add is the maintainer's own, made directly: the maintainer as the user, and no bot. Any change to the description or the title at or after that add, the maintainer's own included, voids the label until the maintainer adds it again on its own. Other changes, such as the priority or a relation, leave it standing: the label vouches for the text;
+* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate, with the ticket's relations read whole. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL, and SMD-3669's agenda read (`GET /v1/agenda`, migration 123) now carries startability: open blockers, live claims and `not_before`.
+* **nobody's work** (CLAUDE.md step 1, from the branches on GitHub and in the main checkout):
+  * no unmerged branch or worktree carries the ticket's id, matched as a whole id (`smd-408` is not `smd-4087`). A branch is done with once a PR from it merged or closed into `main` at the commit it points at now, with none open; one at another commit, or with no PR, may be work not merged or not pushed yet, and a stacked PR merged or closed into another branch frees nothing. This covers branches of this repo and of the main checkout, and the main checkout's worktrees. A PR is looked up in this repo owner's account alone, so a branch of the bot's fork holds its ticket until reconciliation deletes it;
+  * no open PR names the ticket in its head branch or title, or in its body when the maintainer or the bot opened it. Anyone can open a PR on this public repo, and one body could name every ticket;
+  * `list_claims` shows no unreleased piece claim and no live claim. It also shows no lapsed claim that was never released, unless that claim's PR has merged or closed, and no claim in a state the rule doesn't know. The runner asks with `ticket`, `include_ended: true` and `limit: 1000`. A reply still `truncated` at that cap means the ticket is skipped: the list has no cursor until SMD-3606.
 
 A live claim whose PR merged or closed is stale. The runner skips its ticket and names the claim in its record for the maintainer (CLAUDE.md step 1). A lapsed claim never released whose PR hasn't merged or closed is skipped, never taken: it may be work paused on another machine. A whole-ticket `claim_work` would close it as taken over (migration 115), with no one having decided the work is dead (CLAUDE.md step 1).
 
-The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda item carries no ticket state, assignee, delegate or label history, so the rule's Backlog, unassigned and label-after-the-last-edit checks stay Linear's.
+The label proves less than it seems. Linear records an add made through the maintainer's personal API key just as it records the maintainer's own click, so any agent session with that key's write access can add the label. For the label to be the maintainer's own word, agent sessions hold only read access to Linear, or a key of their own (`scripts/agent-runner/README.md`, "What the label proves").
+
+The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda item carries no ticket state, assignee, delegate, title or label history, so the rule's Backlog, unassigned, title and label checks stay Linear's.
 
 ## A run, step by step
 
@@ -279,7 +281,7 @@ Records are pruned after 90 days.
 
   The sandbox denies reading the whole home directory, these files included.
 * **The install:** `~/.local/share/open-brain/agent-runner/install/`. It holds:
-  * a copy of `scripts/agent-runner/` from a commit of `main`;
+  * a checkout of a commit of `main`, whole, since the runner imports from elsewhere in the repo (`db/linear-api.ts`, the one Linear client);
   * the profile templates;
   * the pinned Claude Code binary, with its checksum.
 
@@ -312,10 +314,14 @@ Each its own PR, in order:
    * Then the claim, the clone, the worker and review sessions, the bundle, the gate and the record, ending at a branch in the runner's bare repository with no push.
    * Each run then releases its claim with a reason (its token deleted once the release lands) and moves the ticket back to Backlog. The maintainer reads the bundle with nothing left held.
    * Amends CLAUDE.md's "Claim your work" for a runner (decision 6), and checks that stable's server sets `OB1_TIER=stable`.
+   * Holds a ticket whose description or Verify has a character that doesn't show, as cut 1 does for a title, before any of it reaches the brief. The tickets it names are not vouched for by the label: the brief leaves them out, or they pass the same checks.
+   * Settles how the runner knows the brain it sends its key to. Plain http on a loopback address, which cut 1 accepts, authenticates no server: a process that holds the port first would receive the key.
+   * Keeps sessions out of Bun's transpiler cache, by the sandbox's write rules or by running Bun with `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`. Bun caches the transpiled form of a large file such as `dry-run.ts`, so an entry planted there would run as the runner.
    * Needs stable on v2.0.0, SMD-4086, SMD-4088, and SMD-4089's brain key, API key and Linear key: this cut moves the ticket and comments.
 3. **Publish and reconcile:**
    * The bot's fork, the push, the draft PR and its body, CI's result, the week lease, reconciliation, handover, and the launchd schedule.
    * Needs SMD-4089's GitHub identity, and SMD-3606, since the schedule runs unattended.
+   * The launchd job runs Bun with `--no-env-file --config=/dev/null`, as cut 1's dry run must, from a working directory only the runner writes. So neither a `.env` nor a `bunfig.toml` there can set a proxy, TLS or logging setting, or preload code.
    * This repo asks the maintainer to approve CI on a PR from anyone with nothing merged here yet. So the bot's PRs wait for that click until its first one merges.
 4. **The pilot and its report** (SMD-4091).
 
