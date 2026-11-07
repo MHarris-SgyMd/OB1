@@ -28,6 +28,8 @@ export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type Loa
 export { HEALTH_DEADLINE_MS } from "./reads.ts";
 /** The REST core runs each request asLive, so its model calls count live (SMD-3379 PR 2a, model-call.ts). */
 export { asLive } from "../model-call.ts";
+/** Background calls held to OB1_BACKGROUND_SLOTS' share, the api's hook among the brain's processes' (SMD-3379 PR 2b-1, slots.ts). */
+export { installBackgroundSlots } from "../slots.ts";
 export { mendIntervalFrom, newMendState, type MendState } from "./mend.ts";
 export { reprobeIntervalFrom } from "../provider-health.ts";
 

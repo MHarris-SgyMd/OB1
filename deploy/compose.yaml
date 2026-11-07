@@ -932,6 +932,14 @@ services:
       # provider answers (SMD-2889). Unset, 60. The REST core reads it; a
       # leader lock lets one mend at a time, where two run on one database.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
+      # Background calls held to a share of each model server's slots (SMD-3379
+      # PR 2b-1): types with optional per-model overrides, e.g.
+      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, kept across the brain's
+      # processes by advisory locks: each slot held, and one waiting call per
+      # share and process, costs a connection of its own; a live call takes none.
+      # Unset or off, none is held. The REST core reads it, the coordinator hands
+      # it to its passes, and the orchestration runner to its reembed.
+      OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
       # way /models cannot show), 1 to 3600, 0 or off for the start's probe
@@ -1852,14 +1860,15 @@ services:
     cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]
     security_opt: ["no-new-privileges:true"]
     environment:
-      # Its own role, and only what its ingester and reembed read (SMD-2289):
-      # the tier; the embedding model and width; the chunk window and context;
-      # the provider and chat endpoints, their credentials and whether each is
-      # local (reembed's blurbs are chat calls when OB1_CHUNK_CONTEXT is on);
-      # the metadata model and sampling the blurbs use; the timeout; and the
-      # egress gate. Not the server's anchor: a knob the server gains does not
-      # reach the runner unless it is added here. The fallbacks are the
-      # server's, which check-consistency holds equal to db/config.mjs.
+      # Its own role, and only what its ingester and reembed read (SMD-2289): the
+      # tier; the embedding model and width; the chunk window and context; the
+      # provider and chat endpoints, their credentials and whether each is local
+      # (reembed's blurbs are chat calls when OB1_CHUNK_CONTEXT is on); the
+      # metadata model and sampling the blurbs use; the timeout; the egress gate;
+      # and the background slots, which reembed's calls take (SMD-3379 PR 2b-1,
+      # review pass 4). Not the server's anchor: a knob the server gains does not
+      # reach the runner unless it is added here. The fallbacks are the server's,
+      # which check-consistency holds equal to db/config.mjs.
       DATABASE_URL: postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD:-}@postgres:5432/openbrain
       OB1_TIER: ${OB1_TIER:-}
       OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
@@ -1882,6 +1891,7 @@ services:
       OB1_EGRESS_POLICY: ${OB1_EGRESS_POLICY:-}
       OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
       OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
+      OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
       # No `:?`, for the reason n8n's block gives: the runner refuses to
       # start without it, and says why.
       OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}
