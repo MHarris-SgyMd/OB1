@@ -1,6 +1,6 @@
 # MCP Tool Audit & Optimization Guide
 
-You installed Open Brain. You built a few extensions. Maybe you went further and created your own MCP server covering every table in your database. Now your AI is holding 30, 40, 50+ tool definitions in context on every single message — and you're starting to notice: slower responses, tools getting ignored, the AI picking the wrong tool, or just a vague sense that things aren't working as well as they used to.
+You installed Daemonic Brain. You built a few extensions. Maybe you went further and created your own MCP server covering every table in your database. Now your AI is holding 30, 40, 50+ tool definitions in context on every single message — and you're starting to notice: slower responses, tools getting ignored, the AI picking the wrong tool, or just a vague sense that things aren't working as well as they used to.
 
 This guide helps you audit what you've got, identify what's costing you, and right-size your tool surface area so your AI stays sharp.
 
@@ -135,7 +135,7 @@ This maps to how people actually talk to their AI: "save this" or "find that." T
 
 ### Pattern C: The generic entity manager
 
-For tables with similar schemas (all your Open Brain extension tables follow the same `user_id` + timestamps + domain fields pattern), you can go further:
+For tables with similar schemas (all your Daemonic Brain extension tables follow the same `user_id` + timestamps + domain fields pattern), you can go further:
 
 **Before (20+ tools across 4 extensions):**
 
@@ -172,7 +172,7 @@ Not everything should be consolidated:
 
 - **Cross-extension bridge tools** (`link_thought_to_contact`, `link_contact_to_professional_crm`) — These orchestrate across domains. Their specificity is the point.
 - **Tools with complex, unique workflows** (`generate_shopping_list` in Meal Planning) — These aren't CRUD. Merging them into a generic tool loses the workflow context.
-- **High-frequency tools** (`capture_thought`, `search_thoughts`) — The core Open Brain tools benefit from being individually named and described. The AI needs to reach for these quickly and confidently.
+- **High-frequency tools** (`capture_thought`, `search_thoughts`) — The core Daemonic Brain tools benefit from being individually named and described. The AI needs to reach for these quickly and confidently.
 
 ---
 
@@ -182,7 +182,7 @@ Merging tools reduces count within a server. Scoping splits tools across servers
 
 ### The three-server pattern
 
-Most Open Brain users' workflows fall into three modes:
+Most Daemonic Brain users' workflows fall into three modes:
 
 #### Capture server (write-heavy)
 
@@ -447,9 +447,9 @@ You are a context window analyst. Estimate the token cost of all MCP tool defini
 
 ---
 
-## Open Brain Extension Benchmark
+## Daemonic Brain Extension Benchmark
 
-For reference, here's what the official Open Brain extensions expose:
+For reference, here's what the official Daemonic Brain extensions expose:
 
 | Extension | Tools | Cross-Extension |
 |-----------|-------|----------------|
@@ -473,5 +473,5 @@ The official extensions are designed to be connected selectively (you don't need
 
 - [Issue #36: MCP Scoping & Cross-Entity Orchestration](https://github.com/NateBJones-Projects/OB1/issues/36) — The full discussion on context weight, routing accuracy, and architectural options
 - [Issue #61: Standardize Ingestion Patterns](https://github.com/NateBJones-Projects/OB1/issues/61) — Related work on consolidating how thoughts get into the system
-- [Companion Prompts](02-companion-prompts.md) — The core Open Brain prompt kits
+- [Companion Prompts](02-companion-prompts.md) — The core Daemonic Brain prompt kits
 - [FAQ](03-faq.md) — Common issues and solutions

@@ -1,0 +1,49 @@
+# 478. test-preflight's [9] moved to the rest shard — the data layer's first shard is [5] alone, the job ~15–18 s shorter on an EPYC 7763 (SMD-3710)
+
+**What changed.** In `server-portable/test-preflight.ts`, `SHARDS.first` is `["5"]`, where it was `["5", "9"]`; [9] now runs in the rest shard, in the preflight-rest job. The two shards still run every section once between them.
+
+**Why.** Since SMD-3691 the rest shard runs in a job of its own, so the split no longer evens two legs. The first shard is the data layer's, beside `db/test-upgrade.ts` and that job's foreground suites; the job ends at the latest of the three. Over the 16 newest green main runs to 87240d21:
+- **on an AMD EPYC 7763** (eight runs), the first shard ended 15.2–20.4 s after the later of test-upgrade and the foreground suites. [9] took 17.2–19.0 s of the shard: about 11 s are four cases that wait out preflight's 2.5 s probe timeout, and most of the rest some 40 preflight runs, a subprocess each;
+- **on the EPYC 9V45 and 9V74** (five runs), the first shard already ended 2–15 s before test-upgrade, and on the Xeon 6975P-C (one run) 9 s before the foreground suites, so the move takes nothing off there. [9] took 15.1–16.4 s on the 9V45;
+- **on the Xeon 8370C** (two runs) the first shard ended 16 and 11 s after the later of the two, so the move should take about that much off there;
+- **preflight-rest's job** ended 12–107 s before the data layer, 26–91 s on the 7763.
+
+**What it should do.** Taking [9] out, the first shard on a 7763 ends within ~3 s of the later of the other two, the job 15.2–17.5 s sooner in those runs. preflight-rest gains [9] while the data layer loses up to as much, so the margin between them falls by up to twice [9]. In three of the 16 runs it would have gone below 0: a 7763 at 26 s (about −8), an EPYC 9V45 at 13 (about −3) and the 6975P-C at 12 (about −5). These assume [9] takes in preflight-rest what it took in the data layer. Neither job is the run's critical path: the data layer ended 62 s or more before the run's last job in all 16, and 125 s or more in those three, where the last was a schema-against-Postgres cell (sleep in two, rest in the 7763's). So, as the ticket says, this buys the data layer headroom against the next creep, not run time.
+
+**The Verify as written.** It asks for the first shard's median end on a 7763 to be ~10 s earlier than SMD-3691's Verify median, 170.0 s (a figure in Linear; that ticket's record has its one run, 169 s). In these runs the median has crept to 184.5 s, and [5] alone predicts about 166 s, so ~160 s is out of reach whatever [9] does; the later of test-upgrade (median 164.2 s) and the foreground suites would then set the data layer's floor. Its second clause, preflight-rest ending before the data layer, would have failed one 7763 run in eight. Restating it is the maintainer's call.
+
+**What [9] reads.** One case in [9] reads the database: a provider that is down, beside a reachable migrated brain, exits 0 with only a warning. It needs a brain that preflight passes. In the rest shard [9] now runs after [5b], as in a full run. [5b] ends with a brain preflight passes (`--json reports ok:true`). [6], [7], [7b] and [8] run between them and write nothing to the database; since the tidy below, none reads it either. [9] leaves nothing [10]–[12] read. [5]'s own end check stays, since it still shows that [5]'s fixtures clean up after themselves; only its words change.
+
+**Comments.** The `SHARDS` docblock and preflight-rest's comment carry the figures. [5]'s and [5b]'s end comments and the data-layer start step's comment name the move. The README's two shard lines name `SHARDS`, not its sections, so they still read right and are unchanged.
+
+**Held.**
+- **Every section runs once.** Main's last run (41955804078) counted 454 in the first shard and 573 in the rest, 1,027 in all. Here, each shard run locally under a `with-postgres.sh` of its own: first 396 of 396 ([5] alone, `[doc]`'s "1 listed"), rest 631 of 631, 1,027 in all. [9]'s 58 assertions moved.
+- **[9]'s database case ran in the rest shard**, after [5b]: "a provider not up yet beside a reachable, migrated database exits 0", with no check failed.
+- **Review pass 1's runs**, in a scratch tree: first 396, rest 631, a full run 1,027, each all passed; [9] between [8] and [10] in the rest, 16.1 s there locally.
+- **Review pass 1's mutants**, each but the first killed:
+  - [5b]'s end leaving its thoughts, its ok:true row dropped: survives, as it should, since leftover thoughts fail no preflight check;
+  - [5b]'s end leaving a brain preflight fails (`thoughts` renamed), its ok:true row dropped: [9]'s row fails ("failed: schema, vector models"), so [9] guards what it reads itself;
+  - `SHARDS.first` = `["5", "5b"]`, the rest shard's [9] on an unmigrated database: [9]'s row fails, so a re-split that parts [9] from a migrating section fails loudly;
+  - `["5", "9", "9"]`: refused at the start; `["5", "99"]`: `[doc]` fails the first shard ("none headed [99]").
+- **Review pass 2** recomputed every figure from the saved CI logs and the jobs API with code of its own; the corrections are its rows below.
+
+**Tidied while the files were open.** [8]'s `sourceTerm` case dialled the live database through a read-only preflight run, where its siblings point at an unreachable one (`DB_DOWN`) and the section's comment says it needs none: it takes `DB_DOWN` too. Its row reads the egress policy alone, and passes; the rest shard 631 of 631.
+
+**Review passes.** Pass 1's commit carries no tagged bullets; its rows are here, and pass 2's commit body carries its own.
+
+| pass | finding | caught | fix |
+| -- | -- | -- | -- |
+| 1 | [9] was called endpoint timeouts that don't shorten with CPU: about 11 s of its 17–19 s are four 2.5 s timeouts, the rest some 40 preflight runs, and it took 15–16 s on an EPYC 9V45 | run-it | c99e22fe |
+| 1 | test-upgrade was called the data layer's floor: the job's foreground suites ended later than it in 5 of the 7763's 8 runs, so the job comes 15.2–17.4 s sooner, not [9]'s 17–19; the Xeon 6975P-C's first shard ended before those suites, so it gains nothing | run-it | c99e22fe |
+| 1 | preflight-rest's margin over the data layer falls by up to twice [9], not once: three of 16 runs would have gone below 0, one a 7763, not the fastest runners alone | run-it | c99e22fe |
+| 1 | the Verify as written can't be met: the first shard's 7763 median crept to 184.5 s, against a bar of 160 s; left to the maintainer | run-it | c99e22fe |
+| 1 | "[6], [7] and [8] never touch the database": [8]'s `sourceTerm` reads it, read-only, and [7b] runs between them too | cold-read | c99e22fe |
+| 1 | [5]'s reworded row lost the space after "failed:" | run-it | c99e22fe |
+| 1 | the record said four comments carry figures, where two do; preflight-rest's comment gave pre-move laptop figures in the present tense; the start step's comment wrapped short | cold-read | c99e22fe |
+| 2 | preflight-rest's comment put "125 s or more before the run's last job" on all 16 runs, where it holds for the three below 0 alone (62 s or more in all 16); its "those 16 runs" had no antecedent | cold-read | c1ede3cc |
+| 2 | the last job in the 7763's run at 26 s was the schema rest cell, not sleep; the job's gain tops out at 17.5 s, not 17.4 | run-it | c1ede3cc |
+| 2 | test-upgrade's median was given as what puts 160 s out of reach, but the Verify measures the first shard, which [5] alone predicts at ~166 s | cold-read | c1ede3cc |
+| 2 | "that job's" and "the job's" foreground suites pointed at preflight-rest; [5]'s and [5b]'s end comments read awkwardly; the start step's comment still wrapped short; the 8370C's gain went unsaid; pass 1's rows 1–2 were tagged cold-read though they came from CI's logs | cold-read | c1ede3cc |
+| 3 | the `SHARDS` docblock said the split at first gave the first shard [5] alone, where it took [5] and [9]; "four 2.5 s probe timeouts" read as 10 s against "about 11 s"; [5]'s end comment's "after it" could point at [5]'s brain; the record's "the job's legs" counted the foreground suites as legs, its "of it" read as the gap, and its Verify paragraph put test-upgrade alone at the floor again | cold-read | dc3266c8 |
+
+**Follow-ups.** None filed.

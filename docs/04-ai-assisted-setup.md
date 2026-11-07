@@ -1,4 +1,4 @@
-# Build Your Open Brain with an AI Coding Tool
+# Build Your Daemonic Brain with an AI Coding Tool
 
 ## The Short Version
 
@@ -11,7 +11,7 @@ The prompt doesn't contain the setup steps — it tells your AI to fetch the [se
 Copy everything in this block and paste it into your AI coding tool:
 
 ```text
-Walk me through building my own Open Brain — a personal AI memory system — using the
+Walk me through building my own brain — a personal AI memory system — using the
 official guide in the MHarris-SgyMd/OB1 repository.
 
 <context>
@@ -120,7 +120,7 @@ This is what keeps it from rotting. When the setup flow changes — a new auth m
 
 ## After Setup
 
-Once your Open Brain is running, check out the [Extensions learning path](../README.md#extensions--the-learning-path). The same approach works — point your AI at an extension's README and build together.
+Once your brain is running, check out the [Extensions learning path](../README.md#extensions--the-learning-path). The same approach works — point your AI at an extension's README and build together.
 
 ---
 

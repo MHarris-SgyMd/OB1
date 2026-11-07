@@ -1,0 +1,79 @@
+# 433. One coordinator runs the brain's core passes, each as its own user (SMD-3476)
+
+**Upgrading, and what an operator's commands become.**
+- Before pulling, note which of the four services run (`compose ps`). After pulling, name those passes in `deploy/.env` (`OB1_PASSES=sleep,board-sync`, say), drop `sleep`, `workers` and `board-sync` from any `COMPOSE_PROFILES`, and run `compose up -d --remove-orphans`. An old `extract` or `consolidate` container left running keeps the scheduler down (exit 2, held), and an old `sleep` container would run a second scheduler beside the coordinator's.
+- `--profile sleep up -d sleep`, `--profile workers up -d` and `--profile board-sync up -d` become `OB1_PASSES` and `up -d coordinator`.
+- `logs -f sleep` (or `extract`, `consolidate`, `board-sync`) becomes `logs -f coordinator`, each line marked with its pass, such as `[sleep]`.
+- A one-off such as `--profile workers run --rm --no-deps extract bun db/extract-entities.ts --status` becomes `run --rm --no-deps coordinator db/coordinator.ts run extract --status`: the pass's script as its user, with its settings alone.
+- `cp sleep:/var/lib/ob1/sleep-dumps <dir>` becomes `cp coordinator:/var/lib/ob1/sleep-dumps <dir>`.
+- `stop sleep` and the like become `stop coordinator`, which stops every pass it runs.
+- To drain a backlog with extraction alone, run `extract-entities.ts` once in the coordinator's container, and name `workers` afterwards.
+- `deploy/canary.sh up` takes the canary's passes from its own file's `OB1_PASSES`, never stable's. The first run after the upgrade writes the passes its old running containers ran there (a stopped one is said, not carried). board-sync needs both `board-sync` in that line and a Linear key of the canary's own.
+- The passes run from the server image, as the servers do: a changed `db/` needs the image rebuilt and the coordinator recreated (`up -d --build`), and a stack with no checkout (a release install) runs them too. An old container left by `up -d` without `--remove-orphans` runs a retired `supervise.ts`, which says so and holds rather than restart in a loop.
+
+**What changed.**
+- **`db/coordinator.ts`** (new) is the `coordinator` service's command, run from the server image as root (`.dockerignore` lets the passes' import graph into it, `db/test-coordinator.ts` holds that list, and the release overlay pins the coordinator with the servers).
+  - `db/coordinator.ts run <pass> [args…]` runs a pass's script once, as its user with its settings: the one-offs (`--status`, `--switch-key`, a backlog, `--accept`). A SIGHUP goes on as a SIGTERM.
+  - It reads `OB1_PASSES` (`sleep`, `workers`, `board-sync`; commas or spaces) and runs each pass as a child through `db/supervise.ts`.
+  - `workers` is two children, `extract` and `consolidate`. With `sleep` named too they are left out, and the log says so.
+  - A name that is no pass is left out and said; the rest run. With none named it runs nothing and waits for its stop.
+  - Running as root, it runs each child as its own user: board-sync 1101, extract 1102, consolidate 1103, sleep 1104. Each gets a HOME of its own and only its own settings: the shared environment, minus every setting another child owns and the coordinator's own (`OB1_PASSES`, `PORT`).
+  - It hands the dump volume to sleep's user, but only a directory directly in `/var/lib/ob1` (every directory above it root's, so no child can put a link on the path), and never through a link: the directory and its regular files alone, by `lchown`.
+  - Each child's HOME is a directory made afresh by `mkdtemp` (root's, 0700, then handed over), never one found in the shared `/tmp`; one that cannot be made is a HOME that does not exist, never `/tmp`. The HOMEs an earlier start left are removed at the next, and a one-off's when it ends.
+  - A child it cannot start (a uid the runtime does not map, say) is said and tried again on supervise's clock: the coordinator never exits on a child's behalf, so `unless-stopped` cannot loop it.
+  - Each child runs in a process group of its own, so a terminal's Ctrl-C is one signal to it, not two.
+  - Each child's output is marked `[<name>] `. A stop goes on to every child.
+- **`db/supervise.ts`** is now a library.
+  - It takes an argv with no shell (`cmd`), a `uid` and `gid`, and a `label` for its output lines.
+  - Its CLI is retired: run with its old flags, as an old container does, it says so and holds until its stop rather than restart in a loop; anything else it refuses, as before. The compose file's `sh -c` command lines are now `CHILDREN`'s `args` in `db/coordinator.ts`, each a fixed argv built from settings the digits guard has checked.
+  - Its output pump ends a line at a newline or a carriage return, writes a partial line past 64 KiB as it is, and never rejects.
+  - The coordinator and its children start with `--no-env-file`, so the compose file's environment alone decides theirs.
+- **`deploy/compose.yaml`:**
+  - The four services and three profiles are replaced by `coordinator`, a default service on `data` and `egress` running the server image as root (`bun --no-install --no-env-file`, a healthcheck of its own for the image's, which asks a port it does not serve), waiting on the REST core that builds it, with the `sleep-dumps` volume as its one mount.
+  - It runs under an init, `unless-stopped`, with a 120 s grace.
+  - It drops every capability except `CHOWN`, `SETUID`, `SETGID` and `KILL`, with `no-new-privileges`.
+  - Its environment is the server's anchor, every pass's settings, and `OB1_PASSES`.
+- **Advice:** preflight's `workers` and `sleep` rows, `restartCommand` and `startRefusalRemedy` (`db/config.mjs`), and the scheduler's refusal about followers outside it (`db/sleep.ts`) now name the coordinator. "Start it again" is `up -d --no-deps --force-recreate coordinator` with the pass in `OB1_PASSES`, which works whether the coordinator runs or not. A held pass's fix recreates the coordinator.
+- **`deploy/canary.sh`:**
+  - Before the change it stops the canary's coordinator, and stops and removes any container of the four retired services.
+  - After the smoke it recreates the coordinator with the canary file's `OB1_PASSES` (in `CANARY_DROPPED`, never copied from stable's), leaving out `board-sync` when the canary has no Linear key of its own.
+  - `canary_compose` always sets `OB1_PASSES`, so a value exported in the shell never reaches the canary.
+  - The first run after the upgrade writes the passes the retired containers ran into the canary's file.
+  - `down` names no profile.
+- **Check 28** holds the coordinator's mounts, networks and confinement. **Check 32** holds it `unless-stopped`; `supervisorGapsIn` now holds that no service's command names a db/ follower and that the coordinator's command is exactly `db/coordinator.ts`, with seven probes.
+- **`db/cli.ts`:** `wrapperLine`, the one other argv reader, which hands `run <pass> [args…]` on unread; and `andList`, the "a, b and c" its scripts wrote by hand.
+- **Said, not silent:** an `OB1_SLEEP_DUMP_DIR` the coordinator leaves with root (not directly in `/var/lib/ob1`), and a `COMPOSE_PROFILES` still naming `sleep`, `workers` or `board-sync`, which start nothing now.
+- **Tests:**
+  - **`db/test-coordinator.ts`** (new, no database):
+    - what `OB1_PASSES` runs, each child's settings and its command line;
+    - that compose's coordinator is handed every setting a child owns, and nothing unaccounted for, and that the server image copies the passes' import graph, by name, and no more;
+    - the CLI: `run <pass> [args…]`, and usage (2) for anything else;
+    - as root, a planted pair: one child cannot read another's `/proc/<pid>/environ`, and the same reader gets the secret with the users dropped; each HOME made afresh, an old one removed, a planted one never used; the dump directory handed over without following a link, a nested one never; a one-off as its pass's user, with its settings alone.
+  - **CI:** it runs on the host, and as root in the coordinator's own container. The held-refusal steps run the coordinator with `OB1_PASSES`, add the exclusion case and an unknown name, and check that sleep's user can write the dump volume.
+  - **test-live [37b]:** supervise's argv and its label are covered, and the CLI cases are now the coordinator's.
+
+**PR 2: board-sync's interval is a coordinator trigger.**
+- `db/sync-linear.ts --trigger` is the coordinator's mode: one process, a pass at its start and at each SIGWINCH the coordinator sends, every `OB1_BOARD_SYNC_INTERVAL` seconds (`triggerPasses`, in place of `loopPasses`, the wait for a trigger, `triggerGate`, in place of the loop's sleep). A trigger counts only while the process waits for one: one during its start or a pass is let go, so passes never overlap or queue, each starting on a tick that found the process waiting. The interval is the period between passes' starts — at most one pass a tick — not a rest after each, as `--loop`'s sleep was: a pass nearly as long as it starts the next soon after it ends. SIGWINCH's default is to be ignored, so a trigger before the tool's handler is in does nothing. Its heartbeat, its refusals and its "stopped" are the loop's; its start, its handlers and its once-a-run notes come once. `--trigger` takes no `--dry-run` or `--audit` (runs of their own), and `coordinator.ts run board-sync --trigger` is refused: a one-off of the coordinator's own mode would wait on a clock nothing runs.
+- `--loop` is retired: refused by name (exit 2), pointing at `OB1_PASSES=board-sync`, before anything is read.
+- `db/supervise.ts` takes `every`: while the follower runs it is sent `TRIGGER_SIGNAL` (SIGWINCH) that often, a signal that cannot be sent said once, never thrown on the timer. Nothing else about it changes: an end, a refusal or a crash is a follower's.
+- The coordinator runs board-sync with `--trigger --interval <OB1_BOARD_SYNC_INTERVAL>` (trimmed, 300 unset) and sends it a trigger that often, so the heartbeat's period is the clock's. The coordinator reads the setting from its own environment (compose's; from a checkout, the shell's, never a `.env` file). Both read it by one rule, `BOARD_INTERVAL_RULE`: whole seconds from 10 to `MAX_STAMP_EVERY_S` (2147483, 24.8 days, `setInterval`'s bound, past which a clock fires every millisecond). A value outside it runs no clock, and the tool refuses it, held as any refusal is; a refusal's row takes the period handed in. A run of its own, which waits on no interval, takes any from 10 up, as before.
+- Upgrading: an `OB1_BOARD_SYNC_INTERVAL` past 2147483 seconds, which `--loop` took, is now refused under the coordinator; otherwise nothing to set. A `sync-linear.ts --loop` run by hand becomes the coordinator's, as above.
+
+**PR 3a: the status surface** (`docs/brain-coordinator.md` row 13; decided 2026-10-30).
+- **The coordinator's own row**, `heartbeat:coordinator` (`brain-info.ts`'s `CoordinatorValue`): the passes `OB1_PASSES` asks for, and each child's heartbeat key and state — starting, running, waiting for its next try (`in_s`, the end's `code`, `tries`), held by a guard (its kind), stopped — its times seconds back from its own stamp, so only the database's clock is read. Stamped on each change, every 60 s, and ended at the stop; one write at a time, each bounded, a failure said once and the passes never waiting on it. `db/supervise.ts` tells each change (`onState`). The row is one coordinator's at a time, by an `id` of its process: a second started beside a live one (a one-off `compose run coordinator`, CI's held cases, a checkout's run) writes nothing over it and ends nothing at its stop, says so once, and takes the row over once it is ended or stale. A row of its own host — a container restarted after a hard stop keeps its hostname — it takes over at once.
+- **One function, `taskStates`** (`brain-info.ts`): each task in one word — running, idle, starting, restarting, refused, failed, stale, stopped or missing — with its words. A live coordinator speaks for its children; a child it runs is read from its own row when that row was stamped since the child's start, else starting within two minutes and missing after; any other row is read alone, by `heartbeatState`'s order. `parseCoordinator` reads the row as strictly as a pass stamp, refused whole when not of the shape, and `parseHeartbeats` carries it beside the passes' rows rather than counting it as ignored.
+- **`task_status`**, a read tool and `GET /v1/status`, answers `{ tasks, ignored }` from it (the store's `heartbeats()`, brain_info's read alone); its text is a line a task, its value carried whole as brain_info's record is. The REST client is regenerated.
+- **brain_info** carries `database.tasks` and its Workers row reads each task's words; **preflight** gains a `tasks` row, a warning on any task not running, idle or starting, its fix naming the coordinator's log for a missing pass and its restart for a coordinator gone quiet. The three agree on one set of rows (test-preflight).
+- **PR 3b** stamps the import runner's row (`heartbeat:orchestration-runner`), below.
+
+**PR 3b: the import runner's row.**
+- `deploy/orchestration/runner.ts` stamps `heartbeat:orchestration-runner` (`brain-info.ts`'s `RunnerValue`): the pipelines it holds, those running now, and how its last run ended — its pipeline, success or the stage it stopped at, what it emitted and counted, its age from the stamp. Stamped at its start, at each run's start and end (`serve()`'s hooks, a hook that throws failing no run), every 60 s, and ended at its stop, each write bounded at 5 s inside the profile's 15 s grace. Its role's worker group writes `ob1_config`, so no grant changes; with no `DATABASE_URL` there is no row.
+- The coordinator's row writer is now `db/pass-stamp.ts`'s `rowWriter`, which both rows use: one bounded write at a time, a failure said once, the statement each one's own — the coordinator's owned upsert unchanged.
+- `parseRunner` reads the row in full (pipeline names by the allowlist's rule, the stage and count names by the runner's), refused whole when not of the shape and a last run not of the shape left off; `taskStates` gives the runner a task of its own, last and never coordinated: running, idle, stale or stopped, its last run in its words — a run that stopped short is n8n's report, not the runner's state.
+- Preflight's `tasks` row names the runner's own restart, its profile's (`--profile orchestration up -d orchestration-runner`), and its retirement when it is stale; a runner that ended its row stopped with its profile, an operator's act, and is said, not warned on. The runner takes its stage and count names from `brain-info.ts`, so the row drops none.
+
+**Verify.**
+- On the canary, after a podman machine restart, the coordinator and every pass it should run come back with no one starting them.
+- With both `sleep` and `workers` named, it runs `sleep` and says so; nothing is refused (CI covers it too).
+- Each child cannot read another's `/proc/<pid>/environ` (`db/test-coordinator.ts --require-root`, in CI).
+- The status route, preflight and `brain_info` agree on each task's state, the import runner's included (test-preflight, on one set of rows).

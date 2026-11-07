@@ -719,13 +719,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // re-link, its trigger function, three triggers on thought_facets and two
   // indexes, 084's made again — and redefines 111's validator and 102's
   // record_thought_relation on their own bodies, refusing by name without
-  // 061, 084, 111 or 113 ([20bl]) — all
+  // 061, 084, 111 or 113 ([20bl]); 121 upserts ob1_config.schema_version
+  // for the 2.0.0 cut, needing only 006's table; 122 adds effective_priority
+  // and nine helpers, reads alone, refusing by name without 053, 058, 068,
+  // 071, 116 or 117 ([20bm]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 91, `030 is among the last ninety-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 93, `030 is among the last ninety-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5507,6 +5510,52 @@ console.log("\n[20bl] Migration 120: refused by name without 061, 084, 111 or 11
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the120 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
     "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
+  await sql.close();
+}
+
+console.log("\n[20bm] Migration 122: onto a populated brain at the file before it — refused by name without 117's open items, nothing made; then applied: an operator's Medium due tomorrow on a ticket passes its High with no date, a child ticket inherits its Urgent parent's level less one, a ticket blocking three open ones takes +1; nothing stored moved; a re-apply a no-op (SMD-3667)");
+{
+  const the122 = MIGRATIONS.find((f) => /^\d{3}_effective_priority\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the122 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string, links: { relation: string; target: string }[] = []) => {
+    const content = `upgrade 122: ${issue}`;
+    const meta = { source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    if (links.length) await sql`SELECT record_source_links(${id}::uuid, 'linear', (${JSON.stringify(links)}::text)::jsonb)`;
+  };
+  const put = async (key: string, level: number, due: string | null = null) =>
+    String(((await sql`SELECT assert_priority('ticket', ${key}, ${level}::int, ${due}::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb) AS r`)[0] as { r: { outcome: string } }).r.outcome);
+  for (const t of ["SMD-9501", "SMD-9502", "SMD-9503", "SMD-9505", "SMD-9506", "SMD-9507"]) await ticket(t);
+  await ticket("SMD-9504", [{ relation: "child_of", target: "SMD-9503" }]);
+  await ticket("SMD-9508", [{ relation: "blocks", target: "SMD-9505" }, { relation: "blocks", target: "SMD-9506" }, { relation: "blocks", target: "SMD-9507" }]);
+  const outcomes = [await put("SMD-9501", 2, "2027-03-12T00:00:00Z"), await put("SMD-9502", 3), await put("SMD-9503", 4), await put("SMD-9508", 2)];
+  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h);
+  const storedBefore = await stored();
+
+  // Without 117's open items: refused by name, nothing made.
+  await sql`ALTER TABLE open_items RENAME TO open_items_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the122 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER TABLE open_items_away RENAME TO open_items`;
+  const made = Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'effective_priority'`)[0].n);
+  assert(outcomes.every((o) => o === "asserted") && /^migration 122 needs 053, 068 and 117/.test(without) && made === 0,
+    `the fixture's four statements asserted; without 117's open items the file is refused by name and nothing is made (${outcomes} | ${without.slice(0, 80)} | ${made})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the122 });
+  type Row = { item_key: string; effective: string; inherited_from: { key: string } | null; unblocks: number };
+  const asked = JSON.stringify(["SMD-9501", "SMD-9502", "SMD-9504", "SMD-9508"].map((key) => ({ kind: "ticket", key })));
+  const read = async () => (await sql`SELECT item_key, effective::text AS effective, inherited_from, unblocks FROM effective_priority((${asked}::text)::jsonb, NULL, '2027-03-10T15:00:00Z')`) as Row[];
+  const r = await read();
+  const fx = (k: string) => r.find((x) => x.item_key === k);
+  assert(Number(fx("SMD-9501")?.effective) === 4 && Number(fx("SMD-9502")?.effective) === 3 && Number(fx("SMD-9504")?.effective) === 3 && fx("SMD-9504")?.inherited_from?.key === "SMD-9503"
+         && fx("SMD-9508")?.unblocks === 3 && Number(fx("SMD-9508")?.effective) === 3 && (await stored()) === storedBefore,
+    `applied: the Medium due tomorrow (4) passes the High with no date (3); the child inherits its Urgent parent's 3; the blocker of three takes +1; no stored statement moved (${r.map((x) => `${x.item_key} ${x.effective}`).join(", ")})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the122 });
+  assert(JSON.stringify(await read()) === JSON.stringify(r), "a re-apply is a no-op: the same read");
   await sql.close();
 }
 

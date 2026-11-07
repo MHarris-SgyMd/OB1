@@ -24,6 +24,10 @@ on:
         description: "Push the images and create the release (a tag's run), or rehearse (anything else)"
         type: boolean
         required: true
+      existing_tag:
+        description: "A tag already pushed whose images are on GHCR (SMD-4130): publish its release, building and pushing nothing. Empty for every other run."
+        type: string
+        default: ""
 
 defaults:
   run:
@@ -41,6 +45,11 @@ jobs:
       # runs on a tag push; the facts below refuse a ref name that isn't the
       # last release's v<X.Y.Z>.
       PUBLISH: ${{ inputs.publish }}
+      # A dispatch publishing an existing tag's release (release.yml's
+      # publish-existing job), or empty; and the tag a publishing run names:
+      # that input, or the tag this run was pushed for.
+      EXISTING: ${{ inputs.existing_tag }}
+      RELEASE_TAG: ${{ inputs.existing_tag || github.ref_name }}
       # No build-record artifacts from build-push-action: four `.dockerbuild`
       # uploads per run beside the one artifact this job means to keep.
       DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -52,6 +61,24 @@ jobs:
           # origin/main; assemble-release refuses a shallow clone for the same
           # reason. The whole history, then.
           fetch-depth: 0
+          # An existing tag's release is that tag's tree; any other run's, the
+          # commit it ran for.
+          ref: ${{ inputs.existing_tag }}
+
+      # SMD-4130: an existing tag's release. The tag is v<X.Y.Z> and checked
+      # out; no release names it yet; and the release script is main's (the
+      # commit this dispatch ran from), not the tag's, whose failure is why
+      # this run exists. Everything else is the tag's tree.
+      - name: An existing tag — no release yet, and main's release script
+        if: env.EXISTING != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [[ "$EXISTING" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::publish_tag '$EXISTING' is not v<X.Y.Z>"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$EXISTING^{commit}")" ] || { echo "::error::the checkout is not $EXISTING's commit"; exit 1; }
+          if gh release view "$EXISTING" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "::error::$EXISTING already has a release: nothing to publish"; exit 1; fi
+          git show "$GITHUB_SHA:scripts/release-artifacts.ts" > scripts/release-artifacts.ts
+          echo "release script from main $GITHUB_SHA; tree $EXISTING ($(git rev-parse --short HEAD))"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -72,11 +99,29 @@ jobs:
       - name: What this run releases
         id: facts
         env:
-          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', env.RELEASE_TAG) || '--rehearsal' }}
         run: |
           bun scripts/release-artifacts.ts --self-check
           # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
           bun scripts/release-artifacts.ts facts $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --out "$GITHUB_OUTPUT" | grep -v -e '^[a-z_]*_labels<<' -e '^org\.opencontainers' -e '^__OB1_EOF__$'
+
+      # SMD-4130: the notes fit GitHub's limit on a release's body, checked here
+      # before anything is built or pushed: rendered with placeholder digests
+      # of a real digest's length, which is the only part of the notes the
+      # later steps fill in. `notes` refuses notes that can't fit even with
+      # the CHANGELOG section, the change files and the yield table linked.
+      - name: The release notes fit GitHub's limit
+        env:
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', env.RELEASE_TAG) || '--rehearsal' }}
+          PREVIOUS_TAG: ${{ steps.facts.outputs.previous_tag }}
+        run: |
+          since=()
+          if [ -n "$PREVIOUS_TAG" ]; then since=(--since "$PREVIOUS_TAG"); fi
+          bun scripts/mechanism-yield.ts "${since[@]}" > "$RUNNER_TEMP/yield.txt"
+          d="sha256:$(printf '0%.0s' $(seq 64))"
+          # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
+          bun scripts/release-artifacts.ts notes $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --yield "$RUNNER_TEMP/yield.txt" --ollama-digest "$d" --server-digest "$d" --migrate-digest "$d" > "$RUNNER_TEMP/notes-check.md"
+          echo "the notes render at $(wc -m < "$RUNNER_TEMP/notes-check.md" | tr -d ' ') characters"
 
       # SMD-3473: a pull request's rehearsal builds both platforms when it
       # changes:
@@ -146,7 +191,7 @@ jobs:
           driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
       - name: Log in to GHCR
-        if: env.PUBLISH == 'true'
+        if: env.PUBLISH == 'true' && env.EXISTING == ''
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -189,6 +234,7 @@ jobs:
 
       - name: Build ob1-server
         id: server
+        if: env.EXISTING == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -208,6 +254,7 @@ jobs:
 
       - name: Build ob1-migrate
         id: migrate
+        if: env.EXISTING == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -221,6 +268,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # SMD-4130: an existing tag's images were pushed by its own run; their
+      # digests are read from GHCR, the index each version tag names, as the
+      # push would have returned it. A version with no image there is refused:
+      # this run builds nothing.
+      - name: An existing tag — the images its run pushed
+        id: published
+        if: env.EXISTING != ''
+        env:
+          SERVER_IMAGE: ${{ steps.facts.outputs.server_image }}
+          MIGRATE_IMAGE: ${{ steps.facts.outputs.migrate_image }}
+        run: |
+          for kind in server migrate; do
+            if [ "$kind" = server ]; then image="$SERVER_IMAGE"; else image="$MIGRATE_IMAGE"; fi
+            digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')" || { echo "::error::$image is not on GHCR: this run publishes only a tag whose images are"; exit 1; }
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::$image's digest reads '$digest'"; exit 1; }
+            echo "${kind}_digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "$image $digest"
+          done
+
       # The release's compose overlay: the two images by tag — and, on a tag, by
       # the digest the push returned — and Ollama by the digest its pinned tag
       # resolves to today, read from the registry without a pull. A rehearsal's
@@ -229,10 +295,10 @@ jobs:
       - name: Render the release's compose overlay
         id: overlay
         env:
-          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', env.RELEASE_TAG) || '--rehearsal' }}
           OLLAMA_IMAGE: ${{ steps.facts.outputs.ollama_image }}
-          SERVER_DIGEST: ${{ steps.server.outputs.digest }}
-          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest }}
+          SERVER_DIGEST: ${{ steps.server.outputs.digest || steps.published.outputs.server_digest }}
+          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest || steps.published.outputs.migrate_digest }}
         run: |
           ollama_digest=$(docker buildx imagetools inspect "$OLLAMA_IMAGE" --format '{{.Manifest.Digest}}')
           echo "ollama_digest=$ollama_digest" >> "$GITHUB_OUTPUT"
@@ -392,10 +458,10 @@ jobs:
       # change files, the table.
       - name: Gather the assets and render the release notes
         env:
-          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', env.RELEASE_TAG) || '--rehearsal' }}
           PREVIOUS_TAG: ${{ steps.facts.outputs.previous_tag }}
-          SERVER_DIGEST: ${{ steps.server.outputs.digest }}
-          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest }}
+          SERVER_DIGEST: ${{ steps.server.outputs.digest || steps.published.outputs.server_digest }}
+          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest || steps.published.outputs.migrate_digest }}
           OLLAMA_DIGEST: ${{ steps.overlay.outputs.ollama_digest }}
           CHANGE_FILES: ${{ steps.facts.outputs.change_files }}
           ASSETS: ${{ steps.facts.outputs.assets }}
@@ -461,7 +527,7 @@ jobs:
         if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
           VERSION: ${{ steps.facts.outputs.version }}
           ASSETS: ${{ steps.facts.outputs.assets }}
           YIELD_ASSET: ${{ steps.facts.outputs.yield_asset }}

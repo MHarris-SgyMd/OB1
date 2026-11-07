@@ -60,6 +60,15 @@ export type Env = {
    */
   OB1_VECTOR_MEND_INTERVAL?: string;
   /**
+   * Background calls' share of each model server's slots (SMD-3379 PR 2b-1,
+   * slots.ts): types with per-model overrides, `chat=1,embed=2,decide=1`, held
+   * across the brain's processes by advisory locks: each slot held, and one
+   * waiting call per share and process, costs a connection of its own; a live
+   * call takes none. Unset or off, none held; a value that does not parse is
+   * said, and none held.
+   */
+  OB1_BACKGROUND_SLOTS?: string;
+  /**
    * Seconds between re-probes of a local embedding provider that does not
    * answer (provider-health.ts, SMD-2890): whole seconds from 1 to 3600, `0`
    * or `off` for the start's probe alone; 15 unless set, and a value that does not read is the

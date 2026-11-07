@@ -9,7 +9,7 @@
 import { networkInterfaces } from "node:os";
 import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { listenHostFrom, routable } from "./auth.ts";
-import { createCore, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
+import { createCore, installBackgroundSlots, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -90,6 +90,10 @@ if (SERVES_ON_BUN) {
   void startTelemetry(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
+  // Background calls — the mender's, the reprobe's, a detached job's, a webhook's deferred work — held to
+  // OB1_BACKGROUND_SLOTS' share, beside the brain's other processes' (SMD-3379 PR 2b-1); off when unset, or with no
+  // database to keep the share in. Before the mender and the reprobe start: the reprobe probes at once (review pass 5).
+  const slots = process.env.DATABASE_URL ? installBackgroundSlots({ url: process.env.DATABASE_URL, raw: process.env.OB1_BACKGROUND_SLOTS }) : null;
   // The vector mender (SMD-2889), as the MCP server starts one: a tick acts
   // only under the store's leader lock, so the two servers' menders take
   // turns, and this one goes on mending once the MCP endpoint is
@@ -122,6 +126,7 @@ if (SERVES_ON_BUN) {
     endOpen: () => {
       mender?.stop();
       reprober.stop();
+      void slots?.uninstall();
       cutOpenRequests();
     },
     onCut: () => {

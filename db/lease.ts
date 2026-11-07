@@ -490,9 +490,13 @@ export type InHandAbort = (olderThanMs?: number) => number;
  * which the engine joins with the hard stop's for the calls; when it began —
  * the thought taken up, the admit gate last passed or a provider pause ended;
  * whether it has no call to abort now (at the gate, in a pause, in the
- * decider's call); and whether it was aborted.
+ * decider's call); whether it was aborted; whether a wait for a slot aborts
+ * it (`abortWaiting`: the pass stopping); whether its call waits for a
+ * slot now — on the hook alone, where `waiting` covers the gate, a pause and
+ * the decider's whole call too (review pass 6); and whether it is inside
+ * idleWhile, which a slot wait's end leaves idle (review pass 7).
  */
-export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean };
+export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean; noWait?: boolean; slotWait?: boolean; idle?: boolean };
 
 /**
  * The calls a pass's workers hold, behind its InHandAbort (SMD-3379 PR 1b-2):
@@ -500,13 +504,19 @@ export type InHandCall = { abort: AbortController; since: number; waiting: boole
  * with it; abortInHand aborts each entry at least `olderThanMs` old that is
  * not waiting, and does nothing while `inert()` — the pass stopping, the run
  * returned. One place for the three claim workers, so the rule cannot drift
- * between them (review pass 3).
+ * between them (review pass 3). `abortWaiting`, at the pass's first stop,
+ * aborts each call waiting for a slot on the model-call seam's hook, and each
+ * that starts waiting after it, so the thought goes back to the pool rather
+ * than the stop waiting out other processes' calls (SMD-3379 PR 2b-1, review
+ * pass 5: a SIGTERM waited 36 s on a slot, past which the coordinator's grace
+ * kills).
  */
-export function inHandCalls(inert: () => boolean): { begin(workerId: string): InHandCall; get(workerId: string): InHandCall | undefined; end(workerId: string): void; abortInHand: InHandAbort } {
+export function inHandCalls(inert: () => boolean): { begin(workerId: string): InHandCall; get(workerId: string): InHandCall | undefined; end(workerId: string): void; abortInHand: InHandAbort; abortWaiting(): number } {
   const calls = new Map<string, InHandCall>();
+  let noWait = false;
   return {
     begin(workerId) {
-      const call = { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false };
+      const call = { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false, noWait };
       calls.set(workerId, call);
       return call;
     },
@@ -526,7 +536,25 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
       }
       return n;
     },
+    abortWaiting() {
+      noWait = true;
+      let n = 0;
+      for (const c of calls.values()) {
+        c.noWait = true;
+        // On the hook only: a call running — the decider's, inside idleWhile's `waiting` — finishes (review pass 6).
+        if (c.slotWait && waitAborted(c)) n++;
+      }
+      return n;
+    },
   };
+}
+
+/** Aborts a call in hand that waits for a slot once its pass is stopping (`abortWaiting`); whether it did. */
+function waitAborted(c: InHandCall): boolean {
+  if (!c.noWait || c.aborted) return false;
+  c.aborted = true;
+  c.abort.abort(new StoppedWaiting());
+  return true;
 }
 
 /**
@@ -536,10 +564,15 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
  */
 export async function idleWhile<T>(call: InHandCall | undefined, pending: Promise<T>): Promise<T> {
   if (!call) return pending;
+  // Marked, so a wait on the seam's hook that began as `pending` was made — before this line, its argument evaluated
+  // first — does not end the idle when it ends (review pass 7: N12 could abort the decider's running call). A worker
+  // holds one idleWhile at a time: none nests.
+  call.idle = true;
   call.waiting = true;
   try {
     return await pending;
   } finally {
+    call.idle = false;
     call.waiting = false;
     call.since = Date.now();
   }
@@ -562,13 +595,19 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
       if (waiting++ > 0) return;
       const c = get();
       before = c?.waiting;
-      if (c) c.waiting = true;
+      if (c) {
+        c.waiting = true;
+        c.slotWait = true;
+      }
       also?.waiting();
+      if (c) waitAborted(c);
     },
     running() {
       if (waiting === 0 || --waiting > 0) return;
       const c = get();
-      if (c && before === false) {
+      if (c) c.slotWait = false;
+      // Inside an idleWhile the entry stays idle, whichever began first.
+      if (c && before === false && !c.idle) {
         c.waiting = false;
         c.since = Date.now();
       }
@@ -578,11 +617,66 @@ export function callWaitsFor(get: () => InHandCall | undefined, also?: CallWaits
   };
 }
 
+/**
+ * A deadline that stops counting while its calls wait for a slot on the
+ * model-call seam's hook (SMD-3379 PR 2b-1): `signal` aborts with a
+ * TimeoutError once `ms` of the calls' own time has passed, `waits` pauses and
+ * resumes it — callWaitsFor's `also`, told at its first wait and its last
+ * run — and `dispose` clears its timer. Consolidation's per-pair bound, one
+ * for a pair's calls (the judge's, or decide mode's three), which a wait for a
+ * slot would otherwise eat into.
+ */
+export function pausableTimeout(ms: number): { signal: AbortSignal; waits: CallWaits; dispose(): void } {
+  const ac = new AbortController();
+  let left = ms;
+  let since = Date.now();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = () => ac.abort(new DOMException("The operation timed out.", "TimeoutError"));
+  const arm = () => {
+    since = Date.now();
+    timer = setTimeout(fire, Math.max(0, left));
+  };
+  arm();
+  return {
+    signal: ac.signal,
+    waits: {
+      waiting() {
+        if (timer === null || ac.signal.aborted) return;
+        clearTimeout(timer);
+        timer = null;
+        left -= Date.now() - since;
+      },
+      running() {
+        if (timer !== null || ac.signal.aborted) return;
+        arm();
+      },
+    },
+    dispose() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
 /** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */
 export class AbortedInHand extends Error {
   constructor() {
     super("the call in hand was aborted by the pass's caller; the thought goes to the back of the queue");
     this.name = "AbortedInHand";
+  }
+}
+
+/**
+ * A call in hand aborted as it waited for a slot at the pass's first stop
+ * (`abortWaiting`, SMD-3379 PR 2b-1): an engine that tells it apart treats
+ * it as that stop — extraction counts no stop for it (review pass 6: counted
+ * as an N12 abort, a deploy's restart reset the thought's gained windows).
+ */
+export class StoppedWaiting extends AbortedInHand {
+  constructor() {
+    super();
+    this.name = "StoppedWaiting";
+    this.message = "the pass stopped while the call in hand waited for a slot; the thought goes back to the pool";
   }
 }
 

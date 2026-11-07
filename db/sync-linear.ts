@@ -132,6 +132,7 @@ import type { Derived } from "./ingest-contract.ts";
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, databaseUrlIfAny, openSql } from "./connect.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper, TRIGGER_SIGNAL, BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
 import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
@@ -1987,6 +1988,9 @@ async function main(): Promise<void> {
   const key = process.env.LINEAR_API_KEY?.trim();
   if (!key) return await refuse("linear-key", `LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset. The
+  // first signal leaves a wait for a slot to end, as the issue in hand finishes; the second kills (review pass 1).
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.

@@ -1,0 +1,137 @@
+# 483. The contributed skills, recipes, integrations, schemas, extensions, primitives and plugins, the evals and resources READMEs, and the PR and issue templates say Daemonic Brain, under CONTRIBUTING's new naming rule (SMD-3770)
+
+**What changed.** PR 1 is the rule and `skills/`; PR 2 is `recipes/` and PR 1's leftovers; PR 3 is `integrations/` and `evals/`; PR 4 is `schemas/`, `extensions/`, `primitives/` and `db/`; PR 5 is `plugins/` and `resources/`.
+- **The rule** (the ticket's Work 1) is CONTRIBUTING's new "Naming the product":
+  - Daemonic Brain names the product, and the system a contribution captures to and searches.
+  - One install is "a brain": "a brain of your own", "each brain has its own keys", "search your brain".
+  - Open Brain names only the origin: a "grew out of", a link to upstream, a credit or attribution, a quote, and upstream's own products and services.
+  - OB1 used as the product's name follows the same rule, and OB1 as a repository's name stays.
+  - Identifiers stay until SMD-3771 decides them. The rule names the ones contributions carry: the connector's server name `open-brain`, `mcp__open-brain__…` tool names, the `open-brain` tag, `requires.open_brain` and `.ob1/`-style paths.
+  - A `metadata.json` `author` is never changed.
+- **CONTRIBUTING's own seven mentions** follow the rule. They are on SMD-3793's list, but are taken here, since the rule sits in that file. They now read "a working brain", "a brain of your own", two `metadata.json` examples with "your brain", and Daemonic Brain for the product.
+- **`skills/`:**
+  - "Open Brain" (any case) goes from 165 to 19, and OB1 as a word (case-sensitive, not `OB1_`) from 37 to 23. The files holding either go from 50 to 11.
+  - The product's name becomes Daemonic Brain, and "an Open Brain" becomes "a Daemonic Brain".
+  - The 14 places that used OB1 as the product's name, each reviewed alone, now say Daemonic Brain. `OB1-connected mode` is `Brain-connected mode`, beside `Direct-chat mode`.
+- **The PR template's test line and the two issue templates** follow the rule.
+- **Work 3, the connector's server name in prompts.** A prompt that names a tool does it by the connector's server name, as in `mcp__open-brain__capture_thought`, and that name stays with the connector. The prose beside it names the product. The tool titles the model reads already say "Search Daemonic Brain" and "Fetch Daemonic Brain Thought" (SMD-3769).
+- **What stays in `skills/`, on purpose:**
+  - `deleting-thoughts`' "the upstream Open Brain maintainer's stance", an attribution now marked as upstream's;
+  - the `open-brain` tags;
+  - `heavy-file-ingestion`'s `.ob1/` output folder.
+
+**PR 2, `recipes/` and the leftovers:**
+- **`recipes/`.** "Open Brain" (any case) goes from 381 to 76, and OB1 as a word (case-sensitive, not `OB1_`) from 193 to 153. The files holding either go from 145 to 77.
+  - The same rule as PR 1 applies, never inside a URL or a link target.
+  - The product becomes Daemonic Brain, and one install becomes "your brain" or "my brain".
+  - The two credential trackers that list this stack's values say "FROM YOUR DAEMONIC BRAIN SETUP".
+  - The OpenRouter `X-Title` labels say Daemonic Brain.
+  - `db/test-live.ts`'s check that a refused URL prints no banner follows brain-backup's renamed banner.
+- **What stays Open Brain or OB1, as upstream's:**
+  - **Upstream's deployment.** A line naming Supabase, Edge Functions or a service-role key stays upstream's. So does a heading or tracker whose next lines list those credentials; that is fifteen trackers and life-engine's env block. These recipes are upstream's PostgREST clients.
+  - **Upstream's setup and claims.** That covers upstream's canonical setup (OpenRouter, while this brain defaults to local models), its stock schema (`thoughts` alone, while this one ships many tables), its "base setup", the sizes it targets, its 1536-dim embeddings and its canonical pipeline. Renamed, each would be false here.
+  - **Credits and quotes:**
+    - credits and links;
+    - the nine "Reviewed and merged by the Open Brain maintainer team" badges;
+    - Clay Dunker's "(Open Brain / OB1)";
+    - quotes of upstream's post and video;
+    - "Open Brain forks";
+    - "OB1 `main`", "the OB1 maintainer" and "the OB1 community".
+  - **OB1 as a repository root, checkout or path,** and `session-capture-hook`'s test fixtures.
+- **Recipes kept whole:**
+  - the three NBJ-branded `openclaw-*` recipes, with `recipes/README.md`'s row for them (SMD-1929's item 1);
+  - `vercel-neon-telegram`, upstream's Vercel and Neon build;
+  - `adaptive-capture-classification`, whose `capture` tool and capture types are upstream's throughout. This brain's tool is `capture_thought`, and its types are observation, task, idea, reference and person_note.
+- **One hand fix:** brain-backup's "the brain's tables", since `compat/supabase-sql` is this project's own layer.
+- **PR 1's leftovers:**
+  - `skills/ob1-local-http/` calls this project's REST core, so it is the product, now "Daemonic Brain Local HTTP". Its `ob1-local-http` directory and frontmatter name are identifiers that stay.
+  - `.github/metadata.schema.json`: the title and descriptions say Daemonic Brain, and the upstream `$id` stays.
+  - `skills/auto-capture-claude-code/` stays Open Brain throughout: it posts to upstream's Supabase endpoint, which reaches nothing here.
+- **Found on the way, filed:** SMD-3875. The editorial-policy auditor sends `SUPABASE_URL`, which is a `postgres://` URL with a password here, to OpenRouter as its `HTTP-Referer`. That code is untouched here.
+
+**PR 3, `integrations/` and `evals/`:**
+- **`integrations/`.** "Open Brain" (any case) goes from 147 to 12, and OB1 as a word (case-sensitive, not `OB1_`) from 241 to 235. The files holding either go from 68 to 43. The Agent Memory family holds 201 of the OB1s left, and 26 of the files.
+  - PR 2's rules apply, with its upstream guard on every swap. Its rule for credential trackers narrows, below.
+  - **The Chrome extension** is this brain's client: it calls the REST core with the brain's key. So its name in Chrome is "Daemonic Brain Capture", and its screens, messages and console prefixes call the brain Daemonic Brain. The box in its README's diagram keeps its width. No test or code matches a changed string. `server-portable/test-rest.ts` [10] runs the extension's `lib/config.js`, and it reads the renamed "not configured" error by its `setup` flag, not its text. The extension's own two test files name none of the strings, and its messages are only shown, never compared.
+  - **The capture servers** (Slack, Telegram and Readwise) run under Bun against this brain's Postgres. Each asks for "a working Daemonic Brain setup". Slack's suggested app name and its `/invite @Daemonic Brain` still match, and Telegram's example bot is `my_daemonic_brain_bot`.
+  - **Slack's and Readwise's OpenRouter key.** Both embed `openai/text-embedding-3-small` at 1536, so they work only on a brain that runs the getting-started guide's hosted models through OpenRouter. On that brain "the same OpenRouter credits from your main Daemonic Brain setup" is true, and its tracker records the key, so their trackers say "FROM YOUR DAEMONIC BRAIN SETUP" too.
+  - **Credential trackers.** A tracker's heading says Daemonic Brain only where every value it lists comes from this brain's setup:
+    - the Chrome extension's (the REST core's URL and a capture key);
+    - smart-ingest's (the Postgres URL and the MCP key);
+    - Slack's and Readwise's, above;
+    - `lint-sweep`'s (the Postgres URL, under the shim's `SUPABASE_URL` name). PR 2 kept it upstream's because its next lines named Supabase at all.
+
+    Other blocks need their contents fixed before any heading can be true, and SMD-3877 does both. Some mix in keys from elsewhere: `editorial-policy`'s and PR 2's `daily-digest` list an OpenRouter key a local brain doesn't hold, and `editorial-policy`'s lists Slack's values. Twenty more ask for a project URL or key that nothing here reads, the thirteen `schemas/` trackers among them. The `_template/` trackers, here and in `recipes/`, ask for Supabase keys and stay upstream's until SMD-3877 rewrites them. `agent-memory-api`'s, over this brain's values, is kept whole with its family.
+  - **Two hand fixes:**
+    - consolidation-workers' "not required for the core Open Brain alpha path" now reads "not required for a working brain", since no alpha path exists here;
+    - smart-ingest's three "last redefined by 046" now say 080. Those lines name this brain's schema, and 060, 061, 073 and 080 have each redefined the 3-argument `upsert_thought` since 046.
+- **`evals/`.** The README's four OB1s (the embedding calls, the outbox, the URL-and-header pattern and the profile it ships) and `eval-extraction.ts`'s doc comment name this brain, so they say Daemonic Brain. The orchestration kit's three search-tool descriptions say "Search the brain". OB1 as a word goes from 29 to 24, and "Open Brain" from 31 to 28.
+  - **One hand fix:** `eval-extraction.ts`'s docblock named it `eval-meta.ts`, a file that never existed, and its usage line ran `eval-retrieval.ts`. It now names itself, and its usage line runs it on the guide's hosted metadata model at temperature 0, as the server extracts. The note beside it no longer says the server sends no temperature.
+- **PR 2's figures, and one leftover:**
+  - Recipes' "Open Brain" stays at 76, and the files holding either go from 77 to 78. `lint-sweep`'s tracker drops one. One comes back in `gmail-smart-pull/scripts/pull-gmail.mjs`. PR 2 had renamed its "Open Brain's canonical pipeline", which its guard missed because the phrase wraps across two lines, and PR 2's record keeps the canonical pipeline upstream's. The header now says the pack goes to your Daemonic Brain import pipeline, as the file's last line and its README do, and that it was shaped for upstream Open Brain's canonical pipeline.
+  - The trackers kept upstream's go from fifteen to fourteen, and those saying Daemonic Brain from two to three.
+  - The lines PR 2 kept for naming OpenRouter stay. `atomizer`'s, `email-history-import`'s and `readwise-import`'s stay because each recipe's SMD-2126 note calls it an upstream PostgREST or supabase-py client. `schema-aware-routing`'s and `gmail-smart-pull`'s call OpenRouter OB1's canonical or usual provider, and stay for PR 2's own reason.
+- **What stays upstream's, or stays as data:**
+  - **OpenRouter as upstream's standard.** The vendored workers' comments stay, in `_shared` and beside it. They call OpenRouter "the OB1 standard" or put it first, and say what the ExoCortex port changed. This brain's shipped defaults are local (`SETUP.md`; its one line saying otherwise is SMD-1876's).
+  - **Credits, a badge and the icon set.** Nate B. Jones's and Mark Lavercombe's credits stay, and so does Telegram's maintainer-team badge. The extension's icon set is still upstream's Open Brain mark (the PNGs are unchanged), and its README says so. A logo of this brain's own is SMD-1929's.
+  - **consolidation-workers' two CORS comments,** from upstream's Supabase deployment: "wildcard for OB1", and in `bio/` "users deploy to their own projects".
+  - **OB1 as this repository:** "the OB1 binary-blob policy".
+  - **The evals README's "Open Brain dashboard"** quotes the client name the auth eval registers (`evals/eval-auth.ts`).
+- **Kept whole:**
+  - the three NBJ-branded Agent Memory integrations (`agent-memory-api`, `openclaw-agent-memory` and `hermes-agent-memory`), with their `integrations/README.md` rows (SMD-1929's item 1);
+  - the rest of `evals/`, which is data:
+    - eval input: corpora, recorded queries, fixtures, and the entity names the extraction evals expect;
+    - the auth eval's harness, with its app and client names;
+    - the orchestration kit's names: its workflows ("OB1 — …", "OB1 import — …"), which its code looks up; its credentials ("OB1 inbound — …", "OB1 brain — capture key"), copied from `deploy/orchestration/credentials.template.json`; the "OB1" workspace and sign-up its code creates; and its Windmill scripts' header comments, which name their workflows.
+- **Found on the way:**
+  - SMD-3877, filed: credential trackers list values this brain's setup doesn't give. That covers the two templates, the twenty trackers, the two mixed blocks above, and Slack's tracker, which lacks the Postgres URL its server needs.
+  - SMD-4082, filed: the Chrome extension's and Readwise's READMEs misstate how they work, in sections this PR edits. They call the stored brain key encrypted, they say `fetch()` reaches only the brain, troubleshooting quotes an error Capture never shows, and Readwise calls a required schema "Recommended". This PR changed none of those claims.
+  - SMD-4092, filed: the orchestration eval's Windmill provisioning skips a script that already exists, so the renamed search-tool summary reaches only a fresh workspace.
+  - SMD-4093, filed: the Chrome extension spells its name by hand in about 50 places, in five log-prefix spellings; one prefix and message on `OBConfig` would hold it.
+  - On SMD-3319: consolidation-workers and the extraction worker point at `schemas/knowledge-graph`, which never existed here. Their tables are `schemas/entity-extraction`'s. That includes the second half of consolidation-workers' renamed sentence ("Install it after the enhanced thoughts and knowledge graph schemas").
+
+**PR 4, `schemas/`, `extensions/`, `primitives/` and `db/`:**
+- **Counts.** "Open Brain" (any case) and OB1 as a word (case-sensitive, not `OB1_`), with the files holding either:
+  - `schemas/`: "Open Brain" from 57 to 33, OB1 unchanged at 12, files from 22 to 21;
+  - `extensions/`: "Open Brain" from 15 to 0, OB1 unchanged at 2, files from 10 to 2;
+  - `primitives/`: "Open Brain" from 18 to 6, OB1 unchanged at 3, files from 8 to 5;
+  - `db/`: unchanged at 159 and 14.
+- **The rules carried over** are PR 3's, with one addition: a guarded word that ends the line before ("canonical", "stock", "upstream") guards a phrase wrapped onto the next. That is how `pull-gmail.mjs` slipped through PR 2. Here it keeps `enhanced-thoughts/schema.sql`'s "the canonical / Open Brain type vocabulary" and `smart-ingest/schema.sql`'s "Stock / single-tenant OB1 setups". The name itself can wrap too: `thought-audit/schema.sql`'s "the same Open / Brain" was found by a scan for a line ending "Open" before one starting "Brain", and is now "the same / brain". That scan finds no other in the four directories.
+- **`db/` stays whole.** Every hit there is data or a pointer: test fixtures that use "Open Brain" as an entity's name; the Linear initiative's real name, which `DEFAULT_INITIATIVE` must match for board-sync to find it; `graph-centrality`'s example subject; upstream issue references; URLs; and applied migrations, which are append-only (`db/migrate.ts` checks each one's sha256).
+- **Kept whole:**
+  - `schemas/agent-memory`, the NBJ "OB1 Agent Memory" family's schema (SMD-1929's item 1);
+  - `schemas/per-agent-identity`, upstream's server-side key lookup: it asks for a Supabase project, calls `supabase.rpc`, and sits beside upstream's single `MCP_ACCESS_KEY`, while this brain's agents have their own registry;
+  - `primitives/rls`, upstream's Supabase RLS guide under this tree's note.
+- **What stays upstream's, or stays as is:**
+  - **the thirteen `schemas/` trackers,** "SUPABASE (from your Open Brain setup)", which SMD-3877 rewrites;
+  - **"stock Open Brain" claims,** and `typed-reasoning-edges/README.md`'s upstream description of upstream's graph at its PR 197. Its `schema.sql` says it extends "the entity-extraction schema's knowledge graph": this brain's own graph is migration 016's, which the file doesn't touch;
+  - **`provenance-chains`' two purpose lines,** upstream's account of upstream's file. Here migrations 025 and 026 own derivation, and the file adds two columns and two merge helpers (SMD-2142 retires it). Its two "canonical … setup" lines say Daemonic Brain on purpose: they point at `docs/01-getting-started.md`, this brain's guide, whose `thoughts.id` is a UUID;
+  - **upstream's Discord** and its "propose a new extension" and "propose a new primitive" links;
+  - **OB1 as this repository:** the OB1 community, the OB1 contribution rules, an OB1 checkout's path;
+  - **`primitives/remote-mcp`'s connector name,** "Name: `Open Brain`", and the prompt that names the connector by it. It follows `docs/01-getting-started.md`, which is SMD-3793's, so a reader following both types one name.
+
+- **Held.** `git grep -l -P '(?i:open brain)|\bOB1\b(?!_)' -- schemas extensions primitives ':!schemas/agent-memory' ':!schemas/per-agent-identity' ':!primitives/rls'` lists the files the kept lines above hold.
+
+**PR 5, `plugins/` and `resources/`:**
+- **`plugins/`.** Each of the seven plugin READMEs asked for "A working Open Brain stack". They ask for a Daemonic Brain stack now, as the plugin template has since PR 4. "Open Brain" goes from 7 to 0 there.
+- **`resources/README.md`.** Its opening line says the folder holds Daemonic Brain's companion files and exports. Its "Open Brain Companion" row stays upstream's: `open-brain-companion.skill` (and its `.zip` copy) is upstream's packaged companion to Nate B. Jones's guide, about Supabase Edge Functions. Its name and contents are upstream's, and it belongs with SMD-1929's item 1. The heavy-file-ingestion bundles name only their `.ob1/` output folder, an identifier.
+
+**Why.** The maintainer decided on 2026-11-04 that the live text says Daemonic Brain now (SMD-1929, SMD-3765). Contributors had no rule for which "Open Brain" goes and which stays.
+
+**Held.**
+- The consistency checker passes, including every contribution's README and `metadata.json` checks.
+- The counts compare `origin/main` with the tree: "Open Brain" matched in any case, OB1 matched case-sensitively as `\bOB1\b(?!_)`.
+- `git grep -l -i -P 'open brain|\bOB1\b(?!_)' -- skills` finds only these:
+  - `auto-capture-claude-code` and `openclaw-agent-memory`, with its `skills/README.md` row;
+  - `ob1-local-http`'s paths;
+  - `deleting-thoughts`' attribution;
+  - `heavy-file-ingestion`'s `.ob1/` folder.
+
+  The `open-brain` tags don't match it.
+- In `integrations/`, outside the Agent Memory family, `git grep -l -P '(?i:open brain)|\bOB1\b(?!_)' -- integrations ':!integrations/agent-memory-api' ':!integrations/openclaw-agent-memory' ':!integrations/hermes-agent-memory'` finds 17 files: the kept lines above, and the OpenRouter-first comments in the three vendored workers. It matches OB1 case-sensitively, so the lowercase `ob1-` markers and the `ob1-vendored-tests` package name drop out.
+
+**Not done here.**
+- **The NBJ-branded packs, recipes and integrations go to SMD-1929's item 1:** `skills/openclaw-agent-memory/` with its `skills/README.md` row, the three `openclaw-*` recipes, the three Agent Memory integrations, `schemas/agent-memory`, and `resources/open-brain-companion.skill` with its `.zip` copy.
+- **Credential trackers whose values don't all come from this brain's setup,** the two templates' among them, need new contents, not a new name. They are SMD-3877's.
+- **A check that holds the name** is SMD-3773's. Until it lands, the counts here are re-checked by hand, with the commands under Held.
+- **`docs/01-getting-started.md`,** which the skills' setup links point at. It is SMD-3793's.
