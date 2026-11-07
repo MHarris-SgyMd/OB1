@@ -238,8 +238,11 @@ BEGIN
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = format('not an agenda scope: %s (the scopes are label, project and source)', left(v_bad, 200)), ERRCODE = 'invalid_parameter_value';
   END IF;
+  -- White space alone: JS trim()'s white space, named code point by code point and not [:space:], whose set is the
+  -- collation's (review pass 10: ASCII alone under one, U+0085 among it under PGlite's, which trim() keeps), so
+  -- the check refuses exactly what the schema refuses, under any collation.
   SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad FROM jsonb_each(COALESCE(p_scope, '{}')) e(k, v)
-   WHERE jsonb_typeof(v) <> 'string' OR (v #>> '{}') !~ '[^[:space:]\u00a0\u2007\u202f\ufeff]' OR length(v #>> '{}') > 200;
+   WHERE jsonb_typeof(v) <> 'string' OR (v #>> '{}') !~ '[^\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]' OR length(v #>> '{}') > 200;
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = format('an agenda scope is a non-empty string of at most 200 characters: %s', v_bad), ERRCODE = 'invalid_parameter_value';
   END IF;
@@ -394,4 +397,4 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz) IS
-  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder or clock. Migration 123 / SMD-3669.';
+  'What matters now: every ticket whose head has a known, unsettled status type and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), or the tickets p_holder (a key''s {name, agent_id}) holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migration 123 / SMD-3669.';

@@ -18221,9 +18221,21 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
                  await raisedCode(`SELECT agenda('{"project": ""}')`), await raisedCode(`SELECT agenda(NULL, '{"agent_id": null}')`),
                  await raisedCode(`SELECT agenda(NULL, NULL, 20, NULL)`), await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: "\t" })]),
                  await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: String.fromCharCode(0xa0) + String.fromCharCode(0xfeff) })]),
+                 await raisedCode(`SELECT agenda($1::jsonb)`, [JSON.stringify({ project: String.fromCharCode(0x3000) + String.fromCharCode(0x2028) + String.fromCharCode(0x2003) })]),
                  await raisedCode(`SELECT agenda('{"project": "nothing in scope [110]"}', NULL, 20, false, false, false, '{"bogus": 1}')`)];
   assert(before === null && after?.outcome === "ok" && typeof after?.at === "string" && garbled?.outcome === null && typeof garbled?.at === "string" && nul?.outcome === null && typeof nul?.at === "string" && codes.every((c) => c === "22023"),
-    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown, empty or white-space scope (a no-break space and a byte-order mark among it), a holder with no name, a NULL flag and a bad weight with nothing in scope each 22023 (${JSON.stringify(after)}; ${codes})`);
+    `no heartbeat is null, one names its outcome and time, one that is no JSON its time alone, never failing the read; a limit outside 1 to 100, an unknown, empty or white-space scope (a no-break space, a byte-order mark, an ideographic space, a line separator and an em space among it), a holder with no name, a NULL flag and a bad weight with nothing in scope each 22023 (${JSON.stringify(after)}; ${codes})`);
+
+  // The SQL's white space is JS trim()'s, under PGlite's C collation too (review pass 10: [:space:] is the collation's set,
+  // and PGlite's takes U+0085): across the BMP, the code points the function's pattern reads as white space are those trim() strips.
+  const ws = (await db.query<{ ws: number[] }>(String.raw`SELECT array_agg(c ORDER BY c) AS ws
+      FROM generate_series(1, 65535) c,
+           (SELECT substring(pg_get_functiondef('agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamptz)'::regprocedure)
+                             from $re$!~ '(\[\^[^']*\])'$re$) AS pat) p
+     WHERE c NOT BETWEEN 55296 AND 57343 AND chr(c) !~ p.pat`)).rows[0].ws;
+  const trimmed: number[] = [];
+  for (let c = 1; c <= 65535; c++) if ((c < 0xd800 || c > 0xdfff) && String.fromCharCode(c).trim() === "") trimmed.push(c);
+  assert(JSON.stringify(ws) === JSON.stringify(trimmed), `the scope's white space is trim()'s, code point for code point (${ws}; ${trimmed})`);
 
   await reapply(file.slice(0, 4));
   assert(keys(await ag({ project: P })) === keys(freed), "a re-apply is a no-op");
