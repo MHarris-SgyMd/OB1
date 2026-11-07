@@ -2002,6 +2002,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   let linkAnswer = JSON.stringify({ link: "D", via: "", reason: "the two share their own subject" });
   let writerStatus = 200, linkStatus = 200, writerCalls = 0, linkCalls = 0;
   let writerBody: { model?: string; response_format?: { type?: string }; messages?: { content: string }[] } = {}, linkBody: typeof writerBody = {};
+  let writerLocation = "";
   const writer = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -2015,7 +2016,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       }
       writerCalls++;
       writerBody = body;
-      if (writerStatus !== 200) return new Response("busy", { status: writerStatus });
+      // A 3xx points at writerLocation (SMD-2908).
+      if (writerStatus !== 200) return new Response("busy", { status: writerStatus, headers: writerStatus < 400 ? { location: writerLocation } : {} });
       return Response.json({ choices: [{ message: { content: writerAnswer } }] });
     },
   });
@@ -2047,6 +2049,18 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     writerStatus = 503;
     const e = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
+    // A writer that redirects: refused where it lands, the pair's text sent nowhere else (SMD-2908).
+    let farHits = 0;
+    const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farHits++; await req.text(); return Response.json({ choices: [{ message: { content: writerAnswer } }] }); } });
+    try {
+      writerLocation = `http://127.0.0.1:${far.port}/v1/chat/completions`;
+      writerStatus = 307;
+      const r = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number; kind?: string }) => x);
+      assert(r?.status === 307 && r.kind === "http" && /Writer request .* answered 307 redirecting to .*never followed/.test(r.message) && farHits === 0,
+        `a writer's redirect throws as one never followed, and the origin it points at receives nothing (${r?.message}; ${farHits} request(s) there)`);
+    } finally {
+      far.stop(true);
+    }
     writerStatus = 200;
     tierStatus = 500;
     const f = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);

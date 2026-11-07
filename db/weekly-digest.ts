@@ -57,7 +57,7 @@
 
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
-import { providerCall, providerEndpoint, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
@@ -303,7 +303,11 @@ async function synthesize(cfg: EmbedConfig, model: string, userPrompt: string, k
   return text;
 }
 
-async function deliverTelegram(at: ProviderEndpoint, token: string, chatId: string, text: string): Promise<number[]> {
+/**
+ * The digest's text to Telegram, in chunks. Exported for test-local-provider.ts [13]: a redirect is refused, never
+ * followed, and the token in its path is never printed (SMD-2908).
+ */
+export async function deliverTelegram(at: ProviderEndpoint, token: string, chatId: string, text: string): Promise<number[]> {
   const url = `${at.base}/bot${token}/sendMessage`;
   const ids: number[] = [];
   for (const chunk of chunkForTelegram(text)) {
@@ -312,7 +316,13 @@ async function deliverTelegram(at: ProviderEndpoint, token: string, chatId: stri
         method: "POST",
         headers: at.headers,
         body: JSON.stringify({ chat_id: chatId, text: chunk, disable_web_page_preview: true }),
+        // Never followed: the gate judged this base, not where a 3xx points (SMD-2908).
+        redirect: "manual",
       });
+      // The target's host alone: a redirect to the same path elsewhere carries the token in it, in any spelling a
+      // server picks, so no mask of the path holds (review pass 2).
+      const redirected = refuseRedirect("Telegram sendMessage", at.base, r, { hostOnly: true });
+      if (redirected) throw redirected;
       if (!r.ok) {
         const err = new Error(`Telegram sendMessage failed: ${r.status} ${await r.text()}`) as Error & { status?: number };
         err.status = r.status;

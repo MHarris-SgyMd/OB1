@@ -49,6 +49,8 @@ export const TOOLS = [
   { name: "priority_history", scope: "read" },
   { name: "item_history", scope: "read" },
   { name: "list_items", scope: "read" },
+  // Work threads (SMD-3306 PR 7a-2a).
+  { name: "thread", scope: "read" },
   { name: "capture_thought", scope: "capture" },
   // A capture-only key states a priority on a thought it captured (decision 10, migration 116), and 116 refuses it any other.
   { name: "set_priority", scope: "capture" },
