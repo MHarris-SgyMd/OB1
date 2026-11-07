@@ -3090,11 +3090,16 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     `a capture key's write-back: answered its memory's id and thought alone; its user_confirmed without review stored generated and waiting, never an instruction; its thought the capture key's (${JSON.stringify(capAnswer)}; ${JSON.stringify([capStored?.review_status, capStored?.provenance?.status])})`);
   const capImported = await am("writeback", { ...base, workspace_id: "ws-cap", provenance: { default_status: "imported", requires_review: false }, memory_payload: { decisions: ["am_ledger an import by a capture key."] } }, { as: KEYS.capture });
   const capImportedStored = (await am("get_memory", { memory_id: (capImported.body.memories ?? [])[0]?.memory_id ?? NO_ROW }, { as: KEYS.reader })).body.memory as Body | undefined;
-  assert(capImportedStored?.provenance.status === "imported" && capImportedStored.review_status === "pending" && capImportedStored.use_policy.can_use_as_instruction === false,
-    `…an import from a capture key keeps its provenance and waits for review (${JSON.stringify([capImportedStored?.provenance?.status, capImportedStored?.review_status])})`);
-  const tooMany = await am("writeback", { ...base, memory_payload: { decisions: Array.from({ length: 26 }, (_, i) => `am_ledger many ${i}.`), lessons: Array.from({ length: 25 }, (_, i) => `am_ledger lesson ${i}.`) } });
-  assert(tooMany.status === 400 && tooMany.body.code === "TOO_MANY_MEMORIES" && tooMany.body.count === 51 && tooMany.body.limit === 50,
-    `a write-back of more than 50 memories is refused before any capture (${tooMany.status} ${JSON.stringify(tooMany.body)})`);
+  const capAudit = await one<{ p: string | null } | undefined>(sql`SELECT payload->>'provenance_status' AS p FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_written' AND memory_id = ${capAnswer?.memory_id ?? NO_ROW}::uuid`);
+  const capThoughtProvenance = await one<{ p: string | null } | undefined>(sql`SELECT metadata->>'agent_memory_provenance' AS p FROM thoughts WHERE id = ${capAnswer?.thought_id ?? NO_ROW}::uuid`);
+  assert(capImportedStored?.provenance.status === "generated" && capImportedStored.provenance.created_by === "agent" && capImportedStored.review_status === "pending"
+    && capImportedStored.use_policy.can_use_as_instruction === false && capThoughtProvenance?.p === "generated" && capAudit?.p === "generated",
+    `…an import from a capture key is recorded generated too, waiting; a capture key's thought and audit row say generated (${JSON.stringify([capImportedStored?.provenance?.status, capThoughtProvenance?.p, capAudit?.p])})`);
+  const rejectedBefore = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_rejected'`);
+  const tooMany = await am("writeback", { ...base, memory_payload: { decisions: Array.from({ length: 26 }, (_, i) => `am_ledger many ${i}.`), lessons: [...Array.from({ length: 24 }, (_, i) => `am_ledger lesson ${i}.`), `am_ledger key sk-${"b".repeat(24)}`] } });
+  const rejectedAfter = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_agent_memory.audit_events WHERE event_type = 'memory_rejected'`);
+  assert(tooMany.status === 400 && tooMany.body.code === "TOO_MANY_MEMORIES" && tooMany.body.count === 51 && tooMany.body.limit === 50 && rejectedAfter.n === rejectedBefore.n,
+    `a write-back of more than 50 memories is refused before any capture or unsafe check, no audit row (${tooMany.status} ${JSON.stringify(tooMany.body)})`);
   const personal = mems(await am("writeback", { schema_version: WB, workspace_id: "ws-am", runtime: { name: "codex" }, provenance: { default_status: "imported", requires_review: false }, memory_payload: { lessons: ["am_ledger personal note."] } }))[0];
   const otherProject = mems(await am("writeback", { ...base, project_id: "proj-b", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger in project b."] } }))[0];
   const otherWorkspace = mems(await am("writeback", { ...base, workspace_id: "ws-other", provenance: { default_status: "user_confirmed", requires_review: false }, memory_payload: { decisions: ["am_ledger keeps the ledger in Postgres."] } }))[0];
@@ -3401,6 +3406,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(events.join() === "memory_written,memory_confirmed", `the audit: each memory written, each review by its event (${events.join()})`);
 
     // Usage is the trace's own: a second recall's items untouched, a memory the recall did not return not counted.
+    // A second memory holding the token, so both recalls return one besides col whatever else the brain holds.
+    await one_("xmem_cols companion note.");
     const recallX = { schema_version: RC, workspace_id: "ws-x", project_id: "px", query: "what xmem_cols says", scope: { include_unconfirmed: true } };
     const t1 = await rest("POST", "/v1/plugins/agent-memory/recall", recallX, KEYS.writer);
     const t2 = await rest("POST", "/v1/plugins/agent-memory/recall", recallX, KEYS.writer);
@@ -3434,7 +3441,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const Y = { schema_version: WB, workspace_id: "ws-y", project_id: "py", task_id: "ty", runtime: { name: "ry" } };
     const bodyOf = (r: { body: Body }) => (r.body.memories ?? []) as Body[];
     const reviewY = (memory_id: string, f: Body) => am("review_memory", { memory_id, ...f });
-    // A key that can only capture is answered a memory as its write-back made it, never as a reviewer changed it.
+    // A key that can only capture is answered a memory's id and its write-back's thought alone, never a reviewer's change.
     const orig = { ...Y, idempotency_key: "yk", memory_payload: { decisions: ["y_mem orig decision."] } };
     const written = bodyOf(await am("writeback", orig))[0]!;
     await reviewY(written.memory_id, { action: "edit", content: "y_mem reviewer-private correction." });
@@ -3502,7 +3509,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       WHERE t.request_id = ${String(tr.body.request_id)}::uuid AND a.event_type = 'memory_used'`) : { n: -1 };
     assert(m0 !== undefined && JSON.stringify(twice?.body.recorded) === JSON.stringify({ used: 1, ignored: 1 }) && usedRows.n === 1,
       `record_usage marks a memory named three times once, used and then ignored once (${JSON.stringify(twice?.body)}, ${usedRows.n} used rows)`);
-    // Pass 3: a capture key's answer is the stored memory as its write-back made it, never this request's fields.
+    // A capture key resending another key's memory is answered its id and thought alone, never this request's fields.
     const theirs = bodyOf(await am("writeback", { ...Y, project_id: "py-1", memory_payload: { decisions: ["y_mem theirs."] } }))[0]!;
     const asked = bodyOf(await am("writeback", { ...Y, project_id: "py-2", provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
       memory_payload: { decisions: ["y_mem theirs."] } }, { as: KEYS.capture }))[0];
@@ -3577,7 +3584,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     await reviewY(pairFirst[1]?.memory_id, { action: "edit", content: "y_mem pair two, edited." });
     const pairAgain = bodyOf(await am("writeback", pair, { as: KEYS.capture }));
     assert(pairFirst.length === 2 && pairFirst[0].thought_id !== pairFirst[1].thought_id && JSON.stringify(pairAgain) === JSON.stringify(pairFirst),
-      `a capture key's resend of two memories answers each its own write-back, one confirmed and edited since (${JSON.stringify(pairAgain.map((m) => [m.review_status, m.thought_id === pairFirst[pairAgain.indexOf(m)]?.thought_id]))})`);
+      `a capture key's resend of two memories answers each its own write-back, one confirmed and edited since (${JSON.stringify(pairAgain)})`);
     const queueY = ids(await am("review_queue", { workspace_id: "ws-y" }, { as: KEYS.reader }));
     assert(queueY.includes(unconfirmed.memory_id) && !queueY.includes(back.memory_id) && !queueY.includes(rejectedThenRestricted.memory_id) && !queueY.includes(staleThenRestricted.memory_id) && !queueY.includes(disputedThenRestricted.memory_id),
       `review_queue lists a restricted memory no one confirmed, not a confirmed one, nor a rejected one restricted since (${queueY.length})`);
@@ -3598,6 +3605,9 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
+  // Last, so its 50 thoughts (all one vector under the stub) crowd no recall above.
+  const fifty = await am("writeback", { ...base, workspace_id: "ws-fifty", memory_payload: { decisions: Array.from({ length: 30 }, (_, i) => `fifty plain decision ${i}.`), lessons: Array.from({ length: 20 }, (_, i) => `fifty plain lesson ${i}.`) } });
+  assert(fifty.status === 200 && (fifty.body.memories ?? []).length === 50, `a write-back of exactly 50 memories is taken (${fifty.status}, ${(fifty.body.memories ?? []).length})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

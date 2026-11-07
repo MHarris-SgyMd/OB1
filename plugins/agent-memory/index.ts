@@ -385,7 +385,7 @@ export default definePlugin({
     }),
     writeback: operation({
       title: "Write back agent memories",
-      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when your key can write and provenance.default_status is user_confirmed or imported with requires_review false; any other waits for review, usable as evidence. A key that can only capture never confirms one (its user_confirmed is recorded as generated) and is answered each memory's memory_id and thought_id alone. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing. Refused: no memory in the payload (NO_MEMORIES), more than 50 (TOO_MANY_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in.",
+      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when your key can write and provenance.default_status is user_confirmed or imported with requires_review false; any other waits for review, usable as evidence. A key that can only capture never confirms one (its user_confirmed or imported is recorded as generated) and is answered each memory's memory_id and thought_id alone. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing. Refused: no memory in the payload (NO_MEMORIES), more than 50 (TOO_MANY_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in.",
       scope: "capture",
       annotations: ADDS,
       method: "POST",
@@ -406,9 +406,9 @@ export default definePlugin({
         const provider = req.models_used[0]?.provider ?? null;
         const model = req.models_used[0]?.model ?? null;
         // Only a key that can write is a person's (or a runtime's with a person's word): a key that can only capture never
-        // confirms a memory, nor claims a person confirmed it; its user_confirmed is recorded as generated.
+        // confirms a memory, nor claims what a person stands behind; its user_confirmed or imported is recorded as generated.
         const person = ctx.caller.scope === "write";
-        const status = !person && req.provenance.default_status === "user_confirmed" ? "generated" : req.provenance.default_status;
+        const status = !person && ["user_confirmed", "imported"].includes(req.provenance.default_status) ? "generated" : req.provenance.default_status;
         const confirmed = person && ["user_confirmed", "imported"].includes(status) && !req.provenance.requires_review;
         const createdBy = createdByOf(status);
         const staleAfter = req.retention.stale_after_days ? new Date(Date.now() + req.retention.stale_after_days * 86_400_000).toISOString() : null;
@@ -444,7 +444,7 @@ export default definePlugin({
                       ${confirmed}, true, ${!confirmed}, ${confirmed ? "confirmed" : "pending"}, CASE WHEN ${confirmed} THEN now() END, ${staleAfter}::timestamptz,
                       ${key}, ${contentHash},
                       (${json({ source_refs: req.source_refs, models_used: req.models_used, retention: req.retention, writeback_schema_version: req.schema_version,
-                        written: { provenance_status: status, review_status: confirmed ? "confirmed" : "pending", thought_id: thoughtId } })}::text)::jsonb)
+                        written: { thought_id: thoughtId } })}::text)::jsonb)
               ON CONFLICT (workspace_id, md5(idempotency_key)) WHERE idempotency_key IS NOT NULL DO NOTHING
               RETURNING id::text AS id`;
             if (!made) {

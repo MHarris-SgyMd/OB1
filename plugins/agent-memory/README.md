@@ -11,9 +11,9 @@ An agent runtime (OpenClaw, Hermes, Codex, Claude Code, an n8n flow) asks the br
 - **`agent_memory_writeback`** (capture) keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made. Each item is one memory:
   - Its text is captured as a thought through the core, with `source: agent-memory`, the trust the request gives (never above the key's) and six metadata keys naming the workspace, project, task, runtime, kind and provenance (`agent_memory_*`). Your key is named on the thought's audit row.
   - Its provenance, scope, review state and use policy, the models that made it and where it came from are kept in the plugin's own tables.
-  - A memory is confirmed at once, usable as an instruction, only when the key can write and the request says `user_confirmed` or `imported` with `requires_review: false`. Any other waits for review, usable as evidence only. A key that can only capture never confirms one: its `user_confirmed` is recorded as `generated`.
+  - A memory is confirmed at once, usable as an instruction, only when the key can write and the request says `user_confirmed` or `imported` with `requires_review: false`. Any other waits for review, usable as evidence only. A key that can only capture never confirms one: its `user_confirmed` or `imported` is recorded as `generated`. A memory already written is confirmed with `review_memory`: sending its write-back again, even confirmed under a write key, answers it as it stands and writes nothing.
   - It is refused as a whole, with nothing written, when any memory looks like a private key, an API key, a credential, a large code block or a transcript (`UNSAFE_WRITEBACK`, which lists why).
-  - Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing, even after a person edited one. A key that can only capture is answered each memory's `memory_id` and the `thought_id` its write-back captured alone, as the core answers its capture: never the memory, nor a reviewer's change to it.
+  - Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing, even after a person edited one. A key that can only capture is answered only each memory's `memory_id` and the `thought_id` its write-back captured, as the core answers its capture: never the memory, nor a reviewer's change to it.
 - **`agent_memory_recall`** (read) searches the brain by meaning, keeps the hits that are this workspace's memories and in scope, and ranks them by similarity and by what their provenance, use policy, review and confidence add. Under a write key the recall is traced, and its `request_id` is the one to report usage against. Under a read key the plugin stores nothing (the core's query log, when `OB1_QUERY_LOG` is on, logs the search as it logs any).
 - **`agent_memory_record_usage`** (write) marks the memories a traced recall returned as used, or ignored with a reason.
 - **`agent_memory_review_queue`**, **`agent_memory_list_memories`** and **`agent_memory_get_memory`** (read) list what waits for a person's confirmation (pending, or restricted while still unconfirmed, and not rejected, stale, disputed or superseded), list a workspace's memories by status, runtime, kind or task, and show one memory with its sources, models and relations.
@@ -57,7 +57,7 @@ The requests keep the old server's versions, `openbrain.agent_memory.*.v1` and O
 ## Prerequisites
 
 - A working brain stack (`deploy/compose.yaml`), as [SETUP.md](../../SETUP.md) brings it up.
-- A key for each runtime: `bun keygen.ts --name <runtime> --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env`. Add it before step 2, which recreates the servers that read it. A capture key can write back alone; a read key can recall and list alone. Once the stack is up (step 2), give each runtime's key its kind, so its writes are recorded as an agent's and the trust a write-back declares is weighed against it: from `deploy/`, `docker compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('<runtime>', 'agent');"`.
+- A key for each runtime: `bun keygen.ts --name <runtime> --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env`. Add it before step 2, which recreates the servers that read it. A capture key can write back alone, but its memories are never confirmed (its `user_confirmed` or `imported` is recorded as `generated`) and it is answered ids alone; a read key can recall and list alone. Once the stack is up (step 2), give each runtime's key its kind, so its writes are recorded as an agent's and the trust a write-back declares is weighed against it: from `deploy/`, `docker compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('<runtime>', 'agent');"`.
 
 ## Turn it on
 
@@ -144,8 +144,8 @@ COMMIT;
 
 ## Troubleshooting
 
-- **`400 TOO_MANY_MEMORIES`.** The write-back held more than 50 memories, each a capture with its model calls in one request. Send it in parts.
 - **`400 NO_MEMORIES`.** `memory_payload` held no memory: every list was empty.
+- **`400 TOO_MANY_MEMORIES`.** The write-back held more than 50 memories, each a capture with its model calls in one request. Send it in parts.
 - **`400 REFUSED_INPUT`.** The body was not the contract's: `issues` names each field. The versions are four: `openbrain.agent_memory.recall.v1` and `openbrain.openclaw.recall.v1` for a recall, `openbrain.agent_memory.writeback.v1` and `openbrain.openclaw.writeback.v1` for a write-back; a field past its bound is named too.
 - **`400 NOT_NARROWER`.** A `restrict_scope` named a visibility wider than the memory's own (`current` says it), narrowest first: personal, channel, project, workspace, organization. Restricting only narrows; no review action widens a memory.
 - **`403 FORBIDDEN`.** The key's scope does not reach the operation: recall and the lists read (a capture key cannot), and usage and review write (a read or capture key cannot).
