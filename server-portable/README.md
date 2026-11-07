@@ -442,10 +442,14 @@ and no read. With either, the server asks the hybrid (or, under `prefer_current`
 window is, and reads their effective priority once for the whole window
 (`effective_priority`, migration 122, SMD-3667):
 
-- **A match's priority** is the highest known one among its own (a ticket's row
-  reads as its ticket) and the tickets its metadata files it under. A ticket its
-  text only mentions doesn't count: inheritance through mentions waits for
-  SMD-3662's numbers (`docs/priority.md`, "Not decided here").
+- **A match's priority** is its own effective priority, as `docs/priority.md`
+  decision 5 composes it. A ticket's row reads as its ticket. Any other thought
+  takes its own stated level, else one inherited from the ticket it is about
+  (its metadata `ticket` or `issue`, else its standing subject) at one level less
+  a hop, counted only above unknown's 2. A finished ticket passes nothing down.
+  So a note filed under an Urgent ticket reads High, and one under a High ticket
+  stays unknown. A ticket its text only mentions doesn't count: inheritance
+  through mentions waits for SMD-3662's numbers ("Not decided here").
 - **`priority_weight`** orders the window by (1 − weight) × relevance + weight ×
   priority. Relevance is a match's score over the window's top score. Priority is
   its effective priority (a level, unknown counted as 2, plus urgency and what it

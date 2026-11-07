@@ -6959,32 +6959,38 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
     `the floor keeps a known priority at or above it alone, in the window's order at weight 0; an unknown, ordered as 2, never passes, not even at 0 (${order(0, 3, 4, mixed)}, ${order(0, 1, 4, mixed)}, ${order(0, 0, 4, mixed)})`);
   assert(order(1, null, 2) === "da" && priorityWindow(10) === 40 && priorityWindow(30) === 100,
     `the top limit after the order, of a window of min(100, 4 × limit) (${order(1, null, 2)}, ${priorityWindow(10)}, ${priorityWindow(30)})`);
-  // prioritiesOf: one read, of each row's own item and the tickets it is filed under; a mentioned ticket not read.
+  // The blend divides relevance by the window's top score: the hybrid's fusion scores are about 0.016 to 0.03, and
+  // undivided they would let priority swamp meaning at any weight (review pass 1: a mutant dropping the division
+  // passed every case above, whose top score is 1). At 0.1, divided, a's relevance 1 holds over d's 0.67; raw, d's
+  // priority would put it first.
+  const fusion = [{ id: "a", score: 0.03 }, { id: "b", score: 0.028 }, { id: "c", score: 0.025 }, { id: "d", score: 0.02 }];
+  assert(rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4).map((r) => r.id).join("") === "dabc",
+    `on fusion-sized scores relevance is over the window's top: meaning holds at 0.1, priority leads at 1 (${rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("")})`);
+  // prioritiesOf: one read, each row asked as its own thought; 122 decides inheritance (review pass 1).
   const asked: { kind: string; key: string }[][] = [];
-  const ep = (kind: string, key: string, effective: number, level: number | null, inherited = false) =>
-    ({ item: { kind, key }, effective, level, inheritedFrom: inherited ? { kind: "ticket", key: "X-9", level: 4, hops: 1 } : null });
-  const answers: Record<string, ReturnType<typeof ep>> = {
-    "thought:t1": ep("thought", "t1", 2, null), "ticket:PRI-1": ep("ticket", "PRI-1", 3, 3),
-    "thought:t2": ep("thought", "t2", 2, null), "thought:t3": ep("thought", "t3", 4, 4),
-    "thought:t4": ep("thought", "t4", 3, null, true), "ticket:PRI-2": ep("ticket", "PRI-2", 2, null),
-  };
-  const store = { effectivePriority: async (items: { kind: string; key: string }[]) => { asked.push(items); return items.map((i) => answers[`${i.kind}:${i.key}`]).filter(Boolean); } };
-  const got = await prioritiesOf(store as never, [
-    { id: "t1", metadata: { ticket: "pri-1" } }, { id: "t2", metadata: { topics: ["PRI-1 mentioned"] } },
-    { id: "t3", metadata: { issue: "PRI-1" } }, { id: "t4", metadata: { ticket: "PRI-2" } },
-  ]);
-  assert(asked.length === 1 && JSON.stringify(asked[0].map((i) => `${i.kind}:${i.key}`)) === JSON.stringify(["thought:t1", "ticket:PRI-1", "thought:t2", "thought:t3", "thought:t4", "ticket:PRI-2"]),
-    `one read for the page: each row's thought and its filed tickets, a ticket asked once (${JSON.stringify(asked.map((a) => a.length))})`);
-  assert(JSON.stringify(got) === JSON.stringify({ t1: { effective: 3, known: true }, t2: { effective: 2, known: false }, t3: { effective: 4, known: true }, t4: { effective: 3, known: true } }),
-    `a note filed under a High ticket reads its 3; a mention reads nothing (unknown, 2); the highest known wins (a ticket row's own 4 over its ticket's 3); an inherited level is known, an unknown filed ticket is not (${JSON.stringify(got)})`);
-  const none = await prioritiesOf({ effectivePriority: async () => [] } as never, [{ id: "z", metadata: null }]);
+  const ep = (key: string, effective: number, level: number | null, inherited = false) =>
+    ({ item: { kind: "thought", key }, effective, level, inheritedFrom: inherited ? { kind: "ticket", key: "X-9", level: 4, hops: 1 } : null });
+  const answers: Record<string, ReturnType<typeof ep>> = { t1: ep("t1", 3, null, true), t2: ep("t2", 2, null), t3: ep("t3", 4, 4), t4: ep("t4", 0, 0) };
+  const store = { effectivePriority: async (items: { kind: string; key: string }[]) => { asked.push(items); return items.map((i) => answers[i.key]).filter(Boolean); } };
+  const got = await prioritiesOf(store as never, [{ id: "t1" }, { id: "t2" }, { id: "t3" }, { id: "t4" }, { id: "t1" }]);
+  assert(asked.length === 1 && JSON.stringify(asked[0]) === JSON.stringify(["t1", "t2", "t3", "t4"].map((key) => ({ kind: "thought", key }))),
+    `one read for the page, each row asked once as its own thought, no ticket key of its metadata sent (${JSON.stringify(asked)})`);
+  assert(JSON.stringify(got) === JSON.stringify({ t1: { effective: 3, known: true }, t2: { effective: 2, known: false }, t3: { effective: 4, known: true }, t4: { effective: 0, known: true } }),
+    `122's answer as it gives it: an inherited level known, an unknown not, a stated level known, a stated None known at 0 (${JSON.stringify(got)})`);
+  const none = await prioritiesOf({ effectivePriority: async () => [] } as never, [{ id: "z" }]);
   assert(JSON.stringify(none) === JSON.stringify({ z: { effective: 0, known: false } }), `a row the read answered nothing for is unknown, at 0 (${JSON.stringify(none)})`);
+  // prefer_current's note after a priority re-rank: what the demotion did, the order left to the priority note.
+  const { currentNote } = await import("./render.ts");
+  const win = { rows: 40, known: 12, demoted: 7, syncedAt: null, exact: false };
+  const re = currentNote([{ window: win, demoted: ["completed"] }, { window: win, demoted: [] }], true);
+  assert(re === "Current first (prefer_current): 7 of the top 40 matches are settled, superseded or about finished tickets, their score ×0.25 before the priority ranking below orders them; 12 carry a lifecycle." && !/holding the query's literal|are demoted ones/.test(re ?? ""),
+    `re-ranked, the current-first note says what the demotion did and not where the rows sit (${re})`);
   // The header note.
   const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6 });
   const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5 });
   const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0 });
   assert(priorityNote(null) === null && priorityNote(undefined) === null
-      && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × effective priority, a match's priority the highest of its own and its filed tickets'; 6 of them carry a known priority."
+      && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × each one's own effective priority (a ticket's row reads as its ticket); 6 of them carry a known priority."
       && floored === "Read the top 40 matches for their priority; 5 of them carry a known priority; kept 2 at high (3) or above (min_priority, a known priority alone). A match past the top 40 was not read — raise limit to read further."
       && capped!.endsWith("kept 0 at urgent (4) or above (min_priority, a known priority alone). A match past the top 100 was not read — the window is capped at 100."),
     `the note: the blend and the known count; a floor's level and what it kept; a full window says a match past it was not read, and whether a larger limit reads further (${ranked} | ${floored} | ${capped})`);

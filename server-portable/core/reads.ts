@@ -485,30 +485,27 @@ export type PriorityRanking = { weight: number; min: number | null; window: numb
 /** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a stated or inherited level). */
 export type MatchPriority = { effective: number; known: boolean };
 
-/** The tickets a row's metadata files it under (a ticket row's `issue`, a note's `ticket`): claimKeysOf's filed keys. */
-const filedTickets = (metadata: Record<string, unknown> | null | undefined): string[] =>
-  [...new Set([filedUnder(metadata?.issue), filedUnder(metadata?.ticket)].filter((k): k is string => k !== null))];
-
 /**
- * Each row's priority (SMD-3668), from one effective_priority read (122) for the whole window: of the row's own item
- * (a thought; a ticket's row reads as its ticket) and the tickets its metadata files it under, the highest effective
- * among those whose level is known — stated, or inherited from what it serves; with none known, the row's own, whose
- * unknown level counts as 122's `unknown` weight. A ticket its text only mentions is not read: inheritance through
- * mentions waits for SMD-3662's numbers (docs/priority.md, "Not decided here").
+ * Each row's priority (SMD-3668): its own effective priority, from one effective_priority read (122) for the whole
+ * window, the thoughts asked by id. 122 decides it as docs/priority.md decision 5 says (review pass 1: an earlier
+ * reading took the highest of a thought's and its filed tickets', against three of the ADR's rules):
+ * - a ticket's own row reads as its ticket;
+ * - any other thought takes its own stated level, else one inherited from the ticket it is about (metadata ticket or
+ *   issue, else its standing subject) at one level less a hop, counted only above unknown's 2, and nothing from a
+ *   settled ticket;
+ * - a ticket its text only mentions is not read: inheritance through mentions waits for SMD-3662's numbers ("Not
+ *   decided here").
+ * Known is a stated or a counted inherited level; otherwise the row's unknown, ordered as 122's `unknown` weight.
  */
-export async function prioritiesOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly { id: string; metadata?: Record<string, unknown> | null }[]): Promise<Record<string, MatchPriority>> {
-  const itemsOf = (r: (typeof rows)[number]) => [{ kind: "thought", key: r.id }, ...filedTickets(r.metadata).map((k) => ({ kind: "ticket", key: k }))];
-  const asked = new Map<string, { kind: string; key: string }>();
-  for (const r of rows) for (const i of itemsOf(r)) asked.set(`${i.kind}:${i.key}`, i);
-  const read = await store.effectivePriority([...asked.values()]);
-  const by = new Map(read.map((p) => [`${p.item.kind}:${p.item.key}`, p]));
-  // 122 answers a ticket key in its normal form; the filed key is already upper-cased (filedUnder), as 115's is.
+export async function prioritiesOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly { id: string }[]): Promise<Record<string, MatchPriority>> {
+  const ids = [...new Set(rows.map((r) => r.id))];
+  // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are.
+  const read = await store.effectivePriority(ids.map((key) => ({ kind: "thought", key })));
+  const by = new Map(read.map((p) => [p.item.key, p]));
   const out: Record<string, MatchPriority> = {};
-  for (const r of rows) {
-    const found = itemsOf(r).map((i) => by.get(`${i.kind}:${i.key}`)).filter((p) => p !== undefined);
-    const known = found.filter((p) => p.level !== null || p.inheritedFrom !== null);
-    const best = known.length ? known.reduce((a, b) => (b.effective > a.effective ? b : a)) : found[0];
-    out[r.id] = best ? { effective: best.effective, known: known.length > 0 } : { effective: 0, known: false };
+  for (const id of ids) {
+    const p = by.get(id);
+    out[id] = p ? { effective: p.effective, known: p.level !== null || p.inheritedFrom !== null } : { effective: 0, known: false };
   }
   return out;
 }
