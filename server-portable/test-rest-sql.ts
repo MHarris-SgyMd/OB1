@@ -1895,8 +1895,9 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   // Action items that are not an array — JSON null, as board-sync wrote on ten of stable's rows, a string, an object,
   // a number — are passed over, and never fail the query (SMD-4141: `jsonb_typeof(x) = 'array' AND
   // jsonb_array_length(x) > 0` handed the length a scalar, and the dry run died before it counted anything).
+  const notLists: string[] = [];
   for (const [i, shape] of ([null, "water the ferns", { first: "water the ferns" }, 7] as unknown[]).entries())
-    await raw(`rho backfill: a ticket whose action items are not a list (${i})`, shape);
+    notLists.push(await raw(`rho backfill: a ticket whose action items are not a list (${i})`, shape));
   const meta = async () => JSON.stringify(await sql`SELECT id, metadata, updated_at::text AS u FROM thoughts WHERE id IN (${b1}::uuid, ${b2}::uuid) ORDER BY id`);
   const itemCount = async () => Number((await sql`SELECT count(*)::int AS n FROM open_items`)[0].n);
   const before = await meta(), itemsBefore = await itemCount();
@@ -1911,6 +1912,9 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   const b1Items = await listed(b1), b2Items = await listed(b2);
   const kind = ((await sql`SELECT kind FROM ob1_agents WHERE label = 'backfill-open-items'`)[0] as { kind?: string } | undefined)?.kind;
   const b3Items = await listed(b3);
+  // The four stand as written — a null key kept, not dropped, or the case would test nothing — and open no item.
+  const notListTypes = (await sql`SELECT jsonb_typeof(metadata->'action_items') AS t FROM thoughts WHERE id = ANY(${sql.array(notLists, "TEXT")}::uuid[]) ORDER BY content`).map((r: { t: string }) => r.t);
+  const notListItems = (await Promise.all(notLists.map((id) => listed(id)))).flat().length;
   const second = await run();
   // A key the registry knows with no kind is the operator's to classify: the run stops before writing, its dry run too
   // (review pass 2: its items stood with no trust for good, the thoughts passed over once classified).
@@ -1925,8 +1929,9 @@ console.log("\n[15] The sources of open items (SMD-3665 PR 3a): a capture's extr
   assert(real.code === 0 && /opened 2,/.test(real.out) && b1Items.length === 1 && b1Items[0].text === "water the ferns" && b1Items[0].status === "proposed" && b1Items[0].openedBy.name === "backfill-open-items"
       && b1Items[0].openedBy.trust === "agent" && b2Items.length === 1 && kind === "agent" && (await meta()) === before
       && b3Own.status === 200 && b3Items.length === 1 && b3Items[0].text === "fold the laundry"
+      && JSON.stringify(notListTypes) === JSON.stringify(["null", "string", "object", "number"]) && notListItems === 0
       && second.code === 0 && /^0 thoughts with no item yet hold 0 action items to open; 0 past 1000 characters/m.test(second.out) && /opened 0, 0 already items/.test(second.out),
-    `the backfill opens the two as proposed from their thoughts, its key classified an agent, no thought's metadata or updated_at moved, the thought with an item passed over; a second run takes nothing (${real.out.trim().replace(/\n/g, " | ")} ${real.err.trim()} | ${b3Items.map((i) => i.text)} | ${second.out.trim().replace(/\n/g, " | ")})`);
+    `the backfill opens the two as proposed from their thoughts, its key classified an agent, no thought's metadata or updated_at moved, the thought with an item passed over, the four whose action items are not a list (null, a string, an object, a number) passed over; a second run takes nothing (${real.out.trim().replace(/\n/g, " | ")} ${real.err.trim()} | ${b3Items.map((i) => i.text)} | ${notListTypes} ${notListItems} | ${second.out.trim().replace(/\n/g, " | ")})`);
   assert(unkinded.code === 1 && /rho-unkinded: the registry knows this key with no kind/.test(unkinded.err) && unkindedKind === null && b4Items.length === 0
       && unkindedDry.code === 1 && /the registry knows this key with no kind/.test(unkindedDry.err) && !/dry run: nothing written/.test(unkindedDry.out),
     `a key the registry knows with no kind is left unclassified and stops the run before it writes, its dry run too (${unkinded.code} ${unkinded.err.trim()} | ${unkindedKind} | ${b4Items.length} | ${unkindedDry.code} ${unkindedDry.out.trim().replace(/\n/g, " | ")})`);
