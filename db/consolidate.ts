@@ -93,7 +93,11 @@
  *   - the model missing;
  *   - a pair's timeout after which a one-token probe gets no answer either.
  * In each case the thought goes back to the pool unrecorded and the follower
- * probes the judge model until it answers. A thought that fails the same way
+ * probes the judge model until it answers (worker-bootstrap.ts's
+ * waitOutProvider, SMD-2636 PR 2): an outage back soon after the last one's
+ * answer, nothing got past the provider since, carries the probe's schedule
+ * on; a probe the provider refuses ends the follower, exit 2; an answer polls
+ * again at once. A thought that fails the same way
  * right after a probe answered is recorded failed — unless every error of its
  * streak was the provider holding calls back (a 429, a 503, the model not
  * served), which makes no suspect (SMD-3311). A follower probes once
@@ -726,8 +730,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /**
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps: the sleep
    * scheduler's, which also sets extraction to the newer work while the judge waits (SMD-3008), or this follower's own
-   * (SMD-2905). The schedule carries on waitOutProvider's rules, counting pairs answered and thoughts recorded failed
-   * (a thought with no candidate finishes without a call); an answer polls again at once; a refusal ends the
+   * (SMD-2905). The schedule carries on waitOutProvider's rules, counting thoughts finished having asked the judge and
+   * thoughts recorded failed (a thought put back asks its pairs again; one with no candidate finishes without a call);
+   * an answer polls again at once; a refusal ends the
    * follower, exit 2, its remedy naming the tier when the tier's probe was refused.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
@@ -736,8 +741,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       calls: `${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""}`,
       outage,
       probe: (w) => probe(undefined, w),
-      // Pairs answered (a malformed answer among them), not thoughts: one that has no candidate finishes without a call (review pass 1).
-      settled: () => totals.pairs + failed,
+      // Thoughts finished having asked the judge, and thoughts recorded failed: not pairs, which a thought put back asks
+      // again from its first (review pass 5), nor a thought with no candidate, finished without a call (review pass 1).
+      settled: () => doneAsked + failed,
       pollS: FOLLOW,
       pausesBefore: true,
       wake,
@@ -1536,6 +1542,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let gate: AbortSignal = onStop.signal;
   let done = 0;
   let failed = 0;
+  /** Of `done`, the thoughts that asked the judge at least once: the outage wait's count, with `failed` (SMD-2636 PR 2, review passes 1 and 5). */
+  let doneAsked = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
   /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
@@ -1587,7 +1595,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** `metadata_hash`, `md5(metadata::text)`, is read for the thought a worker claims (claimAfterWait), not for an older side. */
   type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean; metadata_hash?: string | null };
   type Candidate = { older_id: string; similarity: number; shared_entities: number };
-  type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }
+  /** `called`: the thought's pairs put at least one question to the judge that it answered (the outage wait's count, SMD-2636 PR 2). */
+  type Outcome = { outcome: "succeeded"; called?: true } | { outcome: "failed"; error: string } | { outcome: "vanished" }
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
     | { outcome: "abandoned" }
     /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
@@ -1663,6 +1672,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pair, the first pair of a retry included (review pass 1).
    */
   async function processRow(row: Row, workerId: string, asked: { at: number }): Promise<Outcome> {
+    /** Pairs of this thought the judge answered, this claim: whether its finish got past the provider. */
+    let answered = 0;
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1807,6 +1818,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       llmMs += Date.now() - t0;
       if (hardStopped) return { outcome: "abandoned" };
       totals.pairs++;
+      answered++;
       if (j.malformed) {
         totals.malformed++;
         problems.push(`pair with ${c.older_id}: ${j.unknownVerdict !== undefined ? `the model answered the verdict "${j.unknownVerdict}", not one of prompt ${CONSOLIDATE_PROMPT_VERSION}'s five (${VERDICTS.join(", ")}) — a model keeping to an older prompt's words` : "the model's answer was not JSON of the expected shape"}${staleRow ? " (its stale proposal stands)" : ""}`);
@@ -2006,7 +2018,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (await settleStale(s, `no longer a candidate pair — ${why}`, s.older_fingerprint, row.fingerprint, "not-a-candidate", why)) staleMet.settledOut.add(s.id);
     }
     if (problems.length) return { outcome: "failed", error: `${problems.length} of ${candidates.length} pair(s) not judged: ${problems.join("; ").slice(0, 400)}` };
-    return { outcome: "succeeded" };
+    return answered > 0 ? { outcome: "succeeded", called: true } : { outcome: "succeeded" };
   }
 
   // Written inside the worker closures below, which control-flow analysis does
@@ -2335,6 +2347,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             err(`  ${b.thought_id}: ${outcome.error}`);
           } else {
             done++;
+            if ("called" in outcome && outcome.called) doneAsked++;
           }
           outage.settled(b.thought_id);
           progress();

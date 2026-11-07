@@ -4218,6 +4218,8 @@ if (want("9f")) {
   /** Every row's embedding answers rowsStatus while the probe's passes, as a tokens-per-minute limit the probe's few tokens slip under. */
   let rowsLimited = false;
   let rowsStatus = 429;
+  /** While set, every probe hangs (SMD-2636 PR 2, review pass 5). */
+  let embedProbeHangs = false;
   /** A hemlock note answers 500 every time; each row's call is held slowMs; the probe's calls are counted. */
   let poison = false;
   let slowMs = 0;
@@ -4235,6 +4237,8 @@ if (want("9f")) {
       const input = String(((await req.json()) as { input?: string }).input ?? "");
       const probe = input === PROBE;
       if (probe) probeCalls++;
+      // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 5).
+      if (probe && embedProbeHangs) return neverAnswers();
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
       if (modelGone404) return Response.json({ error: { message: `model "stub-embed" not found, try pulling it first` } }, { status: 404 });
@@ -4494,6 +4498,32 @@ if (want("9f")) {
     assert(carriedLines.length >= 2 && carriedLines.every((l) => l.endsWith(" (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)")),
       `…each carried outage's line in re-embed's own words, no pauses (${carriedLines.length}; ${carriedLines[0]?.slice(-130)})`);
     await sql`DELETE FROM thoughts WHERE id = ${throttledThought}::uuid`;
+
+    // A stop while the wait's probe hangs ends re-embed's follower at once, as extract's and consolidate's do (SMD-2636
+    // PR 2, review pass 5, mutant: the probe given a signal of its own waited out the embedder's timeout).
+    const hungFollower = liveFollower();
+    await hungFollower.idle();
+    const hungProbesBefore = probeCalls;
+    let hungThought = "";
+    let hungExit = "";
+    let hungStopMs = -1;
+    try {
+      rowsLimited = true;
+      embedProbeHangs = true;
+      hungThought = await newThought("a thought whose outage's probe hangs");
+      await pollUntil(async () => probeCalls > hungProbesBefore, 15_000);
+      await Bun.sleep(300);
+      const stopAt = Date.now();
+      hungExit = String(await hungFollower.stop());
+      hungStopMs = Date.now() - stopAt;
+    } finally {
+      rowsLimited = false;
+      embedProbeHangs = false;
+    }
+    const hungWaited = hungFollower.lines.some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
+    assert(hungWaited && hungExit === "exit 0" && hungStopMs >= 0 && hungStopMs < 3_000,
+      `a stop while the wait's probe hangs ends re-embed's follower at once (SMD-2636 PR 2, review pass 5; waited ${hungWaited}, ${hungExit} ${hungStopMs} ms after the stop; ${hungFollower.lines.filter((l) => /not answering|answers|stopp/.test(l)).join(" | ").slice(0, 300)})`);
+    if (hungThought) await sql`DELETE FROM thoughts WHERE id = ${hungThought}::uuid`;
 
     // The write's database errors are no thought's (review pass 3: each was recorded as its failure). A trigger on thoughts raises them for a marker.
     await sql.unsafe(`CREATE FUNCTION zz_reembed_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -15141,6 +15171,9 @@ if (want("16")) {
   const judgeDownPrompts: string[] = [];
   /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
   let judgeProbeHangs = false;
+  /** While set, the pair holding both words answers 429 (SMD-2636 PR 2, review pass 5); every pair asked meanwhile, kept. */
+  let tideLimited: string[] | null = null;
+  const tideSeen: string[] = [];
   /** While above zero, the next judge calls answer a 400 whose words say "timed out" (SMD-3311 review pass 3). */
   let judge400TimedOut = 0;
   /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
@@ -15193,6 +15226,11 @@ if (want("16")) {
       if (judge429 > 0) {
         judge429--;
         return new Response(JSON.stringify({ error: { message: "too many requests" } }), { status: 429 });
+      }
+      // A pair whose two thoughts hold both words is limited, every time (SMD-2636 PR 2, review pass 5).
+      if (tideLimited) {
+        tideSeen.push(`${a}\n${b}`);
+        if (tideLimited.every((w) => a.includes(w) || b.includes(w))) return new Response(JSON.stringify({ error: { message: "too many tokens per minute" } }), { status: 429 });
       }
       if (judgeLimitConcurrent) {
         if (judgeCallsInFlight > 0) return new Response(JSON.stringify({ error: { message: "too many concurrent requests" } }), { status: 429 });
@@ -16766,6 +16804,51 @@ if (want("16")) {
     assert(waited && code === 0 && stoppedInMs >= 0 && stoppedInMs < 3_000,
            `a stop while the wait's probe hangs ends the consolidate follower at once, not at the probe's 30 s timeout (SMD-2636 PR 2, review pass 4; waited ${waited}, exit ${code} ${stoppedInMs} ms after the stop)`);
     for (const id of hungSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 2, review pass 5: consolidate counts thoughts finished having asked the judge, not pairs. A thought put
+  // back asks its pairs again from its first, so under a limit its first pair passes each cycle and its second never
+  // does: the second outage carries the first's schedule on, where counting pairs started it over every time.
+  // Stopped at 60 s if it runs on.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 60_000);
+    const tideSeeds: string[] = [];
+    let twice = false;
+    let running: Promise<number> | null = null;
+    try {
+      const startJudgeProbes = judgeProbes;
+      running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      // The two neighbours first, judged and done, so neither finishes between the newest's outages.
+      tideSeeds.push(await seed("The tide table names the first neighbour.", 74, 3, ["tide-table"]));
+      const second = await seed("The tide table names the second neighbour.", 74, 2, ["tide-table"]);
+      tideSeeds.push(second);
+      // A little further from the newest than the first, so the newest asks the first pair first.
+      const near = new Array(EMBEDDING_DIM).fill(0);
+      near[74] = 0.95;
+      near[75] = Math.sqrt(1 - 0.95 * 0.95);
+      await sql`UPDATE thoughts SET embedding = ${`[${near.join(",")}]`}::vector WHERE id = ${second}::uuid`;
+      await pollUntil(async () => (await Promise.all(tideSeeds.map(async (id) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status))).every((st) => st === "succeeded"), 20_000);
+      tideLimited = ["newest reading", "second neighbour"];
+      tideSeeds.push(await seed("The tide table names the newest reading.", 74, 0, ["tide-table"]));
+      twice = await pollUntil(async () => lines.filter((l) => /^ {2}the provider is not answering \(/.test(l)).length >= 2, 30_000);
+    } finally {
+      tideLimited = null;
+      ac.abort();
+      if (running) await running;
+      clearTimeout(backstop);
+      restoreOutage();
+      restorePauses();
+    }
+    const tideWaits = lines.filter((l) => /^ {2}the provider is not answering \(/.test(l));
+    const firstAsked = tideSeen.filter((p) => p.includes("newest reading") && p.includes("first neighbour")).length;
+    assert(twice && firstAsked >= 2 && !/ \(back within /.test(tideWaits[0] ?? "") && (tideWaits[1] ?? "").endsWith(" (back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on)"),
+           `a thought whose first pair is judged each cycle and its second never carries the schedule on: pairs asked again are no work got past (SMD-2636 PR 2, review pass 5; first pair asked ${firstAsked} times; ${tideWaits.map((l) => l.slice(-110)).join(" | ")})`);
+    for (const id of tideSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —

@@ -737,6 +737,15 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
         return waitOutProvider({ ...base, settled: () => 0, outage: c, probe: scripted([{ state: "up" }], "waitOutProvider's cap") });
       });
       ok(/for one token every 5 min \(back within a minute and a poll of its last answer, its pauses aside/.test(lines[0] ?? ""), `waitOutProvider: a carry at the cap says every 5 min (${lines[0]})`);
+      // A step short of it, still the doubling (review pass 5, mutant: the wording a step early).
+      const d = new ProviderOutage(() => clock);
+      lines.length = 0;
+      await onTheClock(async () => {
+        d.end(5, 0);
+        d.begin("429 limited");
+        return waitOutProvider({ ...base, settled: () => 0, outage: d, probe: scripted([{ state: "up" }], "waitOutProvider's step short of the cap") });
+      });
+      ok(/for one token after 160 s and then twice as long each time, up to 5 min \(back within/.test(lines[0] ?? ""), `waitOutProvider: a carry a step short of the cap says its 160 s (${lines[0]})`);
     }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.

@@ -932,8 +932,10 @@ const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answe
  *   one's answer — and the pauses, for a follower that spends them before an outage begins (`pausesBefore`: extract's,
  *   consolidate's; TRANSIENT_PAUSES_MS read as it runs) — `settled()` unmoved since, nothing got past the provider,
  *   goes on from the last one's step, so a limit the probe passes and no work gets past waits longer each time, to the
- *   cap. Measured from the wait's start, after the pass: a call another worker had in flight, which the outage does
- *   not abort, can push it past the window, and such a call usually answers and moves `settled()` anyway.
+ *   cap. The window runs from the last answer to this wait's start, after the pass: a call another worker had in
+ *   flight, which the outage does not abort, or a wait at the admit gate can take it past, and such a call usually
+ *   answers and moves `settled()` anyway; an outage that begins with a timeout comes the call's timeout and the
+ *   probe's after the last answer at the least, past the window unless --timeout is short.
  * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
  *   again at once.
  * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404 (probeChat), the tier's any

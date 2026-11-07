@@ -111,8 +111,11 @@
  *   - the model missing, as while Ollama pulls it;
  *   - a timeout after which a one-token probe gets no answer either.
  * In each case the thought in hand goes back to the pool, not failed, the
- * other workers stop after theirs, and the follower probes the model on the
- * same schedule until it answers. A thought that draws the error again right
+ * other workers stop after theirs, and the follower probes the model until it
+ * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
+ * back soon after the last one's answer, nothing got past the provider since,
+ * carries the probe's schedule on; a probe the provider refuses ends the
+ * follower, exit 2; an answer polls again at once. A thought that draws the error again right
  * after a probe answered is its own fault, and is recorded failed — unless
  * every error of its streak was the provider holding calls back (a 429, a 503,
  * the model not served), which makes no suspect (SMD-3311). Before it
