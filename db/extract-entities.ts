@@ -197,7 +197,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, probeAtStart, probeChat, probeRefusal, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -373,6 +373,14 @@ export const STALL_FLOOR_MS = 60_000;
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
 const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+
+/**
+ * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming a field every extraction call sends
+ * and the probe does not — the answer budget (max_tokens, max_completion_tokens: "completion tokens"), response_format,
+ * reasoning_effort, the penalised retry's frequency_penalty, the fields the closing remedy names. The probe would answer
+ * it and read it the thought's, failing the pool one row at a time; classifyError's maxTokensFatal, widened.
+ */
+const extractRequestFault = (e: unknown): boolean => requestShapeRefused(e, /max_tokens|max_completion_tokens|completion tokens|response_format|reasoning_effort|frequency_penalty/i);
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; limit: number; follow: number };
@@ -1641,7 +1649,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             inCall.begin(workerId);
             const asked = { at: readAt };
-            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+            /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
             let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -1718,24 +1726,32 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                // Under --follow through followClassify's split (followerFault, SMD-3311): a 408 is
-                // the provider's, paused for, not the request's; a 429, a 503 or the model not served
-                // makes no suspect of the thought in hand.
-                const { kind, suspect } = FOLLOW ? followerFault(e, { maxTokensFatal: true }) : { kind: classifyError(e, { maxTokensFatal: true }), suspect: true };
-                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
-                // Under --follow, the provider's state rather than the thought's
-                // or the request's (SMD-2599): a transient error past the pauses,
-                // the model missing (Ollama pulling it; the start probe saw it
-                // answer), or a timeout the probe cannot get an answer past
-                // either — given the call's whole timeout, as a model busy with
-                // another worker's call may need it, and ended by a stop or
-                // another worker's outage, which it joins unprobed (review pass 1).
                 const escalationGone = !!WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel);
-                const down = FOLLOW && (
-                  (kind === "transient" && attempt >= TRANSIENT_PAUSES_MS.length) ||
-                  (kind === "fatal" && modelMissing(e) && (!escalationGone || escalationSeen)) ||
-                  (kind === "thought" && timedOut(e) && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))));
+                // Under --follow, what to do is worker-bootstrap.ts's `fault` (SMD-2636 PR 3a): the provider's state
+                // — paused for, then an outage; the model missing (Ollama pulling it; the start probe saw it answer),
+                // an outage at once, but the escalation model the start could not confirm the request's — or the
+                // probe's to decide, or the thought's, or the request's shape. A run without --follow keeps
+                // classifyError's rules.
+                let act: FollowerFault["act"];
+                if (FOLLOW) {
+                  const read = fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") });
+                  act = read.act;
+                  streakSuspect ||= read.suspect;
+                } else {
+                  const kind = classifyError(e, { maxTokensFatal: true });
+                  act = kind === "transient" ? "pause" : kind;
+                  streakSuspect = true;
+                }
+                // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
+                // timeout, as a model busy with another worker's call may need it: answered, the thought's;
+                // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
+                // and another worker's outage is joined unprobed (review pass 1).
+                if (act === "probe") {
+                  if (stopping) return;
+                  act = outage.reason !== null ? "outage" : probedFault(await probe(TIMEOUT_S * 1000, halt.signal));
+                }
+                const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
@@ -1753,9 +1769,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // cycling through the pool for ever.
                   outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   stopAfter = true;
-                } else if (kind === "thought") {
+                } else if (act === "thought") {
                   outcome = { outcome: "failed", error: msg };
-                } else if (kind === "fatal") {
+                } else if (act === "fatal") {
                   // Every thought would fail the same way. Stop everyone, mark
                   // nothing, and say what to fix; this row goes back with the
                   // leases the finally returns.

@@ -1155,7 +1155,9 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
     // punctuation, emoji or whitespace it lets run while a budget is left. Any
     // other cut is a socket that closed mid-answer, the worker's to pause on.
     if (repeatedTail(content, { cut: true }) !== null) return { kind: "sse", content, finish, repeated: "token" };
-    throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
+    // ECONNRESET, as Bun's fetch gives a socket closed mid-answer: a follower reads it by its code as no connection,
+    // not by its words (SMD-2636 PR 3a), where followClassify left this codeless one to the probe.
+    throw Object.assign(new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`), { code: "ECONNRESET" });
   }
   return { kind: "sse", content, finish, repeated: null };
 }

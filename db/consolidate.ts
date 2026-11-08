@@ -171,7 +171,7 @@ import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, probeAtStart, probeChat, probeRefusal, probeTier, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, probeRefusal, probeTier, ProviderDown, ProviderOutage, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -260,6 +260,13 @@ export const MAX_STALE_DAYS = 2_000_000;
  * sweep asks the judge model beside it (`timeoutNow`, SMD-3306 PR 6b-2).
  */
 export const JUDGE_TIMEOUT_S = 120;
+
+/**
+ * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming a field every judge call sends and
+ * the probe does not — response_format, reasoning_effort (the closing remedy's two), the answer budget. The probe would
+ * answer it and read it the thought's, failing the pool one row at a time.
+ */
+const consolidateRequestFault = (e: unknown): boolean => requestShapeRefused(e, /response_format|reasoning_effort|max_tokens|max_completion_tokens/i);
 
 /**
  * What one consolidation run is asked to do — the CLI's flags, typed
@@ -1807,12 +1814,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
         // else is the provider's and is classified by the caller. Under --follow
-        // an answer whose words say "timed out" that followerFault reads as the
-        // provider's (a gateway's 408 "Request timed out", a 429 saying so) is
-        // the caller's, an outage as extract's is (SMD-3311 review pass 2); any
-        // other — a deadline with no answer, a 400 saying so — is this pair's,
-        // probed as before (review pass 3).
-        if (timedOut(e) && !(FOLLOW && followerFault(e).kind === "transient")) {
+        // an answer whose words say "timed out" that worker-bootstrap.ts's
+        // `fault` reads as the provider's (a gateway's 408 "Request timed out",
+        // a 429 saying so: paused for) is the caller's, an outage as extract's
+        // is (SMD-3311 review pass 2, SMD-2636 PR 3a); any other — a deadline
+        // with no answer, a 400 saying so, the probe's to decide — is this
+        // pair's, probed here (review pass 3).
+        if (timedOut(e) && !(FOLLOW && fault(e, { requestFault: consolidateRequestFault }).act === "pause")) {
           // Under --follow, a timeout the probe gets no answer past either is
           // the provider hung, not this pair (SMD-2599): the thought goes back
           // to the pool unrecorded, its proposals written so far standing.
@@ -2145,7 +2153,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
             const asked = { at: readAt };
-            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+            /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
             let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -2183,18 +2191,29 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                // Under --follow through followClassify's split, as extract-entities.ts reads it (followerFault, SMD-3311).
-                const { kind, suspect } = FOLLOW ? followerFault(e) : { kind: classifyError(e), suspect: true };
-                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
-                // Under --follow, the provider's state rather than the thought's
-                // or the request's (SMD-2599), as extract-entities.ts reads it: a
-                // transient error past the pauses, the model missing, or a pair's
-                // timeout the probe got no answer past either (processRow).
-                const down = FOLLOW && (
-                  e instanceof ProviderDown ||
-                  (kind === "transient" && attempt >= TRANSIENT_PAUSES_MS.length) ||
-                  (kind === "fatal" && modelMissing(e)));
+                // Under --follow, what to do is worker-bootstrap.ts's `fault`, as extract-entities.ts reads it
+                // (SMD-2636 PR 3a): paused for, then an outage; an outage at once — the model missing, a pair's
+                // timeout the probe got no answer past either (processRow's ProviderDown); the probe's to decide;
+                // the thought's; or the request's shape. A run without --follow keeps classifyError's rules.
+                let act: FollowerFault["act"];
+                if (FOLLOW) {
+                  const read = fault(e, { requestFault: consolidateRequestFault });
+                  act = read.act;
+                  streakSuspect ||= read.suspect;
+                } else {
+                  const kind = classifyError(e);
+                  act = kind === "transient" ? "pause" : kind;
+                  streakSuspect = true;
+                }
+                // The probe decides, as extract-entities.ts's (a 401, a 404 naming no model, a 400 no rule reads):
+                // answered, the thought's; refused, the request's; no answer, the provider's. A stopping pass hands
+                // the thought back, and another worker's outage is joined unprobed.
+                if (act === "probe") {
+                  if (stopping) return;
+                  act = outage.reason !== null ? "outage" : probedFault(await probe(TIMEOUT_S * 1000, halt.signal));
+                }
+                const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
@@ -2209,9 +2228,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // cycling through the pool for ever.
                   outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   stopAfter = true;
-                } else if (kind === "thought") {
+                } else if (act === "thought") {
                   outcome = { outcome: "failed", error: msg };
-                } else if (kind === "fatal") {
+                } else if (act === "fatal") {
                   configError = msg;
                   stopping = true;
                   passEnds.abort();
