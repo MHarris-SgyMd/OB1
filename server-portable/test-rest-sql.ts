@@ -2247,7 +2247,7 @@ console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket w
     `PR:012 reads pr:12 and VERSION:V1.2 version:v1.2 (${prUpper.status} ${versionUpper.status})`);
 }
 
-console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch, the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
+console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
 {
   type RelRead = { id: string; relation: string; otherIs: string; other: { id: string; title?: string; created_at: string | null; supersededBy: string | null }; confidence: number | null; judgedAt: string | null; stale: boolean };
   type RelPage = { id: string; relation: string | null; total: number; relations: RelRead[]; cursor: string | null };
@@ -2344,7 +2344,7 @@ console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7
       && same(item(oa)?.relations?.map((x) => x.other.id), [ob, od, oc, oe]) && item(oa)?.relationsMore === 0 && same(item(oloose)?.relations, []) && item(oloose)?.relationsMore === 0
       && same(itemsMcp.find((x) => x.id === oa)?.relations?.map((x) => x.stale), [true, false, false, false])
       && listedMcp.text.includes(`\n   ↔ Relations: related to item ${items.findIndex((x) => x.id === ob) + 1} (confidence 0.90; edited since judged); duplicates item ${items.findIndex((x) => x.id === od) + 1} (confidence 0.80; the other superseded by item ${items.findIndex((x) => x.id === oh) + 1});`)
-      && listedMcp.text.includes("A relation marked edited since judged was judged on a text that has changed since"),
+      && listedMcp.text.split("A relation marked edited since judged was judged on a text that has changed since").length === 2,
     `list_thoughts' items carry theirs: the hub's five and two more, the zeta thought's four (another item named by its place), the loose thought none, the stale mark's key said once (${item(hub)?.relationsMore} ${item(oa)?.relations?.length} ${JSON.stringify(item(oloose)?.relations)})`);
   const srHub = ((sr.body.hits ?? []) as Labelled[]).find((x) => x.id === hub);
   const compatResults = JSON.parse(compat.text).results as Record<string, unknown>[];
@@ -2531,7 +2531,7 @@ console.log("\n[17b] Judged relations, review pass 1 (SMD-2726; SMD-3306 PR 7a-2
   assert(say.renderSearchThoughtsKeyword(dKw as never).content[0].text.includes(unread) && say.renderSearchThoughts(dSt as never, false).content[0].text.includes(unread)
       && upper.id === big && upper.total === 30,
     `both searches say their relations could not be read; an upper-case id reads as its own (${upper.id === big} ${upper.total})`);
-  console.log("\n[17c] Judged relations, review pass 2 (SMD-2726; SMD-3306 PR 7a-2b): paged under a word, distinct among them; a word's cursor refused without its word; an upper-case id paging on its own cursor; the order by when last judged; judgedAt without a lineage row; trust read from the other thought on either side, only ingested marked; places pinned on keyword pages past an offset and on search_thoughts; a superseder on the page named by its place; \"superseded by this thought\" and the stale key on every page renderer; a superseding read that throws");
+  console.log("\n[17c] Judged relations, review pass 2 (SMD-2726; SMD-3306 PR 7a-2b): paged under a word, distinct among them; a word's cursor refused without its word; an upper-case id paging on its own cursor; (and review pass 3:) ties by when first recorded, a walk across a kept re-judge reading each once, judgedAt the latest judging and without a lineage row; a stored fingerprint NULL or out of step read by the text; an empty page past the cursor; trust read from the other thought on either side, only ingested marked; places pinned on keyword pages past an offset and on search_thoughts; a superseder on the page named by its place; \"superseded by this thought\" and the stale key on every page renderer; a superseding read that throws");
   {
     // Paged under a word: twenty-five, then the last five, every one once.
     const w1 = await page(big, "&relation=related&limit=25");
@@ -2559,21 +2559,50 @@ console.log("\n[17b] Judged relations, review pass 1 (SMD-2726; SMD-3306 PR 7a-2
     assert(same(dSeen, [dSpokes[2], dSpokes[1], dSpokes[0]]),
       `distinct relations page one at a time, each once, strongest first (${dSeen.length})`);
 
-    // The order is by when last judged: a kept re-judge of the older of two ties moves it ahead.
+    // Ties go by when first recorded, which a kept re-judge does not move (review pass 3); judgedAt shows the latest.
     const oHub = await own("Rel probe order: the hub");
-    const [o1, o2] = [await own("Rel probe order: one"), await own("Rel probe order: two")];
-    await at(oHub, "2026-07-20T00:00:00Z"); await at(o1, "2026-07-11T00:00:00Z"); await at(o2, "2026-07-12T00:00:00Z");
-    await relate(oHub, o1, "related", 0.5); await relate(oHub, o2, "related", 0.5);
+    const [o1, o2, o3] = [await own("Rel probe order: one"), await own("Rel probe order: two"), await own("Rel probe order: three")];
+    await at(oHub, "2026-07-20T00:00:00Z"); await at(o1, "2026-07-11T00:00:00Z"); await at(o2, "2026-07-12T00:00:00Z"); await at(o3, "2026-07-13T00:00:00Z");
+    await relate(oHub, o1, "related", 0.5); await relate(oHub, o2, "related", 0.5); await relate(oHub, o3, "related", 0.5);
     const firstOrder = (await page(oHub)).relations.map((r) => r.other.id);
+    // A walk one at a time with a kept re-judge of a relation it has not reached yet, between its pages: all three, once.
+    const walk1 = await page(oHub, "&limit=1");
     const keptAgain = await relate(oHub, o1, "related", 0.5);
+    const walk2 = await page(oHub, `&limit=1&after=${walk1.cursor}`);
+    const walk3 = await page(oHub, `&limit=1&after=${walk2.cursor}`);
     const order = await page(oHub);
-    // Paged one at a time across it: the cursor carries the time the order read, so the second page holds the other.
-    const oneP1 = await page(oHub, "&limit=1");
-    const oneP2 = await page(oHub, `&limit=1&after=${oneP1.cursor}`);
-    assert(same(firstOrder, [o2, o1]) && keptAgain.action === "kept" && same(order.relations.map((r) => r.other.id), [o1, o2])
-        && same([...(oneP1.relations ?? []), ...(oneP2.relations ?? [])].map((r) => r.other.id), [o1, o2])
-        && Date.parse(order.relations[0].judgedAt!) > Date.parse(order.relations[1].judgedAt!) && typeof noLineage.relations[0]?.judgedAt === "string",
-      `ties on confidence go by when last judged, a kept re-judge moving one ahead, as the judgedAt each shows; one with no lineage row still shows a time (${JSON.stringify(order.relations.map((r) => r.judgedAt))})`);
+    const at1 = order.relations.find((r) => r.other.id === o1)?.judgedAt, at2 = order.relations.find((r) => r.other.id === o2)?.judgedAt;
+    // A walk whose first page ends on a relation judged again since it was recorded: its cursor holds the recorded time.
+    await relate(oHub, o3, "related", 0.5);
+    const walkB1 = await page(oHub, "&limit=1");
+    const walkB2 = await page(oHub, `&limit=2&after=${walkB1.cursor}`);
+    assert(same(firstOrder, [o3, o2, o1]) && keptAgain.action === "kept" && same(order.relations.map((r) => r.other.id), [o3, o2, o1])
+        && same([...(walk1.relations ?? []), ...(walk2.relations ?? []), ...(walk3.relations ?? [])].map((r) => r.other.id), [o3, o2, o1]) && walk3.cursor === null
+        && same([...(walkB1.relations ?? []), ...(walkB2.relations ?? [])].map((r) => r.other.id), [o3, o2, o1])
+        && Date.parse(at1!) > Date.parse(at2!) && typeof noLineage.relations[0]?.judgedAt === "string",
+      `ties on confidence go by when first recorded, which a kept re-judge leaves: a walk across one reads all three once, while judgedAt shows the latest judging; one with no lineage row still shows a time (${JSON.stringify(order.relations.map((r) => r.judgedAt))})`);
+
+    // stale against the stored fingerprint: NULL, or out of step with an unchanged text, reads not stale; the text decides.
+    const [fp1, fp2] = [await own("Rel probe fingerprint: the older"), await own("Rel probe fingerprint: the newer")];
+    await at(fp1, "2026-07-14T00:00:00Z"); await at(fp2, "2026-07-15T00:00:00Z");
+    await relate(fp2, fp1, "related", 0.55);
+    await sql`UPDATE thoughts SET content_fingerprint = NULL WHERE id = ${fp1}::uuid`;
+    await sql`UPDATE thoughts SET content_fingerprint = md5(content) WHERE id = ${fp2}::uuid`;
+    const fpRead = await page(fp1);
+    assert(fpRead.relations[0]?.other.id === fp2 && fpRead.relations[0].stale === false,
+      `a text whose stored fingerprint is NULL, or out of step with its unchanged text, reads not stale: the text's own hash decides (${fpRead.relations[0]?.stale})`);
+
+    // An empty page past the cursor, a relation closed between pages: the total stands, and the note says why.
+    const eHub = await own("Rel probe empty: the hub");
+    const [e1, e2, e3] = [await own("Rel probe empty: one"), await own("Rel probe empty: two"), await own("Rel probe empty: three")];
+    await at(eHub, "2026-07-25T00:00:00Z"); await at(e1, "2026-07-21T00:00:00Z"); await at(e2, "2026-07-22T00:00:00Z"); await at(e3, "2026-07-23T00:00:00Z");
+    await relate(eHub, e1, "related", 0.9); await relate(eHub, e2, "related", 0.8); await relate(eHub, e3, "related", 0.7);
+    const eP1 = await page(eHub, "&limit=2");
+    await relate(eHub, e3, null, null);
+    const [eP2, eP2Mcp] = await Promise.all([page(eHub, `&limit=2&after=${eP1.cursor}`), mcp("relations", { id: eHub, limit: 2, after: eP1.cursor })]);
+    assert(eP2.total === 2 && same(eP2.relations, []) && eP2.cursor === null
+        && eP2Mcp.text.includes("2 standing judged relations, strongest first, 0 on this page:") && eP2Mcp.text.includes("(None stands past the cursor now: a re-judge changed them since that page."),
+      `a page emptied by a relation closed between pages keeps the total and says why, not "none" (${eP2.total} ${eP2Mcp.text.slice(0, 120).replace(/\n/g, " | ")})`);
 
     // Trust from the other thought on either side: an operator's older thought judged against newer outside text.
     const opOld = await own("Rel probe trust: the operator's older note");

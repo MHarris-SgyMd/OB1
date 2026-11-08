@@ -1,5 +1,5 @@
-// Judged relations, read (SMD-2726; SMD-3306 PR 7a-2b): the `relations` operation, and the relations every read of a
-// thought carries.
+// Judged relations, read (SMD-2726; SMD-3306 PR 7a-2b): the `relations` operation, and the relations that
+// search_thoughts, search_thoughts_keyword, list_thoughts and fetch carry.
 //
 // A relation is the consolidation judge's word on a pair of near neighbours (084, 102's distinct): related, evolves,
 // duplicate or distinct, a facet on the newer thought naming the older, with the judge's confidence and a lineage row
@@ -7,9 +7,10 @@
 // here. From 2026-11-07: every word shows, distinct included; a relation whose text moved since it was judged shows,
 // marked `stale`, until SMD-2726's rebuild arm closes it; and the judge's alone — a work thread's edges (origin
 // `thread`, 120) are the thread read's and fetch's `threads`. From review pass 1: a search or list page's labels name
-// the other thought by its id alone, never its title — its words crowded the page (most of a page's relations name
-// another hit on it) and carried outside text into reads filtered to keep it out — and the ChatGPT-shape search carries
-// none; fetch and the `relations` read give the titles, an outside text's marked by its trust.
+// the other thought by its place on the page or its id, never its title — its words crowded the page (most of a
+// page's relations name another hit on it) and carried outside text into reads filtered to keep it out — and the
+// ChatGPT-shape search carries none; fetch and the `relations` read give the titles, an outside text's marked by its
+// trust.
 
 import { thoughtTitle } from "../thoughts.ts";
 import { ListCursorRefused, RELATIONS_SHOWN, UUID_RE, type RelationEdge, type RelationsOf, type RelationWord, type ThoughtStore } from "../store.ts";

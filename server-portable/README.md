@@ -854,7 +854,9 @@ lineage row at the two texts judged. The reads below show the judge's relations 
 thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads`.
 
 - **`relations`** (read scope; REST `GET /v1/relations`) reads one thought's standing judged relations, both sides of
-  each pair, strongest first: by confidence (rounded to six places), then the latest judged, then by id.
+  each pair, strongest first: by confidence (rounded to six places), then the newest recorded (when the relation was
+  first written, which a re-judge keeping its word doesn't move), then by id. A walk reads each relation standing
+  throughout it once; one closed, replaced or written meanwhile may be missed, or read again under a new id.
   - `relation` keeps one word. `limit` relations a page, 1–100, default 20; more carry a `cursor`, passed back as
     `after` with the same `id` and `relation` (a cursor made for another is refused). `total` counts every one under
     the word.
@@ -867,7 +869,7 @@ thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads
     `consolidate.ts --list relations` reads it. On stable late on 2026-11-07, 1,295 of 6,524 were stale.
   - **Refusals.** Another tool's cursor, or one made for another id or word, is `REFUSED_CURSOR`. An unknown id is
     `NOT_FOUND`.
-- **Every read of a thought** carries its relations: `search_thoughts`, `search_thoughts_keyword` and `list_thoughts`
+- **The reads of a thought** carry its relations: `search_thoughts`, `search_thoughts_keyword` and `list_thoughts`
   the first 5 per result, `fetch` the first 20, with `relationsMore` for the rest. One read per page. A page's labels
   carry no title: MCP's `↔ Relations:` line names another result on the page by its place (`Result 3`, `item 3`) and
   any other thought by its id. Titles are fetch's and the `relations` read's, an outside text's marked `[ingested]`.
