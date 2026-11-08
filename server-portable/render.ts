@@ -2281,15 +2281,19 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not read` : "";
   if (!shown.length) return title || !unread ? null : `none known on the items read; ${unread}.`;
   const state = (p: PriorityOn) => `${p.settled ? ", settled" : ""}${p.waiting && p.notBefore ? `, not before ${p.notBefore}` : ""}`;
+  // A stated None is a statement, not an unknown (review pass 3: "none (0)" read as "no priority known").
+  const stated = (level: number) => `${level === 0 ? "stated " : ""}${levelText(level)}`;
+  const term = (t: PriorityTerm) => (t.term === "level" && Number(t.detail.level) === 0 ? `stated ${agendaTerm(t)}` : agendaTerm(t));
   const one = (p: PriorityOn) => {
     if (title) {
       const inherited = p.terms.find((t) => t.term === "inherited");
       // The inherited level after its hops, then the level it came from (review pass 1: "high (3) inherited from ticket SMD-1" read as SMD-1 High).
       const from = p.inheritedFrom;
-      const level = p.level !== null ? levelText(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
-      return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${state(p)}`;
+      const level = p.level !== null ? stated(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
+      // What it unblocks, which orders it too (review pass 3: a High before an Urgent, the reason unshown).
+      return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${p.unblocks > 0 ? `, unblocks ${p.unblocks}` : ""}${state(p)}`;
     }
-    return `${priorityWho(p)} at ${p.effective} (${p.terms.map(agendaTerm).join("; ")})${state(p)}`;
+    return `${priorityWho(p)} at ${p.effective} (${p.terms.map(term).join("; ")})${state(p)}`;
   };
   const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more` : ""}${unread ? ` (+${unread})` : ""}`;
   return title ? words : `${words}.`;

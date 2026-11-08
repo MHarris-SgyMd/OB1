@@ -567,12 +567,12 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
   for (const r of rows) {
     if (keyed.has(r.id) || opts.tickets === false) continue;
     const { keys, notRead } = claimKeysOf(r);
-    // A ticket's own row (board-sync's: source linear, which no key may write) is asked as its thought, which 122 reads
-    // as its ticket: its key is not asked again (review pass 2: two of the reach's slots for one answer).
-    const own = r.metadata?.source === "linear" ? filedUnder(r.metadata?.issue) : null;
+    // A ticket's own row is asked by its key too, though 122 may read its thought as that ticket: whether it does rests
+    // on the raw metadata and the row's linear source identity, which this side cannot see (review pass 3: a lower-case
+    // `issue`, which 122 does not map, lost its ticket when the key was skipped). priorityLabels shows it once.
     const asked: string[] = [];
     let cut = notRead;
-    for (const k of keys.filter((k) => PRIORITY_TICKET.test(k) && k !== own)) {
+    for (const k of keys.filter((k) => PRIORITY_TICKET.test(k))) {
       if (!seen.has(k)) {
         if (ids.length + tickets.length >= PRIORITY_READ) { cut++; continue; }
         seen.add(k);

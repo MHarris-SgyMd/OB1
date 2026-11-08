@@ -513,7 +513,9 @@ label shows what the result names, the rank what it is.
 
 It is one read per call: the page's thoughts and tickets, 1000 items at most,
 best-effort as the claims read is, and none for an empty page. A ticket's own
-row is asked once, as its thought, which 122 reads as its ticket. A failed read
+row is asked as its thought and by its key: whether 122 reads the thought as
+that ticket rests on the raw metadata and the row's source, which the server
+can't see, and the label shows the ticket once. A failed read
 gives `priority: null`, said once per reply (`[priority not read]` in the compat
 titles, beside a `priorityNote`). A ranked search makes two: its window read asks
 the window's own thoughts alone, as before, and fails the search as before; its

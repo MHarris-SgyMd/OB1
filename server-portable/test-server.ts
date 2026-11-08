@@ -7088,9 +7088,16 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   ];
   const got = await priorityOf(store(), rows);
   const asked = calls[0];
-  assert(calls.length === 1 && asked.slice(0, 5).every((i, n) => i.kind === "thought" && i.key === "abcde"[n]) && asked.filter((i) => i.kind === "ticket").length === 3 + 50 + 12
-      && asked.some((i) => i.key === "SMD-7049") && !asked.some((i) => i.key === "SMD-7050") && !asked.some((i) => i.key === "SMD-4"),
-    `one read: the rows' own thoughts first, then each ticket a row is filed under or names, once, a row's first 50 alone; a ticket's own row asked as its thought alone, its key not again (review pass 2) (${asked.length} items)`);
+  assert(calls.length === 1 && asked.slice(0, 5).every((i, n) => i.kind === "thought" && i.key === "abcde"[n]) && asked.filter((i) => i.kind === "ticket").length === 3 + 1 + 50 + 12
+      && asked.some((i) => i.key === "SMD-7049") && !asked.some((i) => i.key === "SMD-7050") && asked.some((i) => i.key === "SMD-4"),
+    `one read: the rows' own thoughts first, then each ticket a row is filed under or names, once, a row's first 50 alone; a ticket's own row's key asked too (review pass 3) (${asked.length} items)`);
+  // Review pass 3: a ticket row whose `issue` 122 does not map (lower-case, no linear source identity) is answered as a
+  // plain thought; its ticket, asked by key, still labels it.
+  calls.length = 0;
+  answers["ticket:SMD-12"] = ans("ticket", "SMD-12", { effective: 4, level: 4, terms: [lvl(4)] });
+  const twin = await priorityOf(store(), [{ id: "lc", content: "a hand-written row", metadata: { issue: "smd-12", source: "linear" } }]);
+  assert(calls[0].some((i) => i.kind === "ticket" && i.key === "SMD-12") && twin?.lc.priority.length === 1 && twin.lc.priority[0].key === "SMD-12" && !twin.lc.priority[0].self,
+    `a ticket row 122 reads as a plain thought keeps its ticket's label (${JSON.stringify(twin?.lc.priority.map((p) => p.key))})`);
   const a = got!.a, b = got!.b;
   assert(JSON.stringify(a.priority.map((p) => [p.kind, p.key, p.self, p.effective])) === JSON.stringify([["thought", "a", true, 3], ["ticket", "SMD-2", false, 6], ["ticket", "SMD-1", false, 4]]) && a.priorityMore === 0 && a.priorityNotRead === 0,
     `itself first, then the tickets it names most pressing first; an unknown (SMD-3) unlabelled (${JSON.stringify(a.priority.map((p) => p.key))})`);
@@ -7144,6 +7151,13 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
       && failedCompat.results[0].title === "[priority not read] t" && failedCompat.results[0].priority === null && /whose title has no `\[priority: …\]`/.test(failedCompat.priorityNote)
       && failedFetch.title === "[priority not read] t" && failedFetch.priority === null && typeof failedFetch.priorityNote === "string",
     `a failed read said once per reply on each text tool, and marked in the compat pair's titles beside a note (${failedCompat.results[0].title} | ${failedFetch.title})`);
+  // Review pass 3: a title says what an item unblocks, which orders it too; a stated None is said as stated.
+  const unblocking = { kind: "ticket", key: "SMD-21", self: false, effective: 5, level: 3, inheritedFrom: null, dueAt: null, urgency: 0, overdue: false, unblocks: 6, settled: false, notBefore: null, waiting: false, terms: [lvl(3), term("unblocks", 2, { count: 6 })] };
+  const noneStated = { ...unblocking, key: "SMD-22", effective: 0, level: 0, unblocks: 0, terms: [{ ...lvl(0), detail: { level: 0 } }] };
+  const orderTitle = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: [unblocking, noneStated] }] } } as never).content[0].text).results[0].title as string;
+  const noneLine = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, priority: [noneStated], priorityMore: 0, priorityNotRead: 0 }], facts, window: null, priority: null } } as never, false).content[0].text;
+  assert(orderTitle === "[priority: ticket SMD-21 high (3), unblocks 6; ticket SMD-22 stated none (0)] t" && noneLine.includes("\nPriority: ticket SMD-22 at 0 (stated none (0)).\n"),
+    `a title names what an item unblocks; a stated None reads as stated in the title and the line (${orderTitle} | ${noneLine.match(/Priority: .*/)?.[0]})`);
   const kwLine = say.renderSearchThoughtsKeyword({ ok: true, value: { query: "x", offset: 0, total: 1, hits: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, occurrences: 1, claimed: [], claimedMore: 0, claimedNotRead: 0, ...b }] } } as never).content[0].text;
   const listLine = say.renderListThoughts({ ok: true, value: { thoughts: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, supersededBy: null, claimed: [], claimedMore: 0, claimedNotRead: 0, ...got!.c }], sort: "newest", cursor: null } } as never).content[0].text;
   assert(kwLine.includes("\nPriority: this ticket's row (SMD-4) at 5 (critical (5)), settled.\n") && listLine.includes("\n   Priority: none known on the items read; 10 more tickets it names not read."),
