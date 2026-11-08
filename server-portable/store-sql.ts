@@ -1605,46 +1605,49 @@ export class SqlStore implements ThoughtStore {
           SELECT e.*, COALESCE(round(e.confidence::numeric, 6), -1) AS rank FROM e
            WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
         counted AS (SELECT of, count(*)::int AS total FROM w GROUP BY of),
-        -- Ties go by when the relation was first recorded (the facet's created_at), which nothing moves: ordered by when
-        -- it was last judged (pass 2), a kept re-judge between two pages moved a relation to before the cursor, never read
-        -- (review pass 3: 16 in 75 walks), and every relation of a thought joined its lineage row (a hub of 50,000's fetch
-        -- tripled). judgedAt is shown, from the lineage row, for the page alone.
+        -- Ties go by when the relation was first recorded (the facet's created_at), which nothing moves: ordered by
+        -- when it was last judged (pass 2), a kept re-judge between two pages moved a relation to before the cursor,
+        -- never read (review pass 3: 16 in 75 walks), and every relation of a thought joined its lineage row (a hub of
+        -- 50,000's fetch tripled). judgedAt is shown, from the lineage row, for the page alone.
         page AS (
           SELECT * FROM (
             SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, created_at DESC, id DESC) AS n
               FROM w WHERE ${cut}) c
            WHERE n <= ${w.limit}::int),
-        -- The page's relations with their lineage rows (084: written with each, under its judge key; unique per artifact).
+        -- The page's relations with their lineage rows (084: written with each, under its judge key; unique per
+        -- artifact).
         lined AS (
           SELECT page.*, d.id AS lineage, d.produced_at, d.input_fingerprints AS judged
             FROM page LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key),
-        -- A side is stale when its text's fingerprint is not the one judged. The stored fingerprint, where it is the one
-        -- judged, settles it without hashing the text (review pass 2: 158 ms for ten 115 KB texts); where it is not, or is
-        -- NULL, the text's hash decides, as the judge recorded it (review pass 3: a stored key out of step with its text
-        -- read stale for good). Each thought needing its hash is hashed once a statement, however many relations on the
-        -- page it stands in (review pass 4: an edited 200 KB hub's page of 101 hashed it 101 times, 2.9 ms each). A raw
-        -- UPDATE of content that leaves the column at the judged key is the residue, as it is for 120's re-link.
+        -- A side is stale when its text's fingerprint is not the one judged. The stored fingerprint, where it is the
+        -- one judged, settles it without hashing the text (review pass 2: 158 ms for ten 115 KB texts); where it is
+        -- not, or is NULL, the text's hash decides, as the judge recorded it (review pass 3: a stored key out of step
+        -- with its text read stale for good). Each thought needing its hash is hashed once a statement, however many
+        -- relations on the page it stands in (review pass 4: an edited 200 KB hub's page of 101 hashed it 101 times,
+        -- 2.9 ms each). A raw UPDATE of content that leaves the column at the judged key is the residue, as it is for
+        -- 120's re-link.
         hashing AS (
           SELECT l.older AS id FROM lined l JOIN thoughts t ON t.id = l.older WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[1]
           UNION
           SELECT l.newer FROM lined l JOIN thoughts t ON t.id = l.newer WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[2]),
         hashed AS MATERIALIZED (SELECT t.id, content_fingerprint_of(t.content) AS fingerprint FROM hashing JOIN thoughts t ON t.id = hashing.id),
-        -- Each thought's page aggregated once, and its count once, joined to the ids (review pass 2: a correlated read per
-        -- id scanned the whole set for each, 1.8 s for a list page of 1,000). The other thought's head is sent only to a
-        -- read that shows its title (review pass 4: a list page's would be thousands of heads dropped).
+        -- Each thought's page aggregated once, and its count once, joined to the ids (review pass 2: a correlated read
+        -- per id scanned the whole set for each, 1.8 s for a list page of 1,000). The other thought's head is sent only
+        -- to a read that shows its title (review pass 4: a list page's would be thousands of heads dropped). The other
+        -- thought is the older or the newer of the pair, as other_is says, so it is read from their joins.
         shown AS (
           SELECT lined.of, jsonb_agg(jsonb_build_object(
                    'id', lined.id::text, 'relation', lined.relation, 'other_is', lined.other_is,
-                   'other_id', lined.other::text, 'other_created_at', o.created_at,
-                   'other_content', CASE WHEN ${w.heads ?? true}::boolean THEN left(o.content, ${THREAD_HEAD_CHARS}::int) ELSE '' END,
-                   'other_trust', o.metadata->>'trust',
+                   'other_id', lined.other::text,
+                   'other_created_at', CASE lined.other_is WHEN 'older' THEN tol.created_at ELSE tn.created_at END,
+                   'other_content', CASE WHEN ${w.heads ?? true}::boolean THEN left(CASE lined.other_is WHEN 'older' THEN tol.content ELSE tn.content END, ${THREAD_HEAD_CHARS}::int) ELSE '' END,
+                   'other_trust', CASE lined.other_is WHEN 'older' THEN tol.metadata ELSE tn.metadata END->>'trust',
                    'confidence', lined.confidence, 'judged_at', COALESCE(lined.produced_at, lined.created_at), 'rank', lined.rank::text, 'at', lined.created_at::text,
                    'stale', lined.lineage IS NOT NULL AND (
                      (tol.content_fingerprint IS DISTINCT FROM lined.judged[1] AND ho.fingerprint IS DISTINCT FROM lined.judged[1])
                      OR (tn.content_fingerprint IS DISTINCT FROM lined.judged[2] AND hn.fingerprint IS DISTINCT FROM lined.judged[2])))
                    ORDER BY lined.n) AS edges
             FROM lined
-            JOIN thoughts o ON o.id = lined.other
             JOIN thoughts tn ON tn.id = lined.newer
             JOIN thoughts tol ON tol.id = lined.older
             LEFT JOIN hashed ho ON ho.id = lined.older

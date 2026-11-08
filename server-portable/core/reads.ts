@@ -256,7 +256,8 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       needles: f.needles.filter((_, i) => f.needleCounts[i] === 0), commonNeedles: f.commonNeedles });
   }
   const store = await ctx.store();
-  // No relations here (review pass 1, the maintainer's call): ChatGPT's search shape is a list to fetch from, and fetch carries them.
+  // No relations here (review pass 1, the maintainer's call): ChatGPT's search shape is a list to fetch from, and fetch
+  // carries them.
   const [moved, claimed] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows)]);
   return ok({
     results: r.rows.map((t) => ({

@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -35,7 +35,6 @@ import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type Cla
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
-import type { RelationWord } from "./store.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
@@ -707,7 +706,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
-    if (data.some((t) => t.relations?.some((r) => r.stale))) notes.push(STALE_KEY);
+    if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -780,7 +779,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${staleKey(data)}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -823,7 +822,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${staleKey(data)}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -868,7 +867,8 @@ function relationsWords(relations: readonly RelationShown[] | null | undefined, 
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
 /** What a stale mark means, once per reply that shows one (review pass 1: the page's lines said it with no key). */
 const STALE_KEY = "A relation marked edited since judged was judged on a text that has changed since: its word may no longer hold — read both thoughts before relying on it.";
-const staleKey = (data: readonly { relations?: readonly RelationShown[] | null }[]) => (data.some((t) => t.relations?.some((r) => r.stale)) ? `\n${STALE_KEY}` : "");
+/** Whether a page shows a stale relation, which its reply keys once. */
+const anyStale = (data: readonly { relations?: readonly RelationShown[] | null }[]) => data.some((t) => t.relations?.some((r) => r.stale));
 /** An other thought's title as fetch and the relations read quote it: an outside text's marked so, outside the quote (review pass 1). */
 const relatedTitle = (r: RelationShown) => `${r.other.trust === "ingested" ? "[ingested] " : ""}${JSON.stringify(oneLine(r.other.title ?? ""))}`;
 /** relations: the thought, the word asked for, the count and cursor, and each relation's typed fields — no title. */

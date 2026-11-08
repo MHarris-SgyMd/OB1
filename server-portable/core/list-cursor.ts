@@ -76,8 +76,8 @@ export type RelationsCursorAt = { thought: string; relation: RelationWord | null
  * relations' cursor (SMD-2726; SMD-3306 PR 7a-2b): the thought and word it was read under, and the last relation's
  * position in that thought's relations, strongest first, as base64url of `["relations", thought, word, rank, at, id]` —
  * `rank` Postgres's text of its confidence rounded to six places as numeric (-1 for none), `at` its text of when the
- * relation was first recorded. It carries its thought and word so a cursor passed with another is refused, not read as a
- * short last page (review pass 1), as list_thoughts' carries its sort.
+ * relation was first recorded. It carries its thought and word so a cursor passed with another is refused, not read as
+ * a short last page (review pass 1), as list_thoughts' carries its sort.
  */
 export function relationsCursor(c: RelationsCursorAt): string {
   return Buffer.from(JSON.stringify(["relations", c.thought, c.relation, c.rank, c.at, c.id])).toString("base64url");
