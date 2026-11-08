@@ -4158,6 +4158,12 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     const zero = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0 });
     assert(!base.isError && ids(base).length === 4 && zero.text === base.text && JSON.stringify(zero.sc) === JSON.stringify(base.sc) && base.sc?.priority === null,
       `at priority_weight 0 the reply is byte-identical to one without it, text and value, its priority null (${ids(base).map((id) => KEYS.find((k) => rowOf[k] === id)).join(",")})`);
+    // At a limit below the four matches, so a window read at 0 would show (review pass 2's mutant: the filter left a
+    // limit of 4 equal to every match there is).
+    const base2 = await result("search_thoughts", { query, limit: 2, threshold: -1, filter });
+    const zero2 = await result("search_thoughts", { query, limit: 2, threshold: -1, filter, priority_weight: 0 });
+    assert(ids(base2).length === 2 && zero2.text === base2.text && JSON.stringify(zero2.sc) === JSON.stringify(base2.sc),
+      `…and at a limit of 2 of the 4, two rows each, byte-identical: no window is read at 0 (${ids(zero2).length})`);
     // A floor no match reaches: four Highs (3), none critical.
     const none = await result("search_thoughts", { query, limit: 10, threshold: -1, filter, min_priority: 5 });
     assert(!none.isError && ids(none).length === 0 && none.text.includes("kept 0 at critical (5) or above") && (none.sc?.priority as { kept?: number } | undefined)?.kept === 0,
