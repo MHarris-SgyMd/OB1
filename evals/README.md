@@ -4405,15 +4405,18 @@ The first registration planted only what main's search reads: the text, and a bo
 (SMD-3669 PR 2, 2026-11-08) plants the facts where a priority read's store keeps them (`priority.ts`'s
 `plantFacts`), by the writers that keep them there:
 * **Each board item** is recorded as board-sync records the head it has just written (`recordStructure`: its
-  source, its blocks links, its mentions). The operator declares board-sync a priority source, and board-sync's own
+  source, its blocks links, its mentions). Its issue carries both sides of a blocks relation, as Linear returns them,
+  so ZQ-101 holds `blocks ZQ-104` and ZQ-104 `blocked_by ZQ-101`. The operator declares board-sync a priority source, and board-sync's own
   priority step states each ticket's level from its Linear priority. Another agent's key claims ZQ-103.
 * **Every personal note, chatter included,** is opened as an open item from its row by its writer, due on its facts'
   day (calendar days in UTC from the run's day), done when its facts say so. Its stated level is the operator's
   statement on the item, the operator's key classified as `SETUP.md` classifies a brain's own.
 
-The run reads the facts back and fails unless the database holds the plan's: eight tickets, one blocks link, seven
-Linear levels, one claim, ten items, one done and three stated levels, none of them tier 4 (inferred), which
-`effective_priority` counts only when asked. A read never takes the facts from `ITEMS`, which is the answer's side.
+The run reads the facts back value by value and fails unless the database holds exactly the plan's: each ticket and
+its Linear level, each link, the claim and its holder, and each item by its note, with its status, due day, counted
+level and tier, and writer. A statement in tier 4 (inferred), which `effective_priority` counts only when asked, fails
+it too. So a change outside the registration that moves a fact (the store dropping a due day, a new level mapping) is
+seen, not scored. A read never takes the facts from `ITEMS`, which is the answer's side.
 
 A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
 line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself, and `plantFacts`), how a tool's
@@ -4509,7 +4512,8 @@ These mutants are each refused:
 * a drift check comparing counts, not which prompts;
 * a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2);
 * a seeding that leaves the operator's key unclassified or board-sync undeclared (their statements tier 4), or drops
-  the claim, the blocks link or the done item (each fails the seeded run on its own message).
+  the claim, the blocks links or the done item, and a store that drops an item's due day (each fails the seeded run on
+  its own message).
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
@@ -4549,7 +4553,7 @@ What the baseline gets wrong:
   of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
 * **The filter** returns the two High backlog tickets for every prompt, one of them blocked, and nothing personal.
 
-**The agenda, 2026-11-08** (main 601b0452 with SMD-3669 PR 2, registration `0a3583768bdfe9da`: the second, with the
+**The agenda, 2026-11-08** (main 601b0452 with SMD-3669 PR 2, registration `af94b462f72ff618`: the second, with the
 facts planted; the baseline reads score as recorded above). The program's output, verbatim:
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
@@ -4562,19 +4566,22 @@ facts planted; the baseline reads score as recorded above). The program's output
 
 **The verdict: the agenda doesn't clear the bar.** It passes (c), with mean tau 0.607 against the 0.502 needed, and
 (d), keeping `highest-value` and `due-soon` in the top 3. It fails (a) and (b): top-1 on 1 of 7 prompts, where 5 are
-needed, the same 1 as the best baseline.
+needed, as many as the best baseline but not the same one. It gains `due-soon` and loses `highest-value`, where the
+gutters overtake the Urgent ticket.
 * **The overdue task outranks the Urgent ticket.** The gutters, two weeks overdue and with no stated level, score
   unknown 2 plus overdue 3, which is 5. The Urgent ticket that blocks another scores 4 plus 0.5, which is 4.5. Where
   search returns both, the gutters lead, while the gold puts the Urgent ticket first on four prompts. That is
   docs/priority.md's weights against the operator's judgement: where they differ, `priority.ts` says the weights
   are tuned against this eval (SMD-3667).
-* **Search limits it.** On `matters-most` search never returns the Urgent ticket, and on `promised` it never returns
-  the commitment, so the agenda can't move them up.
+* **Search limits it.** On `matters-most` search never returns the Urgent ticket, on `this-week` the bill, and on
+  `promised` the commitment, so the agenda can't move them up.
 * **It does order what it gets.** Mean tau goes from 0.252 to 0.607, and top-3 from 2 prompts to 4.
 
 Two pairs of chatter tie exactly on the agenda (the cat and the documentary at unknown 2, the coffee and the
 bookshelf at a stated 0), and the agenda orders a tie by its items' keys, which are random ids. So their order in the
-printed hits can differ between runs. No gold item ties, so the scores can't.
+printed hits can differ between runs. Gold items tie only on the score, and the agenda breaks those by the sooner due
+time and then the ticket's key (ZQ-105, a stated Medium, before ZQ-108, an unknown, both 2), never by a random id, so
+the scores can't differ.
 `priority.ts`'s `BASELINE` records, per baseline read, which prompts it puts first and in the top 3, and its mean tau.
 The run fails when one moves, including when a count holds but its prompts change, since the bar's (d) reads which. That is a record of today's main,
 not part of the registration: the verdict always compares a measured read with the baselines of the same run. A

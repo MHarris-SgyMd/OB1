@@ -1,8 +1,9 @@
 /**
  * priority.ts — the "what matters now" eval's rules, pure (Linear SMD-3662).
  *
- * Every rule here but registeredSource (which reads this file's text) and
- * plantRows (which writes the corpus) is a function of its arguments, so
+ * Every rule here but registeredSource (which reads this file's text),
+ * plantRows and plantFacts (which write the corpus and its facts) and the
+ * measured reads (which read the database) is a function of its arguments, so
  * `eval-priority.ts --self-check` probes each with a hand-known answer and no
  * database:
  * the seeded corpus and its gold, the stub embedder, the score, the
@@ -43,6 +44,7 @@ import { fileURLToPath } from "node:url";
 import { issueFacets, linearAdapter, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { recordStructure } from "../db/ingest-structure.ts";
 import { ACTOR_NAME as BOARD_SYNC, priorityStep } from "../db/sync-linear.ts";
+import { levelOf } from "../server-portable/priority-scale.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
 
@@ -82,18 +84,19 @@ export type Item = {
 /** A fixed instant for the issues' own clocks (metadata only: the rows' created_at is relative, the text has no date). */
 const ISSUE_CLOCK = "2026-11-02T00:00:00.000Z";
 
-function linearIssue(b: BoardMeta, title: string, body: string, blocks: string[]): LinearIssue {
+function linearIssue(b: BoardMeta, title: string, body: string, blocks: string[], blockedBy: string[]): LinearIssue {
   return {
     identifier: b.issue, title, description: body, url: `https://linear.app/zephyr/issue/${b.issue}`,
     createdAt: ISSUE_CLOCK, updatedAt: ISSUE_CLOCK, archivedAt: null, priorityLabel: b.priority,
     state: { name: b.status, type: b.status_type }, project: { id: "zephyr", name: "Zephyr" }, parent: null, labels: { nodes: [] },
     relations: { nodes: blocks.map((identifier) => ({ type: "blocks", relatedIssue: { identifier } })) },
-    inverseRelations: { nodes: [] },
+    inverseRelations: { nodes: blockedBy.map((identifier) => ({ type: "blocks", issue: { identifier } })) },
   };
 }
 
-const board = (key: string, b: BoardMeta, title: string, body: string, ageDays: number, facts: Facts, blocks: string[] = []): Item => {
-  const issue = linearIssue(b, title, body, blocks);
+/** A board item; `blocks` its own blocks relations, `blockedBy` another issue's blocks on it, as Linear returns each side. */
+const board = (key: string, b: BoardMeta, title: string, body: string, ageDays: number, facts: Facts, blocks: string[] = [], blockedBy: string[] = []): Item => {
+  const issue = linearIssue(b, title, body, blocks, blockedBy);
   return { key, text: renderIssue(issue), writer: "board-sync", ageDays, issue, facts };
 };
 
@@ -133,7 +136,7 @@ export const ITEMS: readonly Item[] = [
   board("zq-claimed", { issue: "ZQ-103", status: "In Progress", status_type: "started", priority: "High" }, "The rate limiter drops short bursts",
     "Another agent holds this one and has a branch open.", 4, { level: 3, claimed: true }),
   board("zq-blocked", { issue: "ZQ-104", status: "Backlog", status_type: "backlog", priority: "High" }, "Roll out single sign-on to the second tenant",
-    "Blocked by ZQ-101: sign-in has to work first.", 8, { level: 3, blockedBy: ["zq-urgent"] }),
+    "Blocked by ZQ-101: sign-in has to work first.", 8, { level: 3, blockedBy: ["zq-urgent"] }, [], ["ZQ-101"]),
   board("zq-medium", { issue: "ZQ-105", status: "Backlog", status_type: "backlog", priority: "Medium" }, "Tidy the settings page copy",
     "Several labels on the settings page say different things for one setting.", 12, { level: 2 }),
   board("zq-low", { issue: "ZQ-106", status: "Backlog", status_type: "backlog", priority: "Low" }, "Rename the internal date helper",
@@ -188,7 +191,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "0a3583768bdfe9da";
+export const REGISTERED_CORPUS = "af94b462f72ff618";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -382,8 +385,13 @@ export const CLAIMANT = "priority-eval-other-agent";
 /** The operator's key, whose statements on the personal items are the operator's. */
 export const OPERATOR = "priority-eval-operator";
 
-/** What the database holds once plantFacts has run, read back, not counted as written: a fact dropped on the way is seen. */
-export type PlantedFacts = { structures: number; links: number; stated: number; claims: number; items: number; done: number; levels: number };
+/**
+ * What the database holds once plantFacts has run, read back value by value (review pass 1: counts passed a due day
+ * dropped on the way), one sorted line a fact: a ticket's source and its counted level, a relation link, a live
+ * claim, and an open item by the note it was read from, with its status, its due day, its counted level and tier, and
+ * who opened it. Any statement in tier 4 (inferred) is a line of its own, which no plan has.
+ */
+export type PlantedFacts = string[];
 
 /**
  * Plant factPlan's facts for `rows` (seedRow's, planted), `today` the run's day. Throws on any refusal: a fact not
@@ -424,26 +432,45 @@ export async function plantFacts(sql: SQL, store: SqlStore, items: readonly Item
   // Every statement planted is one 122 counts: tier 4 (inferred) would read as unknown and pass unseen.
   const [inferred] = (await sql`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NULL AND tier = 4`) as { n: number }[];
   if (inferred.n > 0) throw new Error(`${inferred.n} planted statement(s) are tier 4 (inferred), which effective_priority counts only when asked`);
-  const [n] = (await sql`
-    SELECT (SELECT count(*)::int FROM thought_sources WHERE system = 'linear') AS structures,
-           (SELECT count(*)::int FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' = 'blocks') AS links,
-           (SELECT count(*)::int FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'ticket' AND maker_name = ${BOARD_SYNC} AND tier = 2) AS stated,
-           (SELECT count(*)::int FROM work_claims WHERE released_at IS NULL AND expires_at > now() AND holder_name = ${CLAIMANT}) AS claims,
-           (SELECT count(*)::int FROM open_items) AS items,
-           (SELECT count(*)::int FROM open_items WHERE status = 'done') AS done,
-           (SELECT count(*)::int FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'item' AND maker_name = ${OPERATOR} AND tier = 1) AS levels`) as PlantedFacts[];
-  return { structures: n.structures, links: n.links, stated: n.stated, claims: n.claims, items: n.items, done: n.done, levels: n.levels };
+  const keyOf = new Map(rows.map((r, i) => [r.id, items[i].key] as const));
+  const lines: string[] = [];
+  for (const r of (await sql`SELECT identity FROM thought_sources WHERE system = 'linear'`) as { identity: string }[]) lines.push(`ticket ${r.identity}`);
+  for (const r of (await sql`SELECT item_key, level FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'ticket' AND maker_name = ${BOARD_SYNC} AND tier = 2`) as { item_key: string; level: number }[]) lines.push(`ticket ${r.item_key} level ${r.level}`);
+  for (const r of (await sql`
+      SELECT s.identity, f.payload->>'relation' AS relation, f.payload->>'target' AS target
+        FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = 'linear'
+       WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')`) as { identity: string; relation: string; target: string }[]) {
+    lines.push(`link ${r.identity} ${r.relation} ${r.target}`);
+  }
+  for (const r of (await sql`SELECT issue, holder_name FROM work_claims WHERE released_at IS NULL AND expires_at > now()`) as { issue: string; holder_name: string }[]) lines.push(`claim ${r.issue} by ${r.holder_name}`);
+  // A bare due day is held as its end, the next day's start in UTC (119): the day is that instant less one.
+  for (const r of (await sql`
+      SELECT i.origin_thought_id::text AS origin, i.status, i.opened_by_name,
+             to_char((i.due_at - interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS due,
+             (SELECT a.level || ' tier ' || a.tier FROM priority_assertions a
+               WHERE a.closed_at IS NULL AND a.item_kind = 'item' AND a.item_key = i.item_id::text) AS level
+        FROM open_items i`) as { origin: string; status: string; opened_by_name: string; due: string | null; level: string | null }[]) {
+    lines.push(`item ${keyOf.get(r.origin) ?? r.origin} ${r.status} due ${r.due ?? "none"} level ${r.level ?? "none"} by ${r.opened_by_name}`);
+  }
+  for (const r of (await sql`SELECT item_kind, item_key FROM priority_assertions WHERE closed_at IS NULL AND tier = 4`) as { item_kind: string; item_key: string }[]) lines.push(`tier-4 statement on ${r.item_kind} ${r.item_key}`);
+  return lines.sort();
 }
 
-/** What plantFacts should read back for `items`: the plan's counts, a board item's links and levels its issue's own. */
-export function plannedFacts(items: readonly Item[]): PlantedFacts {
-  const plan = factPlan(items, "2000-01-01");
-  const board = plan.board.map((i) => items[i].issue!);
-  return {
-    structures: board.length, links: board.reduce((a, b) => a + (b.relations?.nodes ?? []).filter((r) => r.type === "blocks").length, 0),
-    stated: board.filter((b) => b.priorityLabel !== "No priority").length, claims: plan.claims.length,
-    items: plan.items.length, done: plan.items.filter((p) => p.done).length, levels: plan.items.filter((p) => p.level !== null).length,
-  };
+/** What plantFacts should read back for `items` on the day `today`: the plan's facts, a board item's levels and links its issue's own. */
+export function plannedFacts(items: readonly Item[], today: string): PlantedFacts {
+  const plan = factPlan(items, today);
+  const lines: string[] = [];
+  for (const i of plan.board) {
+    const b = items[i].issue!;
+    lines.push(`ticket ${b.identifier}`);
+    const level = levelOf("linear", b.priorityLabel);
+    if (level !== null) lines.push(`ticket ${b.identifier} level ${level}`);
+    for (const r of b.relations?.nodes ?? []) if (r.type === "blocks" && r.relatedIssue) lines.push(`link ${b.identifier} blocks ${r.relatedIssue.identifier}`);
+    for (const r of b.inverseRelations?.nodes ?? []) if (r.type === "blocks" && r.issue) lines.push(`link ${b.identifier} blocked_by ${r.issue.identifier}`);
+  }
+  for (const issue of plan.claims) lines.push(`claim ${issue} by ${CLAIMANT}`);
+  for (const p of plan.items) lines.push(`item ${items[p.index].key} ${p.done ? "done" : "open"} due ${p.due ?? "none"} level ${p.level === null ? "none" : `${p.level} tier 1`} by ${p.actor}`);
+  return lines.sort();
 }
 
 /** The two search tools a baseline read, or a measured read's callTool, calls. */

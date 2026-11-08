@@ -54,6 +54,8 @@ import {
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** The read key's name: the key the eval's reads run under, never the claimant or the operator. */
+const READ_KEY = "priority-eval";
 const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
 
 /**
@@ -113,10 +115,15 @@ async function selfCheck(): Promise<void> {
   assert(at("bill")?.due === "2026-02-28" && at("gutters")?.due === "2026-02-13" && at("renewal")?.due === "2026-03-29" && at("cat")?.due === null && at("claim-done")?.done === true && at("bill")?.done === false
       && at("passport")?.level === 4 && at("coffee")?.level === 0 && at("cat")?.level === null && at("commitment")?.actor === "priority-eval-meeting-notes" && at("bill")?.actor === "priority-eval-operator",
     "an item's day is the run's day moved by its facts, in calendar days across a month's end; done and the level are its facts'; its writer opens it");
-  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && new Set<string>([CLAIMANT, OPERATOR]).size === 2 && !CLAIMANT.includes("read"),
-    "a day moves across a leap day and back across a month; the claimant is another key than the operator and the read key");
-  assert(JSON.stringify(plannedFacts(ITEMS)) === JSON.stringify({ structures: 8, links: 1, stated: 7, claims: 1, items: 10, done: 1, levels: 3 }),
-    `the facts a seeded database must hold: eight tickets, ZQ-101's one blocks link, seven Linear levels (No priority states none), one claim, ten items, one done, three stated levels (${JSON.stringify(plannedFacts(ITEMS))})`);
+  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && new Set<string>([CLAIMANT, OPERATOR, READ_KEY]).size === 3,
+    "a day moves across a leap day and back across a month; the claimant, the operator and the read key are three keys");
+  const facts = plannedFacts(ITEMS, "2026-02-27");
+  assert(facts.length === 28 && ["ticket ZQ-101 level 4", "link ZQ-101 blocks ZQ-104", "link ZQ-104 blocked_by ZQ-101", "claim ZQ-103 by priority-eval-other-agent",
+         "item bill open due 2026-02-28 level none by priority-eval-operator", "item gutters open due 2026-02-13 level none by priority-eval-operator",
+         "item passport open due none level 4 tier 1 by priority-eval-operator", "item claim-done done due none level none by priority-eval-operator",
+         "item commitment open due 2026-03-02 level none by priority-eval-meeting-notes", "item coffee open due none level 0 tier 1 by priority-eval-operator"].every((l) => facts.includes(l))
+      && !facts.some((l) => l.startsWith("ticket ZQ-108 level")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
+    `the facts a seeded database must hold, each by its value: eight tickets, seven Linear levels (No priority states none), the blocks link from both sides as Linear returns it, one claim, and ten items with their status, due day, level and writer (${facts.length}: ${facts.slice(0, 3).join("; ")}…)`);
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -260,20 +267,23 @@ async function seeded(): Promise<void> {
   const seeds = ITEMS.map((it, i) => seedRow(it, i));
   const keyOf = new Map(seeds.map((row, i) => [row.id, ITEMS[i].key] as const));
   let planted = 0;
-  let facts: PlantedFacts | null = null;
-  // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days.
+  let facts: PlantedFacts = [];
+  let today = "";
+  // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days;
+  // to_char, so the session's DateStyle never shapes it.
   const factStore = new SqlStore(url, { max: 1 });
   try {
     planted = await plantRows(sql, seeds);
-    const today = String(((await sql`SELECT (now() AT TIME ZONE 'UTC')::date::text AS d`)[0] as { d: string }).d);
+    today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
     facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
   } finally {
     await factStore.close();
     await sql.close();
   }
   if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
-  const want = plannedFacts(ITEMS);
-  if (JSON.stringify(facts) !== JSON.stringify(want)) { console.error(`the database holds the facts ${JSON.stringify(facts)}, not the plan's ${JSON.stringify(want)}`); process.exit(1); }
+  const want = plannedFacts(ITEMS, today);
+  const missing = want.filter((l) => !facts.includes(l)), extra = facts.filter((l) => !want.includes(l));
+  if (missing.length || extra.length) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
 
   // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
   // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.
@@ -293,12 +303,12 @@ async function seeded(): Promise<void> {
   Object.assign(process.env, {
     DATABASE_URL: url, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_LOCAL: "1",
     OB1_EMBEDDING_MODEL: STUB_MODEL, OB1_EMBEDDING_DIM: String(STUB_DIM), OB1_LLM_TIMEOUT: "10",
-    MCP_ACCESS_KEYS: `priority-eval:read:${hashKey(KEY_RAW)}`,
+    MCP_ACCESS_KEYS: `${READ_KEY}:read:${hashKey(KEY_RAW)}`,
   });
   const worker = await mcpUnderTest();
   if (!servedByMcpServer()) { console.error("the server under test is not the MCP server (mcp-server/stack.ts)"); process.exit(1); }
-  // The server's request lines (one per tool call, timestamped) out of the eval's output, which two runs must print
-  // alike. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
+  // The server's request lines (one per tool call, timestamped) out of the eval's output: their times differ from run
+  // to run. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
   // which only the stack's own install carries (test-server's rule on db/ and evals/ imports).
   const telemetry = "../server-portable/telemetry.ts";
   ((await import(telemetry)) as { useRequestLog: (next: (line: string) => void) => unknown }).useRequestLog(() => {});
