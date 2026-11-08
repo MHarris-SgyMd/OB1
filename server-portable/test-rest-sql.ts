@@ -2247,6 +2247,59 @@ console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket w
     `PR:012 reads pr:12 and VERSION:V1.2 version:v1.2 (${prUpper.status} ${versionUpper.status})`);
 }
 
+console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; holder mine lists the tickets the key holds a claim on");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const P = "Agenda rest [17]";
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  const ticket = async (issue: string, st = "backlog") => {
+    const content = `${issue} — [17] ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: st, status_type: st, project: P })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9911"); await ticket("SMD-9912"); await ticket("SMD-9913", "completed"); await ticket("SMD-9914");
+  const high = await rest("POST", "/v1/priorities/ticket/SMD-9911", { level: 3 });
+  const soon = await rest("POST", "/v1/priorities/ticket/SMD-9912", { level: 2, due_at: tomorrow });
+  const q = `/v1/agenda?project=${encodeURIComponent(P)}`;
+  const r = await rest("GET", q);
+  const m = await mcp("agenda", { project: P });
+  type It = { key: string; rank: number; effective: number; terms: { term: string }[] };
+  const items = (r.body.items ?? []) as It[];
+  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9912 SMD-9911 SMD-9914"
+      && items[0].effective === 4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
+    `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
+  const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
+  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
+      && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
+    `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
+  const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
+  assert(blank.status === 400, `a blank scope is refused 400 by the schema, never a database fault (${blank.status} ${blank.body.code})`);
+  // A lone surrogate over MCP (review pass 6): the schema refuses it, never the database's jsonb cast (a 500).
+  const lone = await mcp("agenda", { project: "a" + String.fromCharCode(0xd800) + "b" });
+  assert(lone.isError && !/^Error: |FAILED/.test(lone.text) && /surrogate/.test(lone.text), `a lone surrogate in a scope is refused by the schema (${lone.text.slice(0, 120)})`);
+  // An open item through both doors: read by the store's normaliser, rendered over MCP.
+  const opened = await rest("POST", "/v1/items", { text: "[17] water the ferns", due_at: tomorrow });
+  const its = await rest("GET", "/v1/agenda?source=items&limit=100");
+  const itsMcp = await mcp("agenda", { source: "items", limit: 100 });
+  const mine17 = ((its.body.items ?? []) as (It & { kind: string })[]).find((i) => i.key === String((opened.body.item as { id?: string } | undefined)?.id));
+  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 4 && !itsMcp.isError
+      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 4: no priority stated \\(read as 2\\); \\+2 due by the end of `).test(itsMcp.text),
+    `an open item due tomorrow is listed over REST and said over MCP, unknown 2 plus its urgency (${its.status} ${mine17?.effective} | ${itsMcp.text.split("\n").find((l) => l.includes("water the ferns"))})`);
+  const reader = await rest("GET", q, undefined, KEYS.reader);
+  const hook = await rest("GET", q, undefined, KEYS.hook);
+  assert(reader.status === 200 && same(reader.body.items, r.body.items) && hook.status === 403,
+    `a read key reads the agenda; a capture-only key does not (${reader.status} ${hook.status})`);
+  // holder mine: the tickets this key holds a live claim on, claimed as they are.
+  const claim = await rest("POST", "/v1/claims", { ticket: "SMD-9914", label: "test-rest-sql [17]", lease_seconds: 3600 });
+  const mine = await rest("GET", "/v1/agenda?holder=mine");
+  const rivalMine = await rest("GET", "/v1/agenda?holder=mine", undefined, KEYS.rival);
+  const mineItems = (mine.body.items ?? []) as (It & { claimed: { holder: string }[] })[];
+  assert(claim.status === 200 && mineItems.map((i) => i.key).join(" ") === "SMD-9914" && mineItems[0].claimed[0]?.holder === "writer"
+      && rivalMine.status === 200 && Array.isArray(rivalMine.body.items) && (rivalMine.body.items as It[]).every((i) => i.key !== "SMD-9914"),
+    `holder mine lists the ticket the key claimed, its claim named; another key's mine leaves it out (${mine.status} ${mineItems.map((i) => i.key)} | ${rivalMine.status})`);
+  if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [17] done" });
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

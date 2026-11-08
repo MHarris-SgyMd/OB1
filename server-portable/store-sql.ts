@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -43,6 +43,7 @@ import type {
   ResetStampResult,
   ProvenanceNode,
   QueryActionLog,
+  QueryAgendaLog,
   QuerySearchLog,
   SupersessionProposal,
   ThoughtHybridMatch,
@@ -1183,6 +1184,27 @@ export class SqlStore implements ThoughtStore {
       throw priorityRefusedOr(e);
     }
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
+  }
+
+  // SMD-3669: 123's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
+  async agenda(opts: {
+    scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
+    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; now?: string;
+  }): Promise<AgendaResult> {
+    const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
+    const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
+    const rows = await this.sql`
+      SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
+                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
+                    COALESCE(${opts.now ?? null}::timestamptz, now())) AS a` as { a: unknown }[];
+    return normaliseAgenda(rows[0]?.a, "agenda");
+  }
+
+  async logAgenda(row: QueryAgendaLog): Promise<void> {
+    await this.sql`
+      INSERT INTO query_log (kind, tool, agent_id, match_count, filter, result_items, tier)
+      VALUES ('agenda', 'agenda', ${row.agentId ?? null}::uuid, ${row.matchCount}::int, (${JSON.stringify(row.filter)}::text)::jsonb,
+              (${JSON.stringify(row.items)}::text)::jsonb, ${row.tier ?? null}::text)`;
   }
 
   // SMD-3665 PR 2: 117's writers, the envelope stating the key's scope and the plugin a call came through, and every

@@ -86,6 +86,8 @@ export type Refusal =
   | { code: "PROPOSAL_YOURS"; retryable: false; proposal: string } // a proposal is accepted by a key other than its proposer
   | { code: "CONFIRM_NOT_YOURS"; retryable: false; item: string } // a capture-only key may dismiss a proposed item, never confirm it
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
+  // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
+  | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -197,6 +199,7 @@ const FACTS: Facts = {
   PROPOSAL_DECIDED: (r) => ({ proposal: r.proposal, decision: r.decision }),
   PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
+  CLAIMS_UNREADABLE: none,
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),
