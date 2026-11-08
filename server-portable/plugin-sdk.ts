@@ -17,6 +17,7 @@ import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
 import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
 import { dueInstant, levelOf, reasonOf, type PriorityScale } from "./priority-scale.ts";
+import { withCallWaits, type CallWaits } from "./model-call.ts";
 
 export { z };
 export type { PluginSql, PriorityScale };
@@ -311,6 +312,9 @@ export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlig
  * fails leaves the claim to lapse, and the run's value is answered all the same.
  * A `thoughtId` that is no uuid is the plugin's fault: thrown, the claim kept
  * to lapse, so a resend is told to retry (409) until the lease rather than run.
+ * While one of the run's model calls waits for a slot of its background share,
+ * the claim is renewed (SMD-3379 PR 2b-2b), so a resend is told to retry
+ * however long the wait, and the call then runs within a whole lease.
  *
  * With `defer` (SMD-2767), the claim is made and answered now — `deferred`, a
  * duplicate or one still running — and the run, its record and its release
@@ -354,14 +358,38 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     return { claimed: false as const, thoughtId: held?.thought_id ?? null };
   });
   if (!claim.claimed) return claim.thoughtId ? { duplicate: claim.thoughtId } : { inFlight: true };
-  const claimedAt = claim.at;
+  let claimedAt = claim.at;
+  // The lease renewed while a run's model call waits for a slot of its background share (SMD-3379 PR 2b-2b, the
+  // maintainer, 2026-11-08): a deferred run is background, and under the defaults may wait behind the sleep passes'
+  // long calls, past a lease sized to a capture's own calls, for the sender's retry to run it again. Every third of
+  // the lease while any call waits, and once as the last wait ends, so its call has a whole lease to run in. Matched
+  // on claimed_at, as the release is, which waits for a renewal in flight: never another's claim.
+  let renewing: Promise<void> = Promise.resolve();
+  const renew = () => {
+    renewing = renewing.then(() =>
+      ctx.db
+        .tx((sql) => sql<{ claimed: string }>`UPDATE deliveries SET claimed_at = now() WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING claimed_at::text AS claimed`)
+        .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; }, () => undefined));
+  };
+  let waits = 0;
+  let renewal: ReturnType<typeof setInterval> | undefined;
+  const leaseKept: CallWaits = {
+    waiting: () => {
+      if (waits++ === 0) renewal = setInterval(renew, Math.max(1, lease / 3) * 1000);
+    },
+    running: () => {
+      if (waits === 0 || --waits > 0) return;
+      clearInterval(renewal);
+      renew();
+    },
+  };
   // What became of its own claim: given back; already no longer its own (a
   // retry took it past the lease, or the prune); or, the DELETE failing, left
   // to lapse at the lease (review pass 4: a DELETE that matched nothing was told as given back).
   type Fate = "given back" | "already re-claimed or pruned" | "left to lapse at the lease";
   const release = (): Promise<Fate> =>
-    ctx.db
-      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`)
+    renewing.then(() => ctx.db
+      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`))
       .then((rows): Fate => (rows.length ? "given back" : "already re-claimed or pruned"), (): Fate => "left to lapse at the lease");
   // What became of the claim when no thought was recorded; null, kept to lapse (a thoughtId that is no uuid).
   let gaveBack: Fate | null = null;
@@ -369,11 +397,13 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   const finish = async (): Promise<{ value: T; captured: boolean }> => {
     let done: OnceRun<T>;
     try {
-      done = await run();
+      done = await withCallWaits(leaseKept, run);
     } catch (err) {
+      clearInterval(renewal);
       gaveBack = await release();
       throw err;
     }
+    clearInterval(renewal);
     const thoughtId = done.thoughtId;
     if (thoughtId === null) {
       gaveBack = await release();

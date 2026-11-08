@@ -30,6 +30,14 @@ defaults:
   run:
     shell: bash
 
+# The suites run with the background slots off (SMD-3379 PR 2b-2b, the
+# maintainer, 2026-11-08): the defaults would hold every local stub's background
+# calls in each process a suite spawns, a connection per slot, and the rows that
+# test them set their own. A job that runs the compose stack sets it empty, so
+# compose hands the stack its defaults and they run end to end as shipped.
+env:
+  OB1_BACKGROUND_SLOTS: "off"
+
 # Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
 # GitHub moves to a new release on its own date), and every `uses:` names a
 # full commit SHA with the tag it was in a trailing comment; Dependabot
@@ -1686,6 +1694,9 @@ jobs:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack '))) }}
     steps:
@@ -3003,6 +3014,9 @@ jobs:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-brains '))) }}
     steps:
@@ -3854,6 +3868,9 @@ jobs:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-auth '))) }}
     steps:
@@ -4617,6 +4634,9 @@ jobs:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-observability '))) }}
     steps:

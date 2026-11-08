@@ -1152,7 +1152,7 @@ export async function exitAndOutput(child: { exited: Promise<number>; kill(signa
 export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; until: (pattern: RegExp, ms: number) => Promise<boolean>; stop: () => Promise<string>; kill: () => void }> {
   const child = Bun.spawn([process.execPath, "--no-env-file", entry], {
     cwd,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", ...env },
+    env: withSuiteSlots({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", ...env }),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -1352,6 +1352,16 @@ export async function cuttableRelay(databaseUrl: string): Promise<{ url: string;
  * the inherited environment when given; a caller that wants the parent's plus
  * a few builds that object itself.
  */
+/**
+ * A child's own environment with the suite's background slots carried in, where it does not name them (SMD-3379
+ * PR 2b-2b): the suites run with them off (CI's env, ci-parity.sh's export), and a child given an environment of its
+ * own would otherwise run the defaults, holding every local stub's background calls. One that names them keeps its own.
+ */
+export function withSuiteSlots(env: Record<string, string>): Record<string, string> {
+  const suite = process.env.OB1_BACKGROUND_SLOTS;
+  return "OB1_BACKGROUND_SLOTS" in env || suite === undefined ? env : { ...env, OB1_BACKGROUND_SLOTS: suite };
+}
+
 export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   // A child given its own environment gets exactly that: Bun loads the cwd's
   // .env into a child for every variable the passed environment lacks — which
@@ -1361,7 +1371,7 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   // spawn whose command IS bun, by basename, so a binary spelled by path
   // gets the flag too; a spawn fronted by another program spells it itself.
   const argv = opts.env && basename(cmd[0]) === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
-  const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
+  const p = Bun.spawn(argv, { ...(opts.env ? { env: withSuiteSlots(opts.env) } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const stdout = await new Response(p.stdout).text();
   const stderr = await new Response(p.stderr).text();
   // A package the importing file's directory has not installed fails the import where auto-install is off
@@ -1379,11 +1389,15 @@ const missingReported = new Set<string>();
 /** A terminal colour sequence, as Bun wraps `error` in under FORCE_COLOR. */
 const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
-/** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
+/**
+ * This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts
+ * build their spawns' shells on — but the suite's background slots, which a suite runs with as it does its PATH
+ * (SMD-3379 PR 2b-2b: off in CI and ci-parity.sh).
+ */
 export function shellWithoutOb1(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("OB1_")) env[k] = v;
-  return env;
+  return withSuiteSlots(env);
 }
 
 /**

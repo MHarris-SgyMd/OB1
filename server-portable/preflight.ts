@@ -47,7 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
-import { backgroundSlotsFrom } from "./slots.ts";
+import { slotsSettingFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -1114,13 +1114,29 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 
-// The background slots in force (SMD-3379 PR 2b-2a): only when set, off unless it is — a value the servers and the
-// passes cannot read leaves them off, with a line in each process's log an operator may never read.
-if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
-  const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
-  if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
-  else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
-  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named`);
+// The background slots in force (SMD-3379 PR 2b-2a), on by default since PR 2b-2b: a local model server's chat and
+// embedding calls held to OB1_MODEL_SLOTS less one, the decide tier's to one, OB1_BACKGROUND_SLOTS' own shares over
+// them, holding every endpoint. A value the servers and the passes cannot read leaves the defaults, with a line in each
+// process's log an operator may never read; the host rule warns where a share leaves a model server no slot for live
+// calls — the decide tier aside, which answers one request at a time.
+{
+  const st = slotsSettingFrom(env.OB1_BACKGROUND_SLOTS, env.OB1_MODEL_SLOTS);
+  const listed = (m: ReadonlyMap<string, number>) => [...m].map(([k, v]) => `${k}=${v}`).join(", ");
+  const where = "background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named";
+  // The local endpoints the defaults hold: chat and embeddings, one endpoint or two, and the decide tier's.
+  const locals = [...new Set([embEndpoint.local ? (chatEndpoint === embEndpoint ? "embeddings and chat" : "embeddings") : "", chatEndpoint !== embEndpoint && chatEndpoint.local ? "chat" : "", resolveJevConfig(env)?.endpoint.local ? "decide" : ""].filter(Boolean))];
+  // The host rule: a chat or embedding share, set or by default, as large as the server's slots leaves none for live calls.
+  const full = st.defaults === null ? [] : [...(st.set ?? new Map<string, number>())].filter(([k, v]) => !k.startsWith("decide") && v >= st.modelSlots).map(([k]) => k);
+  const noReserve = st.defaults !== null && st.modelSlots === 1;
+  if (st.defaults === null) add("background slots", "ok", `off (OB1_BACKGROUND_SLOTS) — background model calls are not held`);
+  else {
+    const own = st.set ? `; ${listed(st.set)} set (OB1_BACKGROUND_SLOTS), every endpoint's` : "";
+    const held = locals.length ? `on the local ${locals.join(", ")} endpoint(s)` : "on no endpoint: none is declared local (OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL)";
+    const detail = `${listed(st.defaults)} by default ${held} (OB1_MODEL_SLOTS ${st.modelSlots}, one left for live calls)${own} — ${where}`;
+    const problems = [...st.problems, ...(full.length ? [`${full.join(", ")} take${full.length === 1 ? "s" : ""} every one of OB1_MODEL_SLOTS' ${st.modelSlots}, leaving live calls none`] : []), ...(noReserve ? ["OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one"] : [])];
+    if (problems.length) add("background slots", "warn", `${problems.join("; ")} — in force: ${detail}`, "Correct the value as the line says: a chat or embedding share below OB1_MODEL_SLOTS, OB1_MODEL_SLOTS the model server's parallel calls per model (its OLLAMA_NUM_PARALLEL), or OB1_BACKGROUND_SLOTS=off.");
+    else add("background slots", "ok", detail);
+  }
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────

@@ -64,10 +64,18 @@ export type Env = {
    * slots.ts): types with per-model overrides, `chat=1,embed=2,decide=1`, held
    * across the brain's processes by advisory locks: each slot held, and one
    * waiting call per share and process, costs a connection of its own; a live
-   * call takes none. Unset or off, none held; a value that does not parse is
-   * said, and none held.
+   * call takes none. Merged over the defaults a local model server's calls are
+   * held to (PR 2b-2b: chat and embed OB1_MODEL_SLOTS less one, decide one),
+   * its own shares holding every endpoint; `off`, none held; a value that does
+   * not parse is said, and the defaults stay.
    */
   OB1_BACKGROUND_SLOTS?: string;
+  /**
+   * A local model server's parallel calls per model (SMD-3379 PR 2b-2b), 1 to
+   * 16: compose hands the bundled Ollama the same as OLLAMA_NUM_PARALLEL, and
+   * the background slots' defaults leave one of them for live calls. Unset, 4.
+   */
+  OB1_MODEL_SLOTS?: string;
   /**
    * Seconds between re-probes of a local embedding provider that does not
    * answer (provider-health.ts, SMD-2890): whole seconds from 1 to 3600, `0`

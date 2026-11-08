@@ -933,13 +933,23 @@ services:
       # leader lock lets one mend at a time, where two run on one database.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       # Background calls held to a share of each model server's slots (SMD-3379
-      # PR 2b-1): types with optional per-model overrides, e.g.
-      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, kept across the brain's
-      # processes by advisory locks: each slot held, and one waiting call per
-      # share and process, costs a connection of its own; a live call takes none.
-      # Unset or off, none is held. The REST core reads it, the coordinator hands
-      # it to its passes, and the orchestration runner to its reembed.
+      # PR 2b-1), kept across the brain's processes by advisory locks: each slot
+      # held, and one waiting call per share and process, costs a connection of
+      # its own; a live call takes none. By default (PR 2b-2b) a local model
+      # server's chat and embedding calls are held to OB1_MODEL_SLOTS less one,
+      # so a slot is left for live calls, the decide tier's to one; a remote
+      # provider's are not held. Types with optional per-model overrides, e.g.
+      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, merge over the defaults and
+      # hold every endpoint; off holds none; a value that does not parse is said,
+      # and the defaults stay. The REST core reads it, the coordinator hands it
+      # to its passes, and the orchestration runner to its reembed.
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
+      # A local model server's parallel calls per model, 1 to 16 (SMD-3379 PR
+      # 2b-2b): the bundled Ollama answers this many at once (its
+      # OLLAMA_NUM_PARALLEL, below), and the defaults above leave one for live
+      # calls. Unset, 4, Ollama's own default. For an Ollama on the host, set
+      # its OLLAMA_NUM_PARALLEL to the same.
+      OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
       # way /models cannot show), 1 to 3600, 0 or off for the start's probe
@@ -1523,6 +1533,10 @@ services:
     profiles: ["local-models"]
     volumes:
       - ollama:/root/.ollama
+    # The calls it answers at once per model: OB1_MODEL_SLOTS, which the
+    # background slots' defaults leave one of for live calls (SMD-3379 PR 2b-2b).
+    environment:
+      OLLAMA_NUM_PARALLEL: ${OB1_MODEL_SLOTS:-4}
     # No `ports:`. An unauthenticated model API; the server and ollama-pull reach
     # it as `ollama:11434` on `egress`, and nothing in the stack needs
     # it from the host. `compose exec ollama ollama pull <model>` (with the -f
@@ -1892,6 +1906,7 @@ services:
       OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
       OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
+      OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # No `:?`, for the reason n8n's block gives: the runner refuses to
       # start without it, and says why.
       OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}

@@ -893,7 +893,7 @@ export function extractionKey(model: string): string {
  */
 function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}, stop?: AbortSignal): Promise<Extraction & { runaway: boolean }> {
   // Through the model-call seam (SMD-3379 PR 2a): the request and its streamed read, the deadline started inside.
-  return modelCall({ type: "chat", model: second.model ?? cfg.metadataModel, base: cfg.chat.base, purpose: "extraction", ...(stop ? { signal: stop } : {}) },
+  return modelCall({ type: "chat", model: second.model ?? cfg.metadataModel, base: cfg.chat.base, local: cfg.chat.local, purpose: "extraction", ...(stop ? { signal: stop } : {}) },
     () => extractExchange(text, cfg, timeoutMs, part, w, second, stop));
 }
 
