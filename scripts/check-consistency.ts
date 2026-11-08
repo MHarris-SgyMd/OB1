@@ -10461,7 +10461,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts", "evals/consolidate-labels.json"], why: "named in messages, assertion text and a label file's note" },
   "integrations/openclaw-agent-memory/plugin/README.md": { by: ["integrations/openclaw-agent-memory/plugin/package.json"], why: "in the plugin's npm files list, which no job packs" },
   "jev/README.md": { by: ["db/consolidate.ts", "jev/test-jev.ts"], why: "named in messages" },
-  "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
+  "jev/h2o/README.md": { by: ["db/consolidate.ts", "server-portable/preflight.ts"], why: "named in preflight's and decide mode's messages" },
   "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
   "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },
   "scripts/agent-runner/README.md": { by: ["scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts"], why: "the probe and gate harnesses' \"README.md\" token resolves from their own directory to this file; they plant a README in the clone, not this one" },

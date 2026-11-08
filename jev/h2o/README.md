@@ -15,7 +15,8 @@ temperature. vLLM does not run on the dogfood Mac, so `serve.py` does the same
 read on PyTorch MPS, following `h2o_lightning_shim.py` and `serve_config.json`
 at v1.2.3, the revision behind the card's routing table. It serves the contract
 of `jev/serve.ts` and `jev/decider/serve.py`, so a caller switches models by
-`OB1_JEV_BASE_URL` / `OB1_JEV_MODEL` alone.
+its tier settings alone: `OB1_JEV_BASE_URL` / `OB1_JEV_MODEL` for the shared
+tier, `OB1_CONSOLIDATE_DECIDER_URL` for decide mode's own.
 
 ## Run
 
@@ -243,24 +244,77 @@ proposals, version 2 missed its bar twice, so it stays in
 `evals/eval-judge-propose.ts` (`--record-rule`, `--v2-quotes`) for SMD-3116's
 writers and is not the pass's.
 
-For a brain on this Mac, serve the tier on the host and point the stack at it:
+## Deploy: a host process for decide mode (SMD-3326)
 
-```bash
-JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py
-```
+PyTorch MPS runs only on the host, so on a Mac the adapter runs beside the
+stack, as Ollama's Option B does (decided 2026-10-25). Decide mode reaches it
+through a setting of its own, so the shared tier (`OB1_JEV_*`, which capture's
+genre facet asks) can serve another model (a tier per caller, decided
+2026-10-26):
 
 ```bash
 # deploy/.env
 OB1_CONSOLIDATE_DECIDER=h2o-lightning-4b
-OB1_JUDGE_MODEL=qwen3.8:27b                         # the writer SMD-3114 measured
-OB1_JEV_BASE_URL=http://host.containers.internal:8022
-OB1_JEV_MODEL=h2o-lightning-4b
-OB1_JEV_LOCAL=1
+OB1_JUDGE_MODEL=qwen3.8:27b                                   # the writer SMD-3114 measured
+OB1_CONSOLIDATE_DECIDER_URL=http://host.containers.internal:8022   # host.docker.internal under Docker Desktop
+OB1_CONSOLIDATE_DECIDER_LOCAL=1
 ```
 
-- **The tier must stay up.** Preflight dials `OB1_JEV_BASE_URL` on every server
-  start and fails when nothing answers, so the server will not start without
-  the tier.
+Unset, `OB1_CONSOLIDATE_DECIDER_URL` falls back to the shared tier at
+`OB1_JEV_BASE_URL`, with `OB1_JEV_LOCAL`, and `OB1_JEV_MODEL`, when set, must
+then name the decider; brains set up before SMD-3326 keep working that way.
+
+**Moving such a brain to its own tier,** unset `OB1_JEV_BASE_URL`,
+`OB1_JEV_LOCAL` and `OB1_JEV_MODEL`, or point them at another tier. Left at
+:8022, they keep H2O the shared tier: preflight still dials it on every start
+and fails the start when it is down, and capture's genre facet keeps asking
+it. Unset, the genre facet is off.
+
+**Keep it running.** `com.openbrain.h2o-tier.plist.example` is a LaunchAgent
+for it. It starts the adapter at login, restarts it when it exits, and logs to
+`~/Library/Logs/ob1-h2o-tier.log`. Point it at a `serve.py` that won't move
+under it: a checkout pinned to a release, not a worktree you work in.
+
+The template starts the adapter offline (`HF_HUB_OFFLINE=1`), so a start never
+reaches the network. That only works once the weights are cached, so fetch them
+first with one start by hand. It prints a ready line once the 9.1 GB are down
+and checked; stop it then. Then install the agent:
+
+```bash
+VENV=<decider-4b's venv>; CHECKOUT=<a stable checkout>              # absolute paths
+JEV_PORT=8023 "$VENV/bin/python" -I "$CHECKOUT/jev/h2o/serve.py"   # once: wait for "ready", then Ctrl-C
+sed -e "s|__PYTHON__|$VENV/bin/python|" \
+    -e "s|__SERVE_PY__|$CHECKOUT/jev/h2o/serve.py|" \
+    -e "s|__HOME__|$HOME|" "$CHECKOUT/jev/h2o/com.openbrain.h2o-tier.plist.example" \
+  > ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
+curl -s http://127.0.0.1:8022/health                          # ok once the weights are loaded
+```
+
+To move it to another `serve.py`, rewrite the plist, then `launchctl bootout
+gui/$(id -u)/com.openbrain.h2o-tier` and bootstrap it again. To remove it,
+boot it out and delete the plist. One adapter serves every brain on the
+machine (stable and the canary reach the same :8022), and its queue bound
+holds them all. A compose service for Linux hosts stays a later option.
+
+To try it by hand instead:
+`JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`.
+
+- **When the tier is down.** Preflight's decide tier row dials
+  `OB1_CONSOLIDATE_DECIDER_URL` on every server start and warns when nothing
+  answers. The server still starts, since only the consolidation pass asks this
+  tier, and capture and search don't wait on it. Until it answers, the
+  consolidation pass decides nothing:
+  - A follower (sleep's) checks the tier at its start. It waits for one that
+    does not answer, and refuses one serving another model or not answering as
+    the tier.
+  - A one-shot `bun db/consolidate.ts` makes no start check. Each worker
+    retries its first thought (pauses of 5, 15 and 45 s), records that thought
+    failed, and stops; the rest stay pending for the next run. A tier serving
+    another model (its 409), or a URL that is not a tier and answers a 4xx,
+    stops every worker at the first call, marks nothing failed, and names
+    `OB1_CONSOLIDATE_DECIDER_URL` and the decider. A URL that answers 200
+    outside the contract fails each thought it is asked about instead.
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.

@@ -28,8 +28,12 @@
  * lineage table that would hold it for every derived row is SMD-1731's; this
  * tier supplies what such a row would record and builds nothing to hold it.
  *
- * Nothing in Daemonic Brain calls this yet: the server never decides, and
- * preflight reads the knobs only to check the tier. The spikes are the callers.
+ * Two callers in the brain use it today. The REST core's capture asks the
+ * shared tier (OB1_JEV_*) for a thought's genre (SMD-2323). Consolidation's
+ * decide mode (SMD-3115) asks for every pair's verdict, through a tier of its
+ * own when OB1_CONSOLIDATE_DECIDER_URL names one and through the shared tier
+ * otherwise (resolveDecideTier; a tier per caller, SMD-3326). Preflight dials
+ * each.
  */
 
 import { baseUrlOr, isRedirect, ProviderError, providerEndpoint, providerErrorType, refuseEgress, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
@@ -61,6 +65,12 @@ export type JevEnv = EgressEnv & {
   OB1_JEV_MODEL?: string;
   /** 1/on: OB1_JEV_BASE_URL is on this machine or its private network — declared, never guessed from the address. */
   OB1_JEV_LOCAL?: string;
+  /** Consolidation's decide mode: the tier's model that gives each verdict (SMD-3115). */
+  OB1_CONSOLIDATE_DECIDER?: string;
+  /** Where decide mode's own tier is served (SMD-3326); unset, decide mode asks the shared tier at OB1_JEV_BASE_URL. */
+  OB1_CONSOLIDATE_DECIDER_URL?: string;
+  /** 1/on: OB1_CONSOLIDATE_DECIDER_URL is on this machine or its private network, as OB1_JEV_LOCAL declares the shared tier's. */
+  OB1_CONSOLIDATE_DECIDER_LOCAL?: string;
 };
 
 /**
@@ -102,6 +112,8 @@ export type JevConfig = {
   endpoint: ProviderEndpoint;
   /** OB1_JEV_MODEL, when set: an answer from any other model is refused. */
   model: string | undefined;
+  /** The knob that set `model`, for a message about another model's answer: OB1_JEV_MODEL unless a caller holds the tier to its own (decide mode's OB1_CONSOLIDATE_DECIDER, SMD-3326). */
+  modelKnob?: string;
   egress: EgressPolicy;
   timeoutMs: number;
 };
@@ -117,6 +129,47 @@ export function resolveJevConfig(env: JevEnv): JevConfig | null {
     egress: resolveEgressPolicy(env),
     timeoutMs: DEFAULT_JEV_TIMEOUT_MS,
   };
+}
+
+/**
+ * Decide mode's tier: its configuration, and the knobs a message about it names.
+ * `own` when OB1_CONSOLIDATE_DECIDER_URL names it, else the shared tier's.
+ */
+export type DecideTier = {
+  cfg: JevConfig;
+  own: boolean;
+  baseKnob: "OB1_CONSOLIDATE_DECIDER_URL" | "OB1_JEV_BASE_URL";
+  localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL" | "OB1_JEV_LOCAL";
+};
+
+/**
+ * Consolidation's decide mode reads a tier of its own (a tier per caller, decided 2026-10-26, SMD-3326): a base URL
+ * at OB1_CONSOLIDATE_DECIDER_URL, declared local by OB1_CONSOLIDATE_DECIDER_LOCAL, held to the decider's own model,
+ * so an answer from any other is refused. Unset, it falls back to the shared tier at OB1_JEV_BASE_URL with its own
+ * OB1_JEV_LOCAL and OB1_JEV_MODEL, as decide mode read before. Null when neither base is set.
+ *
+ * So H2O-Lightning-4B can serve decide mode on :8022 while the shared tier, which capture's genre facet asks,
+ * serves another model, and neither setting is the other's.
+ */
+export function resolveDecideTier(env: JevEnv): DecideTier | null {
+  const own = baseUrlOr(env.OB1_CONSOLIDATE_DECIDER_URL, "");
+  if (own) {
+    const decider = stringOr(env.OB1_CONSOLIDATE_DECIDER, "");
+    return {
+      own: true,
+      baseKnob: "OB1_CONSOLIDATE_DECIDER_URL",
+      localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
+      cfg: {
+        endpoint: providerEndpoint(own, undefined, flagOn(env.OB1_CONSOLIDATE_DECIDER_LOCAL), "OB1_CONSOLIDATE_DECIDER_LOCAL"),
+        model: decider || undefined,
+        modelKnob: "OB1_CONSOLIDATE_DECIDER",
+        egress: resolveEgressPolicy(env),
+        timeoutMs: DEFAULT_JEV_TIMEOUT_MS,
+      },
+    };
+  }
+  const shared = resolveJevConfig(env);
+  return shared ? { own: false, baseKnob: "OB1_JEV_BASE_URL", localKnob: "OB1_JEV_LOCAL", cfg: shared } : null;
 }
 
 /**
@@ -193,10 +246,10 @@ async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/in
 }
 
 /** What is wrong with an answer, or null: the contract, the model, and every result's shape. */
-export function jevAnswerProblem(cfg: Pick<JevConfig, "model">, decisions: JevDecision[], answer: JevResponse): string | null {
+export function jevAnswerProblem(cfg: Pick<JevConfig, "model" | "modelKnob">, decisions: JevDecision[], answer: JevResponse): string | null {
   if (answer?.contract !== JEV_CONTRACT) return `the answer's contract is ${JSON.stringify(answer?.contract)}, not ${JEV_CONTRACT}`;
   if (!answer.model || typeof answer.model.name !== "string") return "the answer names no model";
-  if (cfg.model && answer.model.name !== cfg.model) return `the answer is from ${answer.model.name}, and OB1_JEV_MODEL expects ${cfg.model}`;
+  if (cfg.model && answer.model.name !== cfg.model) return `the answer is from ${answer.model.name}, and ${cfg.modelKnob ?? "OB1_JEV_MODEL"} expects ${cfg.model}`;
   if (!Array.isArray(answer.results) || answer.results.length !== decisions.length) return `${answer.results?.length ?? "no"} results for ${decisions.length} decisions`;
   for (const [i, r] of answer.results.entries()) {
     const d = decisions[i];

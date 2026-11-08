@@ -106,7 +106,9 @@ Or `podman compose -f deploy/compose.yaml --profile jev up -d` —
 8020, the `jev-models` volume) and `deploy/.env` reaches the service with
 `JEV_THREADS` and `JEV_HUB` only; there `JEV_PORT` is the host port
 `compose.host-ports.yaml` publishes. The brain's knobs are `OB1_JEV_BASE_URL`,
-`OB1_JEV_MODEL` and `OB1_JEV_LOCAL` (`deploy/.env.example`); the API is
+`OB1_JEV_MODEL` and `OB1_JEV_LOCAL` (`deploy/.env.example`), and decide mode's
+own tier, `OB1_CONSOLIDATE_DECIDER_URL` and `OB1_CONSOLIDATE_DECIDER_LOCAL`
+(SMD-3326); the API is
 unauthenticated, like Ollama's, and binds loopback by default. Its queue is
 unbounded: each waiting request holds its body (up to 8 MB) several times
 over until its turn, so a burst of large requests raised resident memory from
