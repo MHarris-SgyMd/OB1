@@ -2340,10 +2340,11 @@ console.log("\n[18] The priority label through both doors (SMD-3668 PR 2): a tho
   const compatHit = pick(JSON.parse(compatMcp.text).results, tid);
   const plainMcp = JSON.parse((await mcp("search", { query: '"a plan naming no ticket"' })).text);
   const compatPlain = pick(plainMcp.results, pid);
+  const plainRest = pick((await rest("POST", "/v1/search/compat", { query: '"a plan naming no ticket"' })).body.results, pid);
   assert(String(compatHit?.title).startsWith(title) && String(JSON.parse(fetchedMcp.text).title).startsWith(title)
       && String(JSON.parse(rowMcp.text).title).startsWith(`[priority: this ticket's row (SMD-9921) high (3), due ${due}] `) && JSON.parse(rowMcp.text).priority.length === 1
-      && compatPlain !== undefined && JSON.stringify(Object.keys(compatPlain)) === '["id","title","url"]',
-    `search's and fetch's titles start with the prefix, a ticket's own row once as its ticket; a result naming none keeps ChatGPT's shape (${compatHit?.title} | ${JSON.parse(rowMcp.text).title})`);
+      && compatPlain !== undefined && JSON.stringify(Object.keys(compatPlain)) === '["id","title","url"]' && plainRest !== undefined && !("priority" in plainRest),
+    `search's and fetch's titles start with the prefix, a ticket's own row once as its ticket; a result naming none keeps ChatGPT's shape, over REST too (${compatHit?.title} | ${JSON.parse(rowMcp.text).title})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '%[18] the priority label%'`;
 }
 
