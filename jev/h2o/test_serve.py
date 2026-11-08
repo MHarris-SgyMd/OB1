@@ -278,6 +278,31 @@ async def main():
         s = f"raised {type(e).__name__}"
     check(s == 200 and gate.admitted == 0, f"a Content-Length of ² is read as undeclared and the body as it streams ({s})")
 
+    print("\n[10] the requests every caller sends, and a waiter cancelled")
+    # Review pass 2's mutants: no case sent the model's own name, which jev.ts sends on every request — a 409 for it
+    # would refuse every real request — and none cancelled a request while it WAITED (only while it was read), whose
+    # waiter left uncancelled would take the lock with no one to release it, and the tier would answer nothing again.
+    R, gate = FakeReader(), serve.Gate()
+    s, b, _ = await post(R, gate, body(model=serve.MODEL_NAME))
+    check(s == 200 and R.reads == 1, f"a request naming the model this tier serves is read ({s}, {b.get('error')})")
+    R, gate = FakeReader(delay=0.4), serve.Gate()
+    first = asyncio.ensure_future(post(R, gate, body()))
+    await asyncio.sleep(0.1)
+    waiting = asyncio.ensure_future(post(R, gate, body()))
+    await asyncio.sleep(0.1)
+    waiting.cancel()
+    try:
+        await waiting
+    except asyncio.CancelledError:
+        pass
+    s1 = (await first)[0]
+    try:
+        s3 = (await asyncio.wait_for(post(R, gate, body()), timeout=5))[0]
+    except asyncio.TimeoutError:
+        s3 = "no answer in 5 s"
+    check(s1 == 200 and s3 == 200 and R.reads == 2 and gate.admitted == 0,
+          f"a request cancelled while it waits is never read, and the next request is read after the first ({s1}, {s3}, {R.reads} read, {gate.admitted} admitted)")
+
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

@@ -90,12 +90,13 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Thirteen mutants, one per mechanism, each fail it: eight
+  server runs it in CI. Fifteen mutants, one per mechanism, each fail it: eight
   worker threads, the read on the event loop, no count bound, no byte bound, no
   refusal before the body, no drop while waiting, no check at its turn, no 422,
   bytes never released, a body over the byte bound alone answered 503, a body
-  stream that breaks and escapes, a caller check that raises and escapes, and
-  tokens estimated from bytes.
+  stream that breaks and escapes, a caller check that raises and escapes,
+  tokens estimated from bytes, a 409 for the model's own name, and a cancelled
+  waiter's acquire left running.
 
 **Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
 model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):
