@@ -989,6 +989,58 @@ export function normaliseThreadPlace(r: Record<string, unknown>): ThreadPlace {
   return { key: String(r.key), place: Number(r.place), total: Number(r.total), previous: side("prev"), next: side("next") };
 }
 
+// ── Judged relations, read (SMD-2726; SMD-3306 PR 7a-2b) ─────────────────────
+
+/** The consolidation judge's words (084, 102's distinct): every one shown (the maintainer's call, 2026-11-07). */
+export type RelationWord = "related" | "evolves" | "duplicate" | "distinct";
+export const RELATION_WORDS = ["related", "evolves", "duplicate", "distinct"] as const satisfies readonly RelationWord[];
+/** How many relations a search or list result carries; the rest are counted. */
+export const RELATIONS_SHOWN = 5;
+/** How many a fetched thought carries; the rest are counted, and the `relations` read pages them. */
+export const RELATIONS_FETCHED = 20;
+/**
+ * Where a page of one thought's relations ends, in their order — strongest first: the confidence rounded to six
+ * places (absent as -1), then the newest recorded (the facet's created_at, which nothing moves: ordered by when last
+ * judged, pass 2's, a kept re-judge between two pages moved a relation to before a walk's cursor — review pass 3), then
+ * the relation's id, each descending. `rank` is Postgres's text of that rounded numeric — a confidence 084 takes
+ * unrounded from a direct write keeps a cursor short (review pass 1) — and `at` its text of that time, so a cursor
+ * compares exactly what the order read.
+ */
+export type RelationPosition = { rank: string; at: string; id: string };
+/**
+ * One judged relation as seen from one thought's side: the relation's id (its facet's) and word, the other thought
+ * (its id, time, its text's head and its `metadata.trust`) and whether it is the older or the newer of the pair — a
+ * relation sits on the newer and names the older, so evolves reads "evolves from" on the newer and "evolved into" on
+ * the older — the confidence (null when the judge gave none), when it was last judged (its lineage row's produced_at,
+ * which a re-judge keeping the word moves while the facet stays: review pass 1; the facet's created_at without one),
+ * its position, and whether either text moved since (`stale`: the lineage row's fingerprints no longer those of the
+ * two texts, as --list relations' EDITED SINCE JUDGED; a relation with no lineage row reads not stale, as there).
+ */
+export type RelationEdge = {
+  id: string; relation: RelationWord; otherIs: "older" | "newer"; other: { id: string; created_at: string | null; content: string; trust: string | null };
+  confidence: number | null; judgedAt: string | null; position: RelationPosition; stale: boolean;
+};
+/** A thought's relations as read: how many stand under the read's filter, and the page of them. */
+export type RelationsOf = { total: number; edges: RelationEdge[] };
+/** Which of a thought's relations to read: one word or all, `limit` of them, after a position; `heads` false leaves out the other thoughts' text heads, for a read that shows no title. */
+export type RelationsWindow = { relation?: RelationWord; limit: number; after?: RelationPosition; heads?: boolean };
+
+/** A relation's row (relationsAmong's jsonb element) → RelationEdge, or null for a word or side this read does not make. */
+export function normaliseRelationEdge(r: Record<string, unknown>): RelationEdge | null {
+  const relation = (RELATION_WORDS as readonly unknown[]).includes(r.relation) ? r.relation as RelationWord : null;
+  const otherIs = r.other_is === "older" || r.other_is === "newer" ? r.other_is : null;
+  if (relation === null || otherIs === null || typeof r.id !== "string" || typeof r.other_id !== "string") return null;
+  const confidence = r.confidence == null ? null : Number(r.confidence);
+  return {
+    id: r.id, relation, otherIs,
+    other: { id: r.other_id, created_at: isoTimestampOrNull(r.other_created_at ?? null), content: String(r.other_content ?? ""), trust: textOrNull(r.other_trust) },
+    confidence: confidence !== null && Number.isFinite(confidence) ? confidence : null,
+    judgedAt: isoTimestampOrNull(r.judged_at ?? null),
+    position: { rank: String(r.rank), at: String(r.at), id: r.id },
+    stale: r.stale === true,
+  };
+}
+
 /** A ticket key as a store sends it: 077's TEAM-123 shape, each once. */
 export function ticketList(tickets: string[]): string[] {
   return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
@@ -2526,6 +2578,22 @@ export interface ThoughtStore {
   threadPlaces(id: string): Promise<ThreadPlace[]>;
 
   /**
+   * Each thought's standing judged relations (SMD-2726; SMD-3306 PR 7a-2b): 084's `relation` facets of origin
+   * `judged` — a work thread's edges (origin `thread`, 120) are the thread read's — on the thought (it the newer) and
+   * naming it (it the older), every word, strongest first; per thought the first `shown` and how many stand. A thought
+   * with none is absent. Throws what Postgres throws: a role that cannot read thought_facets or derivations is the
+   * caller's to say.
+   */
+  relationsAmong(ids: string[], shown: number, heads?: boolean): Promise<Record<string, RelationsOf>>;
+
+  /**
+   * One thought's standing judged relations, a page of them (the `relations` read): `window` filters by word and
+   * picks the page after a position. `total` counts every one under the filter. Throws ListCursorRefused for a
+   * cursor whose time Postgres cannot read, else as relationsAmong does.
+   */
+  relationsPage(id: string, window: RelationsWindow): Promise<RelationsOf>;
+
+  /**
    * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
    * judged to conflict, in one status (null for every status), most confident
    * first, each with both thoughts. Read-only — accepting or rejecting is the
@@ -2685,7 +2753,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 
