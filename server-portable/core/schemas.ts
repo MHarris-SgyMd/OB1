@@ -89,6 +89,11 @@ const actorInput = z.string().trim().min(1).max(200).optional()
 const minTrustInput = z.enum(TRUST).optional()
   .describe("Only thoughts whose trust is at least this: operator (typed by the operator) above agent (an agent's own output) above ingested (outside text an importer copied in). The trust is the one on a hit's `By:` line, decided by the key that wrote the text and what that write declared, never by the text; a thought with no trust recorded is below every word. Omit for every thought.");
 
+/** No lone UTF-16 surrogate: JSON.stringify writes one as an escape jsonb refuses (SMD-3669 review pass 6). */
+const WELL_FORMED = (v: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v);
+/** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
+const AGENDA_SCOPE = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
+
 export const SPECS = {
   search: {
     title: "Search Daemonic Brain",
@@ -183,6 +188,15 @@ export const SPECS = {
       // held to search_demote_weight() by test-e2e-sql.
       prefer_current: z.boolean().optional().default(false)
         .describe("Rank settled and superseded thoughts, and thoughts about finished tickets, below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed, canceled or a duplicate (a note filed under such a ticket included; a Duplicate's work is tracked under the ticket it duplicates, which ranks by its own status), that a newer thought supersedes, or with no ticket of its own whose tickets are all finished — every ticket it is about (its topics, action items, or a session summary's header) Done, Canceled or Duplicate, or with none of those three or more tickets named and all finished, and in either case no open ticket named anywhere in it — has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. Each candidate's lifecycle is a lookup in a table kept current on write (migration 068): about half a millisecond over an ordinary search at 10,000 thoughts, about one at 100,000, most of it the wider window it reads; before 068 it read every thought's lifecycle per search (over 100 ms at 100,000)."),
+      // SMD-3668: effective priority (122, SMD-3667) blended into the order, as
+      // recency_weight blends age — over a window of the hybrid's rows, as
+      // prefer_current's is (077), read once for the window. 0 (default) is
+      // today's order exactly: no window and no read. Clamped, as recency is.
+      priority_weight: z.number().optional().default(0)
+        .describe("How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's place among them (the first 1, the last 1 over their count, so the search's own order, ties and all, is what weighs), priority its effective priority (a counted level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own counted level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less a hop, two hops at most, counted only above medium; a level counts when it was stated by a key the operator classified (an unclassified or importer's key's statement is inferred, and not counted yet). A finished ticket's own row keeps its stated level — only its urgency and what it unblocks drop — and passes nothing down to a note under it: to rank finished work lower, add prefer_current. A ticket a match's text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.")
+        .transform((w) => Math.min(Math.max(w, 0), 1)),
+      min_priority: z.number().int().min(0).max(5).optional()
+        .describe("Keep only matches whose priority is known — a counted level of its own (on a ticket's row, its ticket's; a finished ticket's row keeps its level), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log."),
     },
   },
   search_thoughts_keyword: {
@@ -764,6 +778,22 @@ export const SPECS = {
       origin_thought: UUID_ARG.optional().describe("Only items read from this thought"),
       plugin: z.string().min(1).max(64).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only items standing for this plugin's rows"),
       limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many. Default 100"),
+    },
+  },
+  agenda: {
+    title: "Agenda",
+    description:
+      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed work: blocked items, items under a live claim and items not yet startable are left out and counted. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), and `claimsRead` false means claims could not be read, so none was left out. It orders and explains; the caller decides.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      source: AGENDA_SCOPE.optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
+      project: AGENDA_SCOPE.optional().describe("Only tickets in this Linear project"),
+      label: AGENDA_SCOPE.optional().describe("Only tickets with this Linear label"),
+      holder: z.enum(["mine"]).optional().describe("mine: only the work this key holds a live claim on"),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe("At most this many. Default 20"),
+      include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),
+      include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder"),
+      include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

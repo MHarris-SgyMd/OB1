@@ -87,7 +87,7 @@ export default definePlugin({
       async handler(ctx, { entry_id }) {
         const [row] = await ctx.db.tx((sql) => sql<EntryRow>`
           SELECT id, name, notes, created_at FROM entries WHERE id = ${entry_id}`);
-        // A refusal is 400, 403, 404, 409 or 422 with an UPPER_CASE code, and says what to do next.
+        // A refusal is 400, 403, 404, 409 or 422 with an UPPER_CASE code, and says what to do next (503 is for a service that did not answer).
         if (!row) return refuse(404, "NO_SUCH_ENTRY", { entry_id, message: "No entry has that id: search_entries lists them." });
         return ok({ entry: asEntry(row) });
       },

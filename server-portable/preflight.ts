@@ -47,6 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
+import { slotsSettingFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -1111,6 +1112,51 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
   else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
+}
+
+// The background slots in force (SMD-3379 PR 2b-2a), on by default since PR 2b-2b: a local model server's chat and
+// embedding calls held to OB1_MODEL_SLOTS less one, the decide tier's to one, OB1_BACKGROUND_SLOTS' own shares over
+// them, holding every endpoint. A value the servers and the passes cannot read leaves the defaults, with a line in each
+// process's log an operator may never read; the host rule warns where a share leaves a model server no slot for live
+// calls, and where a decide share above one queues background calls at a tier that answers one request at a time.
+{
+  const st = slotsSettingFrom(env.OB1_BACKGROUND_SLOTS, env.OB1_MODEL_SLOTS);
+  const jevConfigured = resolveJevConfig(env);
+  // Whether a share's endpoint is local, by its type (a model's override by its prefix): what the defaults hold.
+  const endpointLocal = (k: string) => (k.startsWith("chat") ? chatEndpoint.local : k.startsWith("embed") ? embEndpoint.local : jevConfigured?.endpoint.local === true);
+  const listed = (m: ReadonlyMap<string, number>) => [...m].map(([k, v]) => `${k}=${v}`).join(", ");
+  const where = "background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named";
+  // The local endpoints the defaults hold: chat and embeddings, one endpoint or two, and the decide tier's.
+  const locals = [...new Set([embEndpoint.local ? (chatEndpoint === embEndpoint ? "embeddings and chat" : "embeddings") : "", chatEndpoint !== embEndpoint && chatEndpoint.local ? "chat" : "", jevConfigured?.endpoint.local ? "decide" : ""].filter(Boolean))];
+  // The host rule: a chat or embedding share as large as the local server's slots leaves live calls none — set, on a
+  // local endpoint, for OB1_MODEL_SLOTS speaks of the local server alone; by default, a server of one slot, where
+  // some endpoint is local (review pass 1). The decide tier answers one request at a time, so a share of it above one
+  // queues background calls ahead of a capture's live genre call.
+  const ownShares = [...(st.set ?? new Map<string, number>())];
+  const full = st.defaults === null ? [] : ownShares.filter(([k, v]) => !k.startsWith("decide") && endpointLocal(k) && v >= st.modelSlots).map(([k]) => k);
+  // OB1_MODEL_SLOTS reaches a held share only through a local chat or embedding endpoint: the decide tier's is one
+  // whatever it says (review pass 2).
+  const noReserve = st.defaults !== null && st.modelSlots === 1 && (chatEndpoint.local || embEndpoint.local);
+  const decideQueue = st.defaults === null || jevConfigured === null ? [] : ownShares.filter(([k, v]) => k === "decide" && v > 1).map(([, v]) => v);
+  if (st.defaults === null) add("background slots", "ok", `off (OB1_BACKGROUND_SLOTS) — background model calls are not held`);
+  else {
+    const own = st.set ? `; ${listed(st.set)} set (OB1_BACKGROUND_SLOTS), every endpoint's` : "";
+    // The defaults as they stand: a type the value's own share gives is its, everywhere (review pass 1); a type's
+    // default only where its endpoint is local, a remote one's calls not held (review pass 2); none said where no
+    // endpoint is local.
+    const shown = new Map([...st.defaults].filter(([k]) => !st.set?.has(k) && endpointLocal(k)));
+    const byDefault = !locals.length
+      ? "none by default: no endpoint is declared local (OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL)"
+      : `${shown.size ? listed(shown) : "none"} by default on the local ${locals.join(", ")} endpoint(s)${chatEndpoint.local || embEndpoint.local ? ` (OB1_MODEL_SLOTS ${st.modelSlots}, ${st.modelSlots === 1 ? "none" : "one"} left for live calls)` : ""}`;
+    const detail = `${byDefault}${own} — ${where}`;
+    const problems = [...st.problems,
+      ...(full.length ? [`${full.join(", ")} take${full.length === 1 ? "s" : ""} every one of the local server's OB1_MODEL_SLOTS ${st.modelSlots}, leaving live calls none`] : []),
+      // One fault, one warning: a share of its own as large as a server of one slot is that fault already (review pass 3).
+      ...(noReserve && !full.length ? ["OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one"] : []),
+      ...(decideQueue.length ? [`decide=${decideQueue[0]} queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time`] : [])];
+    if (problems.length) add("background slots", "warn", `${problems.join("; ")} — in force: ${detail}`, "Correct the value as the line says: a chat or embedding share below OB1_MODEL_SLOTS, decide=1, OB1_MODEL_SLOTS the model server's parallel calls per model (its OLLAMA_NUM_PARALLEL) — a server of one slot leaves live calls none, so raise its OLLAMA_NUM_PARALLEL and OB1_MODEL_SLOTS together to 2 or more — or OB1_BACKGROUND_SLOTS=off.");
+    else add("background slots", "ok", detail);
+  }
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -3057,7 +3103,8 @@ if (configFailed) {
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
               : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
             // SELECT is every read's too since SMD-3599: the claimed label says its claims could not be read (review pass 2).
-            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599)" : ", and nothing else does";
+            // The agenda (SMD-3669) answers unfiltered by claims without SELECT, and refuses holder mine.
+            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599); agenda answers unfiltered by claims and refuses holder mine (SMD-3669)" : ", and nothing else does";
             add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table${also}`,
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
           } else if (logging.length) {
@@ -3112,7 +3159,10 @@ if (configFailed) {
             const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
               : itemOnly ? "set_priority and priority_history on an open item (kind item)"
               : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+            // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
+            // alone was left out, and the items row said otherwise).
+            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669)" : ", and nothing else does";
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
@@ -3150,7 +3200,7 @@ if (configFailed) {
             // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
             // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
             const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
-            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, and set_priority on an open item"
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, set_priority on an open item, and agenda (SMD-3669)"
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
@@ -5547,7 +5597,7 @@ async function probed(operation: "embeddings" | "chat", model: string, base: str
     const r = await call();
     if (!r.ok) span.end("error", statusType(r.status));
     return r;
-  }, undefined, { "ob1.probe": "preflight" }));
+  }, undefined, { "ob1.probe": "preflight", "ob1.call.class": "background" }));
 }
 
 if (!deep) {
@@ -5717,7 +5767,7 @@ if (!jevCfg) {
   if (unresolved) {
     add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
   } else try {
-    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
+    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
     // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
     // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
@@ -5768,7 +5818,7 @@ if (!jevCfg) {
   } else {
     try {
       const t0 = performance.now();
-      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
       add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };

@@ -352,6 +352,8 @@ const WORDS: Record<ToolName, Words> = {
   decide_item_close: { render: (o) => say.renderDecideItemClose(o), fault: writeFault("decide_item_close failed: ") },
   item_history: { render: (o) => say.renderItemHistory(o), fault: readFault() },
   list_items: { render: (o) => say.renderListItems(o), fault: readFault() },
+  // The agenda (SMD-3669).
+  agenda: { render: (o) => say.renderAgenda(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };

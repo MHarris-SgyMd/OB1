@@ -65,7 +65,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))
+              expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe="", gen_ai_operation_name!="decide"}[10m]))
           - refId: B
             datasourceUid: __expr__
             model:

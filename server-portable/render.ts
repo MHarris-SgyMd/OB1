@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -29,13 +29,14 @@ import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThread
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
+import type { AgendaCode, AgendaResult } from "./core/agenda.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
-import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -192,6 +193,9 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   // Unknown, not false, when the brain had no row to report the query's facts on (review pass 6).
   literalOnly: v.facts?.literalOnly ?? null,
   window: v.window,
+  // SMD-3668: the priority ranking's weight, floor and window; null with neither set. (A REST core older than this server
+  // refuses the inputs this one always sends, as it does prefer_current's, so it never answers without the field.)
+  priority: v.priority ?? null,
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
@@ -466,13 +470,20 @@ export function demotedLine(t: Pick<ThoughtHybridMatch, "demoted" | "score" | "f
  * limit), so a larger limit reads more only below 100 rows (first review
  * pass: the note told a caller at 100 to raise it). Null without the flag (no
  * window on the rows). Exported for the unit test.
+ *
+ * `reranked` (SMD-3668): a priority_weight above 0 ordered the rows after the
+ * demotion, so where a demoted row sits is the priority's doing, not the
+ * literal's, and what follows the current rows is no longer known to be the
+ * demoted ones: the note says what the demotion did and leaves the order to
+ * the priority note (review pass 1).
  */
-export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[]): string | null {
+export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">[], reranked = false): string | null {
   const w = rows[0]?.window;
   if (!w) return null;
   // The latest sync is a thought's own metadata (068: max over linear_updated_at),
   // which any capture key can set, so it is quoted as untrusted text is (review pass 6).
   const lifecycle = `${w.known} carr${w.known === 1 ? "ies" : "y"} a lifecycle${w.syncedAt ? ` (latest sync ${snipText(w.syncedAt, 40)})` : ""}`;
+  if (reranked) return `Current first (prefer_current): ${w.demoted} of the top ${w.rows} match${w.rows === 1 ? "" : "es"} ${w.demoted === 1 ? "is" : "are"} settled, superseded or about finished tickets, ${w.demoted === 1 ? "its" : "their"} score ×0.25 before the priority ranking below orders them; ${lifecycle}.`;
   // A demoted exact hit keeps a quarter of its literal bonus (1/61 per literal
   // it holds), so one can still rank above current rows — on a query of
   // literals only, or holding several literals. Rather than state when (the
@@ -496,6 +507,24 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
 }
 
 /**
+ * The header note under priority_weight or min_priority (SMD-3668): how the window was ranked, how many of its matches
+ * carry a known priority, and with a floor how many it kept; that a match past the window was not read, and whether a
+ * larger limit reads further (the window is min(100, 4 × limit), prefer_current's). Null with neither set, and from a
+ * REST core older than this server (no `priority`). Exported for the unit test.
+ */
+export function priorityNote(p: PriorityRanking | null | undefined): string | null {
+  if (!p) return null;
+  const ranked = p.weight > 0
+    ? `Ranked by priority (priority_weight ${p.weight}): the top ${p.read} match${p.read === 1 ? "" : "es"} ordered by (1 − ${p.weight}) × relevance + ${p.weight} × each one's own effective priority (a ticket's row reads as its ticket)`
+    : `Read the top ${p.read} match${p.read === 1 ? "" : "es"} for their priority`;
+  const known = `${p.known} of them carr${p.known === 1 ? "ies" : "y"} a known priority`;
+  const floor = p.min === null ? "" : `; kept ${p.kept} at ${levelText(p.min)} or above (min_priority, a known priority alone)`;
+  // Not full: the window held every match there was, so nothing past it was missed.
+  const past = p.read < p.window ? "" : ` A match past the top ${p.read} was not read${p.window < 100 ? " — raise limit to read further" : " — the window is capped at 100"}.`;
+  return `${ranked}; ${known}${floor}.${past}`;
+}
+
+/**
  * The hint an error from a min_trust search carries (SMD-1724): the function
  * forms it calls are 074's and 075's, and a brain before them has none — the
  * search without it still answers, so the caller is told so. Read first: a
@@ -508,10 +537,25 @@ export function minTrustHint(msg: string): string {
     : "";
 }
 
-/** The hint a search tool's fault carries, by what it asked for: min_trust's first, then prefer_current's; undefined when it asked for neither. */
-export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolean }): ((msg: string) => string) | undefined {
-  const hints = [...(asked.min_trust !== undefined ? [minTrustHint] : []), ...(asked.prefer_current ? [currentSearchHint] : [])];
+/** The hint a search tool's fault carries, by what it asked for: min_trust's first, then prefer_current's, then priority's; undefined when it asked for none. */
+export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolean; priority_weight?: number; min_priority?: number }): ((msg: string) => string) | undefined {
+  const ranked = (asked.priority_weight ?? 0) > 0 || asked.min_priority !== undefined;
+  const hints = [...(asked.min_trust !== undefined ? [minTrustHint] : []), ...(asked.prefer_current ? [currentSearchHint] : []), ...(ranked ? [priorityHint] : [])];
   return hints.length ? (msg) => hints.map((h) => h(msg)).find((t) => t !== "") ?? "" : undefined;
+}
+
+/**
+ * The hint an error from priority_weight's or min_priority's read carries (SMD-3668, review pass 2): the read is
+ * effective_priority (migration 122), over 116's assertions and 117's open items, so a brain short of 122 or a server
+ * role granted before 116 fails every ranked search. Unlike the claimed and moved labels the read does not degrade:
+ * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
+ */
+export function priorityHint(msg: string): string {
+  return /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight and min_priority read effective_priority, migration 122 (db/migrations/122_effective_priority.sql), which is not applied; search without them meanwhile"
+    : /permission denied for (table|function|relation) (priority_|open_item|ob1_|thought_facets|thought_sources|node_)/i.test(msg)
+    ? " — priority_weight and min_priority read effective_priority (migration 122), and the server's role needs the grants migrations 116, 117 and 122 add (db/README.md, Grants for a capturing role; migrate.ts --grant issues them, and a role granted before 116 must be granted again); search without them meanwhile"
+    : "";
 }
 
 /** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
@@ -615,6 +659,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${thoughtCount(c)})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
       }
+      // SMD-3668: a floor that kept none of the window's matches.
+      const prio = priorityNote(v.priority);
+      if (prio && v.priority!.read > 0) why.push(prio);
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }
 
@@ -694,25 +741,33 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     const notes: string[] = literal ? [literal] : [];
     // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
     const asText = vectorFailed?.matched === "text";
+    // SMD-3668 (review pass 2): a priority_weight above 0 ordered what follows, so a note saying what the order is by
+    // says so — the rows it names are still the window's, the order theirs no more.
+    const reranked = (v.priority?.weight ?? 0) > 0;
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
     // Past the page the shown are the newest of the first rows the scan met, not of every holder (review pass 9).
     if (asText && head.needleCounts[0] > data.length) notes.push(head.needleCounts[0] > TEXT_PAGE
-      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are the newest of the first ${TEXT_PAGE + 1} the scan found, not of all — page with search_thoughts_keyword.`
-      : `It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length} — raise limit or page with search_thoughts_keyword.`);
-    if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
+      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are ${reranked ? `drawn from the newest the scan found and ordered by priority_weight` : `the newest of the first ${TEXT_PAGE + 1} the scan found`}, not of all — page with search_thoughts_keyword.`
+      : `It is in ${thoughtCount(head.needleCounts[0])}; these are ${reranked ? `${data.length} of the newest, ordered by priority_weight` : `the newest ${data.length}`} — raise limit or page with search_thoughts_keyword.`);
+    if (asText && v.preferCurrent) notes.push(reranked ? "prefer_current does not rank a text match, and priority_weight orders these: a superseded one labelled." : "prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
+    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}${v.priority?.min != null ? " (or below min_priority)" : ""}${reranked ? " (or ranked past it by priority)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")}${v.priority?.min != null ? " — lower min_priority, raise limit" : " — raise limit"} or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
-    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
+    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })), reranked);
     if (current) notes.push(current);
+    // SMD-3668: how priority ranked or filtered the window.
+    const prio = priorityNote(v.priority);
+    if (prio) notes.push(prio);
     // Without a vector there is no similarity to rank the rest by (SMD-2891).
     if (head.literalOnly && !literal) {
-      notes.push(matchedAny.size
+      notes.push(reranked
+        ? `The query is only literals: the window was read ${matchedAny.size ? "exact matches first and the rest by similarity" : "by similarity alone"}${v.preferCurrent ? ", current ones first" : ""}, and priority_weight orders it below.`
+        : matchedAny.size
         ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
         : head.commonNeedles.length
           ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`
@@ -2242,6 +2297,51 @@ export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>
     ...(v.proposals.length ? [`Closes proposed (${v.proposals.length}):`, ...v.proposals.map((p) => `- ${proposalLine(p)}`)] : []),
   ].join("\n"),
   itemRefusal, AS_JSON);
+
+/** One of 122's terms behind an agenda item's place, in words. */
+const agendaTerm = (t: PriorityTerm): string => {
+  const d = t.detail;
+  if (t.term === "level") return levelText(Number(d.level));
+  if (t.term === "inherited") {
+    const f = d.from as { kind?: string; key?: string; level?: number; hops?: number } | undefined;
+    return `inherited ${t.value} from ${f?.kind === "item" ? "open item" : f?.kind ?? "?"} ${f?.key ?? "?"} (${levelText(Number(f?.level))}, ${f?.hops} hop${f?.hops === 1 ? "" : "s"})`;
+  }
+  if (t.term === "unknown") return `no priority stated (read as ${t.value})`;
+  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}`;
+  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
+  if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
+  return `${t.term} ${t.value}`;
+};
+/**
+ * The agenda (SMD-3669): one line an item — its place, what it is, its score and the terms behind it — then what was
+ * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
+ * read. A title, a holder and a blocker are other keys' words: quoted and cut, never a line of their own.
+ */
+export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => render(o, (v) => {
+  const lines = v.items.length === 0
+    ? ["Nothing on the agenda in this scope."]
+    : [
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
+        ...v.items.map((i) => {
+          const what = i.kind === "ticket" ? `ticket ${i.key}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
+          const notes = [
+            i.overdue ? "OVERDUE" : null,
+            i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
+            i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+            // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
+            i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+          ].filter(Boolean);
+          return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
+        }),
+      ];
+  const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
+  if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
+  if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
+  // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
+  lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
+  if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): claimed work is not left out or named.");
+  return lines.join("\n");
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
 
 export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Reply => render(o, (v) =>
   v.items.length === 0 ? "No items match."

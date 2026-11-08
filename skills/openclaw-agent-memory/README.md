@@ -9,7 +9,7 @@ flowchart LR
   Review --> Future["Future OpenClaw or other runtime task"]
 ```
 
-This skill gives OpenClaw agents a disciplined way to use Nate Jones OB1 Agent Memory. It pairs with the [NBJ OB1 Agent Memory for OpenClaw integration](../../integrations/openclaw-agent-memory/) and the runtime-neutral [OB1 Agent Memory API](../../integrations/agent-memory-api/).
+This skill gives OpenClaw agents a disciplined way to use Nate Jones OB1 Agent Memory. It pairs with the [NBJ OB1 Agent Memory for OpenClaw integration](../../integrations/openclaw-agent-memory/) and the runtime-neutral [agent-memory plugin](../../plugins/agent-memory/), the OB1 Agent Memory API until SMD-2690.
 
 Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workflows, and implementation notes: [Substack](https://substack.com/@natesnewsletter) and [natebjones.com](https://natebjones.com).
 

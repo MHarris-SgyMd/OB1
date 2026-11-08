@@ -14,6 +14,7 @@ import * as priority from "./priority.ts";
 import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
+import * as agendaRead from "./agenda.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
@@ -77,6 +78,7 @@ export function createCore(deps: CoreDeps) {
     decideItemClose: bind(ctx, items.decideItemClose),
     itemHistory: bind(ctx, items.itemHistory),
     listItems: bind(ctx, items.listItems),
+    agenda: bind(ctx, agendaRead.agenda),
     /**
      * A plugin's own tables (SMD-2310): a transaction as its role, in its
      * schema (store-sql.ts's pluginTx). A store without one (a suite's fake)

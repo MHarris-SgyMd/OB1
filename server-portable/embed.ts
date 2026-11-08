@@ -46,7 +46,7 @@ import {
 } from "../db/config.mjs";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 import { statusType, usageOf, withProviderSpan } from "./spans.ts";
-import { modelCall } from "./model-call.ts";
+import { currentCallClass, modelCall } from "./model-call.ts";
 
 /** The environment keys this module reads. A subset of root.ts's Env. */
 export type EmbedEnv = {
@@ -229,12 +229,12 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
   // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it, so a refused call waits for no slot,
   // and the span inside it, so the span times the call and not a wait; the deadline starts in exchange.
-  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, purpose: subject.kind, ...(signal ? { signal } : {}) },
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, local: at.local, purpose: subject.kind, ...(signal ? { signal } : {}) },
     () => withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
       const answer = await exchange<T>(cfg, path, body, at, what, signal);
       span.set(usageOf(answer));
       return answer;
-    }, providerErrorType));
+    }, providerErrorType, { "ob1.call.class": currentCallClass() }));
 }
 
 /**
@@ -243,7 +243,7 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
  * `invalid_body`; undefined for the runtime's own error, read by its code or
  * kind (spans.ts faultOf).
  */
-function providerErrorType(err: unknown): string | undefined {
+export function providerErrorType(err: unknown): string | undefined {
   if (!(err instanceof ProviderError)) return undefined;
   if (err.kind === "http" && err.status !== undefined) return statusType(err.status);
   return err.kind === "body" ? "invalid_body" : err.kind;

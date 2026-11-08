@@ -3323,8 +3323,20 @@ else {
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON work_claims TO ob1_pf_capture");
-      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\)/.test(noSelect.out),
+      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\); agenda answers unfiltered by claims and refuses holder mine \(SMD-3669\)/.test(noSelect.out),
              `…and without SELECT on it, the claim calls and every read's claimed label are named (${noSelect.out.split("\n").find((l) => /ticket claims/.test(l))?.trim().slice(0, 200)})`);
+      // The agenda (SMD-3669 review pass 6): without SELECT on priority_assertions the priority row names it; without
+      // SELECT on open_items both the priority row and the items row do.
+      await claims.unsafe("REVOKE SELECT ON priority_assertions FROM ob1_pf_capture");
+      const noAssertions = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_assertions TO ob1_pf_capture");
+      await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
+      const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
+      assert(/, and so does agenda \(SMD-3669\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\)/.test(rowOf(noItems.out, "priority"))
+             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table/.test(rowOf(noItems.out, "open items")),
+        `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.
@@ -5424,6 +5436,45 @@ if (want("9")) {
   assert(/!\s+provider re-probe\s+OB1_PROVIDER_REPROBE_INTERVAL="5m" is not a whole number of seconds from 1 to 3600, or "off"; a provider that does not answer is re-probed every 15 s/.test(reprobeBad.out) && /→ Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15\./.test(fix(reprobeBad.out, "provider re-probe")),
          "…a value that does not read warns, with the default it falls back to");
   assert(row(refused.out, "provider re-probe") === "", "…and unset, the knob has no row");
+  // The background slots in force (SMD-3379 PR 2b-2a), on by default since PR 2b-2b: the defaults on the local
+  // endpoints, a value's own shares over them, off, a value that does not read (the defaults standing), OB1_MODEL_SLOTS'
+  // own, and the host rule — a chat or embedding share as large as the server's slots, or a server of one, warns. A run
+  // reading the defaults sets it empty, as unset — the suites run with it off.
+  const slotsDefault = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsSet = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=1,embed=2,decide=1" });
+  const slotsOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "off" });
+  const slotsBad = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=0" });
+  const slotsTwo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "2", OB1_BACKGROUND_SLOTS: "" });
+  const slotsFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=4,decide=4" });
+  const slotsOne = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsTypo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_MODEL_SLOTS: "four", OB1_BACKGROUND_SLOTS: "" });
+  // No endpoint local: OB1_MODEL_SLOTS speaks of none, so neither a chat share of 4 nor a server of one warns (review pass 1).
+  const slotsRemote = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=4", OB1_MODEL_SLOTS: "1" });
+  // The defaults said only where their endpoint is local; one slot warned only where chat or embeddings is; a decide
+  // share warned only with a tier (review pass 2).
+  const slotsSplit = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k-split", OB1_EGRESS_POLICY: "off", OB1_BACKGROUND_SLOTS: "" });
+  const slotsJevOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsNoTier = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "decide=2" });
+  const slotsOneFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "embed=1" });
+  const held = "background model calls held to these shares";
+  // The shares as they stand: the decide tier's default left out with no tier configured, a type the value gives its
+  // own (review pass 1).
+  assert(new RegExp(String.raw`✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\) — ${held}`).test(slotsDefault.out)
+      && new RegExp(String.raw`✓\s+background slots\s+none by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\); chat=1, embed=2, decide=1 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — ${held}`).test(slotsSet.out)
+      && /✓\s+background slots\s+off \(OB1_BACKGROUND_SLOTS\) — background model calls are not held/.test(slotsOff.out)
+      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16 .*; the defaults stay — in force: none by default: no endpoint is declared local/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
+      && /✓\s+background slots\s+chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 2,/.test(slotsTwo.out),
+         `the background slots' row: the defaults on the local endpoints, a value's own over them, off, a value that does not read, OB1_MODEL_SLOTS' own (${row(slotsDefault.out, "background slots").slice(0, 200)})`);
+  assert(/!\s+background slots\s+chat takes every one of the local server's OB1_MODEL_SLOTS 4, leaving live calls none; decide=4 queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time — in force:/.test(slotsFull.out) && !/decide takes/.test(row(slotsFull.out, "background slots"))
+      && /!\s+background slots\s+OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one — in force: chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 1, none left for live calls\)/.test(slotsOne.out)
+      && /✓\s+background slots\s+none by default: no endpoint is declared local \(OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL\); chat=4 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — /.test(slotsRemote.out)
+      && /!\s+background slots\s+OB1_MODEL_SLOTS: "four" is no whole number of slots from 1 to 16 .*; 4 stays — in force: none by default: no endpoint is declared local/.test(slotsTypo.out),
+         `the host rule: a chat share of every one of the local server's slots warns, a decide share above one does, a server of one slot does; neither where no endpoint is local; a slot count that does not read is said (${row(slotsFull.out, "background slots").slice(0, 160)} | ${row(slotsOne.out, "background slots").slice(0, 120)})`);
+  assert(/✓\s+background slots\s+embed=3 by default on the local embeddings endpoint\(s\) \(OB1_MODEL_SLOTS 4,/.test(slotsSplit.out)
+      && /✓\s+background slots\s+decide=1 by default on the local decide endpoint\(s\) — /.test(slotsJevOnly.out)
+      && /✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) .*; decide=2 set/.test(slotsNoTier.out)
+      && /!\s+background slots\s+embed takes every one of the local server's OB1_MODEL_SLOTS 1, leaving live calls none — in force:/.test(slotsOneFull.out) && !/OB1_MODEL_SLOTS 1 leaves live calls no slot/.test(row(slotsOneFull.out, "background slots")),
+         `the defaults said only for a local endpoint, a remote chat's not; one slot no warning where only the decide tier is local; a decide share no warning with no tier; one fault one warning (${row(slotsSplit.out, "background slots").slice(0, 120)} | ${row(slotsJevOnly.out, "background slots").slice(0, 120)} | ${row(slotsNoTier.out, "background slots").slice(0, 120)})`);
   // With the database up, the warning alone is no failure: exit 0, the server
   // starts — the restart loop SMD-2887 measured is gone.
   if (LIVE) {

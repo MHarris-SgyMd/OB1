@@ -505,8 +505,8 @@ if (import.meta.main) {
   );
 
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   const outputRaw = (cli.value("output") ?? "telegram").trim();
   if (outputRaw !== "telegram" && outputRaw !== "stdout" && outputRaw !== "file") {
     console.error(`--output must be telegram|stdout|file, got: ${outputRaw}`);

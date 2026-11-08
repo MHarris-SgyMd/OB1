@@ -1,7 +1,8 @@
 /**
  * slots.ts — background calls held to a share of a model server's slots
- * (SMD-3379 PR 2b-1): the model-call seam's hook (model-call.ts), off unless
- * OB1_BACKGROUND_SLOTS says how many.
+ * (SMD-3379 PR 2b-1): the model-call seam's hook (model-call.ts), on by
+ * default since PR 2b-2b for a local model server, OB1_BACKGROUND_SLOTS
+ * setting shares of its own or `off`.
  *
  * A model server answers a few calls at once — Ollama's OLLAMA_NUM_PARALLEL,
  * per loaded model — and live calls (a capture, a search) should find one
@@ -40,10 +41,17 @@
  * is, by 5 s: a database that stops answering fails a waiting call open, and a
  * slot's unlock gives up, the call's answer returned.
  *
- * Written as types, with per-model overrides: `chat=1,embed=2,decide=1,
- * chat:qwen3.8:27b=1`. A type left out is unlimited; unset, empty or `off`,
- * no hook is set. A value that does not parse is said and the hook is left
- * off, as other server settings fall back.
+ * The defaults (PR 2b-2b, the maintainer, 2026-11-06): a local model server —
+ * an endpoint OB1_LLM_LOCAL, OB1_CHAT_LOCAL or OB1_JEV_LOCAL declares — answers
+ * OB1_MODEL_SLOTS calls at once per model (4 unset; compose hands the bundled
+ * Ollama the same as OLLAMA_NUM_PARALLEL), and background chat and embedding
+ * calls are held to one fewer, so a slot is left for live calls, the decide
+ * tier to one. A remote provider's calls are not held by default.
+ * OB1_BACKGROUND_SLOTS, written as types with per-model overrides —
+ * `chat=1,embed=2,decide=1,chat:qwen3.8:27b=1` — merges over the defaults, its
+ * shares holding every endpoint, local or not; `off` holds none. A value that
+ * does not parse is said, and the defaults stay, as other server settings
+ * fall back.
  *
  * Fail open (the maintainer, 2026-11-05): a semaphore whose database does not
  * answer lets the call run without a slot, said once, and is not asked again
@@ -61,7 +69,7 @@
  * swallowed FIN — ends, its locks with it, within about a minute.
  */
 import { SQL } from "bun";
-import { setModelCallHook, type ModelCallHook, type ModelType, type ResolvedModelCall } from "./model-call.ts";
+import { noteSlotWait, setModelCallHook, type ModelCallHook, type ModelType, type ResolvedModelCall } from "./model-call.ts";
 
 /** A parsed OB1_BACKGROUND_SLOTS: each type's share, and per-model overrides keyed `type:model`. */
 export type BackgroundSlots = ReadonlyMap<string, number>;
@@ -88,13 +96,13 @@ const IDLE_MAX = 4;
 /** How long a semaphore found down is not asked again, in ms: its calls run without a slot meanwhile. */
 const DOWN_MS = 30_000;
 
-/** OB1_BACKGROUND_SLOTS read: null when unset, empty or `off`; else its shares, or a problem in words. */
+/** OB1_BACKGROUND_SLOTS' own shares: null when unset, empty or `off`; else its shares, or a problem in words. */
 export function backgroundSlotsFrom(raw: string | undefined): { slots: BackgroundSlots | null; problem?: string } {
   const text = (raw ?? "").trim();
   if (text === "" || text.toLowerCase() === "off") return { slots: null };
   const slots = new Map<string, number>();
   for (const part of text.split(",").map((p) => p.trim()).filter(Boolean)) {
-    const bad = (why: string) => ({ slots: null, problem: `OB1_BACKGROUND_SLOTS: ${JSON.stringify(part)} ${why} — write types and per-model overrides, e.g. chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, or off; background slots stay off` });
+    const bad = (why: string) => ({ slots: null, problem: `OB1_BACKGROUND_SLOTS: ${JSON.stringify(part)} ${why} — write types and per-model overrides, e.g. chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, or off; the defaults stay` });
     const eq = part.lastIndexOf("=");
     if (eq <= 0) return bad("has no =N");
     const name = part.slice(0, eq).trim();
@@ -112,6 +120,56 @@ export function backgroundSlotsFrom(raw: string | undefined): { slots: Backgroun
   return slots.size ? { slots } : { slots: null };
 }
 
+/**
+ * The parallel calls per model a local model server is counted to answer, OB1_MODEL_SLOTS unset: the bundled Ollama is
+ * handed the same; a host Ollama's own default is 1 in current releases, so its operator raises it to match (the
+ * maintainer, 2026-11-08).
+ */
+export const DEFAULT_MODEL_SLOTS = 4;
+
+/** OB1_MODEL_SLOTS read: a whole number of slots from 1 to MAX_SLOTS, the default unset or empty; a value that does not parse is said, the default kept. */
+export function modelSlotsFrom(raw: string | undefined): { n: number; problem?: string } {
+  const text = (raw ?? "").trim();
+  if (text === "") return { n: DEFAULT_MODEL_SLOTS };
+  if (/^\d+$/.test(text) && Number(text) >= 1 && Number(text) <= MAX_SLOTS) return { n: Number(text) };
+  return { n: DEFAULT_MODEL_SLOTS, problem: `OB1_MODEL_SLOTS: ${JSON.stringify(text)} is no whole number of slots from 1 to ${MAX_SLOTS} — the model server's parallel calls per model, as OLLAMA_NUM_PARALLEL; ${DEFAULT_MODEL_SLOTS} stays` };
+}
+
+/**
+ * The shares a local model server's background calls are held to by default (PR 2b-2b): chat and embeddings one
+ * fewer than its slots, so one is left for live calls — at least one, so a server of one slot leaves none, which
+ * preflight's host rule says — and the decide tier one, as it answers one request at a time.
+ */
+export function defaultShares(modelSlots: number): BackgroundSlots {
+  const n = Math.max(1, modelSlots - 1);
+  return new Map([["chat", n], ["embed", n], ["decide", 1]]);
+}
+
+/**
+ * The shares in force (PR 2b-2b): OB1_BACKGROUND_SLOTS' own, holding every endpoint, over the defaults, holding a
+ * local one alone; none under `off`. A value of either setting that does not parse is in `problems`, and leaves the
+ * defaults as they would be: OB1_BACKGROUND_SLOTS' none of its own, OB1_MODEL_SLOTS its default.
+ */
+export type SlotsSetting = {
+  /** OB1_BACKGROUND_SLOTS' own shares, every endpoint's: null where it gives none. */
+  set: BackgroundSlots | null;
+  /** The defaults, a local endpoint's: null under `off`. */
+  defaults: BackgroundSlots | null;
+  /** OB1_MODEL_SLOTS, read. */
+  modelSlots: number;
+  problems: string[];
+};
+
+/** The shares in force from OB1_BACKGROUND_SLOTS (`raw`) and OB1_MODEL_SLOTS (`modelSlots`). */
+export function slotsSettingFrom(raw: string | undefined, modelSlots: string | undefined): SlotsSetting {
+  const m = modelSlotsFrom(modelSlots);
+  const problems = m.problem ? [m.problem] : [];
+  if ((raw ?? "").trim().toLowerCase() === "off") return { set: null, defaults: null, modelSlots: m.n, problems };
+  const own = backgroundSlotsFrom(raw);
+  if (own.problem) problems.push(own.problem);
+  return { set: own.slots, defaults: defaultShares(m.n), modelSlots: m.n, problems };
+}
+
 /** A model server's base as one share knows it: the scheme and host in lower case, no userinfo, no trailing slash, the path kept. */
 export function normalisedBase(base: string): string {
   try {
@@ -123,10 +181,18 @@ export function normalisedBase(base: string): string {
   }
 }
 
-/** The share a call counts against: its key and its size, or null where it is unlimited (a live call, a type left out). */
-export function shareOf(slots: BackgroundSlots, call: Pick<ResolvedModelCall, "type" | "model" | "base" | "cls">): { key: string; limit: number } | null {
+/**
+ * The share a call counts against: its key and its size, or null where it is unlimited (a live call, a type left out).
+ * Given a setting, its own shares first — a model's override, then its type — and a local endpoint's default after
+ * (PR 2b-2b); given shares alone, those.
+ */
+export function shareOf(slots: BackgroundSlots | SlotsSetting, call: Pick<ResolvedModelCall, "type" | "model" | "base" | "cls" | "local">): { key: string; limit: number } | null {
   if (call.cls !== "background") return null;
-  const limit = (call.type !== "decide" && call.model !== undefined ? slots.get(`${call.type}:${call.model}`) : undefined) ?? slots.get(call.type);
+  const setting: SlotsSetting = slots instanceof Map ? { set: slots, defaults: null, modelSlots: DEFAULT_MODEL_SLOTS, problems: [] } : (slots as SlotsSetting);
+  const own = setting.set;
+  const limit = (own && call.type !== "decide" && call.model !== undefined ? own.get(`${call.type}:${call.model}`) : undefined)
+    ?? own?.get(call.type)
+    ?? (call.local ? setting.defaults?.get(call.type) : undefined);
   if (limit === undefined) return null;
   const base = normalisedBase(call.base);
   return { key: call.type === "decide" ? `ob1:slot:decide:${base}` : `ob1:slot:${call.type}:${base}:${call.model ?? "?"}`, limit };
@@ -182,17 +248,19 @@ const WAITING = -1;
 
 /**
  * Sets the background-slots hook for this process, once, at its entry point:
- * `raw` its OB1_BACKGROUND_SLOTS, `url` its database. Returns `uninstall`,
- * which puts back the hook it replaced and ends every wait, a call already
- * running keeping its slot until it ends; and the setting's problem, said
- * through `log`, the hook then left off. `connectS` bounds a connection's
- * opening and each statement, CONNECT_S unless a test asks for less.
+ * `raw` its OB1_BACKGROUND_SLOTS, `modelSlots` its OB1_MODEL_SLOTS, `url` its
+ * database. Returns `uninstall`, which puts back the hook it replaced and ends
+ * every wait, a call already running keeping its slot until it ends; and the
+ * settings' problems, said through `log`, the defaults then standing in.
+ * Under `off` no hook is set. `connectS` bounds a connection's opening and
+ * each statement, CONNECT_S unless a test asks for less.
  */
-export function installBackgroundSlots(opts: { url: string; raw: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
+export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
-  const { slots, problem } = backgroundSlotsFrom(opts.raw);
-  if (problem) log(problem);
-  if (!slots) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
+  const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
+  for (const p of setting.problems) log(p);
+  const problem = setting.problems.length ? setting.problems.join("; ") : undefined;
+  if (!setting.set && !setting.defaults) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();
   const stop = opts.stop ? AbortSignal.any([opts.stop, ended.signal]) : ended.signal;
   const boundS = opts.connectS ?? CONNECT_S;
@@ -417,9 +485,24 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     }
   };
   const hook: ModelCallHook = async (call, run, waiting) => {
-    const share = shareOf(slots, call);
+    const share = shareOf(setting, call);
     if (!share) return run();
-    const held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, waiting);
+    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a).
+    const asked = performance.now();
+    // Whether it waited at all, by the hook's own word, apart from a slot taken at once (review pass 1).
+    let waited = false;
+    const told = () => {
+      waited = true;
+      waiting();
+    };
+    let held: Held | null;
+    try {
+      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told);
+    } catch (e) {
+      noteSlotWait(call, performance.now() - asked, "stopped", waited);
+      throw e;
+    }
+    noteSlotWait(call, performance.now() - asked, held ? "held" : "open", waited);
     try {
       return await run();
     } finally {

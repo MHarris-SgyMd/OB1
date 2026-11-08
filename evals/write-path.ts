@@ -53,10 +53,13 @@ export const STUB_EMBED_MODEL = "write-path-stub";
  * The OB1_* variables that reach the arm's process by name when every other
  * is removed: the throwaway guard's override (db/test-support's
  * assertThrowawayDatabase and dropSchema read it — an operator's answer to a
- * safety question, not a knob of the server under test) and this eval's own
- * verbose switch. The parent forwards these; the child keeps these.
+ * safety question, not a knob of the server under test), this eval's own
+ * verbose switch, and the suite's background slots, off in CI and
+ * ci-parity.sh as its PATH (SMD-3379 PR 2b-2b), which the workers it spawns
+ * would otherwise run on the defaults. The parent forwards these; the child
+ * keeps these.
  */
-export const FORWARDED_ENV = ["OB1_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE"] as const;
+export const FORWARDED_ENV = ["OB1_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE", "OB1_BACKGROUND_SLOTS"] as const;
 
 /** The subjects a text names, by phrase, case-insensitive, in SUBJECTS' order. */
 export function subjectsIn(text: string): SubjectKey[] {
