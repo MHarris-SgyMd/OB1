@@ -628,7 +628,8 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # extensions until SMD-2311 made the six plugins (change 64), and the
       # recipes' and integrations' HTTP APIs and workers (change 67; the
-      # webhook receiver until SMD-2690 made it a plugin) — through a
+      # webhook receiver and the agent-memory API until SMD-2690 made them
+      # plugins, and smart-ingest imports only listenOn and routable) — through a
       # _shared/auth.ts beside it, a byte copy. Their suites and install live
       # in integrations/ since SMD-3747. One MCP stack
       # across the tree's installs — the test fails if server-portable's or

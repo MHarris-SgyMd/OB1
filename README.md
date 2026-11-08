@@ -142,17 +142,12 @@ MCP server extensions, capture sources beyond Slack, and the workers and APIs be
 
 | Integration | What It Does | Contributor |
 | ----------- | ------------ | ----------- |
-| [Agent Memory API](integrations/agent-memory-api/) | Runtime-neutral recall, write-back, review, inspector, and recall-trace API for OB1 Agent Memory | OB1 Team |
 | [OpenClaw Agent Memory](integrations/openclaw-agent-memory/) | OpenClaw plugin and publishing package for using OB1 Agent Memory from OpenClaw workflows | OB1 Team |
 | [Slack Capture](integrations/slack-capture/) | Quick-capture thoughts via Slack messages with auto-embedding and classification | Core |
 
 ### [`/schemas`](schemas/) — Database Extensions
 
-Tables and sidecars that extend the base `thoughts` model without replacing it.
-
-| Schema | What It Does | Contributor |
-| ------ | ------------ | ----------- |
-| [Agent Memory](schemas/agent-memory/) | Provenance, review, use-policy, source-reference, relation, recall-trace, and audit sidecars for agent workflow memory | OB1 Team |
+Tables and sidecars that extend the base `thoughts` model without replacing it. Each is a folder under [`schemas/`](schemas/) with a README saying what it adds and how to apply it.
 
 ## Using a Contribution
 

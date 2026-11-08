@@ -54,7 +54,7 @@ The core user journey is:
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
 - `schemas/`: Database extensions that add tables, columns, sidecars, and RPCs.
-- `integrations/`: MCP extensions, capture sources, the OpenClaw and Hermes plugins, and the agent memory API (the REST gateways retired with SMD-1931).
+- `integrations/`: MCP extensions, capture sources, and the OpenClaw and Hermes plugins (the REST gateways retired with SMD-1931; the agent memory API is the `agent-memory` plugin since SMD-2690).
 - `primitives/`: Reusable concept guides such as remote MCP, RLS, shared MCP, deployment, and troubleshooting.
 - `docs/assets/agent-memory/`: Diagrams, screenshots, brand assets, and promotional material for Agent Memory.
 
@@ -181,7 +181,7 @@ The brain's REST core is the one REST surface: every operation the MCP tools exp
 
 The two REST gateways that came before it, `integrations/open-brain-rest` and `integrations/rest-api`, are retired (SMD-1931); `docs/vendored-disposition.md` gives each of their routes its fate. The Next.js dashboards written for `open-brain-rest` retired after the operator GUI's harvest (SMD-3309), and the SvelteKit one that spoke MCP with SMD-3310. The brain's one dashboard is the operator GUI at `/dashboard` (`dashboard/`), a client of the REST core.
 
-The Agent Memory dashboard pages that called `integrations/agent-memory-api` were the Next.js dashboard's; agent-memory-api's own pages come as a plugin's (SMD-2690).
+The Agent Memory dashboard pages that called `integrations/agent-memory-api` were the Next.js dashboard's; that server is the `agent-memory` plugin since SMD-2690, and its own pages would come as the plugin's.
 
 The operator GUI keeps each session on the server, with only a random id in an HTTP-only cookie. A visitor signs in with an access key, or through the authorization server where the stack runs one. Do not advise storing that key in client-side JavaScript.
 
@@ -191,8 +191,7 @@ OB1 Agent Memory is runtime-neutral. OpenClaw is the flagship launch runtime, no
 
 The Agent Memory stack adds governed operational memory for agents:
 
-- `schemas/agent-memory`: sidecar tables for memory records, provenance, use policy, review status, recall traces, recall items, and audit events.
-- `integrations/agent-memory-api`: runtime-neutral HTTP API (one process under Bun) for recall, write-back, review, inspection, and traces.
+- `plugins/agent-memory`: the brain's own operations for recall, write-back, usage, review, inspection, and traces (tools on its connector, routes under `/v1/plugins/agent-memory/`), with its tables for memory records, provenance, use policy, review status, recall traces, recall items, and audit events. It was `integrations/agent-memory-api` and `schemas/agent-memory` until SMD-2690.
 - `integrations/openclaw-agent-memory`: OpenClaw plugin that exposes typed `openbrain_*` tools.
 - `skills/openclaw-agent-memory`: behavioral rules for when agents should recall, write back, and request review.
 - `docs/safe-agent-memory-provenance.md`: trust and safety operating model.
