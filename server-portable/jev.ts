@@ -99,6 +99,8 @@ export type JevConfig = {
   endpoint: ProviderEndpoint;
   /** OB1_JEV_MODEL, when set: an answer from any other model is refused. */
   model: string | undefined;
+  /** The knob that set `model`, for a message about another model's answer: OB1_JEV_MODEL unless a caller holds the tier to its own (decide mode's OB1_CONSOLIDATE_DECIDER, SMD-3326). */
+  modelKnob?: string;
   egress: EgressPolicy;
   timeoutMs: number;
 };
@@ -147,6 +149,7 @@ export function resolveDecideTier(env: JevEnv): DecideTier | null {
       cfg: {
         endpoint: providerEndpoint(own, undefined, flagOn(env.OB1_CONSOLIDATE_DECIDER_LOCAL), "OB1_CONSOLIDATE_DECIDER_LOCAL"),
         model: decider || undefined,
+        modelKnob: "OB1_CONSOLIDATE_DECIDER",
         egress: resolveEgressPolicy(env),
         timeoutMs: DEFAULT_JEV_TIMEOUT_MS,
       },
@@ -229,10 +232,10 @@ async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/in
 }
 
 /** What is wrong with an answer, or null: the contract, the model, and every result's shape. */
-export function jevAnswerProblem(cfg: Pick<JevConfig, "model">, decisions: JevDecision[], answer: JevResponse): string | null {
+export function jevAnswerProblem(cfg: Pick<JevConfig, "model" | "modelKnob">, decisions: JevDecision[], answer: JevResponse): string | null {
   if (answer?.contract !== JEV_CONTRACT) return `the answer's contract is ${JSON.stringify(answer?.contract)}, not ${JEV_CONTRACT}`;
   if (!answer.model || typeof answer.model.name !== "string") return "the answer names no model";
-  if (cfg.model && answer.model.name !== cfg.model) return `the answer is from ${answer.model.name}, and OB1_JEV_MODEL expects ${cfg.model}`;
+  if (cfg.model && answer.model.name !== cfg.model) return `the answer is from ${answer.model.name}, and ${cfg.modelKnob ?? "OB1_JEV_MODEL"} expects ${cfg.model}`;
   if (!Array.isArray(answer.results) || answer.results.length !== decisions.length) return `${answer.results?.length ?? "no"} results for ${decisions.length} decisions`;
   for (const [i, r] of answer.results.entries()) {
     const d = decisions[i];

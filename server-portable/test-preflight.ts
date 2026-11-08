@@ -5929,19 +5929,28 @@ if (want("10")) {
       && /→ Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(ownElse.out, "decide tier")),
          `its own tier serving another model than the decider warns, pointing at OB1_CONSOLIDATE_DECIDER_URL (${row(ownElse.out, "decide tier").trim().slice(0, 160)})`);
   const ownDead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
-  assert(/✗\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(ownDead.out) && /→ Start it on the host — jev\/h2o\/serve\.py in decider-4b's venv, kept running by its LaunchAgent/.test(fix(ownDead.out, "decide tier"))
-      && /·\s+decide decision\s+not checked — the decide tier row failed/.test(ownDead.out),
-         `its own tier down fails with the host process's remedy, and --deep dials no decision (${fix(ownDead.out, "decide tier").trim().slice(0, 120)})`);
+  // A warning, not a failure (review pass 1): only the consolidation pass asks this tier, and it refuses at its own
+  // start; capture and search must still start.
+  assert(/!\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(ownDead.out) && /→ Start it on the host — jev\/h2o\/serve\.py in decider-4b's venv, kept running by its LaunchAgent/.test(fix(ownDead.out, "decide tier"))
+      && /Capture and search are unaffected/.test(fix(ownDead.out, "decide tier")) && /·\s+decide decision\s+not checked — the decide tier row warned/.test(ownDead.out),
+         `its own tier down warns with the host process's remedy — the server still starts — and --deep dials no decision (${fix(ownDead.out, "decide tier").trim().slice(0, 120)})`);
   const both = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
-  assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* tokens\s*$/.test(row(both.out, "jev tier")) && /✗\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(both.out)
+  assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* tokens\s*$/.test(row(both.out, "jev tier")) && /!\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(both.out)
       && /✓\s+consolidate decide mode/.test(both.out),
          `with a tier of its own, the shared tier is no longer held to the decider: no warning on it, and decide mode's row is ok (${row(both.out, "jev tier").trim().slice(0, 160)})`);
   const ownUndeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: TIER, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
   assert(/!\s+decide egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(ownUndeclared.out) && /→ Set OB1_CONSOLIDATE_DECIDER_LOCAL=1 if this endpoint is on this machine/.test(ownUndeclared.out),
          "its own tier undeclared: the decide egress row warns with OB1_CONSOLIDATE_DECIDER_LOCAL as the fix");
+  // Its own URL the shared tier's still gets its own rows (review pass 1): decide mode holds the tier to the decider and
+  // reads its own local declaration, which the jev rows check neither of.
   const ownSame = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
-  assert(/✓\s+decide tier\s+OB1_CONSOLIDATE_DECIDER_URL names the jev tier's own URL/.test(ownSame.out) && !/decide egress/.test(ownSame.out),
-         "its own URL the shared tier's: one set of rows, and the decide tier row says whose they are");
+  assert(/✓\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(ownSame.out, "decide tier")) && /✓\s+decide egress/.test(ownSame.out)
+      && /✓\s+jev tier/.test(ownSame.out),
+         "its own URL the shared tier's: both tiers' rows, the decide tier's held to the decider");
+  const ownSameElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER_URL: TIER, OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/✓\s+jev tier/.test(ownSameElse.out) && /!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b/.test(row(ownSameElse.out, "decide tier"))
+      && /!\s+decide egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(ownSameElse.out),
+         `…so at the shared tier's URL, a model other than the decider and a missing OB1_CONSOLIDATE_DECIDER_LOCAL each warn, though the jev rows pass (${row(ownSameElse.out, "decide tier").trim().slice(0, 140)})`);
   const ownDeep = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" }, "--deep");
   assert(/✓\s+decide decision\s+one binary decision in \d+ ms/.test(ownDeep.out), `--deep makes one decision through decide mode's own tier (${row(ownDeep.out, "decide decision").trim().slice(0, 120)})`);
 

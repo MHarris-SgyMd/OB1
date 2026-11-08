@@ -664,7 +664,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const tier = resolveDecideTier(env as JevEnv);
     if (!tier) return refused("usage", `\n  OB1_CONSOLIDATE_DECIDER is ${cfg.decider} and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set: decide mode asks the typed-decision tier for every verdict (SMD-3115). Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving ${cfg.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
     if (!tier.own && tier.cfg.model && tier.cfg.model !== cfg.decider) return refused("usage", `\n  OB1_JEV_MODEL is ${tier.cfg.model} and OB1_CONSOLIDATE_DECIDER is ${cfg.decider}: the shared tier's verdicts would come from a model the pass key does not name. Give decide mode a tier of its own (OB1_CONSOLIDATE_DECIDER_URL), or set the two to the same model.`);
-    jev = { ...tier.cfg, model: cfg.decider };
+    jev = { ...tier.cfg, model: cfg.decider, modelKnob: "OB1_CONSOLIDATE_DECIDER" };
     tierBaseKnob = tier.baseKnob;
     tierLocalKnob = tier.localKnob;
   }

@@ -5719,6 +5719,12 @@ type TierProbe = {
   want: string | undefined;
   wantKnob: string;
   wantFails: boolean;
+  /**
+   * A tier that answers nothing, or not as the tier: "fail" for the shared one, which the server itself asks (capture's
+   * genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation pass asks —
+   * that pass refuses at its start and waits out an outage, and a pass's tier must not stop the server starting.
+   */
+  down: "fail" | "warn";
   /** The compose service's name, so a host of that name gets the service's remedies, and every other the start one. */
   serviceHost: string;
   /** What the tier is, in a remedy: "the jev service", or the decide tier's adapter. */
@@ -5744,7 +5750,7 @@ async function tierRows(t: TierProbe): Promise<void> {
   const host = hostnameOf(base);
   const unresolved = await resolveFirst(host);
   if (unresolved) {
-    add(TIER, "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === t.serviceHost ? t.notRunning : t.start);
+    add(TIER, t.down, `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === t.serviceHost ? t.notRunning : t.start);
   } else try {
     const info = await jevInfo(t.cfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
@@ -5775,24 +5781,24 @@ async function tierRows(t: TierProbe): Promise<void> {
     if (err.kind === "http" && (err as { status?: number }).status === 401) {
       // A 401 is about the credential, not the path: the base's user and
       // password are the tier's only one (SMD-2885, fourth review pass).
-      add(TIER, "fail", `${at} answers, but refuses the request: ${masked(err.message)}${route}`,
+      add(TIER, t.down, `${at} answers, but refuses the request: ${masked(err.message)}${route}`,
           `${viaProxy}${t.cfg.endpoint.userinfo ? `The user and password in ${t.baseKnob} are rejected. Check them.` : `It wants a credential and none was sent: put a user and password in ${t.baseKnob}.`}`);
     } else if (err.kind === "http" || err.kind === "body") {
-      add(TIER, "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
+      add(TIER, t.down, `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
           `${viaProxy}Check ${t.baseKnob} is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names ${t.names}, not another.`);
     } else if (failure?.kind === "tls") {
-      add(TIER, "fail", `${at} answers, but ${failure.why}${route}`,
+      add(TIER, t.down, `${at} answers, but ${failure.why}${route}`,
           `${viaProxy}The tier serves plain http: use http:// in ${t.baseKnob}, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
     } else {
       const why = failure ? failure.why : `no HTTP answer in ${LOCAL_PROBE_SECONDS}`;
-      add(TIER, "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === t.serviceHost ? t.notListening : t.start));
+      add(TIER, t.down, `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === t.serviceHost ? t.notListening : t.start));
     }
   }
   egressRow(`${t.row} egress`, t.cfg.endpoint, t.localKnob, "decision", t.refusedMeans);
   if (!deep) {
     add(`${t.row} decision`, "skip", "not checked — pass --deep to make one decision");
   } else if (!results.some((r) => r.name === TIER && r.status === "ok")) {
-    add(`${t.row} decision`, "skip", `not checked — the ${TIER} row failed`);
+    add(`${t.row} decision`, "skip", `not checked — the ${TIER} row ${t.down === "fail" ? "failed" : "warned"}`);
   } else {
     try {
       const t0 = performance.now();
@@ -5800,7 +5806,7 @@ async function tierRows(t: TierProbe): Promise<void> {
       add(`${t.row} decision`, "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };
-      add(`${t.row} decision`, err.kind === "egress" ? "warn" : "fail", masked(err.message),
+      add(`${t.row} decision`, err.kind === "egress" ? "warn" : t.down, masked(err.message),
           err.kind === "egress" ? `See the ${t.row} egress row.` : "The tier answered /info but not /decide in the contract's shape — check its log.");
     }
   }
@@ -5825,7 +5831,7 @@ if (!jevCfg) {
   await tierRows({
     row: "jev", cfg: jevCfg, baseKnob: "OB1_JEV_BASE_URL", localKnob: "OB1_JEV_LOCAL",
     want: jevCfg.model ?? (heldToDecider ? resolvedEmbed.decider : undefined),
-    wantKnob: jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER", wantFails: !!jevCfg.model,
+    wantKnob: jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER", wantFails: !!jevCfg.model, down: "fail",
     serviceHost: "jev", names: "the jev service",
     start: "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.",
     notRunning: "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart api does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.",
@@ -5834,19 +5840,18 @@ if (!jevCfg) {
   });
 }
 if (decideTier?.own) {
-  if (jevCfg && decideTier.cfg.endpoint.base === jevCfg.endpoint.base) {
-    add("decide tier", "ok", `OB1_CONSOLIDATE_DECIDER_URL names the jev tier's own URL — the jev tier rows above are its; decide mode holds it to ${resolvedEmbed.decider}`);
-  } else {
-    // A host process, not a compose service (decided 2026-10-25): H2O-Lightning-4B runs on PyTorch MPS, which only the
-    // host has, so its adapter runs beside the stack, kept running by a LaunchAgent (jev/h2o/README.md).
-    const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL.";
-    await tierRows({
-      row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
-      want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false,
-      serviceHost: "", names: "decide mode's adapter", start: START, notRunning: START, notListening: START,
-      refusedMeans: "every verdict decide mode asks for is refused before it is sent, and db/consolidate.ts refuses to start (a ProviderError of kind egress)",
-    });
-  }
+  // Always its own rows, even at the shared tier's URL: decide mode holds the tier to the decider and reads its own
+  // local declaration (OB1_CONSOLIDATE_DECIDER_LOCAL), neither of which the jev rows check (review pass 1: a same-URL
+  // shortcut said ok while the pass would refuse a model other than the decider, or an undeclared endpoint).
+  // A host process, not a compose service (decided 2026-10-25): H2O-Lightning-4B runs on PyTorch MPS, which only the
+  // host has, so its adapter runs beside the stack, kept running by a LaunchAgent (jev/h2o/README.md).
+  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; the consolidation pass refuses to start until it answers.";
+  await tierRows({
+    row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
+    want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false, down: "warn",
+    serviceHost: "", names: "decide mode's adapter", start: START, notRunning: START, notListening: START,
+    refusedMeans: "every verdict decide mode asks for is refused before it is sent, and db/consolidate.ts refuses to start (a ProviderError of kind egress)",
+  });
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

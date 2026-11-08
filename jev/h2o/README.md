@@ -175,9 +175,15 @@ the decider; brains set up before SMD-3326 keep working that way.
 **Keep it running.** `com.openbrain.h2o-tier.plist.example` is a LaunchAgent
 for it. It starts the adapter at login, restarts it when it exits, and logs to
 `~/Library/Logs/ob1-h2o-tier.log`. Point it at a `serve.py` that won't move
-under it: a checkout pinned to a release, not a worktree you work in. Then:
+under it: a checkout pinned to a release, not a worktree you work in.
+
+The template starts the adapter offline (`HF_HUB_OFFLINE=1`), so a start never
+reaches the network. That only works once the weights are cached, so fetch them
+first with one start by hand. It prints a ready line once the 9.1 GB are down
+and checked; stop it then. Then install the agent:
 
 ```bash
+JEV_PORT=8023 <venv>/bin/python -I <a stable checkout>/jev/h2o/serve.py   # once: wait for "ready", then Ctrl-C
 sed -e "s|__PYTHON__|$HOME/decider-probe/.venv/bin/python|" \
     -e "s|__SERVE_PY__|<a stable checkout>/jev/h2o/serve.py|" \
     -e "s|__HOME__|$HOME|" jev/h2o/com.openbrain.h2o-tier.plist.example \
@@ -194,9 +200,11 @@ holds them all. A compose service for Linux hosts stays a later option.
 
 To try it by hand instead: `JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`.
 
-- **The tier must stay up.** Preflight's decide tier row dials
-  `OB1_CONSOLIDATE_DECIDER_URL` on every server start and fails when nothing
-  answers, so the server will not start without the tier.
+- **When the tier is down.** Preflight's decide tier row dials
+  `OB1_CONSOLIDATE_DECIDER_URL` on every server start and warns when nothing
+  answers. The server still starts, since only the consolidation pass asks this
+  tier, and capture and search don't wait on it. The pass refuses at its start
+  until the tier answers.
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.

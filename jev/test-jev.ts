@@ -58,7 +58,7 @@ import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createAssert } from "../db/test-support.ts";
 import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_BODY_BYTES, JEV_MAX_OPTIONS, JEV_MAX_TEXT, jevRequestProblem, type JevDecision, type JevResponse } from "../server-portable/jev-contract.ts";
-import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, requestTimeoutMs, resolveJevConfig } from "../server-portable/jev.ts";
+import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, requestTimeoutMs, resolveDecideTier, resolveJevConfig } from "../server-portable/jev.ts";
 import { ProviderError } from "../server-portable/embed.ts";
 import { ensureModel, sha256File, STALE_PART_MS, type ModelPins } from "./fetch-model.ts";
 import { createHandler, intKnob, RETRY_MS, retryWait, untilReady } from "./serve.ts";
@@ -504,6 +504,12 @@ section("[8] the client's batches and answers");
   let err: any;
   try { await jevDecide(expecting, { proposition: "p", context: "c" }, subj); } catch (e) { err = e; }
   assert(err?.kind === "body" && /OB1_JEV_MODEL expects semif/.test(err.message), "an answer from another model is refused even from a tier that did not check");
+  // Decide mode's own tier holds the tier to OB1_CONSOLIDATE_DECIDER, and the refusal names that knob (SMD-3326).
+  const decideOwn = resolveDecideTier({ OB1_CONSOLIDATE_DECIDER_URL: BASE, OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b", OB1_JEV_MODEL: "semif" })!;
+  let errOwn: any;
+  try { await jevDecide(decideOwn.cfg, { proposition: "p", context: "c" }, subj); } catch (e) { errOwn = e; }
+  assert(decideOwn.own && errOwn?.kind === "body" && /OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b/.test(errOwn.message) && !/OB1_JEV_MODEL/.test(errOwn.message),
+    `decide mode's own tier refuses another model's answer naming OB1_CONSOLIDATE_DECIDER, not OB1_JEV_MODEL (${errOwn?.message?.slice(0, 120)})`);
   const bodies: [string, () => unknown][] = [
     ["another contract", () => ({ contract: "other/9", model: MODEL_INFO, results: [], ms: 0 })],
     ["too few results", () => ({ contract: JEV_CONTRACT, model: MODEL_INFO, results: [], ms: 0 })],
