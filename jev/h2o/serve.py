@@ -27,18 +27,35 @@ and each question's own tail continues from a copy of that cache, as vLLM's pref
 question still sees only the record and itself; H2O_SHARE=0 reads every prompt whole. A start-up check compares the
 two reads and refuses to serve if they differ.
 
+Serving (SMD-3326). One request's read runs at a time, behind a lock, on one worker thread, so the event loop stays
+free: GET /health and GET /info answer while a decide runs, and two requests never interleave on the model. Admission
+is bounded (SMD-2082's knobs, which every ob1-jev/1 adapter honours): at most JEV_MAX_QUEUED requests admitted at once,
+the one being read included, and at most JEV_MAX_QUEUED_BYTES of their bodies held. Past either, a request is answered
+503 with Retry-After before its body is read when Content-Length shows it, or as soon as the bytes read pass it. A
+request whose caller leaves while it waits is dropped then (499), its bytes released, never read. The request path is
+`handle`, free of the web framework and the model, so test_serve.py holds it with the standard library alone.
+
+A record this model would read in part gets the contract's 422, naming the decision and its token count (SMD-3326,
+decided 2026-11-08): a context over max_state_tokens (32,000 in serve_config.json) is refused, not cut to its head and
+tail as H2O's own shim cuts it, so a caller never gets a verdict on a record whose middle went unread. The contract lets
+an adapter answer a cut it can read faithfully, `truncated: true`; this adapter reads no cut as faithful, so every
+result it answers says `truncated: false`.
+
 Endpoints (ob1-jev/1): GET /health, GET /info, POST /decide.
-Knobs: JEV_HOST (127.0.0.1), JEV_PORT (8022), H2O_MODEL (h2oai/h2o-lightning-4b), H2O_REVISION (v1.2.3),
-H2O_DEVICE (mps), H2O_SHARE (1), H2O_DTYPE (float16 on MPS, as decider runs; bfloat16 elsewhere), H2O_MPS_PATCH (1:
-decider's MPS kernels for the gated-delta layers, when the decider package is installed).
+Knobs: JEV_HOST (127.0.0.1), JEV_PORT (8022), JEV_MAX_QUEUED (8), JEV_MAX_QUEUED_BYTES (33554432, 32 MiB),
+H2O_MODEL (h2oai/h2o-lightning-4b), H2O_REVISION (v1.2.3), H2O_DEVICE (mps), H2O_SHARE (1), H2O_DTYPE (float16 on MPS,
+as decider runs; bfloat16 elsewhere), H2O_MPS_PATCH (1: decider's MPS kernels for the gated-delta layers, when the
+decider package is installed).
 """
-import copy, hashlib, json, math, os, time
+import asyncio, copy, hashlib, json, math, os, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 CONTRACT = "ob1-jev/1"
 INSUFFICIENT = "__insufficient_evidence__"
 NO_ABSTAIN_LOGIT = -10_000.0
 MAX_OPTIONS, MAX_BATCH, MAX_TEXT, MAX_BODY = 24, 64, 20_000, 8 * 2 ** 20
+DEFAULT_MAX_QUEUED, DEFAULT_MAX_QUEUED_BYTES = 8, 32 * 2 ** 20
 MODEL_NAME = "h2o-lightning-4b"
 REPO = os.environ.get("H2O_MODEL", "h2oai/h2o-lightning-4b")
 REVISION = os.environ.get("H2O_REVISION", "v1.2.3")
@@ -125,8 +142,18 @@ class Reader:
             raise SystemExit(f"these labels are not one distinct token at the answer slot: {bad[:8]}")
         return ids
 
+    def state_tokens(self, text):
+        """The record's token count when it is over max_state_tokens, else None. A record no longer in UTF-8 bytes than
+        the limit can't be longer in tokens, so only a longer one is encoded. Over the limit, the shim would keep its
+        head and tail around a "..." line; this port refuses it instead (a 422), as `handle` says."""
+        mx = self.max_state_tokens
+        if not mx or len(text.encode("utf-8", "ignore")) <= mx: return None
+        n = len(self.encode(text))
+        return n if n > mx else None
+
     def truncate_state(self, text):
-        """A record over max_state_tokens keeps its head and tail around a "..." line, as the shim cuts it. (bool: cut)"""
+        """The shim's cut, for conformance.py alone: a record over max_state_tokens keeps its head and tail around a
+        "..." line, as H2O's published reads were made. Serving never cuts (state_tokens, a 422). (bool: cut)"""
         mx = self.max_state_tokens
         if not mx or len(text.encode("utf-8", "ignore")) <= mx: return text, False
         ids = self.encode(text)
@@ -248,50 +275,196 @@ def result_of(dd, ids, typ, raw, probs, tokens, truncated, temperature):
     return res
 
 
-def build_app(R, model_info):
+def decide_all(R, decs):
+    """Every decision's result, the decisions sharing a context read together (the shared prefix read once). It runs on
+    the gate's worker thread, never the event loop. A context over max_state_tokens never reaches it: `handle` refuses
+    it first, so nothing here is cut and every result says `truncated: false`."""
+    results = [None] * len(decs)
+    groups = {}
+    for i, dd in enumerate(decs):
+        groups.setdefault(dd["context"], []).append(i)
+    for ctx, idxs in groups.items():
+        asked = [(i, *question_of(decs[i])) for i in idxs]
+        prompts = [R.encode(R.prompt(ctx, instr, names, descs)) for _, instr, names, descs, _, _ in asked]
+        for (i, _, names, _, typ, ids), p, lg in zip(asked, prompts, R.read(prompts)):
+            rawlp, probs = R.answer(lg, len(names), typ)
+            results[i] = result_of(decs[i], ids, typ, rawlp, probs, len(p), False, R.temperature[typ])
+    return results
+
+
+class Busy(Exception):
+    """Admission refused: past JEV_MAX_QUEUED requests or JEV_MAX_QUEUED_BYTES held. A 503, with Retry-After."""
+
+    def __init__(self, why, retry_after):
+        super().__init__(why)
+        self.retry_after = retry_after
+
+
+GONE = object()  # what Gate.run returns for a caller that left before its turn
+
+
+class Gate:
+    """Admission and serialization for /decide (SMD-3326, to SMD-2082's knobs).
+
+    Admission: at most `max_queued` requests at once, the one being read included, holding at most `max_bytes` of
+    body between them; past either, Busy. Serialization: `run` reads one request at a time, behind a lock, on a single
+    worker thread, so the event loop (and /health, /info) stays free. The thread is the hard guarantee: the model is
+    never entered by two reads at once, even when a request's caller leaves mid-read and the lock passes on."""
+
+    def __init__(self, max_queued=DEFAULT_MAX_QUEUED, max_bytes=DEFAULT_MAX_QUEUED_BYTES, poll_s=0.25):
+        self.max_queued, self.max_bytes, self.poll_s = max_queued, max_bytes, poll_s
+        self.admitted = 0
+        self.bytes = 0
+        self.mean_s = 1.0  # a read's seconds, smoothed; Retry-After is the admitted requests' expected wait
+        self._lock = asyncio.Lock()
+        self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h2o-read")
+
+    def retry_after(self):
+        """Whole seconds a refused caller should wait: the admitted requests at the recent read time, at least 1."""
+        return max(1, math.ceil(self.admitted * self.mean_s))
+
+    def enter(self):
+        if self.admitted >= self.max_queued:
+            raise Busy(f"{self.admitted} requests are already admitted; this tier admits at most {self.max_queued} (JEV_MAX_QUEUED)", self.retry_after())
+        self.admitted += 1
+
+    def hold(self, n):
+        """Reserve n more bytes of body for an admitted request, or Busy past max_bytes."""
+        if self.bytes + n > self.max_bytes:
+            raise Busy(f"the admitted requests would hold {self.bytes + n} bytes; this tier holds at most {self.max_bytes} (JEV_MAX_QUEUED_BYTES)", self.retry_after())
+        self.bytes += n
+
+    def leave(self, held):
+        self.admitted -= 1
+        self.bytes -= held
+
+    async def run(self, fn, gone=None):
+        """fn() on the worker thread at this request's turn, or GONE when `gone()` says its caller left first."""
+        waiter = asyncio.ensure_future(self._lock.acquire())
+        try:
+            while not (await asyncio.wait({waiter}, timeout=self.poll_s))[0]:
+                if gone is not None and await gone():
+                    waiter.cancel()
+                    try:
+                        await waiter
+                    except asyncio.CancelledError:
+                        return GONE
+                    self._lock.release()  # it took the lock just as it was cancelled
+                    return GONE
+        except BaseException:
+            if not waiter.done():
+                waiter.cancel()
+            elif not waiter.cancelled() and waiter.exception() is None:
+                self._lock.release()
+            raise
+        try:
+            if gone is not None and await gone():
+                return GONE
+            t = time.monotonic()
+            try:
+                return await asyncio.get_running_loop().run_in_executor(self._worker, fn)
+            finally:
+                self.mean_s = 0.8 * self.mean_s + 0.2 * (time.monotonic() - t)
+        finally:
+            self._lock.release()
+
+
+async def handle(R, gate, model_info, headers, chunks, gone=None):
+    """POST /decide, free of the web framework: (status, JSON body, extra headers). `headers` lower-cased, `chunks` the
+    body as an async iterator of bytes, `gone` an async callable saying whether the caller has left.
+
+    In order: 413 for a Content-Length over 8 MB; 503 when admission is full, or when the body (its Content-Length, or
+    the bytes as they arrive) would pass the held-bytes bound; 413 for a body that runs past 8 MB; 400 malformed; 409
+    another model; 422 for a context the model would read only in part; 499 for a caller gone before its turn; the
+    result, or 500 when the model fails."""
+    cl = headers.get("content-length")
+    declared = int(cl) if cl is not None and cl.strip().isdigit() else None
+    if declared is not None and declared > MAX_BODY:
+        return 413, {"error": f"the body is over {MAX_BODY} bytes"}, {}
+    try:
+        gate.enter()
+    except Busy as e:
+        return 503, {"error": str(e)}, {"Retry-After": str(e.retry_after)}
+    held = 0
+    try:
+        try:
+            if declared is not None:
+                gate.hold(declared)
+                held = declared
+            parts, size = [], 0
+            async for c in chunks:
+                size += len(c)
+                if size > MAX_BODY:
+                    return 413, {"error": f"the body is over {MAX_BODY} bytes"}, {}
+                if size > held:  # no Content-Length, or a body longer than it said
+                    gate.hold(size - held)
+                    held = size
+                parts.append(c)
+        except Busy as e:
+            return 503, {"error": str(e)}, {"Retry-After": str(e.retry_after)}
+        try:
+            body = json.loads(b"".join(parts))
+        except Exception:
+            return 400, {"error": "the body is not JSON"}, {}
+        prob = problem(body)
+        if prob:
+            return 400, {"error": prob}, {}
+        if body.get("model") is not None and body["model"] != MODEL_NAME:
+            return 409, {"error": f"this service serves {MODEL_NAME}, not {body['model']}"}, {}
+        decs = body["decisions"]
+        # The whole request is refused, naming the first decision the model would read only in part (the contract's
+        # 422): each distinct context measured once, before the request queues for the model.
+        seen = {}
+        for i, dd in enumerate(decs):
+            ctx = dd["context"]
+            if ctx not in seen:
+                seen[ctx] = R.state_tokens(ctx)
+            if seen[ctx] is not None:
+                return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
+                                      f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
+        t = time.time()
+        try:
+            results = await gate.run(lambda: decide_all(R, decs), gone)
+        except Exception as e:
+            # the contract's 500 shape ({error}), as jev/serve.ts returns on a model failure
+            return 500, {"error": f"the model failed: {str(e)[:200]}"}, {}
+        if results is GONE:
+            return 499, {"error": "the caller left before its turn; nothing was read"}, {}
+        return 200, {"contract": CONTRACT, "model": model_info, "results": results, "ms": (time.time() - t) * 1000}, {}
+    finally:
+        gate.leave(held)
+
+
+def knob(name, default):
+    """A positive whole-number setting, or a refusal to start naming it."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    if not raw.isdigit() or int(raw) < 1:
+        raise SystemExit(f"{name} is a positive whole number, not {raw!r}")
+    return int(raw)
+
+
+def build_app(R, model_info, gate):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, PlainTextResponse
     info = {"contract": CONTRACT, "model": model_info, "kinds": ["binary", "choice"],
             "max_options": MAX_OPTIONS, "max_batch": MAX_BATCH, "max_tokens": R.max_state_tokens}
     app = FastAPI()
 
+    # Both answer from the event loop, which a read never holds: it runs on the gate's worker thread
     @app.get("/health")
     @app.head("/health")
-    def health(): return PlainTextResponse("ok")
+    async def health(): return PlainTextResponse("ok")
 
     @app.get("/info")
-    def get_info(): return JSONResponse(info)
+    async def get_info(): return JSONResponse(info)
 
     @app.post("/decide")
     async def decide(req: Request):
-        raw = await req.body()
-        if len(raw) > MAX_BODY: return JSONResponse({"error": f"the body is over {MAX_BODY} bytes"}, status_code=413)
-        try:
-            body = json.loads(raw)
-        except Exception:
-            return JSONResponse({"error": "the body is not JSON"}, status_code=400)
-        prob = problem(body)
-        if prob: return JSONResponse({"error": prob}, status_code=400)
-        if body.get("model") is not None and body["model"] != MODEL_NAME:
-            return JSONResponse({"error": f"this service serves {MODEL_NAME}, not {body['model']}"}, status_code=409)
-        t = time.time()
-        decs = body["decisions"]
-        results = [None] * len(decs)
-        groups = {}
-        for i, dd in enumerate(decs):
-            groups.setdefault(dd["context"], []).append(i)
-        try:
-            for ctx, idxs in groups.items():
-                state, cut = R.truncate_state(ctx)
-                asked = [(i, *question_of(decs[i])) for i in idxs]
-                prompts = [R.encode(R.prompt(state, instr, names, descs)) for _, instr, names, descs, _, _ in asked]
-                for (i, _, names, _, typ, ids), p, lg in zip(asked, prompts, R.read(prompts)):
-                    rawlp, probs = R.answer(lg, len(names), typ)
-                    results[i] = result_of(decs[i], ids, typ, rawlp, probs, len(p), cut, R.temperature[typ])
-        except Exception as e:
-            # the contract's 500 shape ({error}), as jev/serve.ts returns on a model failure
-            return JSONResponse({"error": f"the model failed: {str(e)[:200]}"}, status_code=500)
-        return JSONResponse({"contract": CONTRACT, "model": model_info, "results": results, "ms": (time.time() - t) * 1000})
+        headers = {k.lower(): v for k, v in req.headers.items()}
+        status, body, extra = await handle(R, gate, model_info, headers, req.stream(), req.is_disconnected)
+        return JSONResponse(body, status_code=status, headers=extra)
 
     return app
 
@@ -306,6 +479,7 @@ def snapshot():
 
 def main():
     import uvicorn
+    gate = Gate(knob("JEV_MAX_QUEUED", DEFAULT_MAX_QUEUED), knob("JEV_MAX_QUEUED_BYTES", DEFAULT_MAX_QUEUED_BYTES))
     t0 = time.time()
     path = snapshot()
     weights = Path(path) / "model.safetensors"
@@ -322,8 +496,9 @@ def main():
     host, port = os.environ.get("JEV_HOST", "127.0.0.1"), int(os.environ.get("JEV_PORT", "8022"))
     print(f"jev-h2o: {MODEL_NAME} ({REPO}@{REVISION} = {Path(path).name[:8]}, weights {h.hexdigest()[:12]}) ready in "
           f"{time.time() - t0:.0f} s; {R.dtype}{', decider MPS kernels' if R.patched else ''}; T {R.temperature}; serving {CONTRACT} on http://{host}:{port}; "
-          f"{'a shared context read once per request (checked)' if SHARE else 'every prompt read whole'}", flush=True)
-    uvicorn.run(build_app(R, model_info), host=host, port=port, log_level="warning")
+          f"{'a shared context read once per request (checked)' if SHARE else 'every prompt read whole'}; "
+          f"one read at a time, at most {gate.max_queued} requests and {gate.max_bytes} bytes admitted", flush=True)
+    uvicorn.run(build_app(R, model_info, gate), host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
