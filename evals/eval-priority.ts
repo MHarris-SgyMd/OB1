@@ -133,6 +133,12 @@ async function selfCheck(): Promise<void> {
   const zqLevels = ITEMS.filter((it) => it.issue && it.facts.level !== undefined).map((it) => `${it.issue!.identifier} ${it.facts.level}`);
   assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.split(" ")[0]} level ${l.split(" ")[1]} `))),
     `every ticket's planned level is its facts', so a mapping change in board-sync's writer is a difference, not a shared move (${zqLevels})`);
+  // The facts, not the label: a High whose facts state 0, and one whose facts state none, plan 0 and no statement
+  // (review pass 3: every fixture ticket's facts equal its label's mapping, so the row above could not tell).
+  const relabelled = ITEMS.map((it) => (it.key === "zq-high" ? { ...it, facts: { ...it.facts, level: 0 } } : it.key === "zq-medium" ? { ...it, facts: { ...it.facts, level: undefined } } : it));
+  const off = plannedFacts(relabelled, "2026-02-27");
+  assert(off.includes("statement on ticket:ZQ-102 level 0 tier 2 by board-sync due none not_before none due_ref none") && !off.some((l) => l.startsWith("statement on ticket:ZQ-105")),
+    "a ticket's planned level follows its facts against its Linear label: a High stated 0 plans 0, a Medium with no level plans none");
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -283,13 +289,14 @@ async function seeded(): Promise<void> {
   const factStore = new SqlStore(url, { max: 1 });
   try {
     planted = await plantRows(sql, seeds);
+    // Before the facts, whose writers would refuse a missing row first and hide the count (review pass 3).
+    if (planted !== ITEMS.length) throw new Error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`);
     today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
     facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
   } finally {
     await factStore.close();
     await sql.close();
   }
-  if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
   const want = plannedFacts(ITEMS, today);
   // As sorted arrays, so a fact planted twice is a difference too; the message names each side's lines the other lacks.
   const less = (a: readonly string[], b: readonly string[]) => { const left = [...b]; return a.filter((l) => { const i = left.indexOf(l); if (i < 0) return true; left.splice(i, 1); return false; }); };

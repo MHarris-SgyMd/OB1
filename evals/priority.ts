@@ -759,9 +759,9 @@ export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureI
  * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda takes
  * its default flags (every source, startable and unclaimed work only) at its cap of 100, read through the store, as
  * are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer is not
- * exercised here). A hit is the agenda's item when it is the ticket's row (the thought board-sync recorded the ticket
- * on, read by its metadata) or an open item's origin thought (list_items). Priority orders what is relevant; it adds
- * nothing search did not find.
+ * exercised here). A hit is placed by its ticket when its metadata names one (board-sync's row, or an older row of
+ * the same ticket), else by the best of the open items read from it (list_items). Priority orders what is relevant;
+ * it adds nothing search did not find.
  */
 export const AGENDA_READ: MeasuredRead = {
   name: "agenda", ticket: "SMD-3669",

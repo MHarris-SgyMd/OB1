@@ -4460,14 +4460,15 @@ moves consults the answer, and fails the run. The ceiling, which reads the gold,
 pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
 loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
 verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
-the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
-read exists.
+the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same
+path on every run, so the path is exercised whatever the measured reads do.
 
 **The agenda read** (SMD-3669, `priority.ts`'s `AGENDA_READ`) is the first measured read. The agenda takes no query,
 so the read puts it to a question as a client would (the maintainer's choice, 2026-11-08). It searches the query as
 `plain` does (its default ten hits), then orders those hits by the agenda, with its default flags at its cap of 100:
 the hits the agenda lists first, in its order, then the rest in search's order. A hit is on the agenda when it is a
-ticket's row (read by its metadata) or the origin thought of an open item. The agenda and those lookups are read
+ticket's row (any row whose metadata names the ticket, placed by its ticket alone), else the origin thought of an
+open item. The agenda and those lookups are read
 through the store, since a measured read's `callTool` admits the search tools alone, so the `agenda` tool's own
 layer isn't exercised here. Priority orders what is relevant; it adds nothing search didn't find.
 
@@ -4522,7 +4523,7 @@ These mutants are each refused:
 * a seeding that leaves the operator's key unclassified or board-sync undeclared (their statements tier 4), or drops
   the claim, the blocks links or the done item; a store that drops an item's due day; Linear's High mapped to 4; and
   due times hours off, a statement on a note and an operator's statement on a ticket (each fails the seeded run on
-  its own message).
+  its own message); a plan that takes a ticket's level from its Linear label, not its facts (the self-check).
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
@@ -4583,20 +4584,22 @@ facts planted; the baseline reads score as recorded above). The program's output
 (d), keeping `highest-value` and `due-soon` in the top 3. It fails (a) and (b): top-1 on 1 of 7 prompts, where 5 are
 needed, as many as the best baseline but not the same one. It gains `due-soon` and loses `highest-value`, where the
 gutters overtake the Urgent ticket.
-* **The overdue task outranks the Urgent ticket.** The gutters, two weeks overdue and with no stated level, score
-  unknown 2 plus overdue 3, which is 5. The Urgent ticket that blocks another scores 4 plus 0.5, which is 4.5. Where
-  search returns both, the gutters lead, while the gold puts the Urgent ticket first on four prompts. That is
-  docs/priority.md's weights against the operator's judgement: where they differ, `priority.ts` says the weights
-  are tuned against this eval (SMD-3667).
-* **Search limits it.** On `matters-most` search never returns the Urgent ticket, on `this-week` the bill, and on
-  `promised` the commitment, so the agenda can't move them up.
+* **Search caps it below the bar, whatever the weights.** The read only reorders search's ten hits, and on three
+  prompts the gold's first item isn't among them: the Urgent ticket on `matters-most`, the bill on `this-week`, the
+  commitment on `promised`. So this read reaches top-1 on 4 of 7 at most, and (a) needs 5.
+* **Within that, the overdue task outranks the Urgent ticket.** The gutters, two weeks overdue and with no stated
+  level, score unknown 2 plus overdue 3, which is 5. The Urgent ticket that blocks another scores 4 plus 0.5, which
+  is 4.5. On the three prompts whose hits hold both and whose gold puts the ticket first (`next-ticket`,
+  `highest-value`, `blocking`), the gutters lead. That is docs/priority.md's weights against the operator's
+  judgement, which `priority.ts` says the weights are tuned against (SMD-3667); a retuning that put the ticket first
+  there would lose `due-soon`, so it reaches 3 of 7 at most, not the bar.
 * **It does order what it gets.** Mean tau goes from 0.252 to 0.607, and top-3 from 2 prompts to 4.
 
 Two pairs of chatter tie exactly on the agenda (the cat and the documentary at unknown 2, the coffee and the
 bookshelf at a stated 0), and the agenda orders a tie by its items' keys, which are random ids. So their order in the
 printed hits can differ between runs. Gold items tie only on the score, and the agenda breaks those by the sooner due
-time and then the ticket's key (ZQ-105, a stated Medium, before ZQ-108, an unknown, both 2), never by a random id, so
-the scores can't differ.
+time, then items before tickets, then the ticket's key (ZQ-105, a stated Medium, before ZQ-108, an unknown, both 2),
+never by a random id, so the scores can't differ.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
