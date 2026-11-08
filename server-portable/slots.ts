@@ -120,7 +120,7 @@ export function backgroundSlotsFrom(raw: string | undefined): { slots: Backgroun
   return slots.size ? { slots } : { slots: null };
 }
 
-/** The parallel calls per model a model server answers by default: OB1_MODEL_SLOTS unset, as Ollama's own default. */
+/** The parallel calls per model a local model server is counted to answer, OB1_MODEL_SLOTS unset: the bundled Ollama is handed the same; a host Ollama's own default is 1 in current releases, so its operator sets the two to match (the maintainer, 2026-11-08). */
 export const DEFAULT_MODEL_SLOTS = 4;
 
 /** OB1_MODEL_SLOTS read: a whole number of slots from 1 to MAX_SLOTS, the default unset or empty; a value that does not parse is said, the default kept. */

@@ -2102,8 +2102,11 @@ them with the rest: the coordinator is one of the stack's default services.
   A worker holds one model call at a time. On a local model server the
   background slots hold every background call, these workers' and
   `board-sync`'s among them, to `OB1_MODEL_SLOTS` less one per model (SMD-3379
-  PR 2b-2b), so a capture finds a slot whatever the counts; on a remote
-  provider, set `OB1_BACKGROUND_SLOTS` to hold them. Digits only: anything else
+  PR 2b-2b), so a capture finds a slot whatever the counts — where the server
+  answers `OB1_MODEL_SLOTS` calls at once (a host Ollama's own
+  `OLLAMA_NUM_PARALLEL` is 1 unset in current releases: set it to match) and
+  no other brain shares it (two brains each take their share: set each lower);
+  on a remote provider, set `OB1_BACKGROUND_SLOTS` to hold them. Digits only: anything else
   is refused naming the variable, and a number the CLI then refuses (`0`,
   more digits than it reads exactly) is refused naming its flag, `--follow`
   or `--workers`. Everything else is the server's environment: the model, the
@@ -3258,10 +3261,10 @@ waits for `jev` to be healthy (`depends_on … required: false`), so the first
 start's fetch does not crashloop it. `compose restart api` does not start
 what the server depends on: with `jev` stopped the server's preflight fails
 and restarts it until `compose --profile jev up -d` brings the tier back
-(preflight's remedy says so). The tier answers one request at a time, and the
-background slots' defaults hold its background calls to one (SMD-3379 PR
-2b-2b), so a capture's live genre call waits at most the one background call
-in hand: measured against a stub tier of 300 ms a call, about 200 ms, the rest
+(preflight's remedy says so). The tier answers one request at a time, and with
+`OB1_JEV_LOCAL=1`, as the profile's tier is declared, the background slots'
+defaults hold its background calls to one (SMD-3379 PR 2b-2b), so a capture's
+live genre call waits at most the one background call in hand: measured against a stub tier of 300 ms a call, about 200 ms, the rest
 of the call it arrived behind. A full batch of 64 decisions is ~25 s in the
 container; `JEV_THREADS` (and `JEV_HUB`, a mirror for the weights) in
 `deploy/.env` reach the service. A spike run from a checkout

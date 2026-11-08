@@ -947,8 +947,10 @@ services:
       # A local model server's parallel calls per model, 1 to 16 (SMD-3379 PR
       # 2b-2b): the bundled Ollama answers this many at once (its
       # OLLAMA_NUM_PARALLEL, below), and the defaults above leave one for live
-      # calls. Unset, 4, Ollama's own default. For an Ollama on the host, set
-      # its OLLAMA_NUM_PARALLEL to the same.
+      # calls. Unset, 4. An Ollama on the host answers what its own
+      # OLLAMA_NUM_PARALLEL says, 1 unset in current releases: set the two to
+      # match. Two brains on one model server each take their share of it: set
+      # each brain's lower, so the shares together leave live calls a slot.
       OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
@@ -1535,6 +1537,8 @@ services:
       - ollama:/root/.ollama
     # The calls it answers at once per model: OB1_MODEL_SLOTS, which the
     # background slots' defaults leave one of for live calls (SMD-3379 PR 2b-2b).
+    # Handed as written: a value the brain does not read (preflight says so,
+    # and the brain takes 4) still reaches Ollama as it is.
     environment:
       OLLAMA_NUM_PARALLEL: ${OB1_MODEL_SLOTS:-4}
     # No `ports:`. An unauthenticated model API; the server and ollama-pull reach

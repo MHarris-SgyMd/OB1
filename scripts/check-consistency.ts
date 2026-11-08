@@ -12099,6 +12099,15 @@ function checkCiParity() {
   // workflow's env for every job, ci-parity.sh's export before its first row.
   const topSlots = isMapping(doc) && isMapping(doc.env) ? doc.env.OB1_BACKGROUND_SLOTS : undefined;
   if (topSlots !== SUITE_SLOTS) fail(SUITE_WORKFLOW, `sets OB1_BACKGROUND_SLOTS ${JSON.stringify(topSlots ?? null)} in its env, not "${SUITE_SLOTS}": the suites run with the background slots off, a compose stack's job setting it empty (check 35, SMD-3379)`);
+  // A job that brings the compose stack up runs it as shipped: OB1_BACKGROUND_SLOTS empty in its env, so compose hands
+  // the stack the defaults rather than the suites' off (review pass 1).
+  const jobsOf = isMapping(doc) && isMapping(doc.jobs) ? Object.entries(doc.jobs) : [];
+  const stackJobs = jobsOf.filter(([, j]) => isMapping(j) && Array.isArray(j.steps) && j.steps.some((st) => isMapping(st) && typeof st.run === "string" && /\bcompose\b[^\n]*\bup\b/.test(st.run)));
+  if (!stackJobs.length) fail(SELF, `check 35 reads no job of ${SUITE_WORKFLOW} that brings a compose stack up — the reading is broken`);
+  for (const [name, j] of stackJobs) {
+    const own = isMapping(j) && isMapping(j.env) ? j.env.OB1_BACKGROUND_SLOTS : undefined;
+    if (own !== "") fail(SUITE_WORKFLOW, `job ${name} brings a compose stack up with OB1_BACKGROUND_SLOTS ${JSON.stringify(own ?? null)} in its env, not "": the workflow's "${SUITE_SLOTS}" would reach the stack, which runs as shipped (check 35, SMD-3379)`);
+  }
   if (readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n").filter((l) => l === PARITY_SLOTS_LINE).length !== 1) fail(PARITY_SCRIPT, `does not \`${PARITY_SLOTS_LINE}\` once, as ${SUITE_WORKFLOW}'s env does, so its suites would run with the background slots' defaults (check 35, SMD-3379)`);
   // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
   if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))

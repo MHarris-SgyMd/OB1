@@ -5436,17 +5436,22 @@ if (want("9")) {
   const slotsFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=4,decide=4" });
   const slotsOne = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
   const slotsTypo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_MODEL_SLOTS: "four", OB1_BACKGROUND_SLOTS: "" });
+  // No endpoint local: OB1_MODEL_SLOTS speaks of none, so neither a chat share of 4 nor a server of one warns (review pass 1).
+  const slotsRemote = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=4", OB1_MODEL_SLOTS: "1" });
   const held = "background model calls held to these shares";
-  assert(new RegExp(String.raw`✓\s+background slots\s+chat=3, embed=3, decide=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\) — ${held}`).test(slotsDefault.out)
-      && new RegExp(String.raw`✓\s+background slots\s+chat=3, embed=3, decide=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\); chat=1, embed=2, decide=1 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — ${held}`).test(slotsSet.out)
+  // The shares as they stand: the decide tier's default left out with no tier configured, a type the value gives its
+  // own (review pass 1).
+  assert(new RegExp(String.raw`✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\) — ${held}`).test(slotsDefault.out)
+      && new RegExp(String.raw`✓\s+background slots\s+none by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\); chat=1, embed=2, decide=1 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — ${held}`).test(slotsSet.out)
       && /✓\s+background slots\s+off \(OB1_BACKGROUND_SLOTS\) — background model calls are not held/.test(slotsOff.out)
-      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16 .*; the defaults stay — in force: chat=3, embed=3, decide=1 by default on no endpoint: none is declared local/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
-      && /✓\s+background slots\s+chat=1, embed=1, decide=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 2,/.test(slotsTwo.out),
+      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16 .*; the defaults stay — in force: none by default: no endpoint is declared local/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
+      && /✓\s+background slots\s+chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 2,/.test(slotsTwo.out),
          `the background slots' row: the defaults on the local endpoints, a value's own over them, off, a value that does not read, OB1_MODEL_SLOTS' own (${row(slotsDefault.out, "background slots").slice(0, 200)})`);
-  assert(/!\s+background slots\s+chat takes every one of OB1_MODEL_SLOTS' 4, leaving live calls none — in force:/.test(slotsFull.out) && !/decide takes/.test(row(slotsFull.out, "background slots"))
-      && /!\s+background slots\s+OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one — in force: chat=1, embed=1, decide=1/.test(slotsOne.out)
-      && /!\s+background slots\s+OB1_MODEL_SLOTS: "four" is no whole number of slots from 1 to 16 .*; 4 stays — in force: chat=3, embed=3/.test(slotsTypo.out),
-         `the host rule: a chat share of every one of the server's slots warns, the decide tier's not, nor does a server of one slot pass; a slot count that does not read is said (${row(slotsFull.out, "background slots").slice(0, 160)} | ${row(slotsOne.out, "background slots").slice(0, 120)})`);
+  assert(/!\s+background slots\s+chat takes every one of the local server's OB1_MODEL_SLOTS 4, leaving live calls none; decide=4 queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time — in force:/.test(slotsFull.out) && !/decide takes/.test(row(slotsFull.out, "background slots"))
+      && /!\s+background slots\s+OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one — in force: chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 1, none left for live calls\)/.test(slotsOne.out)
+      && /✓\s+background slots\s+none by default: no endpoint is declared local \(OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL\); chat=4 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — /.test(slotsRemote.out)
+      && /!\s+background slots\s+OB1_MODEL_SLOTS: "four" is no whole number of slots from 1 to 16 .*; 4 stays — in force: none by default: no endpoint is declared local/.test(slotsTypo.out),
+         `the host rule: a chat share of every one of the local server's slots warns, a decide share above one does, a server of one slot does; neither where no endpoint is local; a slot count that does not read is said (${row(slotsFull.out, "background slots").slice(0, 160)} | ${row(slotsOne.out, "background slots").slice(0, 120)})`);
   // With the database up, the warning alone is no failure: exit 0, the server
   // starts — the restart loop SMD-2887 measured is gone.
   if (LIVE) {

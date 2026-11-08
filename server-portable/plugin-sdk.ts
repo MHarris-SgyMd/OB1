@@ -361,24 +361,38 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   let claimedAt = claim.at;
   // The lease renewed while a run's model call waits for a slot of its background share (SMD-3379 PR 2b-2b, the
   // maintainer, 2026-11-08): a deferred run is background, and under the defaults may wait behind the sleep passes'
-  // long calls, past a lease sized to a capture's own calls, for the sender's retry to run it again. Every third of
-  // the lease while any call waits, and once as the last wait ends, so its call has a whole lease to run in. Matched
-  // on claimed_at, as the release is, which waits for a renewal in flight: never another's claim.
+  // long calls, past a lease sized to a capture's own calls, for the sender's retry to run it again. As a wait begins
+  // — a call before it may have run most of the lease (review pass 1) — then every third of the lease while any call
+  // waits, and once as the last wait ends, so its call has a whole lease to run in. Matched on claimed_at, as the
+  // release is, which waits for a renewal in flight: never another's claim. A tick while one is in flight is skipped,
+  // the period held to a timer's most (a lease of years would fire every millisecond), and once the run is done the
+  // observer does nothing, so a call it left waiting cannot renew a claim the release is giving back.
   let renewing: Promise<void> = Promise.resolve();
+  let inFlight = false;
+  let done = false;
   const renew = () => {
+    if (inFlight || done) return;
+    inFlight = true;
     renewing = renewing.then(() =>
       ctx.db
         .tx((sql) => sql<{ claimed: string }>`UPDATE deliveries SET claimed_at = now() WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING claimed_at::text AS claimed`)
-        .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; }, () => undefined));
+        .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; }, () => undefined)
+        .finally(() => { inFlight = false; }));
   };
   let waits = 0;
   let renewal: ReturnType<typeof setInterval> | undefined;
+  const stopRenewing = () => {
+    done = true;
+    clearInterval(renewal);
+  };
   const leaseKept: CallWaits = {
     waiting: () => {
-      if (waits++ === 0) renewal = setInterval(renew, Math.max(1, lease / 3) * 1000);
+      if (done || waits++ > 0) return;
+      renew();
+      renewal = setInterval(renew, Math.min(Math.max(1, lease / 3) * 1000, 2_147_483_647));
     },
     running: () => {
-      if (waits === 0 || --waits > 0) return;
+      if (done || waits === 0 || --waits > 0) return;
       clearInterval(renewal);
       renew();
     },
@@ -395,19 +409,19 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   let gaveBack: Fate | null = null;
   // The run's value, and whether it captured a thought.
   const finish = async (): Promise<{ value: T; captured: boolean }> => {
-    let done: OnceRun<T>;
+    let finished: OnceRun<T>;
     try {
-      done = await withCallWaits(leaseKept, run);
+      finished = await withCallWaits(leaseKept, run);
     } catch (err) {
-      clearInterval(renewal);
+      stopRenewing();
       gaveBack = await release();
       throw err;
     }
-    clearInterval(renewal);
-    const thoughtId = done.thoughtId;
+    stopRenewing();
+    const thoughtId = finished.thoughtId;
     if (thoughtId === null) {
       gaveBack = await release();
-      return { value: done.value, captured: false };
+      return { value: finished.value, captured: false };
     }
     // Anything else would fail the record unseen. Not given back: a resend is
     // 409 until the lease, where a release would run it again on every one.
@@ -417,7 +431,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     await ctx.db
       .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${key}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
       .catch(() => undefined);
-    return { value: done.value, captured: true };
+    return { value: finished.value, captured: true };
   };
   if (options.defer) {
     // Its sender has its answer: a run that captured nothing is a fault to

@@ -1344,15 +1344,6 @@ export async function cuttableRelay(databaseUrl: string): Promise<{ url: string;
 }
 
 /**
- * Run a script as a subprocess and collect its exit code with everything it
- * printed, stdout then stderr — so a suite observes the real exit code, and an
- * assertion can read a message whichever stream it went to — and each stream
- * apart, for a check of which one a line went to (SMD-2304). Five suites had
- * written this body (SMD-1024's second review pass counted). `env` replaces
- * the inherited environment when given; a caller that wants the parent's plus
- * a few builds that object itself.
- */
-/**
  * A child's own environment with the suite's background slots carried in, where it does not name them (SMD-3379
  * PR 2b-2b): the suites run with them off (CI's env, ci-parity.sh's export), and a child given an environment of its
  * own would otherwise run the defaults, holding every local stub's background calls. One that names them keeps its own.
@@ -1362,6 +1353,16 @@ export function withSuiteSlots(env: Record<string, string>): Record<string, stri
   return "OB1_BACKGROUND_SLOTS" in env || suite === undefined ? env : { ...env, OB1_BACKGROUND_SLOTS: suite };
 }
 
+/**
+ * Run a script as a subprocess and collect its exit code with everything it
+ * printed, stdout then stderr — so a suite observes the real exit code, and an
+ * assertion can read a message whichever stream it went to — and each stream
+ * apart, for a check of which one a line went to (SMD-2304). Five suites had
+ * written this body (SMD-1024's second review pass counted). `env` replaces
+ * the inherited environment when given — but for the suite's background
+ * slots, carried in where it does not name them (withSuiteSlots); a caller
+ * that wants the parent's plus a few builds that object itself.
+ */
 export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string; stdout: string; stderr: string }> {
   // A child given its own environment gets exactly that: Bun loads the cwd's
   // .env into a child for every variable the passed environment lacks — which
