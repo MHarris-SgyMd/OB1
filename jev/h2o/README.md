@@ -59,7 +59,13 @@ Knobs:
   with `Retry-After`: the admitted requests times the recent read time, at
   least 1 s. A request is refused before its body is read when its
   Content-Length shows it would pass the bound, and otherwise as soon as the
-  bytes read pass it. A body over `JEV_MAX_QUEUED_BYTES` on its own could never
+  bytes read pass it. The consolidation pass reads that 503 as an outage: it
+  pauses on its own schedule, not `Retry-After`, and after three pauses records
+  the thought failed and stops the worker. So set `JEV_MAX_QUEUED` above the
+  decide workers of every brain sharing the tier. In review pass 4 the default,
+  8, lost nothing to 10 workers at a 1 s read; a bound of 1 under 4 workers
+  failed two good thoughts.
+  A body over `JEV_MAX_QUEUED_BYTES` on its own could never
   be admitted, so it gets 413, as a body over `JEV_MAX_BODY_BYTES` does, not a
   503 that asks for a retry.
 - **A caller that leaves while it waits** is dropped then (499), its admission
@@ -98,14 +104,15 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Eighteen mutants, one per mechanism, each fail it: eight
+  server runs it in CI. Twenty-one mutants, one per mechanism, each fail it: eight
   worker threads, the read on the event loop, no count bound, no byte bound, no
   refusal before the body, no drop while waiting, no check at its turn, no 422,
   bytes never released, a body over the byte bound alone answered 503, a body
   stream that breaks and escapes, a caller check that raises and escapes,
   tokens estimated from bytes, a 409 for the model's own name, and a cancelled
   waiter's acquire left running, no body deadline, the token count on the
-  event loop, and an encode failure escaping.
+  event loop, an encode failure escaping, a per-chunk deadline, the prompt
+  built without the record, and an unset knob refused.
 
 **Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
 model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):

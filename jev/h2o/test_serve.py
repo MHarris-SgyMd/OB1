@@ -47,13 +47,16 @@ class FakeReader:
         self.delay, self.fail = delay, fail
         self.active = self.peak = self.reads = 0
         self.threads = set()
+        self.prompted = []  # each prompt built, so a test can see what the model would read
         self._mu = threading.Lock()
 
     def encode(self, text):
         return list(range(len(text) // 4 + 1))
 
     def prompt(self, state, instructions, names, descs):
-        return f"{state}\n{instructions}\n" + "\n".join(f"{n}: {d}" for n, d in zip(names, descs))
+        text = f"{state}\n{instructions}\n" + "\n".join(f"{n}: {d}" for n, d in zip(names, descs))
+        self.prompted.append(text)
+        return text
 
     def state_tokens(self, text):
         n = len(text)  # one token a character, so a test sets a context's length
@@ -271,7 +274,12 @@ async def main():
     os.environ["JEV_TEST_KNOB"] = "12"
     kept = serve.knob("JEV_TEST_KNOB", 8)
     del os.environ["JEV_TEST_KNOB"]
-    check(all(refused) and kept == 12, f"a knob of ², 0, -3 or 1.5 is refused by name, and 12 is read ({refused}, {kept})")
+    # Unset is the default, not a refusal (review pass 4: else the tier would not start on its defaults).
+    try:
+        kept = kept if serve.knob("JEV_TEST_KNOB", 8) == 8 else -1
+    except SystemExit:
+        kept = -1
+    check(all(refused) and kept == 12, f"a knob of ², 0, -3 or 1.5 is refused by name, 12 is read, and unset is the default ({refused}, {kept})")
     try:
         s, _, _ = await serve.handle(FakeReader(), gate, MODEL, {"content-length": "²"}, chunks_of(body()), None)
     except Exception as e:
@@ -352,6 +360,29 @@ async def main():
         s, b = f"raised {type(e).__name__}", {}
     check(s == 400 and "decision 0: its context cannot be encoded" in b.get("error", "") and R.reads == 0 and gate.admitted == 0,
           f"a context the tokenizer cannot encode is that decision's 400, not an escape ({s}, {b.get('error')})")
+
+    # The deadline is the whole body's, not each chunk's (review pass 4: a caller sending a byte every 0.1 s would
+    # hold its place for good under a per-chunk deadline).
+    async def trickles():
+        yield body()[:40]
+        while True:
+            await asyncio.sleep(0.05)
+            yield b" "
+
+    R, gate = FakeReader(), serve.Gate(body_s=0.3)
+    try:
+        s, _, _ = await asyncio.wait_for(serve.handle(R, gate, MODEL, {}, trickles(), None), timeout=5)
+    except asyncio.TimeoutError:
+        s = "still reading after 5 s"
+    check(s == 408 and gate.admitted == 0 and gate.bytes == 0, f"a body that trickles past the deadline is a 408 though each chunk is quick ({s}, {gate.admitted}, {gate.bytes})")
+
+    print("\n[12] what the model reads")
+    # Review pass 4's mutants: the prompt could be built without the record and every case passed, the fake reader
+    # never looking at what it was handed.
+    R, gate = FakeReader(), serve.Gate()
+    marked = "THOUGHT A: the quarterly audit moved to March. THOUGHT B: the auditors confirmed it."
+    s, _, _ = await post(R, gate, body(context=marked))
+    check(s == 200 and R.prompted and all(marked in p for p in R.prompted), f"each prompt holds the decision's record ({s}, {len(R.prompted)} prompts)")
 
 
 asyncio.run(main())
