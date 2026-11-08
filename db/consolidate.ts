@@ -2219,6 +2219,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   outcome = { outcome: "failed", error: msg };
                 } else if (kind === "fatal") {
                   configError = msg;
+                  // The decision tier's refusal (jev.ts names its requests so: a tier serving another model, 409; a
+                  // URL that is not a tier, 404), not the writer's: the closing remedy names the tier's knob, not the
+                  // chat endpoint's (review pass 4: a one-shot run against a tier serving another model said
+                  // "Check the chat endpoint"; only the follower's start refusal set this).
+                  if (jev && e instanceof ProviderError && /^(Decision|Info) request to /.test(e.message)) refusedByTier = true;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
@@ -2666,7 +2671,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
         (refusedByTier
-          ? `  Check ${tierBaseKnob}: it must be an ob1-jev/1 tier (jev/README.md). Nothing was marked failed.`
+          ? `  Check ${tierBaseKnob}: it must be an ob1-jev/1 tier${jev?.model ? ` serving ${jev.model} (${jev.modelKnob ?? "OB1_JEV_MODEL"})` : ""} (jev/README.md). Nothing was marked failed.`
           : `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
             `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`)
     );

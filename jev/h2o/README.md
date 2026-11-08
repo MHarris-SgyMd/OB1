@@ -218,9 +218,10 @@ To try it by hand instead: `JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`
     the tier.
   - A one-shot `bun db/consolidate.ts` makes no start check. Each worker
     retries its first thought (pauses of 5, 15 and 45 s), records that thought
-    failed, and stops; the rest stay pending for the next run. Its calls to a
-    tier serving another model fail each thought claimed, and a URL that is
-    not a tier stops every worker at the first call.
+    failed, and stops; the rest stay pending for the next run. A tier serving
+    another model (its 409) or a URL that is not a tier stops every worker at
+    the first call, marks nothing failed, and names `OB1_CONSOLIDATE_DECIDER_URL`
+    and the decider.
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.

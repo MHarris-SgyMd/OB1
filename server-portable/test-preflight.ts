@@ -5892,6 +5892,19 @@ if (want("10")) {
            "an https tier with an untrusted certificate answers, and the fix is http://");
   }
   rmSync(jevCerts, { recursive: true, force: true });
+  // Every failure branch of decide mode's own tier warns (review pass 4's mutants: only nothing listening and an
+  // unresolved name were held, so a 401, an answer not as the tier, or --deep's decision failing could go back to
+  // failing the start over a tier only the consolidation pass asks).
+  const DECIDE_OWN = { OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" };
+  const ownNotTier = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${other.port}` });
+  const ownGuard = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("unauthorized", { status: 401 }) });
+  const ownRefused = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${ownGuard.port}` });
+  ownGuard.stop(true);
+  const ownHalf = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${halfTier.port}` }, "--deep");
+  assert(/!\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but not as the tier/.test(ownNotTier.out) && !/✗\s+decide tier/.test(ownNotTier.out)
+      && /!\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but refuses the request/.test(ownRefused.out) && !/✗\s+decide tier/.test(ownRefused.out)
+      && /!\s+decide decision\s+/.test(ownHalf.out) && !/✗\s+decide decision/.test(ownHalf.out),
+         `its own tier answering not as the tier, refusing the request, or failing --deep's decision each warns (${row(ownNotTier.out, "decide tier").trim().slice(0, 90)} | ${row(ownRefused.out, "decide tier").trim().slice(0, 90)} | ${row(ownHalf.out, "decide decision").trim().slice(0, 90)})`);
   redirector.stop();
   halfTier.stop();
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });

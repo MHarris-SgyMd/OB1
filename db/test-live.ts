@@ -17952,6 +17952,17 @@ if (want("16")) {
       const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
       const fv = fbeat ? JSON.parse(fbeat.value as string) : null;
       assert(fv?.ended === true && fv.outcome === "failed" && fv.refused === "model", `…and its row ends on the refusal, the kind on it, model (${JSON.stringify(fv)})`);
+      // A one-shot run makes no start check: the tier's 409 stops every worker at its first call, nothing marked
+      // failed, and the remedy names the tier's knob and model, not the chat endpoint (review pass 4: it said "Check
+      // the chat endpoint", and the README said each thought fails).
+      await seed("[16d] The intake form asks for a phone number.", 59, 3, ["intake"]);
+      const intakeNew = await seed("[16d] The intake form no longer asks for a phone number.", 59, 0, ["intake"]);
+      const oneShotElse = await decide({ ...denv, ...OWN_TIER });
+      const [intakeClaim] = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${intakeNew}::uuid`) as { status: string }[];
+      assert(oneShotElse.code === 2 && /stopping every worker; nothing is marked failed/.test(oneShotElse.out)
+          && /Check OB1_CONSOLIDATE_DECIDER_URL: it must be an ob1-jev\/1 tier serving h2o-stub \(OB1_CONSOLIDATE_DECIDER\)/.test(oneShotElse.out)
+          && !/Check the chat endpoint/.test(oneShotElse.out) && intakeClaim?.status !== "failed",
+        `a one-shot run against a tier serving another model stops at the first call, marks nothing failed, and names the tier's knob and model (exit ${oneShotElse.code}, the claim ${intakeClaim?.status}: ${last(oneShotElse.out)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
