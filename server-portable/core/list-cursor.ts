@@ -6,7 +6,7 @@
 // structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { UUID_RE, type ListSort } from "../store.ts";
+import { RELATION_WORDS, UUID_RE, type ListSort, type RelationWord } from "../store.ts";
 
 /**
  * list_thoughts' cursor (SMD-2995): the sort it was made under and the place
@@ -70,8 +70,7 @@ export function parseThreadCursor(raw: string): { at: string | null; id: string 
 }
 
 /** What a relations cursor was made under and where its page ended: the thought, the word (null for all four), and the last relation's position. */
-export type RelationsCursorAt = { thought: string; relation: string | null; rank: string; at: string; id: string };
-const RELATION_WORD = /^(?:related|evolves|duplicate|distinct)$/;
+export type RelationsCursorAt = { thought: string; relation: RelationWord | null; rank: string; at: string; id: string };
 
 /**
  * relations' cursor (SMD-2726; SMD-3306 PR 7a-2b): the thought and word it was read under, and the last relation's
@@ -97,10 +96,10 @@ export function parseRelationsCursor(raw: string): RelationsCursorAt | null {
   if (!Array.isArray(v) || v.length !== 6 || v[0] !== "relations") return null;
   const [, thought, relation, rank, at, id] = v as unknown[];
   if (typeof thought !== "string" || !UUID_RE.test(thought) || typeof id !== "string" || !UUID_RE.test(id)) return null;
-  if (relation !== null && (typeof relation !== "string" || !RELATION_WORD.test(relation))) return null;
+  if (relation !== null && !(RELATION_WORDS as readonly unknown[]).includes(relation)) return null;
   // numeric's text of a value rounded to six places: a sign, digits and a fraction, never an exponent; -1 the absent.
   if (typeof rank !== "string" || !/^-?[0-9]{1,20}(?:\.[0-9]{1,6})?$/.test(rank)) return null;
-  return pgStamp(at) ? { thought: thought.toLowerCase(), relation, rank, at, id: id.toLowerCase() } : null;
+  return pgStamp(at) ? { thought: thought.toLowerCase(), relation: relation as RelationWord | null, rank, at, id: id.toLowerCase() } : null;
 }
 
 /**

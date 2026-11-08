@@ -865,8 +865,9 @@ thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads
     "evolved into" on the older); the confidence; `judgedAt`, when it was last judged; and `stale`.
   - **`stale`** is the lineage row's fingerprints no longer those of the two texts: a text was edited since it was
     judged, so the word may no longer hold. Such a relation stands, shown, until SMD-2726's `rebuild_derived` arm
-    closes it and the judge reads the pair again. A relation with no lineage row reads not stale, as
-    `consolidate.ts --list relations` reads it. On stable late on 2026-11-07, 1,295 of 6,524 were stale.
+    closes it and has the pair judged again: the consolidation pass doesn't judge an edited pair again before then.
+    A relation with no lineage row reads not stale, as `consolidate.ts --list relations` reads it. On stable late on
+    2026-11-07, 1,295 of 6,524 were stale.
   - **Refusals.** Another tool's cursor, or one made for another id or word, is `REFUSED_CURSOR`. An unknown id is
     `NOT_FOUND`.
 - **The reads of a thought** carry its relations: `search_thoughts`, `search_thoughts_keyword` and `list_thoughts`

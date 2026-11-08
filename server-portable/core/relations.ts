@@ -62,7 +62,7 @@ export async function relationsOf(store: Pick<ThoughtStore, "relationsAmong" | "
   let read: Record<string, RelationsOf>, pages: RelationShown[][];
   const keys: string[] = [];
   try {
-    read = await store.relationsAmong(ids, per);
+    read = await store.relationsAmong(ids, per, titles);
     keys.push(...Object.keys(read));
     pages = await shown(store, keys.map((k) => read[k]), titles);
   } catch (e) {

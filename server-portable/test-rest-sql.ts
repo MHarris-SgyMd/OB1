@@ -2313,14 +2313,14 @@ console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7
       && none.status === 200 && (none.body as unknown as RelPage).total === 0 && same((none.body as unknown as RelPage).relations, []),
     `one word's relations alone; a thought with none answers an empty page (${ev.total} ${evolvesMcp.text.slice(0, 80)})`);
 
-  // A hub with seven: a page's label shows the first five and counts the rest; a fetch shows them all. Two tie on confidence: the later judged first.
+  // A hub with seven: a page's label shows the first five and counts the rest; a fetch shows them all. Two tie on confidence: the later recorded first.
   const hub = await own("Rel case: the zeta relation hub, judged against seven");
   const spokes: string[] = [];
   for (let i = 1; i <= 7; i++) spokes.push(await own(`Rel case: spoke ${i} of the hub`));
   await at(hub, "2026-09-20T00:00:00Z");
   for (const [i, s] of spokes.entries()) await at(s, `2026-09-1${i}T00:00:00Z`);
   for (const [i, s] of spokes.entries()) await relate(hub, s, "related", i === 0 ? 0.2 : (i + 1) / 10);
-  // spokes[0] and spokes[1] both 0.2: spokes[1]'s relation was judged later, so it comes first.
+  // spokes[0] and spokes[1] both 0.2: spokes[1]'s relation was recorded later, so it comes first.
   const hubOrder = [spokes[6], spokes[5], spokes[4], spokes[3], spokes[2], spokes[1], spokes[0]];
   const [kw, kwMcp, listed, listedMcp, sr, srMcp, compat, fHub, fA, fLoose, fMcp, hubAll] = await Promise.all([
     rest("POST", "/v1/search/keyword", { query: "zeta relation hub" }), mcp("search_thoughts_keyword", { query: "zeta relation hub" }),
@@ -2356,7 +2356,7 @@ console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7
   assert(same(fh.relations?.map((x) => x.other.id), hubOrder) && !("relationsMore" in fHub.body) && same(fa.relations?.map((x) => x.other.id), [ob, od, oc, oe])
       && !("relations" in fLoose.body) && same((JSON.parse(fMcp.text) as Labelled).relations?.map((x) => x.other.id), hubOrder)
       && (hubAll.body as unknown as RelPage).total === 7 && same((hubAll.body as unknown as RelPage).relations.map((x) => x.other.id), hubOrder),
-    `fetch carries all seven of the hub's, strongest first, the later judged of a tie first; the zeta thought's four; none on the loose thought (${fh.relations?.length} ${JSON.stringify(Object.keys(fLoose.body))})`);
+    `fetch carries all seven of the hub's, strongest first, the later recorded of a tie first; the zeta thought's four; none on the loose thought (${fh.relations?.length} ${JSON.stringify(Object.keys(fLoose.body))})`);
 
   // Not read: every read goes on, its relations null, and the text says so.
   const real = await db();
@@ -2601,7 +2601,7 @@ console.log("\n[17b] Judged relations, review pass 1 (SMD-2726; SMD-3306 PR 7a-2
     await relate(eHub, e3, null, null);
     const [eP2, eP2Mcp] = await Promise.all([page(eHub, `&limit=2&after=${eP1.cursor}`), mcp("relations", { id: eHub, limit: 2, after: eP1.cursor })]);
     assert(eP2.total === 2 && same(eP2.relations, []) && eP2.cursor === null
-        && eP2Mcp.text.includes("2 standing judged relations, strongest first, 0 on this page:") && eP2Mcp.text.includes("(None stands past the cursor now: a re-judge changed them since that page."),
+        && eP2Mcp.text.includes("2 standing judged relations, strongest first, 0 on this page:") && eP2Mcp.text.includes("(None stands past the cursor now: a relation was closed or replaced since that page."),
       `a page emptied by a relation closed between pages keeps the total and says why, not "none" (${eP2.total} ${eP2Mcp.text.slice(0, 120).replace(/\n/g, " | ")})`);
 
     // Trust from the other thought on either side: an operator's older thought judged against newer outside text.
@@ -2649,6 +2649,15 @@ console.log("\n[17b] Judged relations, review pass 1 (SMD-2726; SMD-3306 PR 7a-2
     assert(stSup.text.includes("the other superseded by this thought") && sp2Place > 0 && stSup.text.includes(`the other superseded by Result ${sp2Place}`)
         && listed100.text.includes("the other superseded by this thought") && kwStale.text.includes(staleKeyText) && stStale.text.includes(staleKeyText),
       `search_thoughts names the superseder on its page by its place and says "superseded by this thought", as list_thoughts does; both searches give the stale key (${sp2Place})`);
+
+    // (Review pass 4.) The rank keeps six places: 0.124 before 0.123, though 0.123 was written later (084 takes a direct write unrounded).
+    const [r3a, r3b, r3h] = [await own("Rel probe rank: older one"), await own("Rel probe rank: older two"), await own("Rel probe rank: the newer")];
+    await at(r3a, "2026-07-26T00:00:00Z"); await at(r3b, "2026-07-27T00:00:00Z"); await at(r3h, "2026-07-28T00:00:00Z");
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${r3h}::uuid, 'relation', ${`{"relation":"related","target":"${r3b}","judge_key":"consolidate:rel-test@p4","confidence":0.124}`}::text::jsonb)`;
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${r3h}::uuid, 'relation', ${`{"relation":"related","target":"${r3a}","judge_key":"consolidate:rel-test@p4","confidence":0.123}`}::text::jsonb)`;
+    const rankRead = await page(r3h);
+    assert(same(rankRead.relations.map((r) => r.other.id), [r3b, r3a]) && same(rankRead.relations.map((r) => r.confidence), [0.124, 0.123]),
+      `the rank keeps six places: a confidence of 0.124 before 0.123, though 0.123 was written later (${JSON.stringify(rankRead.relations.map((r) => r.confidence))})`);
 
     // A superseding read that throws: fetch answers, its relations null.
     const realStore = await db();

@@ -1560,13 +1560,13 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseThreadPlace(r));
   }
 
-  async relationsAmong(ids: string[], shown: number): Promise<Record<string, RelationsOf>> {
-    return this.relationsOf(idList(ids), { limit: shown });
+  async relationsAmong(ids: string[], shown: number, heads = true): Promise<Record<string, RelationsOf>> {
+    return this.relationRows(idList(ids), { limit: shown, heads });
   }
 
   async relationsPage(id: string, w: RelationsWindow): Promise<RelationsOf> {
     const valid = idList([id]);
-    return (await this.relationsOf(valid, w))[valid[0] ?? ""] ?? { total: 0, edges: [] };
+    return (await this.relationRows(valid, w))[valid[0] ?? ""] ?? { total: 0, edges: [] };
   }
 
   /**
@@ -1579,7 +1579,7 @@ export class SqlStore implements ThoughtStore {
    * the answer consolidate.ts --list relations gives, read from a text's stored fingerprint where that is the one
    * judged. A thought with none is absent.
    */
-  private async relationsOf(ids: string[], w: RelationsWindow): Promise<Record<string, RelationsOf>> {
+  private async relationRows(ids: string[], w: RelationsWindow): Promise<Record<string, RelationsOf>> {
     if (ids.length === 0) return {};
     const after = w.after ?? null;
     const cut = after === null ? this.sql`TRUE`
@@ -1606,7 +1606,7 @@ export class SqlStore implements ThoughtStore {
            WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
         counted AS (SELECT of, count(*)::int AS total FROM w GROUP BY of),
         -- Ties go by when the relation was first recorded (the facet's created_at), which nothing moves: ordered by when
-        -- it was last judged (pass 2), a kept re-judge between two pages moved a relation ahead of the cursor, never read
+        -- it was last judged (pass 2), a kept re-judge between two pages moved a relation to before the cursor, never read
         -- (review pass 3: 16 in 75 walks), and every relation of a thought joined its lineage row (a hub of 50,000's fetch
         -- tripled). judgedAt is shown, from the lineage row, for the page alone.
         page AS (
@@ -1614,30 +1614,42 @@ export class SqlStore implements ThoughtStore {
             SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, created_at DESC, id DESC) AS n
               FROM w WHERE ${cut}) c
            WHERE n <= ${w.limit}::int),
+        -- The page's relations with their lineage rows (084: written with each, under its judge key; unique per artifact).
+        lined AS (
+          SELECT page.*, d.id AS lineage, d.produced_at, d.input_fingerprints AS judged
+            FROM page LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key),
+        -- A side is stale when its text's fingerprint is not the one judged. The stored fingerprint, where it is the one
+        -- judged, settles it without hashing the text (review pass 2: 158 ms for ten 115 KB texts); where it is not, or is
+        -- NULL, the text's hash decides, as the judge recorded it (review pass 3: a stored key out of step with its text
+        -- read stale for good). Each thought needing its hash is hashed once a statement, however many relations on the
+        -- page it stands in (review pass 4: an edited 200 KB hub's page of 101 hashed it 101 times, 2.9 ms each). A raw
+        -- UPDATE of content that leaves the column at the judged key is the residue, as it is for 120's re-link.
+        hashing AS (
+          SELECT l.older AS id FROM lined l JOIN thoughts t ON t.id = l.older WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[1]
+          UNION
+          SELECT l.newer FROM lined l JOIN thoughts t ON t.id = l.newer WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[2]),
+        hashed AS MATERIALIZED (SELECT t.id, content_fingerprint_of(t.content) AS fingerprint FROM hashing JOIN thoughts t ON t.id = hashing.id),
         -- Each thought's page aggregated once, and its count once, joined to the ids (review pass 2: a correlated read per
-        -- id scanned the whole set for each, 1.8 s for a list page of 1,000). A side is stale when its text's fingerprint
-        -- is not the one judged: the stored fingerprint, where it is the one judged, settles it without hashing the text
-        -- (review pass 2: 158 ms for ten 115 KB texts); where it is not, or is NULL, the text's hash decides, as the judge
-        -- recorded it (review pass 3: a stored key out of step with its text read stale for good, a re-judge never
-        -- clearing it). A raw UPDATE of content that leaves the column is the residue, as it is for 120's re-link.
+        -- id scanned the whole set for each, 1.8 s for a list page of 1,000). The other thought's head is sent only to a
+        -- read that shows its title (review pass 4: a list page's would be thousands of heads dropped).
         shown AS (
-          SELECT page.of, jsonb_agg(jsonb_build_object(
-                   'id', page.id::text, 'relation', page.relation, 'other_is', page.other_is,
-                   'other_id', page.other::text, 'other_created_at', o.created_at, 'other_content', left(o.content, ${THREAD_HEAD_CHARS}::int),
+          SELECT lined.of, jsonb_agg(jsonb_build_object(
+                   'id', lined.id::text, 'relation', lined.relation, 'other_is', lined.other_is,
+                   'other_id', lined.other::text, 'other_created_at', o.created_at,
+                   'other_content', CASE WHEN ${w.heads ?? true}::boolean THEN left(o.content, ${THREAD_HEAD_CHARS}::int) ELSE '' END,
                    'other_trust', o.metadata->>'trust',
-                   'confidence', page.confidence, 'judged_at', COALESCE(d.produced_at, page.created_at), 'rank', page.rank::text, 'at', page.created_at::text,
-                   'stale', d.id IS NOT NULL AND (
-                     CASE WHEN tol.content_fingerprint IS NOT DISTINCT FROM d.input_fingerprints[1] THEN false
-                          ELSE content_fingerprint_of(tol.content) IS DISTINCT FROM d.input_fingerprints[1] END
-                     OR CASE WHEN tn.content_fingerprint IS NOT DISTINCT FROM d.input_fingerprints[2] THEN false
-                             ELSE content_fingerprint_of(tn.content) IS DISTINCT FROM d.input_fingerprints[2] END))
-                   ORDER BY page.n) AS edges
-            FROM page
-            JOIN thoughts o ON o.id = page.other
-            JOIN thoughts tn ON tn.id = page.newer
-            JOIN thoughts tol ON tol.id = page.older
-            LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key
-           GROUP BY page.of)
+                   'confidence', lined.confidence, 'judged_at', COALESCE(lined.produced_at, lined.created_at), 'rank', lined.rank::text, 'at', lined.created_at::text,
+                   'stale', lined.lineage IS NOT NULL AND (
+                     (tol.content_fingerprint IS DISTINCT FROM lined.judged[1] AND ho.fingerprint IS DISTINCT FROM lined.judged[1])
+                     OR (tn.content_fingerprint IS DISTINCT FROM lined.judged[2] AND hn.fingerprint IS DISTINCT FROM lined.judged[2])))
+                   ORDER BY lined.n) AS edges
+            FROM lined
+            JOIN thoughts o ON o.id = lined.other
+            JOIN thoughts tn ON tn.id = lined.newer
+            JOIN thoughts tol ON tol.id = lined.older
+            LEFT JOIN hashed ho ON ho.id = lined.older
+            LEFT JOIN hashed hn ON hn.id = lined.newer
+           GROUP BY lined.of)
         SELECT ids.of::text AS of, COALESCE(counted.total, 0) AS total, COALESCE(shown.edges, '[]'::jsonb) AS edges
           FROM ids LEFT JOIN counted ON counted.of = ids.of LEFT JOIN shown ON shown.of = ids.of`;
     } catch (e) {

@@ -879,10 +879,11 @@ export function renderRelations(o: Outcome<RelationsResult>): Reply {
     const word = relation === null ? "" : ` ${relation}`;
     if (total === 0) return `Thought ${id} has no standing judged${word} relation.`;
     const head = `Thought ${id}: ${total} standing judged${word} relation${total === 1 ? "" : "s"}, strongest first${relations.length < total ? `, ${relations.length} on this page` : ""}:`;
-    // A page past the cursor emptied by a re-judge between pages (another thought's or word's cursor is refused: review pass 2).
-    if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a re-judge changed them since that page. Read them again from the start.)`;
+    // A page past the cursor emptied by a relation closed or replaced between pages — a re-judge, or its other thought
+    // deleted (another thought's or word's cursor is refused: review pass 1).
+    if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a relation was closed or replaced since that page. Read them again from the start.)`;
     const rows = relations.map((r, i) => `${i + 1}. ${RELATION_SAID[r.relation][r.otherIs]} ${relatedTitle(r)}\n   ID: ${r.other.id}\n   ${relationMarks(r, id)}; last judged ${r.judgedAt ?? "at an unknown time"} (relation ${r.id})`);
-    const stale = relations.some((r) => r.stale) ? `\n\n${STALE_KEY} It stands until the judge reads the pair again.` : "";
+    const stale = relations.some((r) => r.stale) ? `\n\n${STALE_KEY} It stands as judged: nothing judges an edited pair again yet.` : "";
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\` with id ${id}${relation === null ? "" : ` and relation ${relation}`} for the next page.` : "";
     return `${head}\n\n${rows.join("\n\n")}${stale}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR" ? r.reason === "filters"

@@ -1001,7 +1001,7 @@ export const RELATIONS_FETCHED = 20;
 /**
  * Where a page of one thought's relations ends, in their order — strongest first: the confidence rounded to six
  * places (absent as -1), then the newest recorded (the facet's created_at, which nothing moves: ordered by when last
- * judged, pass 2's, a kept re-judge between two pages put a relation behind a walk's cursor — review pass 3), then
+ * judged, pass 2's, a kept re-judge between two pages moved a relation to before a walk's cursor — review pass 3), then
  * the relation's id, each descending. `rank` is Postgres's text of that rounded numeric — a confidence 084 takes
  * unrounded from a direct write keeps a cursor short (review pass 1) — and `at` its text of that time, so a cursor
  * compares exactly what the order read.
@@ -1022,8 +1022,8 @@ export type RelationEdge = {
 };
 /** A thought's relations as read: how many stand under the read's filter, and the page of them. */
 export type RelationsOf = { total: number; edges: RelationEdge[] };
-/** Which of a thought's relations to read: one word or all, `limit` of them, after a position. */
-export type RelationsWindow = { relation?: RelationWord; limit: number; after?: RelationPosition };
+/** Which of a thought's relations to read: one word or all, `limit` of them, after a position; `heads` false leaves out the other thoughts' text heads, for a read that shows no title. */
+export type RelationsWindow = { relation?: RelationWord; limit: number; after?: RelationPosition; heads?: boolean };
 
 /** A relation's row (relationsAmong's jsonb element) → RelationEdge, or null for a word or side this read does not make. */
 export function normaliseRelationEdge(r: Record<string, unknown>): RelationEdge | null {
@@ -2468,7 +2468,7 @@ export interface ThoughtStore {
    * with none is absent. Throws what Postgres throws: a role that cannot read thought_facets or derivations is the
    * caller's to say.
    */
-  relationsAmong(ids: string[], shown: number): Promise<Record<string, RelationsOf>>;
+  relationsAmong(ids: string[], shown: number, heads?: boolean): Promise<Record<string, RelationsOf>>;
 
   /**
    * One thought's standing judged relations, a page of them (the `relations` read): `window` filters by word and
