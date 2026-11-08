@@ -5959,6 +5959,16 @@ if (want("10")) {
       && /→ Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(urlAlone.out, "decide tier"))
       && !/decide egress/.test(urlAlone.out),
          `OB1_CONSOLIDATE_DECIDER_URL with no decider warns that nothing reads it, and dials nothing (${row(urlAlone.out, "decide tier").trim().slice(0, 160)})`);
+  // Every way its own tier can fail warns, not only nothing listening (review pass 2: the other branches could fail the
+  // start unseen) — an unresolved name, the likeliest, under the wrong runtime's host alias.
+  const ownUnresolved = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://ob1-no-such-host.invalid:8022", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/!\s+decide tier\s+nothing answers at http:\/\/ob1-no-such-host\.invalid:8022/.test(ownUnresolved.out) && !/✗\s+decide tier/.test(ownUnresolved.out),
+         `its own tier's name unresolved warns, as nothing listening does (${row(ownUnresolved.out, "decide tier").trim().slice(0, 160)})`);
+  // OB1_JEV_MODEL names the shared tier's model, not decide mode's, once decide mode has its own (review pass 2: that
+  // check went unheld here, though it is the setup a tier per caller exists for).
+  const ownJevModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_JEV_MODEL: "semif", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through its own tier/.test(ownJevModel.out) && !/OB1_JEV_MODEL is semif and OB1_CONSOLIDATE_DECIDER/.test(ownJevModel.out),
+         `with its own tier, an OB1_JEV_MODEL naming another model leaves decide mode's row ok (${row(ownJevModel.out, "consolidate decide mode").trim().slice(0, 160)})`);
   const ownDeep = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" }, "--deep");
   assert(/✓\s+decide decision\s+one binary decision in \d+ ms/.test(ownDeep.out), `--deep makes one decision through decide mode's own tier (${row(ownDeep.out, "decide decision").trim().slice(0, 120)})`);
 

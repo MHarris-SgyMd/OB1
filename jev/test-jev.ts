@@ -510,6 +510,18 @@ section("[8] the client's batches and answers");
   try { await jevDecide(decideOwn.cfg, { proposition: "p", context: "c" }, subj); } catch (e) { errOwn = e; }
   assert(decideOwn.own && errOwn?.kind === "body" && /OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b/.test(errOwn.message) && !/OB1_JEV_MODEL/.test(errOwn.message),
     `decide mode's own tier refuses another model's answer naming OB1_CONSOLIDATE_DECIDER, not OB1_JEV_MODEL (${errOwn?.message?.slice(0, 120)})`);
+  // …and obeys the brain's egress policy as the shared tier does (review pass 2: forcing it open, or reading no policy,
+  // passed every suite, since every own-tier case was declared local).
+  const ownUndeclared = resolveDecideTier({ OB1_CONSOLIDATE_DECIDER_URL: BASE, OB1_CONSOLIDATE_DECIDER: MODEL_INFO.name })!;
+  stub.requests = [];
+  let errGate: unknown;
+  try { await jevDecide(ownUndeclared.cfg, { proposition: "p", context: "c" }, subj); } catch (e) { errGate = e; }
+  assert(errGate instanceof ProviderError && errGate.kind === "egress" && stub.requests.length === 0,
+    `decide mode's own tier, undeclared, is refused under the default deny, and the stub sees nothing (${(errGate as Error)?.message})`);
+  const ownAllowed = resolveDecideTier({ OB1_CONSOLIDATE_DECIDER_URL: BASE, OB1_CONSOLIDATE_DECIDER: MODEL_INFO.name, OB1_EGRESS_ALLOW: "actor:spike" })!;
+  let errAllowed: unknown;
+  try { await jevDecide(ownAllowed.cfg, { proposition: "p", context: "c" }, subj); } catch (e) { errAllowed = e; }
+  assert(errAllowed === undefined && stub.requests.length === 1, `…and the brain's allow term naming the actor lets it through: its policy is the brain's (${(errAllowed as Error)?.message ?? "sent"})`);
   const bodies: [string, () => unknown][] = [
     ["another contract", () => ({ contract: "other/9", model: MODEL_INFO, results: [], ms: 0 })],
     ["too few results", () => ({ contract: JEV_CONTRACT, model: MODEL_INFO, results: [], ms: 0 })],
