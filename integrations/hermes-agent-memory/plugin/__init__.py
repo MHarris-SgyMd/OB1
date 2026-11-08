@@ -510,14 +510,19 @@ class OB1RequestError(RuntimeError):
 
 
 class OB1WritebackCut(RuntimeError):
-    """A write-back in parts stopped at its deadline (Hermes exiting): the
-    parts sent before it were kept (``memories``, as the plugin answered
-    them), and ``unsent`` memories were never sent."""
+    """A write-back stopped at its deadline: the parts answered before it were
+    kept (``memories``, as the plugin answered them); ``unsent`` memories were
+    in parts never started; ``unconfirmed`` were in the part in flight, whose
+    wait the deadline cut. The plugin finishes a write-back its caller stops
+    waiting for, so those may well have been kept: sent again, the write-back
+    answers them, writing nothing twice."""
 
-    def __init__(self, memories: List[Any], unsent: int):
+    def __init__(self, memories: List[Any], unsent: int, unconfirmed: int = 0):
         self.memories = memories
         self.unsent = unsent
-        super().__init__(f"OB1 write-back stopped at its deadline: {len(memories)} memories kept, {unsent} not sent")
+        self.unconfirmed = unconfirmed
+        super().__init__(f"OB1 write-back stopped at its deadline: {len(memories)} memories kept, "
+                         f"{unconfirmed} sent but unconfirmed, {unsent} not sent")
 
 
 class _OB1Client:
@@ -541,7 +546,8 @@ class _OB1Client:
         self._stop_at: Optional[float] = None
 
     def stop_by(self, deadline: float) -> None:
-        """No write-back part starts after ``deadline`` (time.monotonic()), and none waits past it."""
+        """No write-back part starts after ``deadline`` (time.monotonic()). A part started before it waits no
+        longer than the deadline allowed when it started (a part already in flight keeps its wait)."""
         self._stop_at = deadline if self._stop_at is None else min(self._stop_at, deadline)
 
     def _writeback_wait(self, deadline: Optional[float]) -> Optional[float]:
@@ -667,7 +673,7 @@ class _OB1Client:
             wait = self._writeback_wait(deadline)
             if wait is None:
                 raise OB1WritebackCut([], sizes[0])
-            return self._send_part(body, wait, deadline, [], sizes[0])
+            return self._send_part(body, wait, deadline, [], sizes[0], 0)
         # More than a part: each part a write-back of its own, the parts' answers joined part after part (each in
         # the plugin's order of kinds). The plugin keys each memory by the write-back's key, or by one it makes of
         # the workspace, runtime, task, step and the memory's text, and the memory's index in the request: so each
@@ -687,19 +693,20 @@ class _OB1Client:
                 body["idempotency_key"] = _part_id(idempotency_key, n)
             else:
                 body["step_id"] = _part_id(step_id or "step", n)
-            answer = self._send_part(body, wait, deadline, memories, sum(sizes[n:]))
+            answer = self._send_part(body, wait, deadline, memories, sizes[n], sum(sizes[n + 1:]))
             memories.extend(answer.get("memories") or [])
         return {**answer, "memories": memories}
 
-    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any], unsent: int) -> dict:
+    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any], in_flight: int, later: int) -> dict:
         """One write-back request. One that times out with its wait cut short by the deadline is the deadline's cut
-        (OB1WritebackCut, chained to the timeout): the memories kept before it, and this part's and the rest unsent."""
+        (OB1WritebackCut, chained to the timeout): the memories kept before it, this part's unconfirmed (the
+        plugin finishes it all the same), and the later parts' unsent. A refusal is OB1RequestError, never here."""
         try:
             return self._request("POST", "/writeback", body=body, timeout=wait)
-        except (TimeoutError, OSError) as e:
-            if isinstance(e, urllib.error.HTTPError) or wait >= self._writeback_timeout or self._writeback_wait(deadline) is not None:
+        except OSError as e:  # a read timeout (TimeoutError) or a connect one (URLError)
+            if wait >= self._writeback_timeout or self._writeback_wait(deadline) is not None:
                 raise
-            raise OB1WritebackCut(kept, unsent) from e
+            raise OB1WritebackCut(kept, later, in_flight) from e
 
     def report_usage(self, request_id: str, *, used: List[str],
                      ignored: List[str]) -> dict:
@@ -1072,7 +1079,8 @@ class OB1MemoryProvider(MemoryProvider):
                 t.join(timeout=max(0.0, deadline - time.monotonic()))
         cut = sum(1 for t in threads if t.is_alive())
         if cut:
-            logger.warning("OB1: %d background write-back(s) still running at the exit deadline (writeback_timeout) were cut", cut)
+            logger.warning("OB1: %d background write-back(s) still running at the exit deadline (writeback_timeout): "
+                           "exit does not wait for them, and they start no further part", cut)
         with self._writeback_lock:
             self._writeback_threads = []
             self._sync_thread = None
@@ -1321,7 +1329,8 @@ class OB1MemoryProvider(MemoryProvider):
                     flow_id=flow_id,
                 )
             except OB1WritebackCut as cut:
-                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back", cut.unsent)
+                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back, %d unconfirmed",
+                               cut.unsent, cut.unconfirmed)
             except Exception:
                 logger.debug("OB1 sync_turn writeback failed", exc_info=True)
 
@@ -1334,14 +1343,17 @@ class OB1MemoryProvider(MemoryProvider):
 
         Hermes calls it at every real session boundary: at exit, before
         shutdown, and mid-process too (/new, a compression that rotates the
-        session), the provider serving on after. Runs synchronously (not
-        threaded), since at exit a daemon thread might be killed before
-        completing, and waits at most one write-back timeout; shutdown, if it
-        follows within it, shares that deadline. It stops nothing: later
-        write-backs go on as before.
+        session, called inside the turn), the provider serving on after. So it
+        writes back in the background, as sync_turn does, and never holds up a
+        turn: the write-back gets at most one write-back timeout, and a
+        shutdown that follows within it (at exit) shares that deadline and
+        waits for it. It stops nothing: later write-backs go on as before.
         """
         if not self._active or not self._auto_capture or not self._write_enabled or not self._client:
             return
+        # First, so a shutdown just after a session end with nothing to write gets a deadline of its own, not one
+        # left by an earlier, mid-process session end.
+        deadline = self._session_end_deadline()
         if not messages:
             return
 
@@ -1371,24 +1383,31 @@ class OB1MemoryProvider(MemoryProvider):
             "requires_review": self._config["require_review_by_default"],
         }
 
-        try:
-            self._client.writeback(
-                workspace_id=self._workspace_id,
-                project_id=self._project_id,
-                memory_payload=findings,
-                runtime={"name": self._runtime_name, "version": self._runtime_version or None},
-                models_used=models_used or None,
-                provenance=provenance,
-                task_id=self._session_id or None,
-                flow_id=self._agent_identity,
-                # The session's findings get at most one write-back timeout, which shutdown shares if it follows.
-                deadline=self._session_end_deadline(),
-            )
-        except OB1WritebackCut as cut:
-            logger.warning("OB1 session end: %d finding(s) not written back by the exit deadline (writeback_timeout); %d kept",
-                           cut.unsent, len(cut.memories))
-        except Exception:
-            logger.debug("OB1 on_session_end writeback failed", exc_info=True)
+        client = self._client
+        kwargs = dict(
+            workspace_id=self._workspace_id,
+            project_id=self._project_id,
+            memory_payload=findings,
+            runtime={"name": self._runtime_name, "version": self._runtime_version or None},
+            models_used=models_used or None,
+            provenance=provenance,
+            task_id=self._session_id or None,
+            flow_id=self._agent_identity,
+            deadline=deadline,
+        )
+
+        def _run() -> None:
+            try:
+                client.writeback(**kwargs)
+            except OB1WritebackCut as cut:
+                logger.warning("OB1 session end: %d finding(s) not written back by the deadline (writeback_timeout), "
+                               "%d more sent but unconfirmed (the plugin may have kept them); %d kept",
+                               cut.unsent, cut.unconfirmed, len(cut.memories))
+            except Exception:
+                # Once a session: a refusal or a key gone wrong is worth seeing.
+                logger.warning("OB1 session end write-back failed", exc_info=True)
+
+        self._start_writeback(_run, "ob1-session-end")
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Extract findings from messages about to be compressed and return
@@ -1442,7 +1461,8 @@ class OB1MemoryProvider(MemoryProvider):
                         idempotency_key=f"precompress:{task_id or 'no-task'}:{len(messages)}",
                     )
                 except OB1WritebackCut as cut:
-                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written back", cut.unsent)
+                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written back, %d unconfirmed",
+                                   cut.unsent, cut.unconfirmed)
                 except Exception:
                     logger.debug("OB1 on_pre_compress writeback failed", exc_info=True)
 
