@@ -5944,8 +5944,8 @@ if (want("10")) {
       && /→ Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(ownElse.out, "decide tier")),
          `its own tier serving another model than the decider warns, pointing at OB1_CONSOLIDATE_DECIDER_URL (${row(ownElse.out, "decide tier").trim().slice(0, 160)})`);
   const ownDead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
-  // A warning, not a failure (review pass 1): only the consolidation pass asks this tier, and it refuses at its own
-  // start; capture and search must still start.
+  // A warning, not a failure (review pass 1): only the consolidation pass asks this tier, and it decides nothing
+  // until it answers; capture and search must still start.
   assert(/!\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(ownDead.out) && /→ Start it on the host — jev\/h2o\/serve\.py in decider-4b's venv, kept running by its LaunchAgent/.test(fix(ownDead.out, "decide tier"))
       && /Capture and search are unaffected/.test(fix(ownDead.out, "decide tier")) && /·\s+decide decision\s+not checked — the decide tier row warned/.test(ownDead.out),
          `its own tier down warns with the host process's remedy — the server still starts — and --deep dials no decision (${fix(ownDead.out, "decide tier").trim().slice(0, 120)})`);
@@ -5972,9 +5972,10 @@ if (want("10")) {
       && /→ Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(urlAlone.out, "decide tier"))
       && !/decide egress/.test(urlAlone.out),
          `OB1_CONSOLIDATE_DECIDER_URL with no decider warns that nothing reads it, and dials nothing (${row(urlAlone.out, "decide tier").trim().slice(0, 160)})`);
-  // Every way its own tier can fail warns, not only nothing listening (review pass 2: the other branches could fail the
-  // start unseen) — an unresolved name, the likeliest, under the wrong runtime's host alias.
-  const ownUnresolved = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://ob1-no-such-host.invalid:8022", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  // Its own tier's name unresolved warns too, the likeliest failure, under the wrong runtime's host alias (review pass 2:
+  // only nothing listening was held; not the tier, a 401 and --deep's decision are held above, review pass 4; the
+  // untrusted-certificate branch has no case of its own).
+  const ownUnresolved = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: "http://ob1-no-such-host.invalid:8022" });
   assert(/!\s+decide tier\s+nothing answers at http:\/\/ob1-no-such-host\.invalid:8022/.test(ownUnresolved.out) && !/✗\s+decide tier/.test(ownUnresolved.out),
          `its own tier's name unresolved warns, as nothing listening does (${row(ownUnresolved.out, "decide tier").trim().slice(0, 160)})`);
   // OB1_JEV_MODEL names the shared tier's model, not decide mode's, once decide mode has its own (review pass 2: that

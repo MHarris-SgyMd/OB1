@@ -206,7 +206,8 @@ boot it out and delete the plist. One adapter serves every brain on the
 machine (stable and the canary reach the same :8022), and its queue bound
 holds them all. A compose service for Linux hosts stays a later option.
 
-To try it by hand instead: `JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`.
+To try it by hand instead:
+`JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`.
 
 - **When the tier is down.** Preflight's decide tier row dials
   `OB1_CONSOLIDATE_DECIDER_URL` on every server start and warns when nothing

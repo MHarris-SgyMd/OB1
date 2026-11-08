@@ -5720,15 +5720,16 @@ type TierProbe = {
   wantKnob: string;
   wantFails: boolean;
   /**
-   * A tier that answers nothing, or not as the tier: "fail" for the shared one, which the server itself asks (capture's
-   * genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation pass asks —
-   * until it answers that pass decides nothing (jev/h2o/README.md, "When the tier is down", says how a follower and a
-   * one-shot run each go on; review passes 2 and 3), and a pass's tier must not stop the server starting.
+   * A tier whose name does not resolve, that answers nothing, refuses the request, answers not as the tier or with an
+   * untrusted certificate, or fails --deep's decision: "fail" for the shared one, which the server itself asks
+   * (capture's genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation
+   * pass asks — until it answers that pass decides nothing (jev/h2o/README.md, "When the tier is down", says how a
+   * follower and a one-shot run each go on; review passes 2 and 3), and a pass's tier must not stop the server starting.
    */
   down: "fail" | "warn";
   /** The compose service's name, so a host of that name gets the service's remedies, and every other the start one. */
   serviceHost: string;
-  /** What the tier is, in a remedy: "the jev service", or the decide tier's adapter. */
+  /** What the tier is, in a remedy: "the jev service", or "decide mode's adapter". */
   names: string;
   start: string;
   notRunning: string;
@@ -5737,9 +5738,6 @@ type TierProbe = {
   refusedMeans: string;
 };
 
-// SMD-1875's rules for a probed endpoint, followed here (the merge review):
-// the base shown masked, since this row runs on every start; the name
-// resolved before it is dialled; the failure in probeFailure's words.
 async function tierRows(t: TierProbe): Promise<void> {
   // SMD-1875's rules for a probed endpoint, followed here (the merge review):
   // the base shown masked, since this row runs on every start; the name
@@ -5828,13 +5826,6 @@ if (!resolvedEmbed.decider && (env.OB1_CONSOLIDATE_DECIDER_URL ?? "").trim()) {
 if (!jevCfg) {
   add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (capture's genre facet and the spikes ask it; decide mode can have its own at OB1_CONSOLIDATE_DECIDER_URL)");
 } else {
-  // The stack's own service name resolves only while the service runs: the
-  // profile is down, or `compose restart api` ran — which does not start
-  // what the server depends on (fifth review pass: ~5 restarts a second).
-  // It resolves and answers nothing: it runs but does not listen yet — it
-  // listens only after the fetch and the load, ~20 s on a first start — or is
-  // restarting, or the port is not its 8020 (sixth review pass: the
-  // not-running remedy was given here too, and dropped "fix the URL").
   // Held to OB1_JEV_MODEL, else to decide mode's decider while decide mode asks this tier (SMD-3115).
   const heldToDecider = !jevCfg.model && !!resolvedEmbed.decider && decideTier?.own !== true;
   await tierRows({
@@ -5843,7 +5834,14 @@ if (!jevCfg) {
     wantKnob: jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER", wantFails: !!jevCfg.model, down: "fail",
     serviceHost: "jev", names: "the jev service",
     start: "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.",
+    // The stack's own service name resolves only while the service runs: the
+    // profile is down, or `compose restart api` ran — which does not start
+    // what the server depends on (fifth review pass: ~5 restarts a second).
     notRunning: "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart api does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.",
+    // It resolves and answers nothing: it runs but does not listen yet — it
+    // listens only after the fetch and the load, ~20 s on a first start — or is
+    // restarting, or the port is not its 8020 (sixth review pass: the
+    // not-running remedy was given here too, and dropped "fix the URL").
     notListening: "The jev service is up but not listening: on a first start it fetches the weights (~20 s) before it listens — compose ps shows its health — or it is restarting (compose logs jev), or OB1_JEV_BASE_URL's port is not the service's 8020.",
     refusedMeans: "every decision a caller asks for is refused before it is sent (a ProviderError of kind egress)",
   });
