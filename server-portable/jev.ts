@@ -90,6 +90,19 @@ export type JevEnv = EgressEnv & {
 export const DEFAULT_JEV_TIMEOUT_MS = 30_000;
 export const JEV_PER_DECISION_MS = 1_000;
 
+/**
+ * The contract's 422 on /decide: the tier refused a decision it cannot read faithfully — its own markers in the text,
+ * labels past its budget, or (jev/h2o, SMD-3326) a context past the tokens it reads whole. Always about one decision's
+ * content, never the request's shape (that is a 400), so a claim worker reads it as that thought's failure, not as a
+ * provider that refuses every request (worker-bootstrap.ts's classifyError and followClassify). A ProviderError of
+ * kind `http` and status 422 still, named so, for every caller that reads those (model-call.ts reads the name).
+ */
+export class DecisionRefused extends ProviderError {
+  constructor(message: string, body: string) {
+    super(message, "http", 422, body);
+  }
+}
+
 /** A request's deadline: the caller's `timeoutMs`, else the fixed part plus a part per decision. */
 export function requestTimeoutMs(cfg: Pick<JevConfig, "timeoutMs">, decisions: number, opts: { timeoutMs?: number } = {}): number {
   return opts.timeoutMs ?? cfg.timeoutMs + decisions * JEV_PER_DECISION_MS;
@@ -174,7 +187,7 @@ function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/d
   // Under a client span, as a provider call's (SMD-3379 PR 2b-2a): `decide <model>`, its point labelled live or
   // background, and preflight's probes marked so (`probe`), as its embedding and chat probes are (review pass 1). The
   // provider alert leaves the tier's calls out (the maintainer, 2026-11-07).
-  return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
+  return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, local: cfg.endpoint.local, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
     () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass(), ...(opts.probe ? { "ob1.probe": opts.probe } : {}) }));
 }
 
@@ -223,6 +236,7 @@ async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/in
     const location = r.headers.get("location");
     throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${shownLocation(location, `${at}${path}`)}` : ""}`, "http", r.status);
   }
+  if (!r.ok && r.status === 422 && path === "/decide") throw new DecisionRefused(`${what} request to ${at}${path} failed: ${r.status} ${capped}`.trimEnd(), capped);
   if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status} ${capped}`.trimEnd(), "http", r.status, capped);
   try {
     return JSON.parse(text) as T;

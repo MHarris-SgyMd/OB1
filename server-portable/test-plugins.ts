@@ -362,6 +362,11 @@ const probe = definePlugin({
       input: {}, output: {},
       async handler() { return refuse(409, "TRY_AGAIN", { retryable: true, message: "later" }); },
     }),
+    outage: operation({
+      title: "Outage", description: "Refuses 503: a service it needs did not answer (SMD-1992).", scope: "read", method: "POST", path: "/outage",
+      input: {}, output: {},
+      async handler() { return refuse(503, "PROVIDER_UNAVAILABLE", { retryable: false, base: "http://provider.invalid/v1" }); },
+    }),
   },
 });
 
@@ -399,6 +404,13 @@ console.log("\n[5] ctx.call: a core operation as the caller, behind the caller's
   thrown = "";
   try { await runOperation(ops.find((o) => o.key === "bad_refusal")!, { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
   assert(/refused with status 500 and code "lower case"/.test(thrown), `a refusal at no refusal status, or with no code, is the plugin's fault (${thrown})`);
+  // Each half of that rule alone: a refusal status with a bad code, and a good code at a status no refusal has.
+  for (const [status, code] of [[500, "VALID_CODE"], [502, "VALID_CODE"], [404, "lower case"]] as const) {
+    thrown = "";
+    const oneOff = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "write", method: "POST", path: "/x", input: {}, output: {}, async handler() { return refuse(status as never, code); } }) } });
+    try { await runOperation(loadPlugins("probe-kit", [oneOff])[0].operations[0], { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
+    assert(thrown.includes(`refused with status ${status} and code "${code}"`), `a refusal at ${status} with code ${JSON.stringify(code)} is the plugin's fault (${thrown || "answered"})`);
+  }
   thrown = "";
   const ctxProbe = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "write", method: "POST", path: "/x", input: {}, output: {}, async handler(ctx) { await ctx.call("drop_everything" as never, {} as never); return ok({}); } }) } });
   try { await runOperation(loadPlugins("probe-kit", [ctxProbe])[0].operations[0], { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
@@ -425,7 +437,14 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
   r = await json(await hit(app, "/v1/plugins/probe-kit/wrong-shape", { key: "read-raw", method: "POST" }));
   assert(r.status === 403 && r.body.needs === "write", "a write operation refuses a read key: 403 needs write");
   r = await json(await hit(app, "/v1/plugins/probe-kit/busy", { key: "read-raw", method: "POST" }));
-  assert(r.status === 409 && r.body.code === "TRY_AGAIN" && r.body.retryable === false && r.body.message === "later", `a refusal is never retryable, whatever the plugin's facts say (${JSON.stringify(r.body)})`);
+  assert(r.status === 409 && r.body.code === "TRY_AGAIN" && r.body.retryable === false && r.body.message === "later", `a refusal at 400–422 is never retryable, whatever the plugin's facts say (${JSON.stringify(r.body)})`);
+  const outage = await hit(app, "/v1/plugins/probe-kit/outage", { key: "read-raw", method: "POST" });
+  const busyAgain = await hit(app, "/v1/plugins/probe-kit/busy", { key: "read-raw", method: "POST" });
+  r = await json(outage);
+  assert(r.status === 503 && r.body.code === "PROVIDER_UNAVAILABLE" && r.body.retryable === true && r.body.base === "http://provider.invalid/v1" && !("status" in r.body),
+    `a 503 is the plugin's one retryable refusal, whatever its facts say, its facts beside it (${JSON.stringify(r.body)})`);
+  assert(/^[1-9][0-9]*$/.test(outage.headers.get("retry-after") ?? "") && busyAgain.headers.get("retry-after") === null,
+    `…sent with Retry-After, as the OpenAPI document's 503 says; a 409 with none (${outage.headers.get("retry-after")}, ${busyAgain.headers.get("retry-after")})`);
   lines.length = 0;
   await hit(app, "/v1/plugins/probe-kit/nothing-here", { key: "read-raw" });
   const unrouted = JSON.parse(lines.at(-1) ?? "{}");
@@ -503,6 +522,9 @@ console.log("\n[9] The MCP reply: the value as JSON text and as structured conte
   assert(okReply.isError === undefined && okReply.content[0].text === '{"item_id":"a","verbose":false}' && JSON.stringify(okReply.structuredContent) === '{"item_id":"a","verbose":false}', "a success: the value's JSON, and the value as structured content");
   const no = renderPlugin({ ok: false, refusal: { status: 404, code: "ITEM_GONE", retryable: false, message: "gone", item_id: "a" } });
   assert(no.isError === true && no.content[0].text === "Refused: ITEM_GONE — gone" && JSON.stringify(no.structuredContent) === '{"code":"ITEM_GONE","retryable":false,"message":"gone","item_id":"a","text":"Refused: ITEM_GONE — gone"}', `a refusal: its code and message in the text, its facts beside it, no status (${JSON.stringify(no.structuredContent)})`);
+  const later = renderPlugin({ ok: false, refusal: { status: 503, code: "PROVIDER_UNAVAILABLE", retryable: true, base: "http://provider.invalid/v1" } });
+  assert(later.isError === true && later.content[0].text === "Refused: PROVIDER_UNAVAILABLE" && (later.structuredContent as { retryable?: unknown }).retryable === true && !("status" in (later.structuredContent as object)),
+    `a 503 refusal on MCP: retryable, as on REST, its status not beside it (${JSON.stringify(later.structuredContent)})`);
   // The SDK's own check, as index.ts registers a tool: the answer runOperation
   // held to the output schema passes the SDK's second hold, a default filled.
   const { McpServer, WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/server");

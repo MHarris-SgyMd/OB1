@@ -170,7 +170,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
-import { resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
+import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, probeAtStart, probeChat, probeRefusal, probeTier, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
@@ -1833,6 +1833,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           problems.push(`pair with ${c.older_id}: ${e.message}`);
           continue;
         }
+        // The tier refused this pair's decision (its 422, SMD-3326): a fact about the pair's text — two thoughts'
+        // context together past what the model reads whole — recorded on the claim like egress, naming the older
+        // thought, so the next pair is still judged and the stale rows still settle. Thrown out of the loop it failed
+        // the claim with none of its later pairs judged, and --retry-failed met the same pair first again (review pass 2).
+        if (e instanceof DecisionRefused) {
+          problems.push(`pair with ${c.older_id}: ${e.message}`);
+          continue;
+        }
         throw e;
       }
       llmMs += Date.now() - t0;
@@ -2685,8 +2693,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 if (import.meta.main) {
   const cli = commandLine("consolidate.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.

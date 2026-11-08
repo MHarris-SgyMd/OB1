@@ -6,7 +6,7 @@
 // structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { UUID_RE, type ListSort } from "../store.ts";
+import { RELATION_WORDS, UUID_RE, type ListSort, type RelationWord } from "../store.ts";
 
 /**
  * list_thoughts' cursor (SMD-2995): the sort it was made under and the place
@@ -67,6 +67,39 @@ export function parseThreadCursor(raw: string): { at: string | null; id: string 
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   if (at === null) return { at: null, id: id.toLowerCase() };
   return pgStamp(at) ? { at, id: id.toLowerCase() } : null;
+}
+
+/** What a relations cursor was made under and where its page ended: the thought, the word (null for all four), and the last relation's position. */
+export type RelationsCursorAt = { thought: string; relation: RelationWord | null; rank: string; at: string; id: string };
+
+/**
+ * relations' cursor (SMD-2726; SMD-3306 PR 7a-2b): the thought and word it was read under, and the last relation's
+ * position in that thought's relations, strongest first, as base64url of `["relations", thought, word, rank, at, id]` —
+ * `rank` Postgres's text of its confidence rounded to six places as numeric (-1 for none), `at` its text of when the
+ * relation was first recorded. It carries its thought and word so a cursor passed with another is refused, not read as
+ * a short last page (review pass 1), as list_thoughts' carries its sort.
+ */
+export function relationsCursor(c: RelationsCursorAt): string {
+  return Buffer.from(JSON.stringify(["relations", c.thought, c.relation, c.rank, c.at, c.id])).toString("base64url");
+}
+
+/** A relations cursor read back, or null for anything that is not one, held as parseListCursor holds its own. */
+export function parseRelationsCursor(raw: string): RelationsCursorAt | null {
+  const text = raw.trim();
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length !== 6 || v[0] !== "relations") return null;
+  const [, thought, relation, rank, at, id] = v as unknown[];
+  if (typeof thought !== "string" || !UUID_RE.test(thought) || typeof id !== "string" || !UUID_RE.test(id)) return null;
+  if (relation !== null && !(RELATION_WORDS as readonly unknown[]).includes(relation)) return null;
+  // numeric's text of a value rounded to six places: a sign, digits and a fraction, never an exponent; -1 the absent.
+  if (typeof rank !== "string" || !/^-?[0-9]{1,20}(?:\.[0-9]{1,6})?$/.test(rank)) return null;
+  return pgStamp(at) ? { thought: thought.toLowerCase(), relation: relation as RelationWord | null, rank, at, id: id.toLowerCase() } : null;
 }
 
 /**

@@ -53,6 +53,8 @@ export const TOOLS = [
   { name: "agenda", scope: "read" },
   // Work threads (SMD-3306 PR 7a-2a).
   { name: "thread", scope: "read" },
+  // Judged relations (SMD-2726; SMD-3306 PR 7a-2b).
+  { name: "relations", scope: "read" },
   { name: "capture_thought", scope: "capture" },
   // A capture-only key states a priority on a thought it captured (decision 10, migration 116), and 116 refuses it any other.
   { name: "set_priority", scope: "capture" },

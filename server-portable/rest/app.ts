@@ -651,8 +651,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (outcome.ok) return c.json(outcome.value, 200);
     // Forwarded, the refusal whole beside its facts, its status in it, as a core refusal's (SMD-2287): the carrier
     // words it as server-portable does (render.ts renderPlugin), and tells it from a refusal of the key mid-call.
+    // A plugin's 503 is its one retryable refusal (SMD-1992): Retry-After with it, as a core operation's retryable 503.
     const { status, ...facts } = outcome.refusal;
-    return answerError(c, { ...facts, ...wholeFor(p, outcome.refusal) }, status);
+    return answerError(c, { ...facts, ...wholeFor(p, outcome.refusal) }, status, status === 503 ? RETRY_AFTER : {});
   });
 
   // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>

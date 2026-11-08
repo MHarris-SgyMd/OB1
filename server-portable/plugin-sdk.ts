@@ -17,6 +17,7 @@ import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
 import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
 import { dueInstant, levelOf, reasonOf, type PriorityScale } from "./priority-scale.ts";
+import { withCallWaits, type CallWaits } from "./model-call.ts";
 
 export { z };
 export type { PluginSql, PriorityScale };
@@ -27,8 +28,15 @@ export type PluginScope = Exclude<Scope, "forward">;
 /** An input or an output: a zod object's shape, each field its own schema — the form core/schemas.ts gives a tool's input. */
 export type Shape = Record<string, z.ZodType>;
 
-/** A refusal a plugin answers: its status, its own code, and facts beside it — JSON a caller can act on. */
-export type PluginRefusal = { status: 400 | 403 | 404 | 409 | 422; code: string; message?: string } & Record<string, unknown>;
+/**
+ * A refusal a plugin answers: its status, its own code, and facts beside it —
+ * JSON a caller can act on. 400, 403, 404, 409 and 422 say this input will not
+ * do and are never retryable. 503 is the one retryable refusal (SMD-1992): a
+ * service the plugin needs did not answer — the core's embedding provider, a
+ * search's `vectorFailed` — so the same call may succeed later. (A capture with
+ * no vector is no reason: the thought is saved, and the vector mender fills it.)
+ */
+export type PluginRefusal = { status: 400 | 403 | 404 | 409 | 422 | 503; code: string; message?: string } & Record<string, unknown>;
 
 /** An operation's answer: the value its output schema describes, or a refusal. A fault is thrown. */
 export type PluginOutcome<T> = { ok: true; value: T } | { ok: false; refusal: PluginRefusal };
@@ -311,6 +319,9 @@ export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlig
  * fails leaves the claim to lapse, and the run's value is answered all the same.
  * A `thoughtId` that is no uuid is the plugin's fault: thrown, the claim kept
  * to lapse, so a resend is told to retry (409) until the lease rather than run.
+ * While one of the run's model calls waits for a slot of its background share,
+ * the claim is renewed (SMD-3379 PR 2b-2b), so a resend is told to retry
+ * however long the wait, and the call then runs within a whole lease.
  *
  * With `defer` (SMD-2767), the claim is made and answered now — `deferred`, a
  * duplicate or one still running — and the run, its record and its release
@@ -354,30 +365,72 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     return { claimed: false as const, thoughtId: held?.thought_id ?? null };
   });
   if (!claim.claimed) return claim.thoughtId ? { duplicate: claim.thoughtId } : { inFlight: true };
-  const claimedAt = claim.at;
+  let claimedAt = claim.at;
+  // The lease renewed while a run's model call waits for a slot of its background share (SMD-3379 PR 2b-2b, the
+  // maintainer, 2026-11-08): a deferred run is background, and under the defaults may wait behind the sleep passes'
+  // long calls, past a lease sized to a capture's own calls, for the sender's retry to run it again. As a wait begins
+  // — a call before it may have run most of the lease (review pass 1) — then every third of the lease while any call
+  // waits, and once as the last wait ends, so its call has a whole lease to run in. Matched on claimed_at, as the
+  // release is, which waits for a renewal in flight: never another's claim. A tick while one is in flight is skipped,
+  // the period held to a timer's most (a lease of years would fire every millisecond), and once the run is done the
+  // observer does nothing, so a call it left waiting cannot renew a claim the release is giving back.
+  let renewing: Promise<void> = Promise.resolve();
+  let inFlight = false;
+  let done = false;
+  const renew = () => {
+    if (inFlight || done) return;
+    inFlight = true;
+    // The catch and the reset on the chain itself, so a transaction that throws before it returns its promise neither
+    // leaves `inFlight` set nor the chain the release waits on rejected (review pass 2).
+    renewing = renewing
+      .then(() => ctx.db.tx((sql) => sql<{ claimed: string }>`UPDATE deliveries SET claimed_at = now() WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING claimed_at::text AS claimed`))
+      .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; })
+      .catch(() => undefined)
+      .finally(() => { inFlight = false; });
+  };
+  let waits = 0;
+  let renewal: ReturnType<typeof setInterval> | undefined;
+  const stopRenewing = () => {
+    done = true;
+    clearInterval(renewal);
+  };
+  const leaseKept: CallWaits = {
+    waiting: () => {
+      if (done || waits++ > 0) return;
+      renew();
+      renewal = setInterval(renew, Math.min(Math.max(1, lease / 3) * 1000, 2_147_483_647));
+    },
+    running: () => {
+      if (done || waits === 0 || --waits > 0) return;
+      clearInterval(renewal);
+      renew();
+    },
+  };
   // What became of its own claim: given back; already no longer its own (a
   // retry took it past the lease, or the prune); or, the DELETE failing, left
   // to lapse at the lease (review pass 4: a DELETE that matched nothing was told as given back).
   type Fate = "given back" | "already re-claimed or pruned" | "left to lapse at the lease";
   const release = (): Promise<Fate> =>
-    ctx.db
-      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`)
+    renewing.then(() => ctx.db
+      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`))
       .then((rows): Fate => (rows.length ? "given back" : "already re-claimed or pruned"), (): Fate => "left to lapse at the lease");
   // What became of the claim when no thought was recorded; null, kept to lapse (a thoughtId that is no uuid).
   let gaveBack: Fate | null = null;
   // The run's value, and whether it captured a thought.
   const finish = async (): Promise<{ value: T; captured: boolean }> => {
-    let done: OnceRun<T>;
+    let finished: OnceRun<T>;
     try {
-      done = await run();
+      finished = await withCallWaits(leaseKept, run);
     } catch (err) {
+      stopRenewing();
       gaveBack = await release();
       throw err;
     }
-    const thoughtId = done.thoughtId;
+    stopRenewing();
+    const thoughtId = finished.thoughtId;
     if (thoughtId === null) {
       gaveBack = await release();
-      return { value: done.value, captured: false };
+      return { value: finished.value, captured: false };
     }
     // Anything else would fail the record unseen. Not given back: a resend is
     // 409 until the lease, where a release would run it again on every one.
@@ -387,7 +440,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     await ctx.db
       .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${key}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
       .catch(() => undefined);
-    return { value: done.value, captured: true };
+    return { value: finished.value, captured: true };
   };
   if (options.defer) {
     // Its sender has its answer: a run that captured nothing is a fault to
