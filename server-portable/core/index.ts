@@ -12,6 +12,7 @@ import * as mend from "./mend.ts";
 import * as claims from "./claims.ts";
 import * as priority from "./priority.ts";
 import * as threads from "./threads.ts";
+import * as relations from "./relations.ts";
 import * as items from "./items.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
@@ -65,6 +66,7 @@ export function createCore(deps: CoreDeps) {
     releaseClaim: bind(ctx, claims.releaseClaim),
     listClaims: bind(ctx, claims.listClaims),
     thread: bind(ctx, threads.thread),
+    relations: bind(ctx, relations.relations),
     setPriority: bind(ctx, priority.setPriority),
     clearPriority: bind(ctx, priority.clearPriority),
     priorityHistory: bind(ctx, priority.priorityHistory),

@@ -70,6 +70,33 @@ export function parseThreadCursor(raw: string): { at: string | null; id: string 
 }
 
 /**
+ * relations' cursor (SMD-2726; SMD-3306 PR 7a-2b): the last relation's position in a thought's relations, strongest
+ * first, as base64url of `["relations", rank, at, id]` — `rank` Postgres's text of its confidence as numeric (-1 for
+ * none), `at` its text of the relation's created_at — passed back with the same id and word.
+ */
+export function relationsCursor(p: { rank: string; at: string; id: string }): string {
+  return Buffer.from(JSON.stringify(["relations", p.rank, p.at, p.id])).toString("base64url");
+}
+
+/** A relations cursor read back, or null for anything that is not one, held as parseListCursor holds its own. */
+export function parseRelationsCursor(raw: string): { rank: string; at: string; id: string } | null {
+  const text = raw.trim();
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length !== 4 || v[0] !== "relations") return null;
+  const [, rank, at, id] = v as unknown[];
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  // numeric's text: a sign, digits and a fraction, never an exponent; 084 holds a confidence to 0..1, the absent -1.
+  if (typeof rank !== "string" || !/^-?[0-9]{1,20}(?:\.[0-9]{1,40})?$/.test(rank)) return null;
+  return pgStamp(at) && at !== null ? { rank, at, id: id.toLowerCase() } : null;
+}
+
+/**
  * Whether `at` is timestamptz's text as Postgres writes it — a date, a clock to
  * the microsecond, an offset, a BC, or ±infinity — held to a shape and a date
  * that exists before it reaches the SQL. One that still makes Postgres's cast

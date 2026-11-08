@@ -23,6 +23,7 @@ export const OPERATIONS = {
   plugins: { method: "GET", path: "/v1/plugins" },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}" },
   propose_item_close: { method: "POST", path: "/v1/items/{id}/proposals" },
+  relations: { method: "GET", path: "/v1/relations" },
   release_claim: { method: "POST", path: "/v1/claims/{id}/release" },
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases" },
   renew_claim: { method: "POST", path: "/v1/claims/{id}/renew" },

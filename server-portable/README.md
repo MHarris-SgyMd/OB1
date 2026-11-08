@@ -845,6 +845,34 @@ either faults it, the error naming the table.
 A thought stands in no thread until its subject is found. The extraction worker's rules find a ticket's subject, and its
 `--subjects` sweep asks the judge model for the rest.
 
+## Judged relations (SMD-2726)
+
+The consolidation pass's judge records its word on a pair of near neighbours as a `relation` facet (migration 084):
+`related`, `evolves` (the newer continues the older's work), `duplicate`, or `distinct` (102: look-alikes about
+different subjects). The facet sits on the newer thought, names the older, carries the judge's confidence, and has a
+lineage row at the two texts judged. The reads below show the judge's relations alone (origin `judged`): a work
+thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads`.
+
+- **`relations`** (read scope; REST `GET /v1/relations`) reads one thought's standing judged relations, both sides of
+  each pair, strongest first: by confidence, then the newest judged, then by id.
+  - `relation` keeps one word. `limit` relations a page, 1–100, default 20; more carry a `cursor`, passed back as
+    `after` with the same `id` and `relation`. `total` counts every one under the word.
+  - **Each relation** carries its id and word; the other thought's id, title, time and `supersededBy`; `otherIs`, which
+    says whether the other is the older or the newer (so evolves reads "evolves from" on the newer and "evolved into"
+    on the older); the confidence; `judgedAt`; and `stale`.
+  - **`stale`** is the lineage row's fingerprints no longer those of the two texts: a text was edited since it was
+    judged, so the word may no longer hold. Such a relation stands, shown, until SMD-2726's `rebuild_derived` arm
+    closes it and the judge reads the pair again. On stable late on 2026-11-07, 1,295 of 6,524 were stale.
+  - **Refusals.** Another tool's cursor is `REFUSED_CURSOR`. An unknown id is `NOT_FOUND`.
+- **Every read of a thought** carries its relations: `search`, `search_thoughts`, `search_thoughts_keyword` and
+  `list_thoughts` the first 5 per result, `fetch` the first 20, with `relationsMore` for the rest. One read per page.
+  The compat shapes (`search`, `fetch`) carry them only where a thought has some. `relations: null` says they couldn't
+  be read, such as for a role without `derivations`, and the log says why; the read goes on.
+- **MCP** prints a `↔ Relations:` line per result, each other thought's title quoted. Its structured value leaves the
+  titles out.
+
+The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds.
+
 ## Worker-queue write actions
 
 Three **write-scoped** tools act on the same queues (SMD-2132, SMD-2272) — the control

@@ -100,6 +100,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     list_thoughts: { limit: 5, days: 1e-7, type: "idea", topic: "a topic with spaces & symbols?" },
     // Work threads (SMD-3306 PR 7a-2a): a phrase key's colon, spaces, & and ? ride the query string.
     thread: { key: "phrase:a key & more?", after: "dGhyZWFk", limit: 7 },
+    // Judged relations (SMD-2726; SMD-3306 PR 7a-2b).
+    relations: { id: ID, relation: "evolves", after: "cmVsYXRpb25z", limit: 3 },
     list_thought_ids: { limit: 2, after: ID },
     list_logged_searches: { since: "2026-10-01T00:00:00+02:00", limit: 3 },
     list_supersession_proposals: { status: "all", lineage: false, limit: 2, judge_key: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3", after: proposalCursor({ status: "all", lineage: false, judgeKey: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3" }, "0.90", "2026-09-25 00:00:00+00", "22222222-2222-4222-8222-222222222222") },

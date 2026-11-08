@@ -2247,6 +2247,143 @@ console.log("\n[16d] Work threads, review pass 3 (SMD-3306 PR 7a-2a): a ticket w
     `PR:012 reads pr:12 and VERSION:V1.2 version:v1.2 (${prUpper.status} ${versionUpper.status})`);
 }
 
+console.log("\n[17] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch, the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
+{
+  type RelRead = { id: string; relation: string; otherIs: string; other: { id: string; title?: string; created_at: string | null; supersededBy: string | null }; confidence: number | null; judgedAt: string | null; stale: boolean };
+  type RelPage = { id: string; relation: string | null; total: number; relations: RelRead[]; cursor: string | null };
+  // Captured by the fresh key alone, so list_thoughts and search_thoughts can keep to this case's thoughts by actor.
+  const own = async (content: string) => String((await rest("POST", "/v1/thoughts", { content }, KEYS.fresh)).body.id);
+  const ids: string[] = [];
+  for (const content of [
+    "Rel case: the older look-alike of the zeta subject", "Rel case: the zeta relation subject itself", "Rel case: a related note on zeta", "Rel case: the next step of zeta's work",
+    "Rel case: a look-alike about another subject", "Rel case: a pair a re-judge closed", "Rel case: the next thought on zeta's thread", "Rel case: the newer text replacing the older look-alike",
+    "Rel case: a loose thought judged against nothing",
+  ]) ids.push(await own(content));
+  const [od, oa, ob, oc, oe, og, of, oh, oloose] = ids;
+  const at = (id: string, ts: string) => sql`UPDATE thoughts SET created_at = ${ts}::timestamptz WHERE id = ${id}::uuid`;
+  for (const [id, ts] of [[od, "2026-09-01T00:00:00Z"], [oa, "2026-09-02T00:00:00Z"], [ob, "2026-09-03T00:00:00Z"], [oc, "2026-09-04T00:00:00Z"], [oe, "2026-09-05T00:00:00Z"], [og, "2026-09-06T00:00:00Z"], [of, "2026-09-07T00:00:00Z"], [oh, "2026-09-08T00:00:00Z"]] as const) await at(id, ts);
+  // As the consolidation pass records them: on the newer thought, naming the older, at the two texts' fingerprints now.
+  const relate = async (newer: string, older: string, word: string | null, confidence: number | null) =>
+    ((await sql`SELECT record_thought_relation(${newer}::uuid, ${older}::uuid, ${word}::text, ${confidence}::numeric, 'consolidate:rel-test@p4', NULL::uuid,
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${older}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${newer}::uuid), NULL::jsonb) AS r`)[0] as { r: Record<string, unknown> }).r;
+  const made = [await relate(ob, oa, "related", 0.9), await relate(oa, od, "duplicate", 0.8), await relate(oc, oa, "evolves", 0.7), await relate(oe, oa, "distinct", 0.5), await relate(og, oa, "related", 0.95)];
+  // A re-judge that sees nothing closes the pair's edge: og's stands no more.
+  const closed = await relate(og, oa, null, null);
+  // A work thread (120): oa and of on one subject, of the later — its evolves edge is the thread's, not the judge's.
+  const threadSubjects = [await subject(oa, "phrase:zeta relation thread", "model"), await subject(of, "phrase:zeta relation thread", "model")];
+  const edges = (await sql`SELECT payload->>'origin' AS origin, count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND (payload->>'target' = ${oa}::text OR thought_id = ${oa}::uuid) GROUP BY 1 ORDER BY 1`) as { origin: string; n: number }[];
+  const closedRows = Number((await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND thought_id = ${og}::uuid AND valid_until IS NOT NULL`)[0].n);
+  // ob's text moves after it was judged: the related edge is stale. oh supersedes od.
+  const edited = await rest("PATCH", `/v1/thoughts/${ob}`, { content: "Rel case: a related note on zeta, rewritten since the judge read it" }, KEYS.fresh);
+  await sql`UPDATE thoughts SET supersedes = ${od}::uuid WHERE id = ${oh}::uuid`;
+  assert(made.every((m) => m.ok !== false) && closed.ok !== false && threadSubjects.every((w) => w.ok) && same(edges, [{ origin: "judged", n: 5 }, { origin: "thread", n: 1 }]) && closedRows === 1 && edited.status === 200,
+    `the case's relations stand as written: four judged on the zeta thought, a fifth closed by a re-judge, a thread's edge beside them, and one text edited since (${JSON.stringify(edges)} ${closedRows} ${edited.status})`);
+
+  const [all, allMcp] = await Promise.all([rest("GET", `/v1/relations?id=${oa}`), mcp("relations", { id: oa })]);
+  const r = all.body as unknown as RelPage, rs = r.relations ?? [];
+  assert(all.status === 200 && r.id === oa && r.relation === null && r.total === 4 && r.cursor === null
+      && same(rs.map((x) => x.other.id), [ob, od, oc, oe]) && same(rs.map((x) => x.relation), ["related", "duplicate", "evolves", "distinct"])
+      && same(rs.map((x) => x.otherIs), ["newer", "older", "newer", "newer"]) && same(rs.map((x) => x.confidence), [0.9, 0.8, 0.7, 0.5])
+      && same(rs.map((x) => x.stale), [true, false, false, false]) && same(rs.map((x) => x.other.supersededBy), [null, oh, null, null])
+      && rs.every((x) => typeof x.id === "string" && typeof x.judgedAt === "string" && typeof x.other.title === "string") && rs[1].other.title?.endsWith(" - Rel case: the older look-alike of the zeta subject"),
+    `a thought's relations from both sides, strongest first: the related newer one stale, the older duplicate superseded, the newer's evolution, the distinct look-alike; the closed one and the thread's edge left out (${JSON.stringify(rs.map((x) => [x.relation, x.otherIs, x.confidence, x.stale]))})`);
+  const sm = allMcp.sc as unknown as RelPage;
+  assert(!allMcp.isError && same(sm.relations?.map((x) => x.other.id), [ob, od, oc, oe]) && sm.relations.every((x) => !("title" in x.other)) && same(sm.relations.map((x) => x.otherIs), ["newer", "older", "newer", "newer"])
+      && sm.total === 4 && sm.cursor === null
+      && allMcp.text.startsWith(`Thought ${oa}: 4 standing judged relations, strongest first:`) && /1\. related to "[^"\n]* - Rel case: a related note on zeta, rewritten/.test(allMcp.text)
+      && /2\. duplicates "[^"\n]* - Rel case: the older look-alike/.test(allMcp.text) && allMcp.text.includes(`confidence 0.80; the other superseded by ${oh}`) && /3\. evolved into "[^"\n]* - Rel case: the next step/.test(allMcp.text)
+      && /4\. distinct from \(a look-alike about another subject\) "[^"\n]* - Rel case: a look-alike/.test(allMcp.text) && allMcp.text.includes("confidence 0.90; edited since judged") && allMcp.text.includes("A relation edited since judged was judged on a text that has changed"),
+    `MCP says the same: each word as it reads from this side, the titles in the text and not the value, the marks (${allMcp.text.slice(0, 160).replace(/\n/g, " | ")})`);
+  // The other side: ob's relation to oa reads as the newer's, still stale.
+  const fromB = (await rest("GET", `/v1/relations?id=${ob}`)).body as unknown as RelPage;
+  assert(fromB.total === 1 && fromB.relations[0]?.other.id === oa && fromB.relations[0].otherIs === "older" && fromB.relations[0].relation === "related" && fromB.relations[0].stale === true
+      && fromB.relations[0].id === rs[0].id,
+    `the same relation from its other side: the same id, the older named (${JSON.stringify(fromB.relations[0])})`);
+  // Paged two at a time; filtered by word.
+  const [p1, p1Mcp] = await Promise.all([rest("GET", `/v1/relations?id=${oa}&limit=2`), mcp("relations", { id: oa, limit: 2 })]);
+  const pg1 = p1.body as unknown as RelPage;
+  const p2 = (await rest("GET", `/v1/relations?id=${oa}&limit=2&after=${pg1.cursor}`)).body as unknown as RelPage;
+  assert(same(pg1.relations?.map((x) => x.other.id), [ob, od]) && typeof pg1.cursor === "string" && pg1.total === 4 && (p1Mcp.sc as unknown as RelPage).cursor === pg1.cursor
+      && p1Mcp.text.includes(`4 standing judged relations, strongest first, 2 on this page:`) && p1Mcp.text.includes(`More follow. Cursor: ${pg1.cursor} — pass it as \`after\` with id ${oa} for the next page.`)
+      && same(p2.relations?.map((x) => x.other.id), [oc, oe]) && p2.cursor === null && p2.total === 4,
+    `paged two at a time: the cursor's page the rest, no cursor at the end (${JSON.stringify(pg1.relations?.map((x) => x.relation))} ${JSON.stringify(p2.relations?.map((x) => x.relation))})`);
+  const [evolves, evolvesMcp, none] = await Promise.all([rest("GET", `/v1/relations?id=${oa}&relation=evolves`), mcp("relations", { id: oa, relation: "evolves" }), rest("GET", `/v1/relations?id=${oloose}`)]);
+  const ev = evolves.body as unknown as RelPage;
+  assert(ev.total === 1 && ev.relation === "evolves" && same(ev.relations.map((x) => x.other.id), [oc]) && evolvesMcp.text.startsWith(`Thought ${oa}: 1 standing judged evolves relation, strongest first:`)
+      && none.status === 200 && (none.body as unknown as RelPage).total === 0 && same((none.body as unknown as RelPage).relations, []),
+    `one word's relations alone; a thought with none answers an empty page (${ev.total} ${evolvesMcp.text.slice(0, 80)})`);
+
+  // A hub with seven: a page's label shows the first five and counts the rest; a fetch shows them all. Two tie on confidence: the later judged first.
+  const hub = await own("Rel case: the zeta relation hub, judged against seven");
+  const spokes: string[] = [];
+  for (let i = 1; i <= 7; i++) spokes.push(await own(`Rel case: spoke ${i} of the hub`));
+  await at(hub, "2026-09-20T00:00:00Z");
+  for (const [i, s] of spokes.entries()) await at(s, `2026-09-1${i}T00:00:00Z`);
+  for (const [i, s] of spokes.entries()) await relate(hub, s, "related", i === 0 ? 0.2 : (i + 1) / 10);
+  // spokes[0] and spokes[1] both 0.2: spokes[1]'s relation was judged later, so it comes first.
+  const hubOrder = [spokes[6], spokes[5], spokes[4], spokes[3], spokes[2], spokes[1], spokes[0]];
+  const [kw, kwMcp, listed, listedMcp, sr, srMcp, compat, fHub, fA, fLoose, fMcp, hubAll] = await Promise.all([
+    rest("POST", "/v1/search/keyword", { query: "zeta relation hub" }), mcp("search_thoughts_keyword", { query: "zeta relation hub" }),
+    rest("GET", "/v1/thoughts?actor=fresh&limit=50"), mcp("list_thoughts", { actor: "fresh", limit: 50 }),
+    rest("POST", "/v1/search", { query: "\"zeta relation hub\"", actor: "fresh", limit: 3 }), mcp("search_thoughts", { query: "\"zeta relation hub\"", actor: "fresh", limit: 3 }),
+    mcp("search", { query: "\"zeta relation hub\"" }),
+    rest("GET", `/v1/thoughts/${hub}`), rest("GET", `/v1/thoughts/${oa}`), rest("GET", `/v1/thoughts/${oloose}`), mcp("fetch", { id: hub }),
+    rest("GET", `/v1/relations?id=${hub}`),
+  ]);
+  type Labelled = { id: string; relations: RelRead[] | null; relationsMore: number };
+  const kwHub = ((kw.body.hits ?? []) as Labelled[]).find((x) => x.id === hub);
+  const kwHubMcp = ((kwMcp.sc.hits ?? []) as Labelled[]).find((x) => x.id === hub);
+  assert(kw.status === 200 && same(kwHub?.relations?.map((x) => x.other.id), hubOrder.slice(0, 5)) && kwHub?.relationsMore === 2
+      && same(kwHubMcp?.relations?.map((x) => x.other.id), hubOrder.slice(0, 5)) && kwHubMcp?.relationsMore === 2 && kwHubMcp.relations!.every((x) => !("title" in x.other))
+      && new RegExp(`↔ Relations: related to "[^"\\n]* - Rel case: spoke 7 of the hub" \\(ID ${spokes[6]}; confidence 0\\.70\\); related to`).test(kwMcp.text) && kwMcp.text.includes("; and 2 more, which the relations tool reads."),
+    `search_thoughts_keyword's hit carries its first five relations and counts the other two, the text a ↔ Relations line (${JSON.stringify(kwHub?.relations?.map((x) => x.confidence))} ${kwHub?.relationsMore})`);
+  const items = (listed.body.thoughts ?? []) as Labelled[], itemsMcp = (listedMcp.sc.thoughts ?? []) as Labelled[];
+  const item = (id: string) => items.find((x) => x.id === id);
+  assert(listed.status === 200 && same(item(hub)?.relations?.map((x) => x.other.id), hubOrder.slice(0, 5)) && item(hub)?.relationsMore === 2
+      && same(item(oa)?.relations?.map((x) => x.other.id), [ob, od, oc, oe]) && item(oa)?.relationsMore === 0 && same(item(oloose)?.relations, []) && item(oloose)?.relationsMore === 0
+      && same(itemsMcp.find((x) => x.id === oa)?.relations?.map((x) => x.stale), [true, false, false, false])
+      && new RegExp(`\\n   ↔ Relations: related to "[^"\\n]* - Rel case: a related note on zeta, rewritten since the judge read it" \\(ID ${ob}; confidence 0\\.90; edited since judged\\); duplicates "[^"\\n]* - Rel case: the older look-alike of the zeta subject" \\(ID ${od}; confidence 0\\.80; the other superseded by ${oh}\\)`).test(listedMcp.text),
+    `list_thoughts' items carry theirs: the hub's five and two more, the zeta thought's four, the loose thought none (${item(hub)?.relationsMore} ${item(oa)?.relations?.length} ${JSON.stringify(item(oloose)?.relations)})`);
+  const srHub = ((sr.body.hits ?? []) as Labelled[]).find((x) => x.id === hub);
+  const compatHub = (JSON.parse(compat.text).results as Labelled[] & { id: string }[]).find((x) => x.id === hub);
+  const compatBare = (JSON.parse(compat.text).results as Record<string, unknown>[]).filter((x) => ![...spokes, hub, oa, ob, oc, od, oe].includes(String(x.id)));
+  assert(sr.status === 200 && same(srHub?.relations?.map((x) => x.other.id), hubOrder.slice(0, 5)) && srHub?.relationsMore === 2 && /↔ Relations: related to "[^"\n]* - Rel case: spoke 7 of the hub"/.test(srMcp.text)
+      && same(compatHub?.relations?.map((x) => x.other.id), hubOrder.slice(0, 5)) && compatHub?.relationsMore === 2 && compatHub?.relations?.[0]?.other.title?.endsWith(" - Rel case: spoke 7 of the hub") === true
+      && compatBare.every((x) => !("relations" in x) && !("relationsMore" in x)),
+    `search_thoughts' hit and search's result carry the hub's first five and count the rest, search's titles in its JSON; a result with none keeps ChatGPT's shape (${srHub?.relationsMore} ${compatHub?.relationsMore} ${compatBare.length})`);
+  const fh = fHub.body as unknown as Labelled, fa = fA.body as unknown as Labelled;
+  assert(same(fh.relations?.map((x) => x.other.id), hubOrder) && !("relationsMore" in fHub.body) && same(fa.relations?.map((x) => x.other.id), [ob, od, oc, oe])
+      && !("relations" in fLoose.body) && same((JSON.parse(fMcp.text) as Labelled).relations?.map((x) => x.other.id), hubOrder)
+      && (hubAll.body as unknown as RelPage).total === 7 && same((hubAll.body as unknown as RelPage).relations.map((x) => x.other.id), hubOrder),
+    `fetch carries all seven of the hub's, strongest first, the later judged of a tie first; the zeta thought's four; none on the loose thought (${fh.relations?.length} ${JSON.stringify(Object.keys(fLoose.body))})`);
+
+  // Not read: every read goes on, its relations null, and the text says so.
+  const real = await db();
+  const denied = new Proxy(real, { get: (t, k) => k === "relationsAmong" ? async () => { throw Object.assign(new Error("permission denied for table derivations"), { errno: "42501" }); } : Reflect.get(t, k, t) });
+  const deniedCore = createCore({ env, store: async () => denied, door: "open-brain-direct" });
+  const dFetch = await deniedCore.fetch(writer!, { id: oa }) as { ok: boolean; value?: Record<string, unknown> };
+  const dList = await deniedCore.listThoughts(writer!, z.object(SPECS.list_thoughts.inputSchema as z.ZodRawShape).parse({ actor: "fresh", limit: 50 }) as never) as { ok: boolean; value?: { thoughts: Labelled[] } };
+  const dListText = say.renderListThoughts(dList as never).content[0].text;
+  assert(dFetch.ok && dFetch.value?.id === oa && "relations" in (dFetch.value ?? {}) && dFetch.value?.relations === null
+      && dList.ok && (dList.value?.thoughts.length ?? 0) > 0 && dList.value!.thoughts.every((x) => x.relations === null && x.relationsMore === 0)
+      && dListText.includes("Judged relations could not be read: a result without a `↔ Relations` line may still have some."),
+    `a read whose relations cannot be read answers, each result's relations null, and the text says so (${JSON.stringify(dFetch.value?.relations)} ${dList.value?.thoughts.length})`);
+
+  // Refusals, through both doors.
+  const [bad, badMcp, gone, goneMcp, notId, word] = await Promise.all([
+    rest("GET", `/v1/relations?id=${oa}&after=${threadCursor("2026-09-02 00:00:00+00", oa)}`), mcp("relations", { id: oa, after: threadCursor("2026-09-02 00:00:00+00", oa) }),
+    rest("GET", "/v1/relations?id=00000000-0000-4000-8000-000000000000"), mcp("relations", { id: "00000000-0000-4000-8000-000000000000" }),
+    rest("GET", "/v1/relations?id=not-a-thought"), rest("GET", `/v1/relations?id=${oa}&relation=outdates`),
+  ]);
+  assert(bad.status === 400 && bad.body.code === "REFUSED_CURSOR" && badMcp.isError && badMcp.sc.code === "REFUSED_CURSOR" && badMcp.text.startsWith("Refused: `after` is not a relations cursor")
+      && gone.status === 404 && gone.body.code === "NOT_FOUND" && goneMcp.isError && goneMcp.text.startsWith("Refused: no thought with id")
+      && notId.status === 404 && notId.body.code === "NOT_FOUND" && word.status === 400,
+    `another tool's cursor is refused, an id no thought has and one that is no id are not found, and a word the judge does not record is refused (${bad.status} ${gone.status} ${notId.status} ${word.status})`);
+  const [readKey, hookKey] = await Promise.all([rest("GET", `/v1/relations?id=${oa}`, undefined, KEYS.reader), rest("GET", `/v1/relations?id=${oa}`, undefined, KEYS.hook)]);
+  assert(readKey.status === 200 && (readKey.body as unknown as RelPage).total === 4 && hookKey.status === 403,
+    `a read key reads a thought's relations; a capture-only key reads none (${readKey.status} ${hookKey.status})`);
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

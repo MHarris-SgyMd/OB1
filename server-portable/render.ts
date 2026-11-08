@@ -25,7 +25,7 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor, parseProposalCursor, parseThreadCursor } from "./core/list-cursor.ts";
+import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
@@ -34,6 +34,8 @@ import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
+import type { RelationShown, RelationsResult } from "./core/relations.ts";
+import type { RelationWord } from "./store.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
@@ -83,7 +85,7 @@ function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   // list_supersession_proposals' (SMD-3249) likewise: a tag, its selection's tokens and pass key, a confidence, a
   // timestamp's text and a uuid.
-  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v) || parseThreadCursor(v))) return v;
+  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v) || parseThreadCursor(v) || parseRelationsCursor(v))) return v;
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
@@ -171,6 +173,16 @@ const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
   Array.isArray(claimed) ? claimed.map((c) => ({ id: c.id, ticket: c.ticket, holder: c.holder, ownKey: c.ownKey, state: c.state, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) : null;
 const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
+/**
+ * A result's judged relations as a typed field (SMD-2726; SMD-3306 PR 7a-2b): each relation's id, word, side, the
+ * judge's confidence, when it was judged and whether it is stale, and the other thought's id, time and superseding
+ * thought — its title, the thought's own words, rides the text. Null when they were not read, and from a REST core
+ * older than this MCP server.
+ */
+const relationsField = (relations: readonly RelationShown[] | null | undefined) =>
+  Array.isArray(relations) ? relations.map((r) => ({ id: r.id, relation: r.relation, otherIs: r.otherIs, other: { id: r.other.id, created_at: r.other.created_at, supersededBy: r.other.supersededBy }, confidence: r.confidence, judgedAt: r.judgedAt, stale: r.stale })) : null;
+const relationsFields = (h: { relations?: readonly RelationShown[] | null; relationsMore?: number }) =>
+  ({ relations: relationsField(h.relations), relationsMore: h.relationsMore ?? 0 });
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust, its moved tickets and its claims; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
@@ -185,17 +197,17 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
-    ...claimedFields(h),
+    ...claimedFields(h), ...relationsFields(h),
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
-  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h) })),
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h) })),
 });
 /** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
-  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t) })),
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
 });
@@ -635,6 +647,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         if (held) parts.push(`⚠ Claimed: ${held}`);
+        // SMD-2726: its judged relations — labels, so the rank above is unchanged.
+        const related = relationsWords(t.relations, t.relationsMore ?? 0);
+        if (related) parts.push(`↔ Relations: ${related}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
         const captured = displayDate(t.created_at);
@@ -689,6 +704,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
+    if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -743,6 +759,8 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
       const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
       if (held) parts.push(`⚠ Claimed: ${held}`);
+      const related = relationsWords(t.relations, t.relationsMore ?? 0);
+      if (related) parts.push(`↔ Relations: ${related}`);
       const topics = metaList(m.topics, TAG_MAX);
       if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
       parts.push(`\n${fenceText(t.content)}`);
@@ -758,7 +776,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -775,7 +793,9 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // header group, so it trails the content. SMD-1248.
         // SMD-3599: who holds a ticket it names, after the superseded mark.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
-        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}`;
+        // SMD-2726: its judged relations, after the claims.
+        const related = relationsWords(t.relations, t.relationsMore ?? 0);
+        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
         // e2e suite ([8]) matched on and a client may too.
@@ -798,12 +818,58 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_thoughts cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out for the first page."
     : unknownRefusal(r), safeList);
+}
+
+// ── Judged relations (SMD-2726; SMD-3306 PR 7a-2b) ───────────────────────────
+
+/**
+ * A relation in words, from the side of the thought it is read on: a relation sits on the newer thought and names the
+ * older, so the newer evolves from (duplicates) the older, and the older evolved into (is duplicated by) the newer;
+ * related and distinct read the same from either side.
+ */
+const RELATION_SAID: Record<RelationWord, { older: string; newer: string }> = {
+  related: { older: "related to", newer: "related to" },
+  evolves: { older: "evolves from", newer: "evolved into" },
+  duplicate: { older: "duplicates", newer: "duplicated by" },
+  distinct: { older: "distinct from (a look-alike about another subject)", newer: "distinct from (a look-alike about another subject)" },
+};
+/** A relation's marks: the judge's confidence, and whether its texts moved since or the other thought is superseded. */
+const relationMarks = (r: RelationShown) =>
+  [r.confidence === null ? "no confidence given" : `confidence ${r.confidence.toFixed(2)}`, r.stale ? "edited since judged" : "", r.other.supersededBy ? `the other superseded by ${r.other.supersededBy}` : ""].filter(Boolean).join("; ");
+/**
+ * A result's relations on one line, or null for none: each its words, the other thought's title quoted — its own
+ * words, cut to 80 — its id and its marks; then how many more, which the relations tool reads.
+ */
+function relationsWords(relations: readonly RelationShown[] | null | undefined, more = 0): string | null {
+  if (!relations?.length) return null;
+  const one = (r: RelationShown) => `${RELATION_SAID[r.relation][r.otherIs]} ${JSON.stringify(oneLine(snipText(r.other.title, 80)))} (ID ${r.other.id}; ${relationMarks(r)})`;
+  return `${relations.map(one).join("; ")}${more > 0 ? `; and ${more} more, which the relations tool reads` : ""}.`;
+}
+/** Relations not read are said, not left to read as none (as the claims are). */
+const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
+/** relations: the thought, the word asked for, the count and cursor, and each relation's typed fields — no title. */
+const safeRelations: Safe<RelationsResult> = (v) => ({ id: v.id, relation: v.relation, total: v.total, cursor: v.cursor, relations: relationsField(v.relations) });
+
+export function renderRelations(o: Outcome<RelationsResult>): Reply {
+  return render(o, ({ id, relation, total, relations, cursor }) => {
+    const word = relation === null ? "" : ` ${relation}`;
+    if (total === 0) return `Thought ${id} has no standing judged${word} relation.`;
+    const head = `Thought ${id}: ${total} standing judged${word} relation${total === 1 ? "" : "s"}, strongest first${relations.length < total ? `, ${relations.length} on this page` : ""}:`;
+    // A page past the cursor emptied by a re-judge between pages, or a cursor from another thought's read.
+    if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a re-judge changed them since that page, or the cursor came from another read. Read them again from the start.)`;
+    const rows = relations.map((r, i) => `${i + 1}. ${RELATION_SAID[r.relation][r.otherIs]} ${JSON.stringify(oneLine(r.other.title))}\n   ID: ${r.other.id}\n   ${relationMarks(r)}; judged ${r.judgedAt ?? "at an unknown time"} (relation ${r.id})`);
+    const stale = relations.some((r) => r.stale) ? "\n\nA relation edited since judged was judged on a text that has changed: the word may no longer hold, until the judge reads the pair again." : "";
+    const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\` with id ${id}${relation === null ? "" : ` and relation ${relation}`} for the next page.` : "";
+    return `${head}\n\n${rows.join("\n\n")}${stale}${more}`;
+  }, (r) => r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a relations cursor — pass the `cursor` the previous page ended with, as it was given, with the same id and relation."
+    : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
+      : unknownRefusal(r), safeRelations);
 }
 
 /** A subject key a structured value may carry: a ticket's, a pull request's or a version's, each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */

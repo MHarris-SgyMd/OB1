@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1558,6 +1558,85 @@ export class SqlStore implements ThoughtStore {
        WHERE me.id = ${id}::uuid
        ORDER BY me.key`;
     return rows.map((r: Record<string, unknown>) => normaliseThreadPlace(r));
+  }
+
+  async relationsAmong(ids: string[], shown: number): Promise<Record<string, RelationsOf>> {
+    return this.relationsOf(idList(ids), { limit: shown });
+  }
+
+  async relationsPage(id: string, w: RelationsWindow): Promise<RelationsOf> {
+    const valid = idList([id]);
+    return (await this.relationsOf(valid, w))[valid[0] ?? ""] ?? { total: 0, edges: [] };
+  }
+
+  /**
+   * SMD-2726 (SMD-3306 PR 7a-2b): each thought's standing judged relations, from both sides — the facets on it
+   * (thought_facets' thought_id index; it the newer) and those naming it (084's target index; it the older) — under
+   * the window's word, strongest first, the first `limit` after its position, and how many stand under the word.
+   * `stale` reads the relation's lineage row (084: written with it, under its judge key) against the two texts now,
+   * as consolidate.ts --list relations does. A thought with none is absent.
+   */
+  private async relationsOf(ids: string[], w: RelationsWindow): Promise<Record<string, RelationsOf>> {
+    if (ids.length === 0) return {};
+    const after = w.after ?? null;
+    const cut = after === null ? this.sql`TRUE`
+      : this.sql`(rank, created_at, id) < (${after.rank}::numeric, ${after.at}::timestamptz, ${after.id}::uuid)`;
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        WITH ids AS (SELECT DISTINCT unnest(${this.sql.array(ids, "TEXT")}::uuid[]) AS of),
+        e AS (
+          SELECT ids.of, f.id, f.payload->>'relation' AS relation, 'older' AS other_is, (f.payload->>'target')::uuid AS other,
+                 f.thought_id AS newer, (f.payload->>'target')::uuid AS older, f.payload->>'judge_key' AS judge_key,
+                 f.payload->>'confidence' AS confidence, f.created_at
+            FROM ids JOIN thought_facets f ON f.thought_id = ids.of
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+          UNION ALL
+          SELECT ids.of, f.id, f.payload->>'relation', 'newer', f.thought_id,
+                 f.thought_id, ids.of, f.payload->>'judge_key',
+                 f.payload->>'confidence', f.created_at
+            FROM ids JOIN thought_facets f ON f.payload->>'target' = ids.of::text
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'),
+        w AS (
+          SELECT e.*, COALESCE(e.confidence::numeric, -1) AS rank FROM e
+           WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
+        page AS (
+          SELECT * FROM (
+            SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, created_at DESC, id DESC) AS n
+              FROM w WHERE ${cut}) c
+           WHERE n <= ${w.limit}::int),
+        shown AS (
+          SELECT page.of, page.n, jsonb_build_object(
+                   'id', page.id::text, 'relation', page.relation, 'other_is', page.other_is,
+                   'other_id', page.other::text, 'other_created_at', o.created_at, 'other_content', left(o.content, ${THREAD_HEAD_CHARS}::int),
+                   'confidence', page.confidence, 'judged_at', page.created_at, 'rank', page.rank::text, 'at', page.created_at::text,
+                   'stale', d.id IS NOT NULL AND (content_fingerprint_of(tol.content) IS DISTINCT FROM d.input_fingerprints[1]
+                                                  OR content_fingerprint_of(tn.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edge
+            FROM page
+            JOIN thoughts o ON o.id = page.other
+            JOIN thoughts tn ON tn.id = page.newer
+            JOIN thoughts tol ON tol.id = page.older
+            LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key)
+        SELECT ids.of::text AS of,
+               (SELECT count(*) FROM w WHERE w.of = ids.of)::int AS total,
+               COALESCE((SELECT jsonb_agg(shown.edge ORDER BY shown.n) FROM shown WHERE shown.of = ids.of), '[]'::jsonb) AS edges
+          FROM ids`;
+    } catch (e) {
+      // A cursor's time Postgres cannot read is the caller's, as the thread read's is.
+      if (!after || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    const out: Record<string, RelationsOf> = {};
+    for (const r of rows) {
+      const total = Number(r.total ?? 0);
+      if (total === 0) continue;
+      const raw = typeof r.edges === "string" ? JSON.parse(r.edges) : r.edges;
+      const edges = (Array.isArray(raw) ? raw : []).map((x: Record<string, unknown>) => normaliseRelationEdge(x)).filter((x: RelationEdge | null): x is RelationEdge => x !== null);
+      out[String(r.of)] = { total, edges };
+    }
+    return out;
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {
