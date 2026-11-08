@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -29,6 +29,7 @@ import { parseListCursor, parseProposalCursor, parseThreadCursor } from "./core/
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
+import type { AgendaCode, AgendaResult } from "./core/agenda.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -2207,6 +2208,51 @@ export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>
     ...(v.proposals.length ? [`Closes proposed (${v.proposals.length}):`, ...v.proposals.map((p) => `- ${proposalLine(p)}`)] : []),
   ].join("\n"),
   itemRefusal, AS_JSON);
+
+/** One of 122's terms behind an agenda item's place, in words. */
+const agendaTerm = (t: PriorityTerm): string => {
+  const d = t.detail;
+  if (t.term === "level") return levelText(Number(d.level));
+  if (t.term === "inherited") {
+    const f = d.from as { kind?: string; key?: string; level?: number; hops?: number } | undefined;
+    return `inherited ${t.value} from ${f?.kind === "item" ? "open item" : f?.kind ?? "?"} ${f?.key ?? "?"} (${levelText(Number(f?.level))}, ${f?.hops} hop${f?.hops === 1 ? "" : "s"})`;
+  }
+  if (t.term === "unknown") return `no priority stated (read as ${t.value})`;
+  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}`;
+  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
+  if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
+  return `${t.term} ${t.value}`;
+};
+/**
+ * The agenda (SMD-3669): one line an item — its place, what it is, its score and the terms behind it — then what was
+ * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
+ * read. A title, a holder and a blocker are other keys' words: quoted and cut, never a line of their own.
+ */
+export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => render(o, (v) => {
+  const lines = v.items.length === 0
+    ? ["Nothing on the agenda in this scope."]
+    : [
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
+        ...v.items.map((i) => {
+          const what = i.kind === "ticket" ? `ticket ${i.key}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
+          const notes = [
+            i.overdue ? "OVERDUE" : null,
+            i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
+            i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+            // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
+            i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+          ].filter(Boolean);
+          return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
+        }),
+      ];
+  const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
+  if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
+  if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
+  // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
+  lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
+  if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): claimed work is not left out or named.");
+  return lines.join("\n");
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
 
 export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Reply => render(o, (v) =>
   v.items.length === 0 ? "No items match."

@@ -61,6 +61,7 @@ export const CALLS = {
   decide_item_close: (c, p, i, o) => c.decideItemClose(p, i, { plugin: o.plugin }),
   item_history: (c, p, i) => c.itemHistory(p, i),
   list_items: (c, p, i) => c.listItems(p, i),
+  agenda: (c, p, i) => c.agenda(p, i),
 } satisfies { [K in ToolName]: Call<K> };
 
 /** The `{field}` names a route's path fills, in order: a core route's (rest/routes.ts) or a plugin operation's. */

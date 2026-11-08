@@ -6915,6 +6915,40 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     ["CONFIRM_NOT_YOURS", R({ code: "CONFIRM_NOT_YOURS", retryable: false, item: T }), /^Refused: open item 3333\S+ was proposed, not stated; a write key confirms it/],
   ];
   for (const [name, r, words] of itemRefusals) assert(r.isError === true && words.test(text(r)) && !text(r).includes("\n"), `${name} (an open item's): refused by its rule, in one line (${text(r)})`);
+  // The core's mapping (review passes 2 and 3): 123's own 42501 under mine is CLAIMS_UNREADABLE; another table's is a fault.
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const raising = (message: string) => ({ store: async () => ({ agenda: async () => { throw Object.assign(new Error(message), { errno: "42501" }); } }), logAgenda: async () => {} });
+    const P = { name: "k", scope: "read", agentId: undefined } as never;
+    const I = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, holder: "mine" } as never;
+    const mapped = await agendaRead(raising("agenda: holder mine reads work_claims, which this role may not (the claims group)") as never, P, I);
+    let other = "";
+    try { await agendaRead(raising("permission denied for table priority_assertions") as never, P, I); } catch (e) { other = (e as Error).message; }
+    assert(!mapped.ok && (mapped as { refusal: { code: string } }).refusal.code === "CLAIMS_UNREADABLE" && /priority_assertions/.test(other),
+      `123's own refusal under mine maps to CLAIMS_UNREADABLE; another table's 42501 stays a fault naming the table (${other})`);
+  }
+  // The core passes each flag to its own argument and writes one log row of the items returned (review pass 8: swapped
+  // flags and a dropped log call passed every suite).
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    let asked: Record<string, unknown> | null = null;
+    const logged: unknown[][] = [];
+    const ctx = {
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 }, boardSync: null, claimsRead: true, now: "2027-01-01T00:00:00.000Z" }; } }),
+      logAgenda: async (...a: unknown[]) => { logged.push(a); },
+    };
+    await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
+      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true } as never);
+    const a = asked as Record<string, unknown> | null;
+    assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
+           && logged.length === 1 && logged[0][2] === 7 && JSON.stringify(logged[0][3]) === '[{"kind":"ticket","key":"SMD-1","effective":4}]'
+           && (logged[0][1] as Record<string, unknown>).include_blocked === true,
+      `each flag reaches its own argument, and one log row carries the scope, the limit and the items (${JSON.stringify(a)}; ${JSON.stringify(logged)})`);
+  }
+  // The agenda (SMD-3669 review pass 2): holder mine on a role without the claims group is a refusal, in words.
+  const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);
+  assert(unreadable.isError === true && /^Refused: holder mine needs the claims this server's database role cannot read \(the claims group\); ask without holder$/.test(text(unreadable)),
+    `CLAIMS_UNREADABLE: refused in words, one line (${text(unreadable)})`);
   // 117's words read as the argument they name (review pass 1): a client reading values knows which to mend.
   const { itemProblemOf } = await import("./open-items.ts");
   const itemProblems = ["not an open item's id: 'x' (a uuid)", "an item's text is at most 1000 characters; this one has 1001", "an owner is at most 200 characters; this one has 201",

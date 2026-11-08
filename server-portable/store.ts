@@ -1534,6 +1534,98 @@ export function normaliseEffectivePriority(r: unknown, what: string): EffectiveP
   };
 }
 
+/** A live or lapsed claim an agenda item names (115): the holder's key name, the piece, and when its lease ends or ended. */
+export type AgendaClaim = { holder: string; piece: string | null; label: string | null; at: string };
+/**
+ * One agenda item (migration 123, SMD-3669): a ticket or an open item, its place, what it is, and 122's terms behind
+ * its place. `claimed` names live claims (shown only with include_claimed or holder mine), `lapsedClaim` claims never
+ * released whose lease ran out, `blockers` the open items blocking it (shown only with include_blocked).
+ */
+export type AgendaItem = {
+  rank: number;
+  kind: "ticket" | "item";
+  key: string;
+  source: string;
+  title: string;
+  project: string | null;
+  status: string | null;
+  owner: string | null;
+  effective: number;
+  level: number | null;
+  inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
+  dueAt: string | null;
+  dueFrom: "stated" | "due_ref" | "item" | null;
+  urgency: number;
+  overdue: boolean;
+  unblocks: number;
+  terms: PriorityTerm[];
+  winner: PriorityAssertion | null;
+  claimed: AgendaClaim[];
+  lapsedClaim: AgendaClaim[];
+  blockers: string[];
+};
+/** An agenda (migration 123): the first `limit` items, how many passed the filters, how many carry no priority, what was left out and why, and board-sync's last heartbeat. */
+export type AgendaResult = {
+  items: AgendaItem[];
+  total: number;
+  unknown: number;
+  leftOut: { blocked: number; claimed: number; waiting: number };
+  boardSync: { at: string; outcome: unknown } | null;
+  /** False when the role may not read work_claims (the claims group is soft): no claim was filtered or named. */
+  claimsRead: boolean;
+  now: string;
+};
+
+const claimsOf = (v: unknown, what: string): AgendaClaim[] => {
+  if (v === null || v === undefined) return [];
+  if (!Array.isArray(v)) throw new Error(`${what} answered claims this server cannot read`);
+  return v.map((c) => {
+    const o = c !== null && typeof c === "object" ? (c as Record<string, unknown>) : undefined;
+    const at = o?.expires_at ?? o?.expired_at;
+    if (!o || typeof o.holder !== "string" || (typeof at !== "string" && !(at instanceof Date))) throw new Error(`${what} answered claims this server cannot read`);
+    return { holder: o.holder, piece: typeof o.piece === "string" ? o.piece : null, label: typeof o.label === "string" ? o.label : null, at: isoTimestamp(at as string | Date) };
+  });
+};
+
+/** migration 123's agenda answer; anything else throws, naming the call and nothing of the answer. */
+export function normaliseAgenda(r: unknown, what: string): AgendaResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const lo = o?.left_out !== null && typeof o?.left_out === "object" ? (o.left_out as Record<string, unknown>) : undefined;
+  const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
+  if (!o || !Array.isArray(o.items) || !Number.isInteger(num(o.total)) || !Number.isInteger(num(o.unknown)) || !lo
+      || ![lo.blocked, lo.claimed, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean") {
+    throw new Error(`${what} answered no agenda this server reads`);
+  }
+  const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
+  const items = (o.items as unknown[]).map((it) => {
+    const i = it !== null && typeof it === "object" ? (it as Record<string, unknown>) : undefined;
+    if (!i || (i.kind !== "ticket" && i.kind !== "item") || typeof i.key !== "string" || typeof i.source !== "string" || !Number.isInteger(num(i.rank))
+        || !Array.isArray(i.blockers) || !(i.blockers as unknown[]).every((b) => typeof b === "string")) {
+      throw new Error(`${what} answered an agenda item this server cannot read`);
+    }
+    // 122's row, as effective_priority answers it: the same normaliser reads the terms, the winner and the due time.
+    const e = normaliseEffectivePriority({
+      item_kind: i.kind, item_key: i.key, effective: i.effective, level: i.level, inherited_from: i.inherited_from, due_at: i.due_at, due_from: i.due_from,
+      urgency: i.urgency, overdue: i.overdue, unblocks: i.unblocks, settled: false, not_before: null, waiting: false, terms: i.terms, winner: i.winner, passed_over: [],
+    }, what);
+    return {
+      rank: num(i.rank), kind: i.kind as AgendaItem["kind"], key: i.key, source: i.source,
+      title: typeof i.title === "string" ? i.title : "", project: typeof i.project === "string" ? i.project : null,
+      status: typeof i.status === "string" ? i.status : null, owner: typeof i.owner === "string" ? i.owner : null,
+      effective: e.effective, level: e.level, inheritedFrom: e.inheritedFrom, dueAt: e.dueAt, dueFrom: e.dueFrom, urgency: e.urgency,
+      overdue: e.overdue, unblocks: e.unblocks, terms: e.terms, winner: e.winner,
+      claimed: claimsOf(i.claimed, what), lapsedClaim: claimsOf(i.lapsed_claim, what), blockers: i.blockers as string[],
+    };
+  });
+  return {
+    items, total: num(o.total), unknown: num(o.unknown),
+    leftOut: { blocked: num(lo.blocked), claimed: num(lo.claimed), waiting: num(lo.waiting) },
+    boardSync: bs && (typeof bs.at === "string" || bs.at instanceof Date) ? { at: isoTimestamp(bs.at as string | Date), outcome: bs.outcome ?? null } : null,
+    claimsRead: o.claims_read as boolean,
+    now: isoTimestamp(o.now as string | Date),
+  };
+}
+
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
 export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswer {
   const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
@@ -1847,6 +1939,18 @@ export type QueryActionLog = {
   agentId?: string;
   targetId: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
+  tier?: string;
+};
+
+/**
+ * An 'agenda' row for the query log (migration 123, SMD-3669): the call's scope, holder and flags in `filter`, its
+ * limit as `matchCount`, and the items returned, in order, each with its effective priority.
+ */
+export type QueryAgendaLog = {
+  agentId?: string;
+  filter: Record<string, unknown>;
+  matchCount: number;
+  items: { kind: string; key: string; effective: number }[];
   tier?: string;
 };
 
@@ -2259,6 +2363,18 @@ export interface ThoughtStore {
    */
   effectivePriority(items: { kind: string; key: string }[], opts?: { weights?: Partial<PriorityWeights>; now?: string }): Promise<EffectivePriority[]>;
   /**
+   * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
+   * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
+   * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
+   * first, and the core answers holder mine's 42501 as CLAIMS_UNREADABLE.
+   */
+  agenda(opts: {
+    scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
+    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; now?: string;
+  }): Promise<AgendaResult>;
+  /** One agenda row in query_log (migration 123): the scope and the items returned, in order. */
+  logAgenda(row: QueryAgendaLog): Promise<void>;
+  /**
    * Open items (migration 117, SMD-3665 PR 2): 117's writers, each one statement in its own transaction, the actor
    * as the maker's envelope with `scope` stated (as 116's) and `plugin` the plugin a call came through (a plugin's
    * ctx.call; never a caller's argument). A malformed argument throws ItemRefused; any other raise is the store's
@@ -2568,7 +2684,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

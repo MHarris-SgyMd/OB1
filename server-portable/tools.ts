@@ -49,6 +49,8 @@ export const TOOLS = [
   { name: "priority_history", scope: "read" },
   { name: "item_history", scope: "read" },
   { name: "list_items", scope: "read" },
+  // The agenda (SMD-3669, migration 123): a read over every kind of open item, ranked by effective priority.
+  { name: "agenda", scope: "read" },
   // Work threads (SMD-3306 PR 7a-2a).
   { name: "thread", scope: "read" },
   { name: "capture_thought", scope: "capture" },
