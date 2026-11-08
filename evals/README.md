@@ -4401,21 +4401,27 @@ computed from `docs/priority.md`'s weights.
   `renderIssue` for the text, `issueFacets` for the metadata), so a read finds it as it finds a synced ticket.
 
 Each item also states the facts its gold rests on (a due offset, a stated level, done, claimed, the blocks links).
-The first registration planted only what main's search reads: the text, and a board row's facets. The second
-(SMD-3669 PR 2, 2026-11-08) plants the facts where a priority read's store keeps them (`priority.ts`'s
-`plantFacts`), by the writers that keep them there:
+The first registration planted only what main's search reads: the text, and a board row's facets. Since SMD-3669 PR 2
+(2026-11-08) the seeding also plants the facts where the agenda reads them (`priority.ts`'s `plantFacts`), by the
+writers that keep them there:
 * **Each board item** is recorded as board-sync records the head it has just written (`recordStructure`: its
   source, its blocks links, its mentions). Its issue carries both sides of a blocks relation, as Linear returns them,
-  so ZQ-101 holds `blocks ZQ-104` and ZQ-104 `blocked_by ZQ-101`. The operator declares board-sync a priority source, and board-sync's own
-  priority step states each ticket's level from its Linear priority. Another agent's key claims ZQ-103.
+  so ZQ-101 holds `blocks ZQ-104` and ZQ-104 `blocked_by ZQ-101`. The operator declares board-sync a priority
+  source, and board-sync's own priority step states each ticket's level from its Linear priority. Another agent's key
+  claims ZQ-103.
 * **Every personal note, chatter included,** is opened as an open item from its row by its writer, due on its facts'
   day (calendar days in UTC from the run's day), done when its facts say so. Its stated level is the operator's
   statement on the item, the operator's key classified as `SETUP.md` classifies a brain's own.
 
-The run reads the facts back value by value and fails unless the database holds exactly the plan's: each ticket and
-its Linear level, each link, the claim and its holder, and each item by its note, with its status, due day, counted
-level and tier, and writer. A statement in tier 4 (inferred), which `effective_priority` counts only when asked, fails
-it too. So a change outside the registration that moves a fact (the store dropping a due day, a new level mapping) is
+A personal note's facts sit on its open item, not on the note. So a read that scores thoughts, as SMD-3668's
+`priority_weight` does, sees the tickets' levels and none of the notes': measuring it needs a decision on where those
+facts go, and a registration of its own.
+
+The run reads the facts back and fails unless the database holds exactly the plan's, line for line, duplicates
+counted: every source and the row it sits on, every link but a text reference, every live claim, every open item by
+its note with its status, due instant and opener, and every open priority statement on anything, with its level,
+tier, maker and times. A ticket's planned level is its item's facts, not board-sync's mapping. So a change outside
+the registration that moves a fact (the store dropping a due day, a new level mapping, a statement on a note) is
 seen, not scored. A read never takes the facts from `ITEMS`, which is the answer's side.
 
 A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
@@ -4459,9 +4465,11 @@ read exists.
 
 **The agenda read** (SMD-3669, `priority.ts`'s `AGENDA_READ`) is the first measured read. The agenda takes no query,
 so the read puts it to a question as a client would (the maintainer's choice, 2026-11-08). It searches the query as
-`plain` does, then orders those hits by the default agenda: the hits the agenda lists first, in its order, then the
-rest in search's order. A hit is on the agenda when it is a ticket's row (read by its metadata) or the origin thought
-of an open item. Priority orders what is relevant; it adds nothing search didn't find.
+`plain` does (its default ten hits), then orders those hits by the agenda, with its default flags at its cap of 100:
+the hits the agenda lists first, in its order, then the rest in search's order. A hit is on the agenda when it is a
+ticket's row (read by its metadata) or the origin thought of an open item. The agenda and those lookups are read
+through the store, since a measured read's `callTool` admits the search tools alone, so the `agenda` tool's own
+layer isn't exercised here. Priority orders what is relevant; it adds nothing search didn't find.
 
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;
@@ -4512,7 +4520,8 @@ These mutants are each refused:
 * a drift check comparing counts, not which prompts;
 * a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2);
 * a seeding that leaves the operator's key unclassified or board-sync undeclared (their statements tier 4), or drops
-  the claim, the blocks links or the done item, and a store that drops an item's due day (each fails the seeded run on
+  the claim, the blocks links or the done item; a store that drops an item's due day; Linear's High mapped to 4; and
+  due times hours off, a statement on a note and an operator's statement on a ticket (each fails the seeded run on
   its own message).
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
@@ -4553,7 +4562,13 @@ What the baseline gets wrong:
   of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
 * **The filter** returns the two High backlog tickets for every prompt, one of them blocked, and nothing personal.
 
-**The agenda, 2026-11-08** (main 601b0452 with SMD-3669 PR 2, registration `af94b462f72ff618`: the second, with the
+`priority.ts`'s `BASELINE` records, per baseline read, which prompts it puts first and in the top 3, and its mean tau.
+The run fails when one moves, including when a count holds but its prompts change, since the bar's (d) reads which. That is a record of today's main,
+not part of the registration: the verdict always compares a measured read with the baselines of the same run. A
+re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
+before it stay as they were measured.
+
+**The agenda, 2026-11-08** (main 601b0452 with SMD-3669 PR 2, registration `acb196be7ec50868`, the
 facts planted; the baseline reads score as recorded above). The program's output, verbatim:
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
@@ -4582,11 +4597,6 @@ bookshelf at a stated 0), and the agenda orders a tie by its items' keys, which 
 printed hits can differ between runs. Gold items tie only on the score, and the agenda breaks those by the sooner due
 time and then the ticket's key (ZQ-105, a stated Medium, before ZQ-108, an unknown, both 2), never by a random id, so
 the scores can't differ.
-`priority.ts`'s `BASELINE` records, per baseline read, which prompts it puts first and in the top 3, and its mean tau.
-The run fails when one moves, including when a count holds but its prompts change, since the bar's (d) reads which. That is a record of today's main,
-not part of the registration: the verdict always compares a measured read with the baselines of the same run. A
-re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
-before it stay as they were measured.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.

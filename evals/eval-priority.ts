@@ -30,8 +30,9 @@
  *       ceiling. Keyless: no provider is called.
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: SMD-3669's agenda, and later SMD-3668's
- * priority_weight, and the run prints each one's verdict against
+ * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
+ * priority_weight needs the notes' facts where it reads them: priority.ts's
+ * Facts), and the run prints each one's verdict against
  * the baselines of the same run. A measured read's verdict does not fail the
  * run; the gold ceiling's, which runs the same path, does.
  *
@@ -49,7 +50,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, CLAIMANT, OPERATOR, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -115,15 +116,23 @@ async function selfCheck(): Promise<void> {
   assert(at("bill")?.due === "2026-02-28" && at("gutters")?.due === "2026-02-13" && at("renewal")?.due === "2026-03-29" && at("cat")?.due === null && at("claim-done")?.done === true && at("bill")?.done === false
       && at("passport")?.level === 4 && at("coffee")?.level === 0 && at("cat")?.level === null && at("commitment")?.actor === "priority-eval-meeting-notes" && at("bill")?.actor === "priority-eval-operator",
     "an item's day is the run's day moved by its facts, in calendar days across a month's end; done and the level are its facts'; its writer opens it");
-  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && new Set<string>([CLAIMANT, OPERATOR, READ_KEY]).size === 3,
-    "a day moves across a leap day and back across a month; the claimant, the operator and the read key are three keys");
+  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && dueInstant("2026-02-28") === "2026-03-01T00:00:00Z",
+    "a day moves across a leap day and back across a month; a bare due day is held as the next day's start in UTC");
   const facts = plannedFacts(ITEMS, "2026-02-27");
-  assert(facts.length === 28 && ["ticket ZQ-101 level 4", "link ZQ-101 blocks ZQ-104", "link ZQ-104 blocked_by ZQ-101", "claim ZQ-103 by priority-eval-other-agent",
-         "item bill open due 2026-02-28 level none by priority-eval-operator", "item gutters open due 2026-02-13 level none by priority-eval-operator",
-         "item passport open due none level 4 tier 1 by priority-eval-operator", "item claim-done done due none level none by priority-eval-operator",
-         "item commitment open due 2026-03-02 level none by priority-eval-meeting-notes", "item coffee open due none level 0 tier 1 by priority-eval-operator"].every((l) => facts.includes(l))
-      && !facts.some((l) => l.startsWith("ticket ZQ-108 level")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
-    `the facts a seeded database must hold, each by its value: eight tickets, seven Linear levels (No priority states none), the blocks link from both sides as Linear returns it, one claim, and ten items with their status, due day, level and writer (${facts.length}: ${facts.slice(0, 3).join("; ")}…)`);
+  const named = [
+    "source linear ZQ-101 on zq-urgent", "statement on ticket:ZQ-101 level 4 tier 2 by board-sync due none not_before none due_ref none",
+    "statement on ticket:ZQ-102 level 3 tier 2 by board-sync due none not_before none due_ref none", "statement on ticket:ZQ-106 level 1 tier 2 by board-sync due none not_before none due_ref none",
+    "link zq-urgent linear blocks ZQ-104", "link zq-blocked linear blocked_by ZQ-101", "claim ZQ-103 piece none by priority-eval-other-agent",
+    "item from bill open due 2026-03-01T00:00:00Z by priority-eval-operator", "item from gutters open due 2026-02-14T00:00:00Z by priority-eval-operator",
+    "item from claim-done done due none by priority-eval-operator", "item from commitment open due 2026-03-03T00:00:00Z by priority-eval-meeting-notes",
+    "statement on item:passport level 4 tier 1 by priority-eval-operator due none not_before none due_ref none",
+    "statement on item:coffee level 0 tier 1 by priority-eval-operator due none not_before none due_ref none",
+  ];
+  assert(facts.length === 31 && named.every((l) => facts.includes(l)) && !facts.some((l) => l.startsWith("statement on ticket:ZQ-108")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
+    `the facts a seeded database must hold, each by its value: eight sources, seven ticket levels from the items' facts (No priority states none), the blocks link from both sides, one claim, ten items with their due instants (a bare day's end, the next day's start), three item levels (${facts.length}: ${facts.slice(0, 2).join("; ")}…)`);
+  const zqLevels = ITEMS.filter((it) => it.issue && it.facts.level !== undefined).map((it) => `${it.issue!.identifier} ${it.facts.level}`);
+  assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.split(" ")[0]} level ${l.split(" ")[1]} `))),
+    `every ticket's planned level is its facts', so a mapping change in board-sync's writer is a difference, not a shared move (${zqLevels})`);
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -282,8 +291,10 @@ async function seeded(): Promise<void> {
   }
   if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
   const want = plannedFacts(ITEMS, today);
-  const missing = want.filter((l) => !facts.includes(l)), extra = facts.filter((l) => !want.includes(l));
-  if (missing.length || extra.length) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
+  // As sorted arrays, so a fact planted twice is a difference too; the message names each side's lines the other lacks.
+  const less = (a: readonly string[], b: readonly string[]) => { const left = [...b]; return a.filter((l) => { const i = left.indexOf(l); if (i < 0) return true; left.splice(i, 1); return false; }); };
+  const missing = less(want, facts), extra = less(facts, want);
+  if (JSON.stringify(facts) !== JSON.stringify(want)) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
 
   // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
   // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.

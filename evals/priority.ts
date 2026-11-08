@@ -44,7 +44,6 @@ import { fileURLToPath } from "node:url";
 import { issueFacets, linearAdapter, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { recordStructure } from "../db/ingest-structure.ts";
 import { ACTOR_NAME as BOARD_SYNC, priorityStep } from "../db/sync-linear.ts";
-import { levelOf } from "../server-portable/priority-scale.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
 
@@ -61,11 +60,14 @@ export type BoardMeta = { issue: string; status: string; status_type: "backlog" 
  * (docs/priority.md's 0–5, absent where nobody states one: unknown), done,
  * the blocks links, a claim. The first registration's rows carried only what
  * main's search reads: the text, and a board row's facets as board-sync
- * writes them. The second (SMD-3669 PR 2) plants these where a priority read's
- * store reads them (plantFacts, below: 116's statements, 117's open items, a
- * claim in work_claims, board-sync's links), with the baseline re-run on it
+ * writes them. Later registrations (SMD-3669 PR 2) plant these where the
+ * agenda reads them (plantFacts, below: 116's statements, 117's open items, a
+ * claim in work_claims, board-sync's links), with the baseline re-run on each
  * and BAR held by its own pin, so the bar a read is judged by never moves with
- * it. A read never reads these from ITEMS: that is the answer's side.
+ * it. A personal note's facts sit on its open item, not on the note: a read
+ * that scores thoughts (SMD-3668's priority_weight) sees the tickets' levels
+ * and none of the notes', so its measurement needs a decision of its own.
+ * A read never reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
 
@@ -191,7 +193,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "af94b462f72ff618";
+export const REGISTERED_CORPUS = "acb196be7ec50868";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -340,7 +342,7 @@ export async function plantRows(sql: SQL, rows: readonly SeedRow[]): Promise<num
 }
 
 /**
- * The facts a priority read's store reads, planted after the rows (SMD-3669 PR 2, the second registration): what
+ * The facts the agenda reads, planted after the rows (SMD-3669 PR 2, from the second registration on): what
  * the gold rests on, written where a deployed brain keeps it, by the writers that keep it there.
  *   - A board item: its issue recorded as board-sync records the head it has just written (recordStructure: the
  *     source, its blocks links, its mentions), board-sync declared a priority source by the operator (116), and
@@ -386,10 +388,15 @@ export const CLAIMANT = "priority-eval-other-agent";
 export const OPERATOR = "priority-eval-operator";
 
 /**
- * What the database holds once plantFacts has run, read back value by value (review pass 1: counts passed a due day
- * dropped on the way), one sorted line a fact: a ticket's source and its counted level, a relation link, a live
- * claim, and an open item by the note it was read from, with its status, its due day, its counted level and tier, and
- * who opened it. Any statement in tier 4 (inferred) is a line of its own, which no plan has.
+ * What the database holds once plantFacts has run, read back value by value, one sorted line a fact, every row of
+ * each kind the reads take (review passes 1 and 2: counts passed a dropped due day, and a read-back narrower than
+ * the reads passed a statement on a thought, a due time off by hours and a mapping the plan shared with its writer):
+ *   - every source, with the row it sits on;
+ *   - every active link but a text reference, with its system;
+ *   - every live claim, with its piece and holder;
+ *   - every open item, by the note it was read from, with its status, its due instant and its opener;
+ *   - every open priority statement, on whatever it names, with its level, tier, maker and times.
+ * A row's id is the item's key it was planted for. Compared with plannedFacts as sorted arrays, duplicates counted.
  */
 export type PlantedFacts = string[];
 
@@ -432,44 +439,68 @@ export async function plantFacts(sql: SQL, store: SqlStore, items: readonly Item
   // Every statement planted is one 122 counts: tier 4 (inferred) would read as unknown and pass unseen.
   const [inferred] = (await sql`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NULL AND tier = 4`) as { n: number }[];
   if (inferred.n > 0) throw new Error(`${inferred.n} planted statement(s) are tier 4 (inferred), which effective_priority counts only when asked`);
+  return readFacts(sql, items, rows);
+}
+
+/** An instant as the read-back writes it: UTC, to the second (a to_char pattern, bound as a parameter). */
+const INSTANT = `YYYY-MM-DD"T"HH24:MI:SS"Z"`;
+
+/** The facts the database holds, as PlantedFacts' lines. */
+export async function readFacts(sql: SQL, items: readonly Item[], rows: readonly SeedRow[]): Promise<PlantedFacts> {
   const keyOf = new Map(rows.map((r, i) => [r.id, items[i].key] as const));
+  const row = (id: string | null) => (id === null ? "none" : keyOf.get(id) ?? `?${id}`);
   const lines: string[] = [];
-  for (const r of (await sql`SELECT identity FROM thought_sources WHERE system = 'linear'`) as { identity: string }[]) lines.push(`ticket ${r.identity}`);
-  for (const r of (await sql`SELECT item_key, level FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'ticket' AND maker_name = ${BOARD_SYNC} AND tier = 2`) as { item_key: string; level: number }[]) lines.push(`ticket ${r.item_key} level ${r.level}`);
-  for (const r of (await sql`
-      SELECT s.identity, f.payload->>'relation' AS relation, f.payload->>'target' AS target
-        FROM thought_facets f JOIN thought_sources s ON s.thought_id = f.thought_id AND s.system = 'linear'
-       WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'relation' IN ('blocks', 'blocked_by')`) as { identity: string; relation: string; target: string }[]) {
-    lines.push(`link ${r.identity} ${r.relation} ${r.target}`);
+  for (const r of (await sql`SELECT system, identity, thought_id::text AS id FROM thought_sources`) as { system: string; identity: string; id: string }[]) {
+    lines.push(`source ${r.system} ${r.identity} on ${row(r.id)}`);
   }
-  for (const r of (await sql`SELECT issue, holder_name FROM work_claims WHERE released_at IS NULL AND expires_at > now()`) as { issue: string; holder_name: string }[]) lines.push(`claim ${r.issue} by ${r.holder_name}`);
-  // A bare due day is held as its end, the next day's start in UTC (119): the day is that instant less one.
   for (const r of (await sql`
-      SELECT i.origin_thought_id::text AS origin, i.status, i.opened_by_name,
-             to_char((i.due_at - interval '1 day') AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS due,
-             (SELECT a.level || ' tier ' || a.tier FROM priority_assertions a
-               WHERE a.closed_at IS NULL AND a.item_kind = 'item' AND a.item_key = i.item_id::text) AS level
-        FROM open_items i`) as { origin: string; status: string; opened_by_name: string; due: string | null; level: string | null }[]) {
-    lines.push(`item ${keyOf.get(r.origin) ?? r.origin} ${r.status} due ${r.due ?? "none"} level ${r.level ?? "none"} by ${r.opened_by_name}`);
+      SELECT thought_id::text AS id, payload->>'system' AS system, payload->>'relation' AS relation, payload->>'target' AS target
+        FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' <> 'references'`) as { id: string; system: string; relation: string; target: string }[]) {
+    lines.push(`link ${row(r.id)} ${r.system} ${r.relation} ${r.target}`);
   }
-  for (const r of (await sql`SELECT item_kind, item_key FROM priority_assertions WHERE closed_at IS NULL AND tier = 4`) as { item_kind: string; item_key: string }[]) lines.push(`tier-4 statement on ${r.item_kind} ${r.item_key}`);
+  for (const r of (await sql`SELECT issue, piece, holder_name FROM work_claims WHERE released_at IS NULL AND expires_at > now()`) as { issue: string; piece: string | null; holder_name: string }[]) {
+    lines.push(`claim ${r.issue} piece ${r.piece ?? "none"} by ${r.holder_name}`);
+  }
+  const itemKey = new Map<string, string>();
+  for (const r of (await sql`
+      SELECT item_id::text AS id, origin_thought_id::text AS origin, status, opened_by_name,
+             to_char(due_at AT TIME ZONE 'UTC', ${INSTANT}) AS due FROM open_items`) as { id: string; origin: string | null; status: string; opened_by_name: string; due: string | null }[]) {
+    itemKey.set(r.id, `item:${row(r.origin)}`);
+    lines.push(`item from ${row(r.origin)} ${r.status} due ${r.due ?? "none"} by ${r.opened_by_name}`);
+  }
+  for (const r of (await sql`
+      SELECT item_kind, item_key, level, tier, maker_name, to_char(due_at AT TIME ZONE 'UTC', ${INSTANT}) AS due,
+             to_char(not_before AT TIME ZONE 'UTC', ${INSTANT}) AS not_before, due_ref_kind, due_ref_key
+        FROM priority_assertions WHERE closed_at IS NULL`) as { item_kind: string; item_key: string; level: number; tier: number; maker_name: string; due: string | null; not_before: string | null; due_ref_kind: string | null; due_ref_key: string | null }[]) {
+    const on = r.item_kind === "item" ? itemKey.get(r.item_key) ?? `item:?${r.item_key}` : r.item_kind === "thought" ? `thought:${row(r.item_key)}` : `${r.item_kind}:${r.item_key}`;
+    lines.push(`statement on ${on} level ${r.level} tier ${r.tier} by ${r.maker_name} due ${r.due ?? "none"} not_before ${r.not_before ?? "none"} due_ref ${r.due_ref_kind ? `${r.due_ref_kind}:${r.due_ref_key}` : "none"}`);
+  }
   return lines.sort();
 }
 
-/** What plantFacts should read back for `items` on the day `today`: the plan's facts, a board item's levels and links its issue's own. */
+/** A planned day's due instant: a bare day is held as its end, the next day's start in UTC (119), written here, not shared with a writer. */
+export const dueInstant = (day: string): string => `${dayFrom(day, 1)}T00:00:00Z`;
+
+/**
+ * What plantFacts should read back for `items` on the day `today`. A ticket's level is its facts' (the gold's side),
+ * never board-sync's mapping, so a change to the mapping is seen (review pass 2); its links are its issue's relations.
+ */
 export function plannedFacts(items: readonly Item[], today: string): PlantedFacts {
   const plan = factPlan(items, today);
   const lines: string[] = [];
   for (const i of plan.board) {
     const b = items[i].issue!;
-    lines.push(`ticket ${b.identifier}`);
-    const level = levelOf("linear", b.priorityLabel);
-    if (level !== null) lines.push(`ticket ${b.identifier} level ${level}`);
-    for (const r of b.relations?.nodes ?? []) if (r.type === "blocks" && r.relatedIssue) lines.push(`link ${b.identifier} blocks ${r.relatedIssue.identifier}`);
-    for (const r of b.inverseRelations?.nodes ?? []) if (r.type === "blocks" && r.issue) lines.push(`link ${b.identifier} blocked_by ${r.issue.identifier}`);
+    lines.push(`source linear ${b.identifier} on ${items[i].key}`);
+    if (items[i].facts.level !== undefined) lines.push(`statement on ticket:${b.identifier} level ${items[i].facts.level} tier 2 by ${BOARD_SYNC} due none not_before none due_ref none`);
+    for (const r of b.relations?.nodes ?? []) if (r.type === "blocks" && r.relatedIssue) lines.push(`link ${items[i].key} linear blocks ${r.relatedIssue.identifier}`);
+    for (const r of b.inverseRelations?.nodes ?? []) if (r.type === "blocks" && r.issue) lines.push(`link ${items[i].key} linear blocked_by ${r.issue.identifier}`);
   }
-  for (const issue of plan.claims) lines.push(`claim ${issue} by ${CLAIMANT}`);
-  for (const p of plan.items) lines.push(`item ${items[p.index].key} ${p.done ? "done" : "open"} due ${p.due ?? "none"} level ${p.level === null ? "none" : `${p.level} tier 1`} by ${p.actor}`);
+  for (const issue of plan.claims) lines.push(`claim ${issue} piece none by ${CLAIMANT}`);
+  for (const p of plan.items) {
+    const key = items[p.index].key;
+    lines.push(`item from ${key} ${p.done ? "done" : "open"} due ${p.due === null ? "none" : dueInstant(p.due)} by ${p.actor}`);
+    if (p.level !== null) lines.push(`statement on item:${key} level ${p.level} tier 1 by ${OPERATOR} due none not_before none due_ref none`);
+  }
   return lines.sort();
 }
 
@@ -725,10 +756,12 @@ export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureI
 /**
  * SMD-3669's agenda, as a client would put it to a question (the maintainer, 2026-11-08): the agenda takes no query,
  * so the read searches the query as the plain baseline does (`search`, its defaults) and orders those hits by the
- * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda is
- * the default one (every source, startable and unclaimed work only), at its cap. A hit is the agenda's item when it
- * is the ticket's row (the thought board-sync recorded the ticket on, read by fetch's metadata) or an open item's
- * origin thought (list_items). Priority orders what is relevant; it adds nothing search did not find.
+ * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda takes
+ * its default flags (every source, startable and unclaimed work only) at its cap of 100, read through the store, as
+ * are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer is not
+ * exercised here). A hit is the agenda's item when it is the ticket's row (the thought board-sync recorded the ticket
+ * on, read by its metadata) or an open item's origin thought (list_items). Priority orders what is relevant; it adds
+ * nothing search did not find.
  */
 export const AGENDA_READ: MeasuredRead = {
   name: "agenda", ticket: "SMD-3669",
