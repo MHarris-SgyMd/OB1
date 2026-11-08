@@ -3405,8 +3405,8 @@ if (import.meta.main) {
   // A command line from before v2.0.0 (SMD-3379 PR 1c-4b): refused with what replaced the flag, not as unknown.
   const cli = commandLine("sleep.ts", FLAGS, { hints: HINTS, removed: REMOVED_FLAGS });
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   const capture = cli.int("capture", { absent: DEFAULT_CAPTURE_S, min: 1, max: 86_400 });
   const abortAfter = cli.int("abort-after", { absent: DEFAULT_ABORT_AFTER_S, min: STALL_FLOOR_MS / 1000, max: 86_400 });
   const rescan = cli.int("rescan", { absent: DEFAULT_RESCAN_S, min: 60, max: 86_400 });
