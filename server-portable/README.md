@@ -954,6 +954,43 @@ either faults it, the error naming the table.
 A thought stands in no thread until its subject is found. The extraction worker's rules find a ticket's subject, and its
 `--subjects` sweep asks the judge model for the rest.
 
+## Judged relations (SMD-2726)
+
+The consolidation pass's judge records its word on a pair of near neighbours as a `relation` facet (migration 084):
+`related`, `evolves` (the newer continues the older's work), `duplicate`, or `distinct` (102: look-alikes about
+different subjects). The facet sits on the newer thought, names the older, carries the judge's confidence, and has a
+lineage row at the two texts judged. The reads below show the judge's relations alone (origin `judged`): a work
+thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads`.
+
+- **`relations`** (read scope; REST `GET /v1/relations`) reads one thought's standing judged relations, both sides of
+  each pair, strongest first: by confidence (rounded to six places), then the newest recorded (when the relation was
+  first written, which a re-judge keeping its word doesn't move), then by id. A walk reads each relation standing
+  throughout it once; one closed, replaced or written meanwhile may be missed, or read again under a new id.
+  - `relation` keeps one word. `limit` relations a page, 1–100, default 20; more carry a `cursor`, passed back as
+    `after` with the same `id` and `relation` (a cursor made for another is refused). `total` counts every one under
+    the word.
+  - **Each relation** carries its id and word; the other thought's id, title, `trust`, time and `supersededBy`;
+    `otherIs`, which says whether the other is the older or the newer (so evolves reads "evolves from" on the newer and
+    "evolved into" on the older); the confidence; `judgedAt`, when it was last judged; and `stale`.
+  - **`stale`** is the lineage row's fingerprints no longer those of the two texts: a text was edited since it was
+    judged, so the word may no longer hold. Such a relation stands, shown, until SMD-2726's `rebuild_derived` arm
+    closes it and has the pair judged again: the consolidation pass doesn't judge an edited pair again before then.
+    A relation with no lineage row reads not stale, as `consolidate.ts --list relations` reads it. On stable late on
+    2026-11-07, 1,295 of 6,524 were stale.
+  - **Refusals.** Another tool's cursor, or one made for another id or word, is `REFUSED_CURSOR`. An unknown id is
+    `NOT_FOUND`.
+- **The reads of a thought** carry its relations: `search_thoughts`, `search_thoughts_keyword` and `list_thoughts`
+  the first 5 per result, `fetch` the first 20, with `relationsMore` for the rest. One read per page. A page's labels
+  carry no title: MCP's `↔ Relations:` line names another result on the page by its place (`Result 3`, `item 3`) and
+  any other thought by its id. Titles are fetch's and the `relations` read's, an outside text's marked `[ingested]`.
+  The ChatGPT-shape `search` carries none, and `fetch` carries them only where a thought has some. `relations: null`
+  says they couldn't be read, and the log says why; the read goes on.
+- **MCP's structured value** leaves the titles out of the pages and the `relations` read; fetch's value is its JSON,
+  titles included.
+
+The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds. A role without either
+gives `relations: null` on the reads, and faults the `relations` operation, the error naming the table.
+
 ## Worker-queue write actions
 
 Three **write-scoped** tools act on the same queues (SMD-2132, SMD-2272) — the control
