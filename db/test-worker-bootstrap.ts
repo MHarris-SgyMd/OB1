@@ -474,8 +474,10 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   ok(probed.length === 0, `probedFault: answered the thought's, refused the request's, no answer or the model missing an outage (${probed.map(([s]) => s).join(", ") || "all four"})`);
   ok(requestShapeRefused(own(400, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(422, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(400, "bad words"), /reasoning_effort/)
     && requestShapeRefused(http(400, '{"error":"response_format unsupported"}'), /response_format/)
-    && !requestShapeRefused(own(400, '{"error":{"message":"invalid input","param":"messages"},"input":"a note on response_format"}'), /response_format/),
-    "requestShapeRefused: a 400 naming a field in the provider's own error words, not an echo of the request's input, and no other status (review pass 1)");
+    && !requestShapeRefused(own(400, '{"error":{"message":"invalid input","param":"messages"},"input":"a note on response_format"}'), /response_format/)
+    && requestShapeRefused(own(400, '{"error":{"message":"unsupported parameter","param":"response_format"}}'), /response_format/)
+    && requestShapeRefused(own(400, '{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"reasoning_effort is not supported"}}}'), /reasoning_effort/),
+    "requestShapeRefused: a 400 naming a field in the provider's own error words — its message, its param, a gateway's upstream words — not an echo of the request's input, and no other status (review passes 1 and 2)");
   // Each field of each worker's list, and the answer budget not the judge's (review pass 1, mutant: one field each held).
   const fieldWrong = [
     ...["max_tokens", "max_completion_tokens", "completion tokens", "response_format", "reasoning_effort", "frequency_penalty"].map((f) => [f, EXTRACT_REQUEST_FIELDS, true] as const),

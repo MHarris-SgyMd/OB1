@@ -503,13 +503,21 @@ export const EXTRACT_REQUEST_FIELDS = /max_tokens|max_completion_tokens|completi
  */
 export const JUDGE_REQUEST_FIELDS = /response_format|reasoning_effort/i;
 
-/** A provider's own error words: a JSON body's error message, param and code when it is one, else the words as they came. */
+/**
+ * A provider's own error words: a JSON body's error message, param and code, and a gateway's upstream words
+ * (OpenRouter's `metadata.raw`), when it is one; else the words as they came — a body cut at the callers' 300
+ * characters, which no longer parses, among them (review pass 2).
+ */
 function errorWords(words: string): string {
   try {
     const body = JSON.parse(words) as { error?: unknown; message?: unknown };
     const err = body?.error;
     if (typeof err === "string") return err;
-    if (err && typeof err === "object") return ["message", "param", "code"].map((k) => (err as Record<string, unknown>)[k]).filter((v): v is string => typeof v === "string").join(" ");
+    if (err && typeof err === "object") {
+      const o = err as Record<string, unknown>;
+      const raw = (o.metadata as { raw?: unknown } | undefined)?.raw;
+      return [o.message, o.param, o.code, raw].filter((v): v is string => typeof v === "string").join(" ");
+    }
     if (typeof body?.message === "string") return body.message;
   } catch {
     // Not JSON: the words as they came.

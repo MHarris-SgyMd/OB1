@@ -1746,14 +1746,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // timeout, as a model busy with another worker's call may need it: answered, the thought's;
                 // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
                 // and another worker's outage is joined unprobed (review pass 1).
-                // The model whose call failed is the one probed: the escalation model's refusal is not the
-                // metadata model's to answer (review pass 1).
-                const calledModel = (e as { model?: unknown }).model;
-                const probedModel = WINDOWING.escalateModel && calledModel === WINDOWING.escalateModel ? WINDOWING.escalateModel : cfg.metadataModel;
+                // The model whose call was refused is the one probed — an answered refusal names it; a deadline or a
+                // lost connection names none, probed on the metadata model as before — so the escalation model's
+                // refusal is not the metadata model's to answer (review pass 1).
+                const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
+                let probeWhy: string | null = null;
                 if (act === "probe") {
                   if (stopping) return;
-                  act = outage.reason !== null ? "outage" : probedFault(await probe(TIMEOUT_S * 1000, halt.signal, probedModel));
-                  if (act === "fatal" && probedModel !== cfg.metadataModel) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
+                  if (outage.reason !== null) act = "outage";
+                  else {
+                    const p = await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
+                    act = probedFault(p);
+                    // The refusal is the probe's, said beside the call's (review pass 2).
+                    if (p.state === "refused") probeWhy = p.why;
+                  }
                 }
                 const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
                 if (down) {
@@ -1763,8 +1769,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     // The escalation model gone since the start: the outage probes it (review pass 2).
-                    // So does one it probed for a call it made, unanswered (review pass 1).
-                    if (begins && (escalationGone || probedModel !== cfg.metadataModel) && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
+                    if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                     return;
@@ -1779,8 +1784,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 } else if (act === "fatal") {
                   // Every thought would fail the same way. Stop everyone, mark
                   // nothing, and say what to fix; this row goes back with the
-                  // leases the finally returns.
-                  configError = msg;
+                  // leases the finally returns. The escalation model's call
+                  // refused, its remedy names it (review passes 1 and 2).
+                  if (escalationCalled) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
+                  configError = probeWhy === null ? msg : `${msg} — and a one-token call right after was refused: ${probeWhy.slice(0, 200)}`;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);

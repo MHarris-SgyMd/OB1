@@ -2056,12 +2056,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let configError = null as string | null;
   /** The configError is the decision tier's, its probe refused in an outage wait: the remedy names the tier (SMD-2636 PR 2, review pass 1). */
   let refusedByTier = false;
-  /**
-   * The decision tier's own call refused (SMD-2636 PR 3a, review pass 1): a 4xx from /decide, not a 408 or a 429 — the
-   * tier answering as something else (a model it does not serve, a contract it does not keep). /info, which the probe
-   * reads, could answer past it, so the probe would read it the thought's, failing the pool a thought at a time.
-   */
-  const tierRefused = (e: unknown): boolean => !!jev && e instanceof ProviderError && e.kind === "http" && e.status !== undefined && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429 && e.message.startsWith(`Decision request to ${jev.endpoint.base}/decide`);
 
   /**
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
@@ -2210,7 +2204,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // the thought's; or the request's shape. A run without --follow keeps classifyError's rules.
                 let act: FollowerFault["act"];
                 if (FOLLOW) {
-                  const read = fault(e, { requestFault: (x) => consolidateRequestFault(x) || tierRefused(x) });
+                  const read = fault(e, { requestFault: consolidateRequestFault });
                   act = read.act;
                   streakSuspect ||= read.suspect;
                 } else {
@@ -2221,14 +2215,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // The probe decides, as extract-entities.ts's (a 401, a 404 naming no model, a 400 no rule reads):
                 // answered, the thought's; refused, the request's; no answer, the provider's. A stopping pass hands
                 // the thought back, and another worker's outage is joined unprobed.
+                let probeWhy: string | null = null;
                 if (act === "probe") {
                   if (stopping) return;
                   if (outage.reason !== null) act = "outage";
                   else {
                     const p = await probe(TIMEOUT_S * 1000, halt.signal);
                     act = probedFault(p);
-                    // The tier's probe refused it: the remedy names the tier (review pass 1).
-                    if (p.state === "refused" && p.tier) refusedByTier = true;
+                    if (p.state === "refused") {
+                      // The tier's probe refused it: the remedy names the tier (review pass 1), and the refusal is
+                      // the probe's, said beside the call's (review pass 2).
+                      if (p.tier) refusedByTier = true;
+                      probeWhy = p.why;
+                    }
                   }
                 }
                 const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
@@ -2249,8 +2248,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 } else if (act === "thought") {
                   outcome = { outcome: "failed", error: msg };
                 } else if (act === "fatal") {
-                  if ((e instanceof ProbeRefused && e.tier) || tierRefused(e)) refusedByTier = true;
-                  configError = msg;
+                  if (e instanceof ProbeRefused && e.tier) refusedByTier = true;
+                  configError = probeWhy === null ? msg : `${msg} — and a one-token call right after was refused: ${probeWhy.slice(0, 200)}`;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);

@@ -6953,6 +6953,8 @@ if (want("10e")) {
   let goneServed = false;
   /** While set, the big-stub escalation model answers 403, a project without access to it (SMD-2636 PR 3a). */
   let bigRefused = false;
+  /** While set, the stub-meta metadata model answers the same (SMD-2636 PR 3a, review pass 2). */
+  let metaRefused = false;
   const escModel = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -6962,6 +6964,8 @@ if (want("10e")) {
       if (body.model?.startsWith("gone-stub") && !goneServed) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       // The escalation model's access refused, its calls and probes alike (SMD-2636 PR 3a, review pass 1).
       if (bigRefused && body.model === "big-stub") return new Response(JSON.stringify({ error: { message: "Project does not have access to model big-stub" } }), { status: 403 });
+      // The metadata model's the same, the escalation model served (review pass 2).
+      if (metaRefused && body.model === "stub-meta") return new Response(JSON.stringify({ error: { message: "Project does not have access to model stub-meta" } }), { status: 403 });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -7058,14 +7062,17 @@ if (want("10e")) {
     }
   }
 
-  // SMD-2636 PR 3a, review pass 1: an escalated call refused (a 403, the project without access to the escalation
-  // model) is probed on the escalation model, not the metadata model, which would answer and read every escalating
-  // thought its own: refused, the request's — exit 2, the remedy naming OB1_EXTRACT_ESCALATE_MODEL, nothing failed.
-  // Stopped at 20 s if it runs on.
-  {
+  // SMD-2636 PR 3a, review passes 1 and 2: a call refused is probed on the model it called. An escalated call refused
+  // (a 403, the project without access to the escalation model) is probed on the escalation model, not the metadata
+  // model, which would answer and read every escalating thought its own — refused, exit 2, the remedy naming
+  // OB1_EXTRACT_ESCALATE_MODEL; and with escalation set, a metadata call refused is still probed on the metadata model,
+  // its remedy OB1_METADATA_MODEL. Nothing failed either way. Stopped at 20 s each if they run on.
+  for (const c of [
+    { who: "escalation", set: () => { bigRefused = true; }, text: "The runaway widget report, whose escalation model the project cannot reach.", knob: "OB1_EXTRACT_ESCALATE_MODEL" },
+    { who: "metadata", set: () => { metaRefused = true; }, text: "A plain widget note, whose metadata model the project cannot reach.", knob: "OB1_METADATA_MODEL" },
+  ]) {
     const restorePauses = shortenPauses();
     listedIds = ["stub-meta", "big-stub"];
-    bigRefused = true;
     const lines: string[] = [];
     const stop = new AbortController();
     const guard = setTimeout(() => stop.abort(), 20_000);
@@ -7073,19 +7080,21 @@ if (want("10e")) {
     let refusedNote = "";
     try {
       const running = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "big-stub" }, workers: 1, follow: 1, signal: stop.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
-        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+        .then((x) => { code = x; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await Bun.sleep(1000);
-      refusedNote = await seedOne("The runaway widget report, whose escalation model the project cannot reach.");
+      c.set();
+      refusedNote = await seedOne(c.text);
       await running;
     } finally {
       clearTimeout(guard);
       bigRefused = false;
+      metaRefused = false;
       listedIds = ["stub-meta"];
       restorePauses();
     }
     const refusedRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${refusedNote}::uuid AND work_type LIKE 'extract:%'`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => /OB1_EXTRACT_ESCALATE_MODEL against the provider/.test(l)),
-           `an escalated call refused is probed on the escalation model: refused, exit 2, the remedy naming OB1_EXTRACT_ESCALATE_MODEL, the thought not failed (SMD-2636 PR 3a, review pass 1; exit ${code}, ${refusedRow}; ${lines.filter((l) => /refus|403/.test(l)).join(" | ").slice(0, 240)})`);
+    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => new RegExp(`and ${c.knob} against the provider`).test(l)),
+           `the ${c.who} model's call refused is probed on that model: refused, exit 2, the remedy naming ${c.knob}, the thought not failed (SMD-2636 PR 3a, review passes 1 and 2; exit ${code}, ${refusedRow}; ${lines.filter((l) => /refus|403/.test(l)).join(" | ").slice(0, 240)})`);
   }
 
   escModel.stop(true);
