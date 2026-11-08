@@ -20,7 +20,7 @@ These diagrams are the shared visual language for the OB1 Agent Memory launch. E
 | [recall-lifecycle.mmd](recall-lifecycle.mmd) | Explain pre-task recall and use policy |
 | [writeback-lifecycle.mmd](writeback-lifecycle.mmd) | Explain post-task compact memory creation |
 | [trust-ladder.mmd](trust-ladder.mmd) | Explain why inferred memory is evidence until confirmed |
-| [data-model-er.mmd](data-model-er.mmd) | Engineering view of the sidecar schema |
+| [data-model-er.mmd](data-model-er.mmd) | Engineering view of the sidecar schema, as the public `agent_memory*` tables drew it: since SMD-2690 the same columns are the agent-memory plugin's tables in `plugin_agent_memory`, the prefix dropped and no foreign key to `thoughts` |
 | [review-queue-flow.mmd](review-queue-flow.mmd) | Product view of review and confirmation |
 | [recall-trace-debug.mmd](recall-trace-debug.mmd) | Debug flow for bad agent behavior |
 | [openclaw-plugin-skill-distribution.mmd](openclaw-plugin-skill-distribution.mmd) | OpenClaw plugin plus ClawHub skill publishing story |
