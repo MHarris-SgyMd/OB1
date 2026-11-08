@@ -2014,6 +2014,31 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         await ahead.close();
       }
     }
+    // A subscription whose connection drops while a call heads the queue — a restart, here its backend terminated — is
+    // re-subscribed by Bun, and the head tries its slots again then: a slot let go meanwhile was told to no one (PR
+    // 2c-1). Here it is let go untold, as the subscription drops, so only the re-subscription's try finds it before the
+    // head's own, a second or two on.
+    {
+      const holds = new SQL({ url: URL_, max: 1 });
+      const admin = new SQL({ url: URL_, max: 1 });
+      try {
+        await holds`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
+        let ranAt = 0;
+        const waiting = modelCall(call(), async () => { ranAt = Date.now(); });
+        const listeners = async () => (await admin`SELECT pid FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`) as { pid: number }[];
+        let subs: { pid: number }[] = [];
+        for (let i = 0; i < 100 && subs.length === 0; i++) { await Bun.sleep(10); subs = await listeners(); }
+        await admin`SELECT pg_terminate_backend(${subs[0]?.pid ?? 0})`;
+        const letGo = Date.now();
+        await holds`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
+        await waiting;
+        assert(subs.length === 1 && ranAt - letGo < 900,
+          `a subscription dropped while a call heads the queue is re-subscribed, and the head tries again then: the slot let go untold meanwhile taken ${ranAt - letGo} ms on`);
+      } finally {
+        await holds.close();
+        await admin.close();
+      }
+    }
     // A process that waited, its subscription to the channel live, still ends on its own once its work is done: the
     // subscription closes 2 s after its last wait, as a CLI never uninstalls the hook (PR 2c-1: a live one holds a
     // process open).
