@@ -60,8 +60,10 @@ Knobs:
   least 1 s. A request is refused before its body is read when its
   Content-Length shows it would pass the bound, and otherwise as soon as the
   bytes read pass it. The consolidation pass reads that 503 as an outage: it
-  pauses on its own schedule, not `Retry-After`, and after three pauses records
-  the thought failed and stops the worker. So set `JEV_MAX_QUEUED` above the
+  pauses on its own schedule, not `Retry-After`. After three pauses a one-shot
+  run records the thought failed and stops the worker; a follower probes the
+  tier's `/info`, which answers, and fails the thought on the next 503. Either
+  way a good pair can end failed. So set `JEV_MAX_QUEUED` above the
   decide workers of every brain sharing the tier. In review pass 4 the default,
   8, lost nothing to 10 workers at a 1 s read; a bound of 1 under 4 workers
   failed two good thoughts. A body over `JEV_MAX_QUEUED_BYTES` on its own could
