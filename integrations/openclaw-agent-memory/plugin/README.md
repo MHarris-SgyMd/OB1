@@ -6,6 +6,8 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 
 ## Install
 
+Version 0.2.0 calls the brain's agent-memory plugin (`plugins/agent-memory`, after the brain's 2.0.0). Until 0.2.0 is published on ClawHub, the ClawHub package and the tarball below are 0.1.6, which calls the standalone Agent Memory API server's routes: on a brain with the agent-memory plugin, use the linked install below.
+
 Recommended for OpenClaw `2026.5.7` and newer:
 
 ```bash
@@ -62,7 +64,7 @@ openclaw --profile ob1-agent-memory plugins install . --link
     entries: {
       "nbj-ob1-agent-memory": {
         config: {
-          endpoint: "https://your-host/agent-memory-api",   // the Agent Memory API behind your TLS proxy; http://127.0.0.1:8787/agent-memory-api on the same machine
+          endpoint: "https://your-host/api/v1/plugins/agent-memory",   // the agent-memory plugin's routes behind your TLS proxy; http://127.0.0.1:8000/api/v1/plugins/agent-memory on the brain's machine
           accessKey: {
             source: "file",
             provider: "ob1_agent_memory",

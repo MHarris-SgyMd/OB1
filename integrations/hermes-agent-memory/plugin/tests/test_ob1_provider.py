@@ -106,7 +106,7 @@ def hermes_home(tmp_path):
 def configured(hermes_home, monkeypatch):
     """Provider with endpoint + key wired up but urlopen still mocked elsewhere."""
     (hermes_home / "ob1.json").write_text(json.dumps({
-        "endpoint": "http://test/agent-memory-api",
+        "endpoint": "http://test/api/v1/plugins/agent-memory",
         "workspace_id": "ws-test",
         "project_id": "proj-test",
         "auto_recall": True,
@@ -172,7 +172,7 @@ class TestPureHelpers:
             {
                 "summary": "Always run migrations off-hours.",
                 "use_policy": {"can_use_as_instruction": True, "requires_user_confirmation": False},
-                "updated_at": "2026-05-09T10:00:00Z",
+                "freshness": {"created_at": "2026-05-09T10:00:00Z", "last_confirmed_at": None, "stale_after": None},
             },
             {
                 "summary": "Last build took 12 minutes.",
@@ -183,6 +183,17 @@ class TestPureHelpers:
         assert "Always run migrations" in out
         assert "[instruction]" in out
         assert "[evidence]" in out
+
+    def test_format_recall_context_reads_the_plugins_freshness(self):
+        from datetime import datetime, timezone, timedelta
+        written = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        confirmed = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        out = _format_recall_context([
+            {"summary": "written", "freshness": {"created_at": written, "last_confirmed_at": None}},
+            {"summary": "confirmed", "freshness": {"created_at": written, "last_confirmed_at": confirmed}},
+        ], 5)
+        assert "- [3d ago] written" in out
+        assert "- [2h ago] confirmed" in out
 
     def test_format_recall_context_truncates_to_max(self):
         items = [{"summary": f"memory {i}"} for i in range(10)]
@@ -399,7 +410,7 @@ class TestOB1Client:
         assert body["schema_version"] == _WRITEBACK_SCHEMA_VERSION
         assert body["memory_payload"]["decisions"] == ["chose Postgres"]
         assert body["runtime"]["name"] == "hermes"
-        # runtime must NOT include extra keys (Edge Function rejects them).
+        # runtime carries name and version alone.
         assert set(body["runtime"].keys()) <= {"name", "version"}
         assert body["models_used"][0]["model"] == "anthropic/claude-opus-4.6"
         assert body["task_id"] == "task-1"
@@ -410,21 +421,88 @@ class TestOB1Client:
         client = _OB1Client("http://x", "k", 5.0)
         with patch("urllib.request.urlopen", fake):
             client.report_usage("req-1", used=["m1", "m2"], ignored=["m3"])
-        assert "/recall/req-1/usage" in captured["url"]
+        assert captured["url"] == "http://x/recalls/req-1/usage"
+        assert captured["method"] == "POST"
         body = captured["body"]
         assert body["used_memory_ids"] == ["m1", "m2"]
         assert body["ignored"] == [{"memory_id": "m3"}]
+
+    def test_routes_are_the_plugins(self):
+        # Each call on the agent-memory plugin's route: the reads on GET with
+        # their input in the query string and no body, the writes with a body.
+        client = _OB1Client("http://x/api/v1/plugins/agent-memory/", "k", 5.0)
+        calls = [
+            (lambda: client.recall(workspace_id="w", project_id=None, task_type="t", query="q"), "POST", "/recall", None),
+            (lambda: client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}), "POST", "/writeback", None),
+            (lambda: client.list_memories(workspace_id="w s", project_id="p", review_status="pending", limit=5),
+             "GET", "/memories?workspace_id=w+s&project_id=p&review_status=pending&limit=5", None),
+            (lambda: client.get_review_queue(workspace_id="w"), "GET", "/review-queue?workspace_id=w", None),
+            (lambda: client.get_review_queue(workspace_id="w", project_id="p"), "GET", "/review-queue?workspace_id=w&project_id=p", None),
+            (lambda: client.review_memory("m/1", action="confirm"), "PATCH", "/memories/m%2F1/review", {"action": "confirm", "actor_label": "ob1-plugin"}),
+            (lambda: client.get_recall_trace("req-1"), "GET", "/recalls/req-1", None),
+        ]
+        for call, method, path, body in calls:
+            captured, fake = self._capture_request()
+            with patch("urllib.request.urlopen", fake):
+                call()
+            assert captured["method"] == method, path
+            assert captured["url"] == "http://x/api/v1/plugins/agent-memory" + path
+            if method == "GET":
+                assert captured["body"] is None, path
+                assert "content-type" not in {k.lower() for k in captured["headers"]}, path
+            elif body is not None:
+                assert captured["body"] == body, path
+
+    def test_review_memory_edit_sends_content_and_summary(self):
+        captured, fake = self._capture_request()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.review_memory("m1", action="edit", notes="n", actor_label="hermes:a",
+                                 content="new text", summary="new summary")
+        # The plugin refuses a field it does not know: the reviewer is actor_label.
+        assert captured["body"] == {"action": "edit", "actor_label": "hermes:a", "notes": "n",
+                                    "content": "new text", "summary": "new summary"}
 
     def test_http_error_is_raised(self):
         import urllib.error
         client = _OB1Client("http://x", "k", 5.0)
         err = urllib.error.HTTPError(
             url="http://x/recall", code=400, msg="Bad",
-            hdrs=None, fp=io.BytesIO(b'{"error":"nope"}'),
+            hdrs=None, fp=io.BytesIO(b'{"code":"REFUSED_INPUT","issues":[]}'),
         )
         with patch("urllib.request.urlopen", side_effect=err):
-            with pytest.raises(RuntimeError, match="HTTP 400"):
+            with pytest.raises(RuntimeError, match="HTTP 400 REFUSED_INPUT"):
                 client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+
+    def test_refusal_carries_code_message_and_retry_after(self):
+        import email.message
+        import urllib.error
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = "5"
+        client = _OB1Client("http://x", "k", 5.0)
+        err = urllib.error.HTTPError(
+            url="http://x/recall", code=503, msg="Unavailable", hdrs=hdrs,
+            fp=io.BytesIO(b'{"code":"PROVIDER_UNAVAILABLE","message":"the brain\'s embedding provider did not answer"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(ob1_module.OB1RequestError) as caught:
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+        assert caught.value.status == 503
+        assert caught.value.code == "PROVIDER_UNAVAILABLE"
+        assert caught.value.retry_after == "5"
+        assert "embedding provider did not answer" in str(caught.value)
+
+    def test_non_json_error_body_is_kept(self):
+        import urllib.error
+        client = _OB1Client("http://x", "k", 5.0)
+        err = urllib.error.HTTPError(
+            url="http://x/recall", code=502, msg="Bad Gateway",
+            hdrs=None, fp=io.BytesIO(b"<html>bad gateway</html>"),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(ob1_module.OB1RequestError, match="HTTP 502 <html>bad gateway</html>") as caught:
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+        assert caught.value.code is None
 
 
 # ---------------------------------------------------------------------------
@@ -440,39 +518,36 @@ class TestProviderLifecycle:
     def test_inactive_without_key(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is False
 
     def test_inactive_without_endpoint(self, hermes_home, monkeypatch):
         monkeypatch.setenv("OPENBRAIN_KEY", "k")
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(hermes_home))
+        p.initialize(session_id="s", hermes_home=str(hermes_home))
         assert p._active is False
 
     def test_active_when_both_present(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={"ok": True}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is True
         assert p._workspace_id == "ws-test"
         assert p._project_id == "proj-test"
 
     def test_subagent_context_disables_writes(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured),
-                         agent_context="subagent")
+        p.initialize(session_id="s", hermes_home=str(configured),
+                     agent_context="subagent")
         assert p._write_enabled is False
 
-    def test_health_failure_keeps_provider_active(self, configured):
-        # Backend health probe failing shouldn't disable the provider —
-        # the agent should still be able to attempt operations.
+    def test_initialize_makes_no_request(self, configured):
+        # The plugin has no keyless health route: initialize() asks nothing,
+        # and the provider is active on its config alone.
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", side_effect=RuntimeError("502")):
+        with patch("urllib.request.urlopen") as mock_open:
             p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is True
+        mock_open.assert_not_called()
 
     def test_save_config_persists_only_known_keys(self, hermes_home):
         p = OB1MemoryProvider()
@@ -500,8 +575,7 @@ class TestOnTurnStart:
 
     def test_caches_kwargs(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         p.on_turn_start(3, "msg", model="anthropic/claude-opus-4.6", remaining_tokens=1200)
         assert p._last_turn_meta["model"] == "anthropic/claude-opus-4.6"
         assert p._last_turn_meta["turn_number"] == 3
@@ -509,8 +583,7 @@ class TestOnTurnStart:
 
     def test_resolve_model_provider_uses_cached_kwargs(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         p._last_turn_meta = {"model": "openrouter/stepfun/step-3.5-flash"}
         out = p._resolve_model_provider()
         assert out["model"] == "openrouter/stepfun/step-3.5-flash"
@@ -523,8 +596,7 @@ class TestOnTurnStart:
             "model:\n  default: anthropic/claude-opus-4.6\n  provider: openrouter\n"
         )
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         out = p._resolve_model_provider()
         assert out["model"] == "anthropic/claude-opus-4.6"
         assert out["provider"] == "openrouter"
@@ -534,8 +606,7 @@ class TestPrefetchAndCache:
 
     def _patched(self, configured) -> OB1MemoryProvider:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         return p
 
     def test_inactive_prefetch_returns_empty(self, hermes_home):
@@ -653,8 +724,7 @@ class TestSyncTurn:
 
     def _patched(self, configured) -> Tuple[OB1MemoryProvider, List[Dict[str, Any]]]:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -715,8 +785,7 @@ class TestSessionEnd:
 
     def _patched(self, configured) -> Tuple[OB1MemoryProvider, List[Dict[str, Any]]]:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -743,8 +812,7 @@ class TestSessionEnd:
     def test_skips_when_inactive(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         # Active should be False without key
         assert p._active is False
         p.on_session_end([{"role": "user", "content": "We decided to do X."}])
@@ -755,8 +823,7 @@ class TestPreCompress:
 
     def test_returns_summary_string_with_findings(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -777,8 +844,7 @@ class TestPreCompress:
 
     def test_returns_empty_when_no_findings(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         # Trivial messages with no extractable findings
         out = p.on_pre_compress([{"role": "user", "content": "ok"}])
         assert out == ""
@@ -794,8 +860,7 @@ class TestTools:
     @pytest.fixture
     def active(self, configured) -> OB1MemoryProvider:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         return p
 
     def test_returns_seven_schemas(self, active):
@@ -879,6 +944,17 @@ class TestTools:
         kwargs = mock.call_args.kwargs
         assert kwargs["action"] == "confirm"
         assert kwargs["notes"] == "looks good"
+        assert kwargs["actor_label"] == "hermes:default"
+
+    def test_review_memory_edit_needs_content_or_summary(self, active):
+        with patch.object(active._client, "review_memory") as mock:
+            out = active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit"})
+        assert "content, summary or both" in out
+        mock.assert_not_called()
+        with patch.object(active._client, "review_memory", return_value={"memory": {}}) as mock:
+            active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit", "content": "new"})
+        assert mock.call_args.kwargs["content"] == "new"
+        assert mock.call_args.kwargs["summary"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -894,8 +970,7 @@ class TestSystemPromptBlock:
 
     def test_lists_tools_and_workspace_when_active(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         block = p.system_prompt_block()
         assert "OpenBrain" in block
         assert "ws-test" in block

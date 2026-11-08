@@ -1,6 +1,6 @@
 # NBJ OB1 Agent Memory for OpenClaw
 
-> OpenClaw plugin package for the runtime-neutral OB1 Agent Memory API.
+> OpenClaw plugin package for the runtime-neutral OB1 Agent Memory contract, served by the brain's [agent-memory plugin](../../plugins/agent-memory/).
 
 ```mermaid
 flowchart LR
@@ -8,9 +8,9 @@ flowchart LR
   Plugin["OpenClaw plugin<br/>typed tools"] --> Agent
   Agent --> Recall["openbrain_recall"]
   Agent --> Writeback["openbrain_writeback"]
-  Recall --> API["OB1 Agent Memory API"]
+  Recall --> API["Brain agent-memory plugin<br/>/api/v1/plugins/agent-memory"]
   Writeback --> API
-  API --> OB1["OB1 thoughts + agent memory sidecars"]
+  API --> OB1["OB1 thoughts + the plugin's memory tables"]
   API --> Review["Review queue + trace"]
 ```
 
@@ -23,7 +23,8 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A brain on 2.0.0, the last release with the Agent Memory API server and its `schemas/agent-memory` tables, with both deployed as 2.0.0's READMEs say (tag `v2.0.0`, `integrations/agent-memory-api/`). This client calls that server's routes; the brain's [agent-memory plugin](../../plugins/agent-memory/), which replaces them after 2.0.0, does not answer them until SMD-2690 PR 2b moves this client onto it.
+- The brain's [agent-memory plugin](../../plugins/agent-memory/) turned on, with `/api` published (its README's "Turn it on"). A brain on 2.0.0 or earlier runs the standalone Agent Memory API server instead, whose routes this client no longer calls: keep version 0.1.6 of this plugin there, or move to the agent-memory plugin first (its README's "Moving from the standalone server").
+- A key with write scope for OpenClaw (the plugin README's "Prerequisites"): recall and the lists read, usage and review write. A capture-only key can write back alone, and is answered each memory's ids alone.
 - OpenClaw installed
 - Node.js 20+
 
@@ -34,8 +35,8 @@ OPENCLAW AGENT MEMORY -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM OB1
-  Agent Memory API URL:   ____________
-  MCP Access Key:         ____________
+  Agent-memory plugin URL:  https://<host>/api/v1/plugins/agent-memory
+  Brain key (write scope):  ____________
 
 OPENCLAW
   Plugin config path:     ____________
@@ -49,9 +50,9 @@ OPENCLAW
 
 ![Step 1](https://img.shields.io/badge/Step_1-Prepare_OB1_Agent_Memory-1E88E5?style=for-the-badge)
 
-Apply the schema and deploy the API.
+Turn the brain's agent-memory plugin on and publish `/api`, as [its README](../../plugins/agent-memory/README.md) says ("Turn it on"), and make OpenClaw a key with write scope. The plugin's routes are `https://<host>/api/v1/plugins/agent-memory` through your TLS proxy or tunnel, or `http://127.0.0.1:8000/api/v1/plugins/agent-memory` on the brain's own machine.
 
-**Done when:** `GET /health` on the Agent Memory API returns `ok: true`.
+**Done when:** the write-back and recall in the plugin README's "Check it" answer with your key.
 
 ![Step 2](https://img.shields.io/badge/Step_2-Install_the_OpenClaw_Plugin-1E88E5?style=for-the-badge)
 
@@ -66,7 +67,7 @@ cd ../../..
 openclaw --profile ob1-agent-memory plugins install integrations/openclaw-agent-memory/plugin --link
 ```
 
-For public distribution, install the live ClawHub package:
+For public distribution, install the live ClawHub package once it is 0.2.0 or later. Until 0.2.0 is published there, the ClawHub package (0.1.6) calls the standalone server's routes, which the agent-memory plugin does not answer: use the linked install above.
 
 ```bash
 openclaw plugins install clawhub:@natebjones/ob1-agent-memory
@@ -97,7 +98,10 @@ Review [Safe Agent Memory and Provenance](../../docs/safe-agent-memory-provenanc
 ## Troubleshooting
 
 **Issue: Plugin loads but tools fail auth**
-Solution: Confirm the plugin config has the correct `endpoint` and `accessKey`. Prefer an OpenClaw SecretRef backed by a file, env, or exec provider so the access key does not live in plaintext config.
+Solution: Confirm the plugin config has the correct `endpoint` (ending `/api/v1/plugins/agent-memory`) and `accessKey`. Prefer an OpenClaw SecretRef backed by a file, env, or exec provider so the access key does not live in plaintext config. A `403 FORBIDDEN` is a key whose scope does not reach the tool: recall and the lists read, usage and review write.
+
+**Issue: A tool fails with a code such as `REFUSED_INPUT` or `NO_SUCH_MEMORY`**
+Solution: Each failure names the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`), which [its README's Troubleshooting](../../plugins/agent-memory/README.md#troubleshooting) explains. A `404` on every tool is an `endpoint` that is not the plugin's routes: a ClawHub 0.1.6 install, or the old server's URL.
 
 **Issue: Plugin loads but lists no tools**
 Solution: Confirm [`plugin/openclaw.plugin.json`](./plugin/openclaw.plugin.json) declares `contracts.tools` for every registered tool. Current OpenClaw builds reject tool registration without that manifest contract.

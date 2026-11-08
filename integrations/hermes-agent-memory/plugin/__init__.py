@@ -1,15 +1,16 @@
 """OB1 (OpenBrain) memory provider for Hermes Agent.
 
 Connects Hermes agents to Nate Jones' OpenBrain governed memory system.
-The backend is a Supabase Edge Function ("agent-memory-api") that exposes
-the OB1 v1 memory contract: recall, writeback, review queue, recall traces,
-usage reporting, inspection.
+The backend is the brain's agent-memory plugin (plugins/agent-memory), whose
+REST routes under /api/v1/plugins/agent-memory serve the OB1 v1 memory
+contract: recall, writeback, review queue, recall traces, usage reporting,
+listing. A refusal is answered as its code (`code` in the JSON body).
 
 Provides:
 - Auto-recall before every LLM turn (via `prefetch`)
 - Auto-writeback after every turn (via `sync_turn`)
 - Token / model / agent tracking via `on_turn_start` kwargs
-- Six explicit tools for direct memory ops (search, store, recall_trace, ...)
+- Seven explicit tools for direct memory ops (search, store, recall_trace, ...)
 - Setup-wizard support via get_config_schema / save_config
 
 Config:
@@ -32,6 +33,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,9 +58,9 @@ _DEFAULT_CONFIDENCE = 0.7
 # falls back to a sync recall. Hermes turns are typically <60s.
 _PREFETCH_TTL_SECONDS = 90.0
 
-# OB1 Edge Function accepts two schema_version literals per endpoint —
+# The plugin accepts two schema_version literals per route —
 # we use the generic "agent_memory" variants since this is a Hermes runtime
-# (not OpenClaw). See integrations/agent-memory-api/index.ts.
+# (not OpenClaw). See plugins/agent-memory/index.ts.
 _RECALL_SCHEMA_VERSION = "openbrain.agent_memory.recall.v1"
 _WRITEBACK_SCHEMA_VERSION = "openbrain.agent_memory.writeback.v1"
 
@@ -92,7 +94,7 @@ def _default_config() -> dict:
         # Default-on: an agent's own writes land as review_status="pending" by
         # default (governance); recall must include unconfirmed or the agent
         # never sees its own prior memories. Pending memories are still ranked
-        # lower than confirmed ones via the Edge Function's scoring.
+        # lower than confirmed ones by the plugin's ranking.
         "include_unconfirmed_recall": True,
         "require_review_by_default": True,
         # Multi-tenant per-agent workspace (mirrors the OpenClaw plugin's
@@ -398,7 +400,10 @@ def _format_recall_context(memories: List[Dict[str, Any]], max_results: int) -> 
         if not summary:
             continue
         bits: List[str] = []
-        rel = _format_relative_time(item.get("updated_at") or item.get("created_at") or "")
+        # The plugin's memory carries its times under freshness: when a person
+        # last confirmed it, else when it was written.
+        freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+        rel = _format_relative_time(freshness.get("last_confirmed_at") or freshness.get("created_at") or "")
         if rel:
             bits.append(f"[{rel}]")
         policy = item.get("use_policy") or {}
@@ -426,11 +431,42 @@ def _format_recall_context(memories: List[Dict[str, Any]], max_results: int) -> 
 # HTTP client (sync, urllib, no extra deps)
 # ---------------------------------------------------------------------------
 
-class _OB1Client:
-    """Thin sync HTTP client for the OB1 Agent Memory API.
+class OB1RequestError(RuntimeError):
+    """A route that answered other than 2xx: its HTTP status, and the plugin's
+    refusal code when the body names one (``NO_SUCH_MEMORY``,
+    ``UNSAFE_WRITEBACK``, ``PROVIDER_UNAVAILABLE``, ...). ``retry_after`` is
+    the Retry-After a 503 the caller may retry carries, in seconds."""
 
-    Uses x-brain-key header (NOT Authorization Bearer) per the OB1 contract.
-    All methods raise on transport errors; callers wrap appropriately.
+    def __init__(self, method: str, path: str, status: int, body: str,
+                 retry_after: Optional[str] = None):
+        self.status = status
+        self.body = body
+        self.retry_after = retry_after
+        self.code: Optional[str] = None
+        detail = ""
+        try:
+            parsed = json.loads(body) if body else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            code = parsed.get("code")
+            if isinstance(code, str):
+                self.code = code
+            message = parsed.get("message")
+            detail = f": {message}" if isinstance(message, str) and message else ""
+        what = self.code or body[:300]
+        super().__init__(f"OB1 {method} {path} failed: HTTP {status} {what}{detail}".rstrip())
+
+
+class _OB1Client:
+    """Thin sync HTTP client for the brain's agent-memory plugin.
+
+    ``endpoint`` is the plugin's REST base, ``https://<host>/api/v1/plugins/agent-memory``
+    (the stack's proxy publishes /api with deploy/compose.api-public.yaml).
+    Uses the x-brain-key header, which the REST core reads; it reads no
+    ``?key=``. All methods raise on transport errors and on a refusal
+    (``OB1RequestError``, its ``code`` the plugin's); callers wrap
+    appropriately.
     """
 
     def __init__(self, endpoint: str, access_key: str, timeout: float):
@@ -438,30 +474,31 @@ class _OB1Client:
         self._access_key = access_key
         self._timeout = timeout
 
-    def _request(self, method: str, path: str, *, body: Optional[dict] = None) -> dict:
+    def _request(self, method: str, path: str, *, body: Optional[dict] = None,
+                 query: Optional[Dict[str, Any]] = None) -> dict:
         url = f"{self._endpoint}{path}"
+        if query:
+            url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(
-            url,
-            data=data,
-            method=method,
-            headers={
-                "Content-Type": "application/json",
-                "x-brain-key": self._access_key,
-            },
-        )
+        headers = {"x-brain-key": self._access_key}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-            raise RuntimeError(f"OB1 {method} {path} failed: HTTP {e.code} {err_body[:300]}") from e
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            raise OB1RequestError(method, path, e.code, err_body, retry_after) from e
+
+    @staticmethod
+    def _id(value: str) -> str:
+        # A path segment: an id with a slash or a ? in it must not become another route.
+        return urllib.parse.quote(str(value), safe="")
 
     # ---- API contract methods ------------------------------------------
-
-    def health(self) -> dict:
-        return self._request("GET", "/health")
 
     def recall(self, *, workspace_id: str, project_id: Optional[str], task_type: str,
                query: str, scope: Optional[dict] = None,
@@ -470,12 +507,10 @@ class _OB1Client:
                task_id: Optional[str] = None,
                flow_id: Optional[str] = None,
                model_intent: Optional[dict] = None) -> dict:
-        # The Edge Function's writeback path stores memories with
-        # visibility="personal" by default, and its scopeMatches() filter at
-        # /recall drops personal memories unless scope.visibility="personal" is
-        # passed. So we always set scope.visibility="personal" to match what
-        # we wrote — without this, recall returns zero results despite
-        # match_thoughts finding the thought correctly.
+        # A memory written back with no project is personal, and the plugin's
+        # recall leaves personal memories out unless scope.visibility is
+        # "personal". So we always set it, to find what we wrote — without it a
+        # recall with no project configured answers nothing.
         body: dict = {
             "schema_version": _RECALL_SCHEMA_VERSION,
             "workspace_id": workspace_id,
@@ -493,7 +528,7 @@ class _OB1Client:
         if task_type:
             body["task_type"] = task_type
         if runtime:
-            body["runtime"] = runtime  # {name, version?} only — no other fields allowed
+            body["runtime"] = runtime  # {name, version?}
         if model_intent:
             body["model_intent"] = model_intent
         if task_id:
@@ -512,6 +547,8 @@ class _OB1Client:
                   flow_id: Optional[str] = None,
                   step_id: Optional[str] = None,
                   idempotency_key: Optional[str] = None) -> dict:
+        # Answered {schema_version, memories}: each memory whole under a write
+        # key, its memory_id and thought_id alone under a capture-only key.
         body: dict = {
             "schema_version": _WRITEBACK_SCHEMA_VERSION,
             "workspace_id": workspace_id,
@@ -520,7 +557,7 @@ class _OB1Client:
         if project_id:
             body["project_id"] = project_id
         if runtime:
-            body["runtime"] = runtime  # {name, version?} only
+            body["runtime"] = runtime  # {name, version?}
         if models_used:
             body["models_used"] = models_used  # [{provider, model, role}]
         if source_refs:
@@ -539,38 +576,44 @@ class _OB1Client:
 
     def report_usage(self, request_id: str, *, used: List[str],
                      ignored: List[str]) -> dict:
-        # API expects used_memory_ids: [] and ignored: [{memory_id, reason?}].
+        # Takes used_memory_ids: [] and ignored: [{memory_id, reason?}]; answers
+        # {recorded: {used, ignored}}, the memories it marked.
         body = {
             "used_memory_ids": used,
             "ignored": [{"memory_id": mid} for mid in ignored],
         }
-        return self._request("POST", f"/recall/{request_id}/usage", body=body)
+        return self._request("POST", f"/recalls/{self._id(request_id)}/usage", body=body)
 
     def list_memories(self, *, workspace_id: str, project_id: Optional[str] = None,
                       review_status: Optional[str] = None, limit: int = 20) -> dict:
-        # Encoded as POST body to avoid URL-encoding issues with workspace ids.
-        body: dict = {"workspace_id": workspace_id, "limit": limit}
-        if project_id:
-            body["project_id"] = project_id
-        if review_status:
-            body["review_status"] = review_status
-        return self._request("POST", "/memories/list", body=body)
+        # Answers {memories, count}, newest first.
+        return self._request("GET", "/memories", query={
+            "workspace_id": workspace_id, "project_id": project_id,
+            "review_status": review_status, "limit": limit,
+        })
 
     def get_review_queue(self, *, workspace_id: str, project_id: Optional[str] = None) -> dict:
-        body: dict = {"workspace_id": workspace_id}
-        if project_id:
-            body["project_id"] = project_id
-        return self._request("POST", "/memories/review", body=body)
+        # Answers {memories}: those still waiting for a person's confirmation.
+        return self._request("GET", "/review-queue", query={
+            "workspace_id": workspace_id, "project_id": project_id,
+        })
 
     def review_memory(self, memory_id: str, *, action: str, notes: Optional[str] = None,
-                      reviewer: str = "ob1-plugin") -> dict:
-        body: dict = {"action": action, "reviewer": reviewer}
+                      actor_label: str = "ob1-plugin", content: Optional[str] = None,
+                      summary: Optional[str] = None) -> dict:
+        # Answers {memory}. An edit gives content, summary or both.
+        body: dict = {"action": action, "actor_label": actor_label}
         if notes:
             body["notes"] = notes
-        return self._request("PATCH", f"/memories/{memory_id}/review", body=body)
+        if content:
+            body["content"] = content
+        if summary:
+            body["summary"] = summary
+        return self._request("PATCH", f"/memories/{self._id(memory_id)}/review", body=body)
 
     def get_recall_trace(self, request_id: str) -> dict:
-        return self._request("GET", f"/recall-traces/{request_id}")
+        # Answers {trace, items}: a recall made under a write key.
+        return self._request("GET", f"/recalls/{self._id(request_id)}")
 
 
 # ---------------------------------------------------------------------------
@@ -646,13 +689,15 @@ LIST_REVIEW_SCHEMA = {
 
 REVIEW_MEMORY_SCHEMA = {
     "name": "ob1_review_memory",
-    "description": "Confirm, reject, or annotate a memory in the review queue.",
+    "description": "Confirm, reject, edit, or mark evidence-only a memory in the review queue. An edit gives content, summary or both.",
     "parameters": {
         "type": "object",
         "properties": {
             "memory_id": {"type": "string"},
             "action": {"type": "string", "enum": ["confirm", "reject", "edit", "evidence_only"]},
             "notes": {"type": "string"},
+            "content": {"type": "string", "description": "edit: the memory's new text."},
+            "summary": {"type": "string", "description": "edit: the memory's new summary."},
         },
         "required": ["memory_id", "action"],
     },
@@ -740,7 +785,7 @@ class OB1MemoryProvider(MemoryProvider):
         return [
             {
                 "key": "endpoint",
-                "description": "OB1 Agent Memory API URL (e.g. http://127.0.0.1:8787/agent-memory-api)",
+                "description": "The brain's agent-memory plugin routes (e.g. https://<host>/api/v1/plugins/agent-memory)",
                 "secret": False,
                 "required": True,
             },
@@ -848,12 +893,8 @@ class OB1MemoryProvider(MemoryProvider):
                     access_key=self._access_key,
                     timeout=self._api_timeout,
                 )
-                # Optional health probe — log warning if unreachable but keep
-                # provider active so the agent can still operate.
-                try:
-                    self._client.health()
-                except Exception:
-                    logger.warning("OB1 endpoint health check failed (continuing)", exc_info=True)
+                # No health probe: the plugin has no keyless route to ask, and
+                # a first recall or write-back that fails is logged as it fails.
             except Exception:
                 logger.warning("OB1 client initialization failed", exc_info=True)
                 self._active = False
@@ -936,8 +977,8 @@ class OB1MemoryProvider(MemoryProvider):
         if not q:
             return "", None
         try:
-            # visibility="personal" matches the Edge Function writeback default —
-            # without it, recall drops every personal-visibility memory we wrote.
+            # visibility="personal": a memory written back with no project is
+            # personal, and without it recall drops every one of those we wrote.
             scope: Dict[str, Any] = {
                 "visibility": "personal",
                 "project_only": bool(self._project_id),
@@ -1402,8 +1443,13 @@ class OB1MemoryProvider(MemoryProvider):
             return tool_error("memory_id and action are required")
         if action not in ("confirm", "reject", "edit", "evidence_only"):
             return tool_error(f"Invalid action: {action}")
+        content = str(args.get("content") or "").strip() or None
+        summary = str(args.get("summary") or "").strip() or None
+        if action == "edit" and not content and not summary:
+            return tool_error("an edit gives content, summary or both")
         response = self._client.review_memory(
-            memory_id, action=action, notes=args.get("notes"), reviewer=f"hermes:{self._agent_identity}"
+            memory_id, action=action, notes=args.get("notes"),
+            actor_label=f"hermes:{self._agent_identity}", content=content, summary=summary,
         )
         return json.dumps(response)
 

@@ -49,118 +49,12 @@ function toolResult(value: unknown) {
   };
 }
 
-const nullableString = Type.Union([Type.String(), Type.Literal(null)]);
-const optionalNullableString = Type.Optional(nullableString);
-const stringArrayRecord = Type.Record(Type.String(), Type.Array(Type.String()));
-
-const channelParameters = Type.Object({
-  kind: optionalNullableString,
-  id: optionalNullableString,
-  thread_id: optionalNullableString,
-});
-
-const runtimeParameters = Type.Object({
-  name: Type.Optional(Type.String()),
-  version: optionalNullableString,
-});
-
-const modelIntentParameters = Type.Object({
-  provider: optionalNullableString,
-  model: optionalNullableString,
-});
-
-const recallParameters = Type.Object({
-  schema_version: Type.Optional(Type.Union([
-    Type.Literal("openbrain.agent_memory.recall.v1"),
-    Type.Literal("openbrain.openclaw.recall.v1"),
-  ])),
-  workspace_id: Type.Optional(Type.String()),
-  project_id: optionalNullableString,
-  task_id: optionalNullableString,
-  flow_id: optionalNullableString,
-  task_type: optionalNullableString,
-  channel: Type.Optional(channelParameters),
-  runtime: Type.Optional(runtimeParameters),
-  model_intent: Type.Optional(modelIntentParameters),
-  query: Type.String(),
-  entities: Type.Optional(stringArrayRecord),
-  scope: Type.Optional(Type.Object({
-    visibility: optionalNullableString,
-    project_only: Type.Optional(Type.Boolean()),
-    include_unconfirmed: Type.Optional(Type.Boolean()),
-    include_stale: Type.Optional(Type.Boolean()),
-  })),
-  limits: Type.Optional(Type.Object({
-    max_items: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })),
-    max_tokens: Type.Optional(Type.Number({ minimum: 256, maximum: 20000 })),
-    recency_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)])),
-  })),
-  sensitivity: Type.Optional(Type.Record(Type.String(), Type.Boolean())),
-});
-
-const memoryPayloadParameters = Type.Object({
-  decisions: Type.Optional(Type.Array(Type.String())),
-  outputs: Type.Optional(Type.Array(Type.String())),
-  lessons: Type.Optional(Type.Array(Type.String())),
-  constraints: Type.Optional(Type.Array(Type.String())),
-  unresolved_questions: Type.Optional(Type.Array(Type.String())),
-  next_steps: Type.Optional(Type.Array(Type.String())),
-  failures: Type.Optional(Type.Array(Type.String())),
-  artifacts: Type.Optional(Type.Array(Type.Object({
-    kind: Type.String(),
-    uri: Type.String(),
-    description: optionalNullableString,
-  }))),
-  entities: Type.Optional(stringArrayRecord),
-});
-
-const writebackParameters = Type.Object({
-  schema_version: Type.Optional(Type.Union([
-    Type.Literal("openbrain.agent_memory.writeback.v1"),
-    Type.Literal("openbrain.openclaw.writeback.v1"),
-  ])),
-  workspace_id: Type.Optional(Type.String()),
-  project_id: optionalNullableString,
-  task_id: optionalNullableString,
-  flow_id: optionalNullableString,
-  step_id: optionalNullableString,
-  idempotency_key: optionalNullableString,
-  content_hash: optionalNullableString,
-  channel: Type.Optional(channelParameters),
-  runtime: Type.Optional(runtimeParameters),
-  models_used: Type.Optional(Type.Array(Type.Object({
-    provider: Type.String(),
-    model: Type.String(),
-    role: Type.String(),
-  }))),
-  source_refs: Type.Optional(Type.Array(Type.Object({
-    kind: Type.String(),
-    uri: optionalNullableString,
-    title: optionalNullableString,
-    timestamp: optionalNullableString,
-  }))),
-  memory_payload: memoryPayloadParameters,
-  provenance: Type.Optional(Type.Object({
-    default_status: Type.Optional(Type.Union([
-      Type.Literal("observed"),
-      Type.Literal("inferred"),
-      Type.Literal("user_confirmed"),
-      Type.Literal("imported"),
-      Type.Literal("generated"),
-    ])),
-    confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-    requires_review: Type.Optional(Type.Boolean()),
-  })),
-  retention: Type.Optional(Type.Object({
-    ttl_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)])),
-    stale_after_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)])),
-  })),
-  visibility: Type.Optional(Type.Object({
-    workspace: optionalNullableString,
-    project: optionalNullableString,
-    channel: optionalNullableString,
-  })),
-});
+/** When a person last confirmed a memory, else when it was written: the plugin's memory carries its times under freshness. */
+function updatedAtOf(m: any): string | undefined {
+  const f = m?.freshness;
+  const at = f?.last_confirmed_at ?? f?.created_at;
+  return typeof at === "string" ? at : undefined;
+}
 
 function registerTool(api: any, tool: { name: string; label: string; description: string; parameters: unknown; run: (client: AgentMemoryClient, input: any) => Promise<unknown> }) {
   api.registerTool({
@@ -237,7 +131,7 @@ export default definePluginEntry({
     registerTool(api, {
       name: "openbrain_review_memory",
       label: "NBJ OB1 review memory",
-      description: "Confirm, edit, evidence-only, restrict, stale, dispute, supersede, or reject a memory.",
+      description: "Confirm, edit, evidence-only, restrict, stale, dispute, merge, supersede, or reject a memory. An edit gives content, summary or both; merge and supersede name related_memory_id; restrict_scope narrows to visibility.",
       parameters: Type.Object({
         memory_id: Type.String(),
         action: Type.Union([
@@ -251,12 +145,17 @@ export default definePluginEntry({
           Type.Literal("dispute"),
           Type.Literal("supersede"),
         ]),
-        actor_id: Type.Optional(Type.String()),
         actor_label: Type.Optional(Type.String()),
         notes: Type.Optional(Type.String()),
         content: Type.Optional(Type.String()),
         summary: Type.Optional(Type.String()),
-        visibility: Type.Optional(Type.String()),
+        visibility: Type.Optional(Type.Union([
+          Type.Literal("personal"),
+          Type.Literal("channel"),
+          Type.Literal("project"),
+          Type.Literal("workspace"),
+          Type.Literal("organization"),
+        ])),
         related_memory_id: Type.Optional(Type.String()),
       }),
       run: (client, input) => {
@@ -360,18 +259,20 @@ export default definePluginEntry({
               : policy?.can_use_as_evidence
                 ? "evidence"
                 : undefined;
+            const id = typeof m?.memory_id === "string" ? m.memory_id : undefined;
             return {
               corpus: "openbrain",
-              path: `openbrain://memory/${m?.id ?? i}`,
+              path: `openbrain://memory/${id ?? i}`,
               title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : undefined,
               kind: "memory",
-              score: typeof m?.score === "number" ? m.score : Math.max(0, 1 - i / Math.max(memories.length, 1)),
+              // The plugin answers memories in rank order, with no score: the rank stands in for one.
+              score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
               snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
-              id: typeof m?.id === "string" ? m.id : undefined,
+              id,
               provenanceLabel: provenance,
               source: "openbrain.agent_memory",
               sourceType: "openbrain.agent_memory",
-              updatedAt: typeof m?.updated_at === "string" ? m.updated_at : undefined,
+              updatedAt: updatedAtOf(m),
             };
           });
         },
@@ -387,7 +288,7 @@ export default definePluginEntry({
           }
           let memory: any;
           try {
-            memory = await client.inspectMemory(id);
+            memory = (await client.inspectMemory(id))?.memory;
           } catch {
             return null;
           }
@@ -407,10 +308,10 @@ export default definePluginEntry({
             content,
             fromLine: 1,
             lineCount: content.split("\n").length,
-            id: typeof (memory as any)?.id === "string" ? (memory as any).id : id,
+            id: typeof (memory as any)?.memory_id === "string" ? (memory as any).memory_id : id,
             provenanceLabel: provenance,
             sourceType: "openbrain.agent_memory",
-            updatedAt: typeof (memory as any)?.updated_at === "string" ? (memory as any).updated_at : undefined,
+            updatedAt: updatedAtOf(memory),
           };
         },
       });

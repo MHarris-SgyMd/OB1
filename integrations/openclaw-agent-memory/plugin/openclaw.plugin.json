@@ -22,10 +22,10 @@
     "properties": {
       "endpoint": {
         "type": "string",
-        "description": "Base URL for the OB1 Agent Memory API, without a trailing slash."
+        "description": "The brain's agent-memory plugin routes, https://<host>/api/v1/plugins/agent-memory."
       },
       "accessKey": {
-        "description": "OB1 Agent Memory access key. Prefer an OpenClaw SecretRef so the key does not live in plaintext config.",
+        "description": "A brain key with write scope, sent as x-brain-key. Prefer an OpenClaw SecretRef so the key does not live in plaintext config.",
         "anyOf": [
           {
             "type": "string"

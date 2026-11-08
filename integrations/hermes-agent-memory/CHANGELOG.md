@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 — 2026-11-08
+
+The provider calls the brain's agent-memory plugin (`plugins/agent-memory`), which replaces the standalone Agent Memory API server after the brain's 2.0.0 (SMD-2690). On a brain still running that server, keep 0.1.0.
+
+### Changed
+
+- `endpoint` is the plugin's REST base, `https://<host>/api/v1/plugins/agent-memory`; the key is still sent as `x-brain-key`.
+- Routes: usage is `POST /recalls/{request_id}/usage`, a recall trace `GET /recalls/{request_id}`, the review queue `GET /review-queue`, and listing `GET /memories`, the reads' input in the query string. The review queue and listing were `POST /memories/review` and `POST /memories/list`, which no server answered.
+- A refusal raises `OB1RequestError`, whose message, `code` and `status` name the plugin's refusal code (`HTTP 400 REFUSED_INPUT`); a retryable 503 carries its `Retry-After`.
+- `ob1_review_memory` sends the reviewer as `actor_label`, the field the plugin takes (it refuses a field it does not know), and an `edit` takes `content` and `summary`; one with neither is refused before it is sent.
+- Recall context reads a memory's time from `freshness` (when a person last confirmed it, else when it was written), as the plugin answers it.
+
+### Removed
+
+- The `GET /health` probe at initialization: the plugin has no such route.
+
 ## 0.1.0 — 2026-05-09
 
 Initial release of the Hermes OB1 memory provider.

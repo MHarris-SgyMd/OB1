@@ -8,18 +8,19 @@
 
 ## What It Does
 
-Plugs Hermes Agent into the OB1 v1 Agent Memory API so every Hermes turn does three things automatically:
+Plugs Hermes Agent into the brain's [agent-memory plugin](../../plugins/agent-memory/), whose REST routes serve the OB1 v1 memory contract, so every Hermes turn does three things automatically:
 
 1. **Recall** — Before the LLM call, recent and relevant memories are pulled from OB1 (filtered by `use_policy` — `[instruction]` items are treated as binding rules, `[evidence]` as supporting context only).
-2. **Writeback** — After the turn, a structured summary lands in `agent_memories` tagged with `runtime=hermes`, the actual model + provider that ran the turn, and the `task_id` linkage.
-3. **Govern** — Memories default to `pending_review` with `requires_user_confirmation=true` so nothing is promoted to instruction-grade until a human (or the `ob1_review_memory` tool) confirms it.
+2. **Writeback** — After the turn, a structured summary lands in the plugin's memories, its text captured as a thought, tagged with `runtime=hermes`, the actual model + provider that ran the turn, and the `task_id` linkage.
+3. **Govern** — Memories default to review status `pending` with `requires_user_confirmation=true` so nothing is promoted to instruction-grade until a human (or the `ob1_review_memory` tool) confirms it.
 
 The same backend serves both runtimes — OpenClaw agents and Hermes agents share **one** governed memory.
 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- A brain on 2.0.0, the last release with the Agent Memory API server and its `schemas/agent-memory` tables, with both deployed as 2.0.0's READMEs say (tag `v2.0.0`, `integrations/agent-memory-api/`). This client calls that server's routes; the brain's [agent-memory plugin](../../plugins/agent-memory/), which replaces them after 2.0.0, does not answer them until SMD-2690 PR 2b moves this client onto it.
+- The brain's [agent-memory plugin](../../plugins/agent-memory/) turned on, with `/api` published (its README's "Turn it on"). A brain on 2.0.0 or earlier runs the standalone Agent Memory API server instead, whose routes this client no longer calls: keep version 0.1.0 of this client there, or move to the plugin first (its README's "Moving from the standalone server").
+- A key with write scope for Hermes (the plugin README's "Prerequisites"): recall reads, and usage and review write. A capture-only key can write back alone.
 - Hermes Agent 0.13.0+ installed
 - Python 3.11+
 
@@ -30,8 +31,8 @@ HERMES AGENT MEMORY -- CREDENTIAL TRACKER
 -----------------------------------------
 
 FROM OB1
-  Agent Memory API URL:   ____________
-  MCP Access Key:         ____________
+  Agent-memory plugin URL:  https://<host>/api/v1/plugins/agent-memory
+  Brain key (write scope):  ____________
 
 HERMES
   Plugin path (~/.hermes/plugins/ob1):  ____________
@@ -45,12 +46,12 @@ HERMES
 
 ![Step 1](https://img.shields.io/badge/Step_1-Prepare_OB1_Agent_Memory-1E88E5?style=for-the-badge)
 
-Apply the schema and deploy the API.
+Turn the brain's agent-memory plugin on and publish `/api`, as [its README](../../plugins/agent-memory/README.md) says ("Turn it on"), and make Hermes a key with write scope.
 
 > [!IMPORTANT]
-> The Agent Memory API must be reachable on the URL you'll configure below. The provider does an HTTP `GET /health` probe on initialization and warns (non-fatally) if it fails.
+> The plugin's routes must be reachable on the URL you'll configure below: `https://<host>/api/v1/plugins/agent-memory` through your TLS proxy or tunnel, or `http://127.0.0.1:8000/api/v1/plugins/agent-memory` on the brain's own machine. The provider asks nothing when it starts; a recall or write-back that fails is logged as it fails.
 
-**Done when:** `GET /health` on the Agent Memory API returns `ok: true`.
+**Done when:** the write-back and recall in the plugin README's "Check it" answer with your key.
 
 ![Step 2](https://img.shields.io/badge/Step_2-Install_the_Plugin-1E88E5?style=for-the-badge)
 
@@ -76,7 +77,7 @@ The plugin reads non-secret config from `~/.hermes/ob1.json` and the access key 
 ```bash
 cat > ~/.hermes/ob1.json <<'EOF'
 {
-  "endpoint": "http://127.0.0.1:8787/agent-memory-api",
+  "endpoint": "https://<host>/api/v1/plugins/agent-memory",
   "workspace_id": "default",
   "project_id": null,
   "auto_recall": true,
@@ -91,8 +92,8 @@ EOF
 **2. Set the access key in `~/.hermes/.env`:**
 
 ```bash
-echo 'OPENBRAIN_KEY=<your-mcp-access-key>' >> ~/.hermes/.env
-echo 'OPENBRAIN_URL=http://127.0.0.1:8787/agent-memory-api' >> ~/.hermes/.env
+echo 'OPENBRAIN_KEY=<your-brain-key>' >> ~/.hermes/.env
+echo 'OPENBRAIN_URL=https://<host>/api/v1/plugins/agent-memory' >> ~/.hermes/.env
 ```
 
 **3. Tell Hermes to use the provider:**
@@ -114,25 +115,21 @@ Drive a real turn and confirm the writeback lands:
 hermes -z "Decision: we will use Postgres for the queue. Lesson: always run migrations off-hours."
 ```
 
-Then query the database:
+Then list Hermes' memories in the workspace (`default` unless you set another):
 
-```sql
-SELECT runtime_name, model, provider, task_id,
-       substring(content, 1, 80) AS content
-FROM agent_memories
-WHERE runtime_name = 'hermes'
-ORDER BY created_at DESC
-LIMIT 5;
+```bash
+curl -sS "https://<host>/api/v1/plugins/agent-memory/memories?workspace_id=default&runtime_name=hermes&limit=5" \
+  -H "x-brain-key: $OPENBRAIN_KEY"
 ```
 
-**Done when:** You see rows with `runtime_name=hermes`, the model your Hermes is configured to use (e.g. `anthropic/claude-opus-4.6`), and content matching your test turn.
+**Done when:** You see memories whose `provenance.runtime` is `hermes`, whose `provenance.model` is the model your Hermes is configured to use (e.g. `anthropic/claude-opus-4.6`), and whose content matches your test turn.
 
 ## Expected Outcome
 
 Once installed and configured:
 
 - **Every Hermes turn auto-recalls.** When the LLM is reasoning, recent and similar OB1 memories are silently injected as `<ob1-context>` in the system prompt.
-- **Every meaningful turn auto-writes.** The user's question + a summary of the assistant's response lands in `agent_memories` as a turn-summary `output`. Trivial messages (`ok`, `thanks`) and short replies are skipped.
+- **Every meaningful turn auto-writes.** The user's question + a summary of the assistant's response lands in the plugin's memories as a turn-summary `output`. Trivial messages (`ok`, `thanks`) and short replies are skipped.
 - **Session end produces structured findings.** When Hermes exits, conversation lines matching decision / lesson / constraint / next_step / question / failure patterns are extracted into OB1's structured payload categories.
 - **Compression preserves findings.** When Hermes hits a context-compression boundary, structured findings from the about-to-be-compressed messages are extracted, written back to OB1, and folded into the compression summary.
 - **Seven tools are available** to the agent for explicit memory ops:
@@ -141,22 +138,22 @@ Once installed and configured:
   - `ob1_search` — alias for recall
   - `ob1_report_usage` — close the loop on which recalled memories were useful
   - `ob1_list_review_queue` — what's pending review
-  - `ob1_review_memory` — confirm / reject / annotate
+  - `ob1_review_memory` — confirm / reject / edit / evidence-only
   - `ob1_get_recall_trace` — debug what came back
 
 ## Troubleshooting
 
-### `hermes -z` returns instantly but nothing writes to `agent_memories`
+### `hermes -z` returns instantly but no memory is written
 
 The provider silently no-ops when `OPENBRAIN_KEY` is not set or the endpoint is empty. Verify both:
 
 ```bash
 hermes config get memory.provider     # must be: ob1
-cat ~/.hermes/ob1.json | grep endpoint  # must be your real Agent Memory API URL
+cat ~/.hermes/ob1.json | grep endpoint  # must be your plugin URL, ending /api/v1/plugins/agent-memory
 grep OPENBRAIN_KEY ~/.hermes/.env       # must be present
 ```
 
-### Writebacks land but `model` and `provider` columns are blank
+### Writebacks land but `provenance.model` is blank
 
 Hermes' `run_agent.py` doesn't pass `model` to `on_turn_start`, so the provider falls back to reading `~/.hermes/config.yaml`. Confirm the config has a real model:
 
@@ -164,15 +161,15 @@ Hermes' `run_agent.py` doesn't pass `model` to `on_turn_start`, so the provider 
 grep -A2 '^model:' ~/.hermes/config.yaml
 ```
 
-If the value is `auto` for the provider field, the plugin derives the provider from the model prefix (`anthropic/...` → `anthropic`, `openrouter/...` → `openrouter`). For provider-less model names, the column will read `unknown` — set an explicit `model.provider` in `config.yaml` if you need accuracy.
+If the value is `auto` for the provider field, the plugin derives the provider from the model prefix (`anthropic/...` → `anthropic`, `openrouter/...` → `openrouter`). For provider-less model names, the provider will read `unknown` — set an explicit `model.provider` in `config.yaml` if you need accuracy.
 
 ### Recall returns 0 memories even when matches obviously exist
 
-The OB1 Agent Memory API uses `match_thoughts(threshold=0.7)` against `text-embedding-3-small`, which is strict. Related items often score 0.4–0.6. If your fleet uses queries that are conceptually similar but not lexically close, lower the threshold in `match_thoughts` or override it in your fork of `agent-memory-api/index.ts`.
+The plugin leaves out memories outside the recall's scope: another project's, stale or rejected ones, and those still waiting for a person's confirmation unless `include_unconfirmed_recall` is on (it is by default). Its README's Troubleshooting ("A recall answers no memories") lists each and the flag that lets it in.
 
-### `HTTP 400 Invalid input` errors in Hermes logs
+### `HTTP 4xx` or `503` errors in Hermes logs
 
-Almost always means the OB1 Agent Memory API rejected a payload shape. The provider sends the v1 schema_version literals (`openbrain.agent_memory.recall.v1` / `openbrain.agent_memory.writeback.v1`) and a strict `runtime: {name, version}` shape — extra keys in `runtime` get rejected. If you're modifying the provider, run the test suite (`pytest plugin/tests/`) before installing.
+Each names the plugin's refusal code (`OB1 POST /recall failed: HTTP 400 REFUSED_INPUT`), which [its README's Troubleshooting](../../plugins/agent-memory/README.md#troubleshooting) explains. `REFUSED_INPUT` means the body was not the contract's: the plugin refuses a field it does not know. `401` is the key, `403 FORBIDDEN` a key whose scope does not reach the route, and `503 PROVIDER_UNAVAILABLE` the brain's embedding provider not answering a recall (send it again). If you're modifying the provider, run the test suite (below) before installing.
 
 ### Subagent runs are corrupting the parent agent's task_id
 
@@ -196,8 +193,7 @@ integrations/hermes-agent-memory/
 ## Tests
 
 ```bash
-cd plugin
-pytest tests/
+pytest plugin/tests/
 ```
 
-75 tests cover pure helpers, schema shapes on the wire, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.
+Run them in Hermes' Python environment, which has the `agent` and `tools` modules the plugin imports. 87 tests cover pure helpers, schema shapes and routes on the wire, the plugin's refusal codes, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.

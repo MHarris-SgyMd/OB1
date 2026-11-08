@@ -16,10 +16,12 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["memory_id", "summary", "content", "source", "provenance", "scope", "use_policy", "freshness", "related_artifacts"],
+        "required": ["memory_id", "thought_id", "memory_type", "summary", "content", "source", "provenance", "scope", "use_policy", "freshness", "review_status", "lifecycle_status", "related_artifacts"],
         "additionalProperties": false,
         "properties": {
           "memory_id": { "type": "string" },
+          "thought_id": { "type": ["string", "null"], "description": "The thought holding the memory's text; null for one migrated whose thought was deleted." },
+          "memory_type": { "type": "string", "enum": ["decision", "output", "lesson", "constraint", "open_question", "failure", "artifact_reference", "work_log"] },
           "summary": { "type": "string" },
           "content": { "type": "string" },
           "source": {
@@ -75,6 +77,8 @@
               "stale_after": { "type": ["string", "null"], "format": "date-time" }
             }
           },
+          "review_status": { "type": "string", "enum": ["pending", "confirmed", "evidence_only", "restricted", "rejected", "stale", "merged"] },
+          "lifecycle_status": { "type": "string", "enum": ["active", "stale", "superseded", "disputed", "rejected"] },
           "related_artifacts": {
             "type": "array",
             "items": {
@@ -83,7 +87,8 @@
               "additionalProperties": false,
               "properties": {
                 "kind": { "type": "string" },
-                "uri": { "type": "string" }
+                "uri": { "type": "string" },
+                "description": { "type": ["string", "null"] }
               }
             }
           }

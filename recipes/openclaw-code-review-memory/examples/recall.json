@@ -23,7 +23,7 @@
     "people": ["Jonathan Edwards"],
     "orgs": ["OB1"],
     "repos": ["NateBJones-Projects/OB1"],
-    "files": ["schemas/agent-memory/schema.sql", "integrations/agent-memory-api/index.ts"],
+    "files": ["plugins/agent-memory/migrations/001_memories.sql", "plugins/agent-memory/index.ts"],
     "customers": [],
     "topics": ["code review", "agent memory"]
   },

@@ -3606,6 +3606,139 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
+  // The repository's two clients of the plugin (SMD-2690 PR 2b), each call they make on its routes answered, not refused:
+  // the REST input is strict, so a field a client sends that the plugin does not take, or a route it no longer has, fails here.
+  console.log("\n[agent-memory's clients] the OpenClaw and Hermes clients on the plugin's routes: every call each makes, answered");
+  {
+    const ENDPOINT = `${API}/v1/plugins/agent-memory`;
+    const { AgentMemoryClient, AgentMemoryError } = await import("../integrations/openclaw-agent-memory/plugin/src/client.ts");
+    const oc = new AgentMemoryClient({ endpoint: `${ENDPOINT}/`, accessKey: KEYS.writer, workspaceId: "ws-clients", projectId: "p-openclaw", includeUnconfirmedRecall: true });
+    // A call the plugin refuses throws: caught, so it fails one row here rather than ending the suite.
+    try {
+      const written = await oc.writeback({ memory_payload: { lessons: ["ocxmem_route the OpenClaw client writes back through the plugin."] }, runtime: { name: "openclaw", version: "0.2.0" }, task_id: "t-oc", step_id: "s1" });
+      const mem = written.memories?.[0];
+      assert(written.schema_version === "openbrain.openclaw.writeback_response.v1" && UUID.test(mem?.memory_id ?? "") && mem?.scope?.project_id === "p-openclaw" && mem?.review_status === "pending",
+        `OpenClaw writeback: the memory written whole under a write key, pending review, in the configured project (${JSON.stringify(written).slice(0, 200)})`);
+      const recalled = await oc.recall({ query: "ocxmem_route", runtime: { name: "openclaw" }, limits: { max_items: 5, max_tokens: 4000 } });
+      const requestId: string = recalled.request_id;
+      assert(recalled.schema_version === "openbrain.openclaw.recall_response.v1" && UUID.test(requestId ?? "") && recalled.memories?.some((m: Body) => m.memory_id === mem?.memory_id),
+        `OpenClaw recall: traced, and finds what it wrote, unconfirmed as configured (${JSON.stringify(recalled).slice(0, 200)})`);
+      const usage = await oc.reportUsage(requestId, { used_memory_ids: [mem.memory_id], ignored: [] });
+      const trace = await oc.getRecallTrace(requestId);
+      assert(usage.recorded?.used === 1 && usage.recorded?.ignored === 0 && trace.trace?.request_id === requestId
+        && trace.items?.some((i: Body) => i.memory?.memory_id === mem.memory_id && i.used === true),
+        `OpenClaw usage on /recalls/{id}/usage, then its trace on /recalls/{id}: the memory marked used (${JSON.stringify(usage)}; ${JSON.stringify(trace).slice(0, 200)})`);
+      const queue = await oc.listReviewQueue();
+      const reviewed = await oc.reviewMemory(mem.memory_id, { action: "edit", actor_label: "openclaw:test", content: "ocxmem_route edited by the OpenClaw client.", notes: "client contract" });
+      const restricted = await oc.reviewMemory(mem.memory_id, { action: "restrict_scope", visibility: "personal" });
+      const inspected = await oc.inspectMemory(mem.memory_id);
+      assert(queue.memories?.some((m: Body) => m.memory_id === mem.memory_id) && reviewed.memory?.content === "ocxmem_route edited by the OpenClaw client."
+        && restricted.memory?.scope?.visibility === "personal" && inspected.memory?.memory_id === mem.memory_id && Array.isArray(inspected.source_refs),
+        `OpenClaw review queue on /review-queue, an edit and a restriction on /memories/{id}/review, the memory on /memories/{id} (${JSON.stringify(queue).slice(0, 120)}; ${JSON.stringify(inspected).slice(0, 120)})`);
+      let refused: unknown;
+      try {
+        await oc.inspectMemory(NO_ROW);
+      } catch (e) {
+        refused = e;
+      }
+      assert(refused instanceof AgentMemoryError && refused.status === 404 && refused.code === "NO_SUCH_MEMORY" && refused.message.includes("404 NO_SUCH_MEMORY"),
+        `OpenClaw: a refusal thrown with its status and the plugin's code (${String(refused)})`);
+      const capturer = new AgentMemoryClient({ endpoint: ENDPOINT, accessKey: KEYS.capture, workspaceId: "ws-clients", projectId: "p-openclaw" });
+      const ids = await capturer.writeback({ memory_payload: { decisions: ["ocxmem_capture a capture key's write-back."] }, provenance: { default_status: "user_confirmed", requires_review: false } });
+      assert(ids.memories?.length === 1 && Object.keys(ids.memories[0]).sort().join() === "memory_id,thought_id",
+        `OpenClaw under a capture-only key: each memory answered by its ids alone (${JSON.stringify(ids)})`);
+
+      // The recipes' example payloads and the recall answer's contract (recipes/openclaw-agent-memory/contracts), held to the plugin:
+      // each example as a runtime would send it, and every field a recalled memory carries one the contract names (it allows no other).
+      const recipe = (path: string) => JSON.parse(readFileSync(join(import.meta.dir, "../recipes", path), "utf8")) as Body;
+      const examples: Body[] = [];
+      for (const [path, route] of [["openclaw-agent-memory/examples/writeback-request.json", "/writeback"], ["openclaw-code-review-memory/examples/writeback.json", "/writeback"],
+        ["openclaw-agent-memory/examples/recall-request.json", "/recall"], ["openclaw-code-review-memory/examples/recall.json", "/recall"]] as const) {
+        const sent = await rest("POST", `/v1/plugins/agent-memory${route}`, recipe(path), KEYS.writer);
+        examples.push(sent.body);
+        assert(sent.status === 200, `the recipe's ${path} is taken on ${route} (${sent.status} ${JSON.stringify(sent.body).slice(0, 200)})`);
+      }
+      const usageExample = recipe("openclaw-agent-memory/examples/usage-report.json");
+      const usageSent = await rest("POST", `/v1/plugins/agent-memory/recalls/${requestId}/usage`, usageExample, KEYS.writer);
+      assert(usageSent.status === 200 && usageSent.body.recorded?.used === 0,
+        `the recipe's usage-report.json is taken on /recalls/{id}/usage (ids the recall did not return change nothing) (${usageSent.status} ${JSON.stringify(usageSent.body).slice(0, 200)})`);
+      const contract = recipe("openclaw-agent-memory/contracts/recall-response.schema.json");
+      const named = (o: Body | undefined) => new Set(Object.keys(o?.properties ?? {}));
+      const memoryContract = contract.properties?.memories?.items as Body;
+      const stray: string[] = [];
+      // The recall's memories, and the example write-back's, whose artifact reference carries related_artifacts: one memory shape.
+      const shown = [...(recalled.memories as Body[]), ...((examples[0]?.memories ?? []) as Body[])];
+      for (const m of shown) {
+        for (const k of Object.keys(m)) if (!named(memoryContract).has(k)) stray.push(k);
+        for (const part of ["source", "provenance", "scope", "use_policy", "freshness"]) for (const k of Object.keys(m[part] ?? {})) if (!named(memoryContract.properties?.[part]).has(k)) stray.push(`${part}.${k}`);
+        for (const a of m.related_artifacts ?? []) for (const k of Object.keys(a)) if (!named(memoryContract.properties?.related_artifacts?.items).has(k)) stray.push(`related_artifacts.${k}`);
+        for (const k of memoryContract.required ?? []) if (!(k in m)) stray.push(`missing ${k}`);
+      }
+      for (const k of Object.keys(recalled)) if (!named(contract).has(k)) stray.push(k);
+      assert(shown.some((m) => m.related_artifacts?.length > 0) && recalled.memories.length > 0 && stray.length === 0, `every field of the recall's answer is one recall-response.schema.json names, and each it requires is there (${[...new Set(stray)].join(", ") || "none stray"})`);
+    } catch (e) {
+      assert(false, `the OpenClaw client's calls ran (${String(e).slice(0, 400)})`);
+    }
+
+    // Hermes' client is Python, run as the provider runs it: its two hermes-agent imports stubbed, the module loaded from its file.
+    const driver = `
+import importlib.util, json, sys, types
+for name in ("agent", "agent.memory_provider", "tools", "tools.registry"):
+    sys.modules[name] = types.ModuleType(name)
+sys.modules["agent.memory_provider"].MemoryProvider = object
+sys.modules["tools.registry"].tool_error = lambda msg: json.dumps({"error": msg})
+spec = importlib.util.spec_from_file_location("ob1_hermes", sys.argv[1])
+ob1 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ob1)
+c = ob1._OB1Client(sys.argv[2], sys.argv[3], 30.0)
+out = {}
+runtime = {"name": "hermes", "version": "0.2.0"}
+w = c.writeback(workspace_id="ws-clients", project_id="p-hermes", memory_payload={"lessons": ["hermesxmem_route the Hermes client writes back through the plugin."]},
+                runtime=runtime, models_used=[{"provider": "stub", "model": "m", "role": "primary"}],
+                provenance={"default_status": "generated", "confidence": 0.7, "requires_review": True}, task_id="t-hermes", flow_id="default")
+mid = w["memories"][0]["memory_id"]
+out["writeback"] = w
+r = c.recall(workspace_id="ws-clients", project_id="p-hermes", task_type="general", query="hermesxmem_route",
+             scope={"visibility": "personal", "project_only": True, "include_unconfirmed": True, "include_stale": False},
+             limits={"max_items": 5, "max_tokens": 4000}, runtime=runtime, model_intent={"model": "m"}, task_id="t-hermes", flow_id="default")
+out["recall"] = r
+out["usage"] = c.report_usage(r["request_id"], used=[mid], ignored=[])
+out["trace"] = c.get_recall_trace(r["request_id"])
+out["queue"] = c.get_review_queue(workspace_id="ws-clients", project_id="p-hermes")
+out["list"] = c.list_memories(workspace_id="ws-clients", project_id="p-hermes", review_status="pending", limit=5)
+out["review"] = c.review_memory(mid, action="edit", notes="client contract", actor_label="hermes:default", content="hermesxmem_route edited by the Hermes client.")
+out["confirm"] = c.review_memory(mid, action="confirm", actor_label="hermes:default")
+try:
+    c.review_memory("${NO_ROW}", action="confirm")
+    out["refused"] = None
+except ob1.OB1RequestError as e:
+    out["refused"] = {"status": e.status, "code": e.code, "message": str(e)}
+out["mid"] = mid
+print(json.dumps(out))
+`;
+    const py = Bun.spawn(["python3", "-I", "-c", driver, join(import.meta.dir, "../integrations/hermes-agent-memory/plugin/__init__.py"), `${ENDPOINT}/`, KEYS.writer], { stdout: "pipe", stderr: "pipe" });
+    const [pyOut, pyErr, pyCode] = await Promise.all([new Response(py.stdout).text(), new Response(py.stderr).text(), py.exited]);
+    let h: Body = {};
+    try {
+      h = JSON.parse(pyOut);
+    } catch {
+      // Reported by the first row below.
+    }
+    assert(pyCode === 0 && typeof h.mid === "string", `the Hermes client's calls ran (exit ${pyCode}: ${pyErr.slice(-400)})`);
+    if (pyCode === 0 && typeof h.mid === "string") {
+      const hm = h.writeback.memories[0];
+      assert(h.writeback.schema_version === "openbrain.agent_memory.writeback_response.v1" && hm.provenance?.runtime === "hermes" && hm.provenance?.model === "m" && hm.scope?.project_id === "p-hermes",
+        `Hermes writeback: its runtime and model kept on the memory (${JSON.stringify(hm).slice(0, 200)})`);
+      assert(h.recall.memories?.some((m: Body) => m.memory_id === h.mid) && h.usage.recorded?.used === 1 && h.trace.items?.some((i: Body) => i.memory?.memory_id === h.mid && i.used === true),
+        `Hermes recall finds it; usage on /recalls/{id}/usage and the trace on /recalls/{id} mark it used (${JSON.stringify(h.usage)}; ${JSON.stringify(h.trace).slice(0, 160)})`);
+      assert(h.queue.memories?.some((m: Body) => m.memory_id === h.mid) && h.list.count >= 1 && h.list.memories?.some((m: Body) => m.memory_id === h.mid),
+        `Hermes review queue on GET /review-queue and listing on GET /memories, their input in the query string (${JSON.stringify(h.queue).slice(0, 120)}; ${JSON.stringify(h.list).slice(0, 120)})`);
+      assert(h.review.memory?.content === "hermesxmem_route edited by the Hermes client." && h.confirm.memory?.review_status === "confirmed" && h.confirm.memory?.use_policy?.can_use_as_instruction === true,
+        `Hermes review: an edit with its content, then a confirm, the reviewer sent as actor_label (${JSON.stringify(h.confirm).slice(0, 160)})`);
+      assert(h.refused?.status === 404 && h.refused?.code === "NO_SUCH_MEMORY" && String(h.refused?.message).includes("HTTP 404 NO_SUCH_MEMORY"),
+        `Hermes: a refusal raised with its status and the plugin's code (${JSON.stringify(h.refused)})`);
+    }
+  }
   // Last, so its 50 thoughts (all one vector under the stub) crowd no recall above.
   const fifty = await am("writeback", { ...base, workspace_id: "ws-fifty", memory_payload: { decisions: Array.from({ length: 30 }, (_, i) => `fifty plain decision ${i}.`), lessons: Array.from({ length: 20 }, (_, i) => `fifty plain lesson ${i}.`) } });
   assert(fifty.status === 200 && mems(fifty).length === 50, `a write-back of exactly 50 memories is taken (${fifty.status}, ${mems(fifty).length})`);
