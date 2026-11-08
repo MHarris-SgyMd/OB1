@@ -4424,13 +4424,13 @@ tier, maker and times. A ticket's planned level is its item's facts, not board-s
 the registration that moves a fact (the store dropping a due day, a new level mapping, a statement on a note) is
 seen, not scored. A read never takes the facts from `ITEMS`, which is the answer's side.
 
-A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
-line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself, and `plantFacts`), how a tool's
-arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
-registration with its baseline re-run, never an edit. A board item is registered by its issue's fields, not by
-`renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the baseline's
-numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them is a
-decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
+A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF line
+endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself, and `plantFacts`), how a tool's
+arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment
+included, is a new registration with its baseline re-run, never an edit. A board item is registered by its issue's
+fields, not by `renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the
+baseline's numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them
+is a decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
 registered one, so no verdict is printed on an unregistered corpus.
 
 **The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
@@ -4467,10 +4467,10 @@ path on every run, so the path is exercised whatever the measured reads do.
 so the read puts it to a question as a client would (the maintainer's choice, 2026-11-08). It searches the query as
 `plain` does (its default ten hits), then orders those hits by the agenda, with its default flags at its cap of 100:
 the hits the agenda lists first, in its order, then the rest in search's order. A hit is on the agenda when it is a
-ticket's row (any row whose metadata names the ticket with source `linear`, placed by its ticket alone), else the origin thought of an
-open item. The agenda and those lookups are read
-through the store, since a measured read's `callTool` admits the search tools alone, so the `agenda` tool's own
-layer isn't exercised here. Priority orders what is relevant; it adds nothing search didn't find.
+ticket's row (any row whose metadata names the ticket with source `linear`, placed by its ticket alone), else the
+origin thought of an open item. The agenda and those lookups are read through the store: a measured read's `callTool`
+admits the search tools alone, so the `agenda` tool's own layer isn't exercised here. Priority orders what is
+relevant; it adds nothing search didn't find.
 
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;

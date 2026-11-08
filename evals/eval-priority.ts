@@ -34,9 +34,9 @@
  * The reads are priority.ts's READS, today's main as the baseline (plain,
  * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
  * priority_weight needs the notes' facts where it reads them: priority.ts's
- * Facts), and the run prints each one's verdict against
- * the baselines of the same run. A measured read's verdict does not fail the
- * run; the gold ceiling's, which runs the same path, does.
+ * Facts), and the run prints each one's verdict against the baselines of the
+ * same run. A measured read's verdict does not fail the run; the gold
+ * ceiling's, which runs the same path, does.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
@@ -133,7 +133,7 @@ async function selfCheck(): Promise<void> {
   assert(facts.length === 31 && named.every((l) => facts.includes(l)) && !facts.some((l) => l.startsWith("statement on ticket:ZQ-108")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
     `the facts a seeded database must hold, each by its value: eight sources, seven ticket levels from the items' facts (No priority states none), the blocks link from both sides, one claim, ten items with their due instants (a bare day's end, the next day's start), three item levels (${facts.length}: ${facts.slice(0, 2).join("; ")}…)`);
   const zqLevels = ITEMS.filter((it) => it.issue && it.facts.level !== undefined).map((it) => `${it.issue!.identifier} ${it.facts.level}`);
-  assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.split(" ")[0]} level ${l.split(" ")[1]} `))),
+  assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.replace(" ", " level ")} `))),
     `every ticket's planned level is its facts', so a mapping change in board-sync's writer is a difference, not a shared move (${zqLevels})`);
   // The facts, not the label: a High whose facts state 0, and one whose facts state none, plan 0 and no statement
   // (review pass 3: every fixture ticket's facts equal its label's mapping, so the row above could not tell).

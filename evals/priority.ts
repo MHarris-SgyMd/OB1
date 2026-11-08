@@ -4,13 +4,12 @@
  * Every rule here but registeredSource (which reads this file's text),
  * plantRows and plantFacts (which write the corpus and its facts), readFacts
  * and the measured reads (which read the database) is a function of its
- * arguments, so
- * `eval-priority.ts --self-check` probes each with a hand-known answer and no
- * database:
- * the seeded corpus and its gold, the stub embedder, the score, the
- * shuffled-gold mutant, the pre-registered bar and the dogfood rows' shape.
- * `eval-priority.ts --seeded` plants the corpus in a throwaway Postgres and
- * runs each read through the server's own store; the scorer never sees SQL.
+ * arguments, so `eval-priority.ts --self-check` probes each with a hand-known
+ * answer and no database: the seeded corpus and its gold, the fact plan, the
+ * stub embedder, the score, the shuffled-gold mutant, the pre-registered bar
+ * and the dogfood rows' shape. `eval-priority.ts --seeded` plants the corpus
+ * and its facts in a throwaway Postgres and runs each read through the
+ * server's own store; the scorer never sees SQL.
  *
  * The question. Asked for the highest-value unstarted issue on 2026-10-14
  * and 2026-11-02, both brains picked a ticket whose words matched the question
@@ -770,13 +769,12 @@ export const AGENDA_READ: MeasuredRead = {
     const hits = await callTool("search", { query });
     const agenda = await store.agenda({ limit: 100, includeBlocked: false, includeClaimed: false, includeProposed: false });
     const place = new Map(agenda.items.map((it, i) => [`${it.kind}:${it.key}`, i] as const));
-    // A hit's place on the agenda: its ticket's, when it is a board row; else the best of the open items read from it.
     const placeOf = async (id: string): Promise<number | undefined> => {
       const m = (await store.getThought(id))?.metadata as { source?: unknown; issue?: unknown } | undefined;
       if (m?.source === "linear" && typeof m.issue === "string") return place.get(`ticket:${m.issue}`);
       const from = await store.listItems({ statuses: ["open"], overdue: false, originThought: id, limit: 100 });
-      const at = from.items.map((i) => place.get(`item:${i.id}`)).filter((n): n is number => n !== undefined);
-      return at.length ? Math.min(...at) : undefined;
+      const places = from.items.map((i) => place.get(`item:${i.id}`)).filter((n): n is number => n !== undefined);
+      return places.length ? Math.min(...places) : undefined;
     };
     const rank = new Map<string, number>();
     for (const id of hits) {
@@ -891,10 +889,11 @@ export function dogfoodProblems(raw: unknown): string[] {
 
 /**
  * What each baseline read scored at REGISTERED_CORPUS, recorded (main
- * 8aa855f1, 2026-11-02; the same at the second registration, main 601b0452 with SMD-3669 PR 2,
- * 2026-11-08, the facts planted beside the rows moving no search): top-1 and
- * top-3 as prompt counts, mean tau to three places. `--seeded` fails when a run differs, so a change to search on main
- * that moves the baseline is seen, not absorbed.
+ * 8aa855f1, 2026-11-02; the same at the second registration, main 601b0452
+ * with SMD-3669 PR 2, 2026-11-08, the facts planted beside the rows moving no
+ * search): which prompts it puts top-1 and top-3, by key, and its mean tau to
+ * three places. `--seeded` fails when a run differs, so a change to search on
+ * main that moves the baseline is seen, not absorbed.
  *
  * A record of today's main, not part of the registration. The verdict always
  * compares a measured read with the baselines measured in the same run, on
