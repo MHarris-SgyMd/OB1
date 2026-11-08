@@ -401,7 +401,7 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
             return 413, {"error": f"the body is over the {gate.max_bytes} bytes this tier holds at once (JEV_MAX_QUEUED_BYTES); no wait would admit it"}, {}
         return None
     cl = headers.get("content-length")
-    declared = int(cl) if cl is not None and cl.strip().isdigit() else None
+    declared = int(cl) if cl is not None and cl.strip().isascii() and cl.strip().isdigit() else None
     if declared is not None and too_big(declared):
         return too_big(declared)
     try:
@@ -467,7 +467,7 @@ def knob(name, default):
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
-    if not raw.isdigit() or int(raw) < 1:
+    if not (raw.isascii() and raw.isdigit()) or int(raw) < 1:
         raise SystemExit(f"{name} is a positive whole number, not {raw!r}")
     return int(raw)
 

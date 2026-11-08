@@ -17928,22 +17928,34 @@ if (want("16")) {
           && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
-      // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that thought's failure, recorded with the
-      // tier's words, and the pass goes on; it was read as a provider refusing every request, which stopped every worker,
-      // marked nothing failed, and met the same pair again on the next run (review pass 1).
-      await seed("[16d] The unreadable ledger lists every vendor.", 56, 3, ["ledger"]);
-      const unreadNew = await seed("[16d] The unreadable ledger now lists only active vendors.", 56, 0, ["ledger"]);
-      // …beside a pair the tier reads, in the same run: that one is settled, so the pass went on past the refusal.
+      // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that pair's, recorded on the claim with the
+      // tier's words and the older thought's id, and the thought's next pair is still judged. Review pass 1: it was read
+      // as a provider refusing every request, which stopped every worker, marked nothing failed, and met the same pair
+      // again on the next run. Review pass 2: thrown out of the pair loop, it failed the claim with the thought's later
+      // pairs never judged. So the ledger thought has two older neighbours: the refused one at its own axis, first in
+      // consolidation_candidates' distance order, and a readable one tilted just off it, second, which the stub tier
+      // calls related (its runbook rule), so the pair judged leaves a relation.
+      const unreadOld = await seed("[16d] The unreadable ledger lists every vendor.", 56, 3, ["ledger"]);
+      const readOld = await seed("[16d] The ledger runbook lists vendors by region.", 56, 2, ["ledger"]);
+      const tilted = new Array(EMBEDDING_DIM).fill(0);
+      [tilted[56], tilted[58]] = [Math.sqrt(1 - 0.1 ** 2), 0.1];
+      await sql`UPDATE thoughts SET embedding = ${`[${tilted.join(",")}]`}::vector WHERE id = ${readOld}::uuid`;
+      const ledgerNew = await seed("[16d] The ledger now lists only active vendors.", 56, 0, ["ledger"]);
+      // …and, in the same run, another thought's pair the tier reads: settled, so the pass went on past the refusal.
       await seed("[16d] The volunteer roster lists every member.", 57, 3, ["roster"]);
       const rosterNew = await seed("[16d] The volunteer roster now lists only active members.", 57, 0, ["roster"]);
       const unreadRun = await decide(denv);
       const claimOf = async (t: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${t}::uuid`) as { status: string; last_error: string | null }[])[0];
-      const [unreadClaim, rosterClaim] = [await claimOf(unreadNew), await claimOf(rosterNew)];
+      const [ledgerClaim, rosterClaim] = [await claimOf(ledgerNew), await claimOf(rosterNew)];
+      const [readJudged] = (await sql`SELECT count(*)::int AS n FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${DKEY}
+                                       WHERE f.kind = 'relation' AND f.thought_id = ${ledgerNew}::uuid AND f.payload->>'target' = ${readOld}`) as { n: number }[];
+      const ledgerError = ledgerClaim?.last_error ?? "";
       // Exit 1 is a pass that left a failed row (consolidate.ts's `incomplete`); a refusal read as the provider's stops
       // every worker and exits 2, "The provider refused the request itself", marking nothing failed.
-      assert(unreadRun.code === 1 && !/stopping every worker|refused the request itself/.test(unreadRun.out) && unreadClaim?.status === "failed" && /422/.test(unreadClaim.last_error ?? "") && /its context is 40000 tokens/.test(unreadClaim.last_error ?? "")
-          && rosterClaim?.status === "succeeded",
-        `a pair the tier refuses with 422 fails that thought, with the tier's words, and the pass goes on to settle the next (exit ${unreadRun.code}: ${JSON.stringify(unreadClaim ?? null)}, roster ${rosterClaim?.status}; ${last(unreadRun.out)})`);
+      assert(unreadRun.code === 1 && !/stopping every worker|refused the request itself/.test(unreadRun.out) && ledgerClaim?.status === "failed"
+          && ledgerError.startsWith(`1 of 2 pair(s) not judged: pair with ${unreadOld}: `) && /422/.test(ledgerError) && /its context is 40000 tokens/.test(ledgerError)
+          && readJudged?.n === 1 && rosterClaim?.status === "succeeded",
+        `a pair the tier refuses with 422 is recorded on the claim, naming the older thought and the tier's words, and the thought's next pair and the next thought are still judged (exit ${unreadRun.code}: ${JSON.stringify(ledgerClaim ?? null)}, the readable pair's relations ${readJudged?.n}, roster ${rosterClaim?.status}; ${last(unreadRun.out)})`);
       const tierBeforeFollower = tierCalls;
 
       // A follower checks the tier at start as it checks the chat endpoint: a

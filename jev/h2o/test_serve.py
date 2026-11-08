@@ -256,6 +256,28 @@ async def main():
     s, _, _ = await post(FakeReader(), gate, body())
     check(s == 200, f"and the next request is read ({s})")
 
+    print("\n[9] digits are ASCII digits")
+    # str.isdigit() is True for "²", which int() refuses (review pass 2): a knob so set got a traceback, not its
+    # refusal, and a Content-Length so set escaped handle as the framework's 500.
+    import os
+    refused = []
+    for raw in ("²", "0", "-3", "1.5"):
+        os.environ["JEV_TEST_KNOB"] = raw
+        try:
+            serve.knob("JEV_TEST_KNOB", 8)
+            refused.append(False)
+        except SystemExit as e:
+            refused.append("JEV_TEST_KNOB is a positive whole number" in str(e))
+    os.environ["JEV_TEST_KNOB"] = "12"
+    kept = serve.knob("JEV_TEST_KNOB", 8)
+    del os.environ["JEV_TEST_KNOB"]
+    check(all(refused) and kept == 12, f"a knob of ², 0, -3 or 1.5 is refused by name, and 12 is read ({refused}, {kept})")
+    try:
+        s, _, _ = await serve.handle(FakeReader(), gate, MODEL, {"content-length": "²"}, chunks_of(body()), None)
+    except Exception as e:
+        s = f"raised {type(e).__name__}"
+    check(s == 200 and gate.admitted == 0, f"a Content-Length of ² is read as undeclared and the body as it streams ({s})")
+
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

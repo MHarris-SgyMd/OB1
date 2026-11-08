@@ -73,9 +73,13 @@ Knobs:
   verdict on a record whose middle went unread could settle the wrong thing.
   So the whole request gets the contract's 422, naming the decision and its
   token count, before it queues. Every result it does answer says
-  `truncated: false`. The consolidation pass fails that one thought with the
-  tier's words and goes on (`DecisionRefused` in `server-portable/jev.ts`). It
-  does not stop the pass, since another try would get the same answer.
+  `truncated: false`. The consolidation pass records that pair on the newer
+  thought's claim, by the older thought's id and with the tier's words, then
+  judges the thought's other pairs and goes on (`DecisionRefused` in
+  `server-portable/jev.ts`). The claim ends failed, so `--retry-failed`
+  revisits it. The refusal does not stop the pass, since another try would get
+  the same answer. The context is both thoughts together, so a long thought can
+  be refused in every pair it is in.
   - Every context is encoded to count its tokens. Its UTF-8 length is no bound,
     because the tokenizer normalizes to NFC first, which can lengthen a text:
     10,666 × U+FB2C is 31,998 bytes and 42,664 tokens.

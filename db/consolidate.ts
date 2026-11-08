@@ -170,7 +170,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
-import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
+import { DecisionRefused, resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, probeAtStart, probeChat, probeRefusal, probeTier, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
@@ -1824,6 +1824,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // these rows under this policy, recorded on the claim like a timeout,
         // so the next pair is still judged and --retry-failed revisits the row.
         if (e instanceof ProviderError && e.kind === "egress") {
+          problems.push(`pair with ${c.older_id}: ${e.message}`);
+          continue;
+        }
+        // The tier refused this pair's decision (its 422, SMD-3326): a fact about the pair's text — two thoughts'
+        // context together past what the model reads whole — recorded on the claim like egress, naming the older
+        // thought, so the next pair is still judged and the stale rows still settle. Thrown out of the loop it failed
+        // the claim with none of its later pairs judged, and --retry-failed met the same pair first again (review pass 2).
+        if (e instanceof DecisionRefused) {
           problems.push(`pair with ${c.older_id}: ${e.message}`);
           continue;
         }
