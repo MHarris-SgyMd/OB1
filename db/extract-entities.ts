@@ -1546,7 +1546,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
-  /** The model setting the closing remedy names: the escalation model's, its probe refused in an outage wait (SMD-2636 PR 2, review pass 1). */
+  /** The model setting the closing remedy names: the escalation model's when its call or its probe was refused — in an outage wait (SMD-2636 PR 2, review pass 1) or mid-pass (PR 3a, review pass 2). */
   let refusedKnob = "OB1_METADATA_MODEL";
 
   /**
@@ -1751,6 +1751,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // refusal is not the metadata model's to answer (review pass 1).
                 const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
                 let probeWhy: string | null = null;
+                /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
+                let probeAnswered = false;
                 if (act === "probe") {
                   if (stopping) return;
                   if (outage.reason !== null) act = "outage";
@@ -1759,6 +1761,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                     act = probedFault(p);
                     // The refusal is the probe's, said beside the call's (review pass 2).
                     if (p.state === "refused") probeWhy = p.why;
+                    probeAnswered = p.state === "up";
                   }
                 }
                 const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
@@ -1780,14 +1783,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   stopAfter = true;
                 } else if (act === "thought") {
-                  outcome = { outcome: "failed", error: msg };
+                  outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
                 } else if (act === "fatal") {
                   // Every thought would fail the same way. Stop everyone, mark
                   // nothing, and say what to fix; this row goes back with the
                   // leases the finally returns. The escalation model's call
                   // refused, its remedy names it (review passes 1 and 2).
                   if (escalationCalled) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
-                  configError = probeWhy === null ? msg : `${msg} — and a one-token call right after was refused: ${probeWhy.slice(0, 200)}`;
+                  configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
@@ -2300,7 +2303,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
         `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and ${refusedKnob} against the provider; a 400 about a request field\n` +
-        `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint. Nothing was marked failed.`
+        `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint; a 402 is the account's credit or spend limit. Nothing was marked failed.`
     );
     return 2;
   }

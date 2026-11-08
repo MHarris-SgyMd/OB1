@@ -5959,7 +5959,9 @@ if (want("10")) {
       restorePauses();
     }
     const waited = lines.some((l) => new RegExp(`the provider is not answering \\(Extraction request to [^)]*${c.status}`).test(l));
-    assert(row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded"),
+    const lastError = ((await sql`SELECT last_error FROM thought_work_claims WHERE thought_id = ${note}::uuid AND work_type = ${KEY}`)[0] as { last_error: string | null } | undefined)?.last_error ?? "";
+    assert(row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded")
+           && (c.want !== "failed" || /a one-token call right after answered, so this thought's; --retry-failed revisits it/.test(lastError)),
            `under --follow a ${c.status} is probed first: ${c.want === "failed" ? "answered, the thought's, recorded failed and the follower running on" : "its probe meeting a 503, the provider's outage, waited out and the thought extracted"} (SMD-2636 PR 3a; ${row}, exit ${code}${ended ? "" : " at the stop"}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     if (note) await sql`SELECT delete_thought(${note}::uuid, NULL::jsonb)`;
   }
@@ -7053,8 +7055,9 @@ if (want("10e")) {
       await seedOne("The runaway widget report, with an escalation model never confirmed.");
       await unseenRun;
       clearTimeout(unseenGuard);
-      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l)),
-             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever (exit ${unseenCode})`);
+      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l))
+             && unseenLines.some((l) => /and OB1_EXTRACT_ESCALATE_MODEL against the provider/.test(l)),
+             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever, the remedy naming its setting (SMD-2636 PR 3a, review pass 3; exit ${unseenCode})`);
     } finally {
       listedIds = ["stub-meta"];
       goneServed = false;
@@ -17029,7 +17032,8 @@ if (want("16")) {
       restorePauses();
     }
     const newerRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${pairSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && newerRow !== "failed" && lines.some((l) => c.words.test(l)) && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)) && (c.probed ? probesAfter >= 1 : probesAfter === 0),
+    assert(code === 2 && newerRow !== "failed" && lines.some((l) => c.words.test(l)) && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)) && (c.probed ? probesAfter >= 1 : probesAfter === 0)
+           && (c.what !== "401" || lines.some((l) => /The provider refused the request itself: a one-token call was refused \(401 /.test(l))),
            `a consolidate follower's judge ${c.what} ${c.probed ? "is probed first, the probe refused: the request's" : "is the request's shape, unprobed"} — exit 2, its pair's thought not failed (SMD-2636 PR 3a; exit ${code}, ${newerRow}, ${probesAfter} probe(s) after; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of pairSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }

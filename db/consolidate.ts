@@ -2216,12 +2216,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // answered, the thought's; refused, the request's; no answer, the provider's. A stopping pass hands
                 // the thought back, and another worker's outage is joined unprobed.
                 let probeWhy: string | null = null;
+                /** The probe answered: the thought's, and said so (review pass 3). */
+                let probeAnswered = false;
                 if (act === "probe") {
                   if (stopping) return;
                   if (outage.reason !== null) act = "outage";
                   else {
                     const p = await probe(TIMEOUT_S * 1000, halt.signal);
                     act = probedFault(p);
+                    probeAnswered = p.state === "up";
                     if (p.state === "refused") {
                       // The tier's probe refused it: the remedy names the tier (review pass 1), and the refusal is
                       // the probe's, said beside the call's (review pass 2).
@@ -2246,10 +2249,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   stopAfter = true;
                 } else if (act === "thought") {
-                  outcome = { outcome: "failed", error: msg };
+                  outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
                 } else if (act === "fatal") {
                   if (e instanceof ProbeRefused && e.tier) refusedByTier = true;
-                  configError = probeWhy === null ? msg : `${msg} — and a one-token call right after was refused: ${probeWhy.slice(0, 200)}`;
+                  configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
@@ -2699,7 +2702,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         (refusedByTier
           ? `  Check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md). Nothing was marked failed.`
           : `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
-            `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`)
+            `  is usually reasoning_effort or response_format not being supported by this model; a 402 is the account's credit or spend limit. Nothing was marked failed.`)
     );
     return 2;
   }
