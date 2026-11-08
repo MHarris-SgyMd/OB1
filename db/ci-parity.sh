@@ -285,6 +285,7 @@ free_rows() {
   nodb .                 scripts/ci-step-times.ts --self-check
   nodb .                 scripts/suite-sections.ts --self-check
   nodb .                 scripts/agent-runner/dry-run.ts --self-check
+  nodb .                 scripts/agent-runner/probes.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts

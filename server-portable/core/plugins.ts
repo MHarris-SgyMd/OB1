@@ -80,7 +80,7 @@ const GUI_PATH = /^(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
 const REFUSAL_CODE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;
 const SCOPES: readonly PluginScope[] = ["read", "capture", "write"];
 const METHODS: readonly Method[] = ["GET", "POST", "PATCH", "DELETE"];
-const REFUSAL_STATUSES = new Set([400, 403, 404, 409, 422]);
+const REFUSAL_STATUSES = new Set([400, 403, 404, 409, 422, 503]);
 
 /** An enabled plugin's operation, as both servers serve it. */
 export type LoadedOp = {
@@ -324,11 +324,12 @@ export async function runOperation(op: LoadedOp, deps: OpDeps, input: unknown): 
   const out = await op.handler(contextFor(op.plugin, deps), input as never);
   if (!out.ok) {
     const { status, code } = out.refusal;
-    if (!REFUSAL_STATUSES.has(status) || !REFUSAL_CODE.test(code)) throw new Error(`${op.tool} refused with status ${status} and code ${JSON.stringify(code)}: a refusal is 400, 403, 404, 409 or 422 with an UPPER_CASE code`);
-    // Never retryable, on either transport: a refusal is the plugin's answer
-    // to this input, and the statuses it may use all say so. Last, so a fact
+    if (!REFUSAL_STATUSES.has(status) || !REFUSAL_CODE.test(code)) throw new Error(`${op.tool} refused with status ${status} and code ${JSON.stringify(code)}: a refusal is 400, 403, 404, 409, 422 or 503 with an UPPER_CASE code`);
+    // Retryable for a 503 alone, on either transport: the others are the
+    // plugin's answer to this input; a 503 says a service it needs did not
+    // answer, so the same call may succeed later (SMD-1992). Last, so a fact
     // of the plugin's own cannot say otherwise.
-    return { ok: false, refusal: { ...out.refusal, retryable: false } };
+    return { ok: false, refusal: { ...out.refusal, retryable: status === 503 } };
   }
   const value = op.output.safeParse(out.value);
   const refused = (error: z.ZodError) => error.issues.map((i) => `${i.path.map(String).join(".") || "(value)"} ${i.message}`).join("; ");
