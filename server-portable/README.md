@@ -507,12 +507,15 @@ result keeps ChatGPT's shape. A mention is labelled though it never ranks: the
 label shows what the result names, the rank what it is.
 
 It is one read per call: the page's thoughts and tickets, 1000 items at most,
-best-effort as the claims read is. A failed read gives `priority: null`, said once
-per reply (`[priority not read]` in the compat titles, beside a `priorityNote`).
-A ranked search's label comes from its window's read, which fails the search as
-before. With no priorities stored the read costs about 3 ms for a 10-hit page
-(10 thoughts, 10 tickets), 14 ms for a 100-row list page (40 tickets) and 25 ms
-for a full ranked window (100 thoughts, 100 tickets), 5,000 thoughts in the brain.
+best-effort as the claims read is, and none for an empty page. A failed read
+gives `priority: null`, said once per reply (`[priority not read]` in the compat
+titles, beside a `priorityNote`). A ranked search makes two: its window read asks
+the window's own thoughts alone, as before, and fails the search as before; its
+label read then asks only the tickets of the page it keeps, reusing the window's
+answers, best-effort. So a ticket only a dropped row names is never read. With no
+priorities stored the label read costs about 3 ms for a 10-hit page (10
+thoughts, 10 tickets) and 14 ms for a 100-row list page (40 tickets), 5,000
+thoughts in the brain.
 
 ### Tickets that moved since a hit was written (migration 095)
 

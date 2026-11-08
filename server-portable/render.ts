@@ -2284,7 +2284,9 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   const one = (p: PriorityOn) => {
     if (title) {
       const inherited = p.terms.find((t) => t.term === "inherited");
-      const level = p.level !== null ? levelText(p.level) : `${levelText(Number(inherited?.value))} inherited from ${p.inheritedFrom?.kind === "item" ? "open item" : p.inheritedFrom?.kind} ${p.inheritedFrom?.key}`;
+      // The inherited level after its hops, then the level it came from (review pass 1: "high (3) inherited from ticket SMD-1" read as SMD-1 High).
+      const from = p.inheritedFrom;
+      const level = p.level !== null ? levelText(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
       return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${state(p)}`;
     }
     return `${priorityWho(p)} at ${p.effective} (${p.terms.map(agendaTerm).join("; ")})${state(p)}`;

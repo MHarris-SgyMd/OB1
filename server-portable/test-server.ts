@@ -7028,6 +7028,18 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
     `the ranking takes each row's own answer as 122 gives it, never a ticket it names: an inherited level known, an unknown not, a stated level known, a stated None known at 0 (${JSON.stringify(got)})`);
   const none = prioritiesOf(await readPriorities({ effectivePriority: async () => [] } as never, [{ id: "z", content: "" }]), [{ id: "z" }]);
   assert(JSON.stringify(none) === JSON.stringify({ z: { effective: 0, known: false } }), `a row the read answered nothing for is unknown, at 0 (${JSON.stringify(none)})`);
+  // Review pass 1: a ranked search's window read asks its rows' own thoughts alone (`tickets: false`), so a ticket only
+  // a dropped row names is neither read nor a way to fail it; the page's label read reuses those answers (`have`) and
+  // asks only the tickets; a page with nothing left to ask makes no call.
+  asked.length = 0;
+  const windowRead = await readPriorities(store as never, rowsP, { tickets: false });
+  const pageRead = await readPriorities(store as never, [rowsP[0]], { have: windowRead.by });
+  const nothing = await readPriorities(store as never, [{ id: "t2", content: "x" }], { have: windowRead.by });
+  const empty = await readPriorities(store as never, []);
+  assert(asked.length === 2 && JSON.stringify(asked[0]) === JSON.stringify(["t1", "t2", "t3", "t4"].map((key) => ({ kind: "thought", key })))
+      && JSON.stringify(asked[1]) === JSON.stringify([{ kind: "ticket", key: "SMD-5" }]) && pageRead.by.get("thought:t1")?.effective === 3 && pageRead.by.get("ticket:SMD-5")?.effective === 5
+      && nothing.by.size === 4 && empty.by.size === 0,
+    `a window read asks its thoughts alone; the page's label read only its tickets, the window's answers kept; nothing to ask, no call (${JSON.stringify(asked)})`);
   // prefer_current's note after a priority re-rank: what the demotion did, the order left to the priority note.
   const { currentNote } = await import("./render.ts");
   const win = { rows: 40, known: 12, demoted: 7, syncedAt: null, exact: false };
@@ -7115,7 +7127,7 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
     `a hit's line: each item's effective priority and its terms as the agenda says them, no maker's name; the value keeps kinds, keys, levels, times and flags, no terms (${stText.match(/Priority: .*/)?.[0]})`);
   const compat = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "11/1/2026 - x", url: "u", trust: "agent", ...priorityResult(got, "a") }, { id: "x", title: "11/1/2026 - y", url: "u", trust: "agent", ...priorityResult(got, "b") }, { id: "y", title: "11/1/2026 - z", url: "u", trust: "agent" }] } } as never).content[0].text);
   const fetched = JSON.parse(say.renderFetch({ ok: true, value: { id: base.id, title: "11/1/2026 - x", text: "x", url: "u", metadata: {}, ...priorityResult(got, "d") } } as never).content[0].text);
-  assert(compat.results[0].title === "[priority: this thought high (3) inherited from ticket SMD-1; ticket SMD-2 high (3), overdue (due by the end of 2026-11-04 (UTC)); and 1 more] 11/1/2026 - x"
+  assert(compat.results[0].title === "[priority: this thought high (3), inherited from urgent (4) ticket SMD-1; ticket SMD-2 high (3), overdue (due by the end of 2026-11-04 (UTC)); and 1 more] 11/1/2026 - x"
       && compat.results[1].title === "[priority: this ticket's row (SMD-4) critical (5), settled] 11/1/2026 - y"
       && JSON.stringify(compat.results[2]) === JSON.stringify({ id: "y", title: "11/1/2026 - z", url: "u" }) && !("priorityNote" in compat)
       && compat.results[0].priority.length === 3 && !("terms" in compat.results[0].priority[0])

@@ -498,7 +498,7 @@ export type MatchPriority = { effective: number; known: boolean };
 
 /**
  * Each row's priority as the ranking reads it (SMD-3668): its own thought's effective priority, from the window's one
- * read (readPriorities), which asks the tickets the rows name too, for the label alone. 122 decides it as
+ * read of its rows' own thoughts (readPriorities with `tickets: false`). 122 decides it as
  * docs/priority.md decision 5 says (review pass 1: an earlier reading took the highest of a thought's and its filed
  * tickets', against three of the ADR's rules):
  * - a ticket's own row reads as its ticket;
@@ -553,14 +553,19 @@ type PriorityRow = { id: string; content: string; metadata?: Record<string, unkn
  * MOVED_READ others its text names (claimKeysOf, as the claimed label reads them), each once, to 122's reach of 1000.
  * A key that is no ticket key by 115's rule is not sent. Throws as the store does: a ranked search refuses on it,
  * priorityOf reads it as not read.
+ *
+ * `tickets: false` asks the rows' own thoughts alone: a ranked search's window read, which ranks by them and refuses
+ * on a failure, so a ticket only a row it drops names can neither cost it nor fail it (review pass 1). `have` holds
+ * answers already read, not asked again: the label of a ranked page reuses the window's. Nothing to ask, no call.
  */
-export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[]): Promise<PriorityRead> {
-  const ids = [...new Set(rows.map((r) => r.id))];
+export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): Promise<PriorityRead> {
+  const have = opts.have ?? new Map<string, EffectivePriority>();
+  const ids = [...new Set(rows.map((r) => r.id))].filter((id) => !have.has(`thought:${id}`));
   const tickets: string[] = [];
   const seen = new Set<string>();
   const keyed = new Map<string, { keys: string[]; notRead: number }>();
   for (const r of rows) {
-    if (keyed.has(r.id)) continue;
+    if (keyed.has(r.id) || opts.tickets === false) continue;
     const { keys, notRead } = claimKeysOf(r);
     const asked: string[] = [];
     let cut = notRead;
@@ -574,9 +579,12 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
     }
     keyed.set(r.id, { keys: asked, notRead: cut });
   }
+  const by = new Map(have);
+  if (ids.length + tickets.length === 0) return { by, keyed };
   // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are; a ticket upper-case.
   const read = await store.effectivePriority([...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))]);
-  return { by: new Map(read.map((p) => [`${p.item.kind}:${p.item.key}`, p])), keyed };
+  for (const p of read) by.set(`${p.item.kind}:${p.item.key}`, p);
+  return { by, keyed };
 }
 
 /** The ticket a thought's answer reads as (122 names it in its first term's `as`), else null. */
@@ -619,12 +627,13 @@ export function priorityLabels(read: PriorityRead, rows: readonly { id: string }
 }
 
 /**
- * The priority label (SMD-3668 PR 2) for a page that was not priority-ranked: one read, best-effort, as claimedOf —
- * a brain before 122, a server role without its grants, or a read that fails gives null, which the replies say.
+ * The priority label (SMD-3668 PR 2) for a page: one read, best-effort, as claimedOf — a brain before 122, a server
+ * role without its grants, or a read that fails gives null, which the replies say. A ranked page passes its window's
+ * answers (`have`), so only its tickets are asked; an empty page asks nothing (review pass 1).
  */
-export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[]): Promise<Record<string, PriorityHit> | null> {
+export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>): Promise<Record<string, PriorityHit> | null> {
   try {
-    return priorityLabels(await readPriorities(store, rows), rows);
+    return priorityLabels(await readPriorities(store, rows, { have }), rows);
   } catch (e) {
     const err = e as { errno?: unknown; code?: unknown; message?: unknown };
     console.error(`priority: the effective priority read failed (${String(err.errno ?? err.code ?? "no code")}): ${String(err.message ?? e).slice(0, 200)}; results carry priority: null`);
@@ -677,15 +686,18 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   if (r.refusal) return refuse(r.refusal);
   let data = r.rows;
   let priority: PriorityRanking | null = null;
-  // A ranked search's one priority read covers its window, the label's tickets with it (SMD-3668 PR 2); it refuses on a
-  // failed read, as PR 1's did. An unranked search reads its page's, best-effort, beside the claims.
+  // A ranked search reads its window's own thoughts, which rank it, and refuses on a failed read, as PR 1's did. Its
+  // label then reads the tickets of the page it keeps, best-effort, reusing the window's answers (SMD-3668 PR 2, review
+  // pass 1: a window read of every ticket its rows name read up to 900 the page never shows, and could fail the search
+  // on one). An unranked search reads its page's, best-effort, beside the claims.
   let labels: Promise<Record<string, PriorityHit> | null> | null = null;
   if (ranked && data.length) {
-    const all = await readPriorities(await ctx.store(), data);
+    const store = await ctx.store();
+    const all = await readPriorities(store, data, { tickets: false });
     const prio = prioritiesOf(all, data);
     const read = data.length;
     data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit);
-    labels = Promise.resolve(priorityLabels(all, data));
+    labels = priorityOf(store, data, all.by);
     priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length };
   } else if (ranked) {
     priority = { weight: priority_weight, min: min_priority ?? null, window, read: 0, kept: 0, known: 0 };

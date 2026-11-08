@@ -4248,8 +4248,29 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     assert(!rankedAll.isError && want.every(([id, w]) => said(rankedAll, id) === w),
       `a ranked search's hits carry the same labels, from its one window read (${want.filter(([id, w]) => said(rankedAll, id) !== w).map(([id]) => name.get(id)).join(", ")})`);
     const fetched = JSON.parse((await call("fetch", { id: underUrgent })) as string) as { title: string; priority: Pr[] };
-    assert(fetched.title.startsWith("[priority: this thought high (3) inherited from ticket PWU-1; ticket PWU-1 urgent (4)] ") && fetched.priority.length === 2,
+    assert(fetched.title.startsWith("[priority: this thought high (3), inherited from urgent (4) ticket PWU-1; ticket PWU-1 urgent (4)] ") && fetched.priority.length === 2,
       `fetch's title starts with the prefix (${fetched.title.slice(0, 120)})`);
+    // Review pass 1: a ranked search reads twice, through a core over a store that records each effective_priority
+    // call: its window's own thoughts alone (which rank it, and fail it on a fault, as PR 1's read did), then only the
+    // tickets of the page it keeps, the window's answers reused. A ticket only a dropped row names is never read.
+    const { z } = await import("zod");
+    const { SPECS } = await import("./core/schemas.ts");
+    const env25: Record<string, string | undefined> = { ...process.env };
+    const real25 = await createStore(env25 as never);
+    const reads25: { kind: string; key: string }[][] = [];
+    const watched = new Proxy(real25, { get: (t, k) => {
+      if (k === "effectivePriority") return async (items: { kind: string; key: string }[], o?: never) => { reads25.push(items); return t.effectivePriority(items, o); };
+      const v = Reflect.get(t, k);
+      return typeof v === "function" ? v.bind(t) : v;
+    } });
+    const core25 = createCore({ env: () => env25 as never, store: async () => watched as never, door: "open-brain" });
+    const in25 = z.object(SPECS.search_thoughts.inputSchema).parse({ query, limit: 1, threshold: -1, filter, priority_weight: 1 });
+    const out25 = await core25.searchThoughts({ name: "MCP_ACCESS_KEY", scope: "write", keyHash: "e2e-25" } as never, in25 as never);
+    const kept25 = out25.ok ? out25.value.hits[0] : undefined;
+    const named25 = kept25 ? `${kept25.content} ${JSON.stringify(kept25.metadata)}` : "";
+    assert(out25.ok && kept25 !== undefined && reads25.length === 2 && reads25[0].length === 4 && reads25[0].every((i) => i.kind === "thought")
+        && reads25[1].length > 0 && reads25[1].every((i) => i.kind === "ticket" && named25.includes(i.key)) && (kept25.priority?.length ?? 0) > 0,
+      `a ranked search reads its window's 4 thoughts alone, then only the tickets its kept row names, and labels it (${JSON.stringify(reads25.map((r) => r.map((i) => i.kind === "ticket" ? i.key : "thought")))})`);
   } finally {
     // The key's kind first, on its own: a failed capture leaves `made` short a row, and the delete after must not stop it
     // (review pass 2). set_agent_kind takes no NULL: the kind the key had, put back by hand.

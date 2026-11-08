@@ -2346,6 +2346,8 @@ console.log("\n[18] The priority label through both doors (SMD-3668 PR 2): a tho
       && compatPlain !== undefined && JSON.stringify(Object.keys(compatPlain)) === '["id","title","url"]' && plainRest !== undefined && !("priority" in plainRest),
     `search's and fetch's titles start with the prefix, a ticket's own row once as its ticket; a result naming none keeps ChatGPT's shape, over REST too (${compatHit?.title} | ${JSON.parse(rowMcp.text).title})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '%[18] the priority label%'`;
+  // The key's kind as [11] left it, before [17] classified it (review pass 1: left as operator for a section after).
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
 }
 
 apiServer.stop();
