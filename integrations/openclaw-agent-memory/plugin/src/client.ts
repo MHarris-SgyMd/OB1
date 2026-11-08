@@ -106,11 +106,11 @@ export class AgentMemoryClient {
     if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
     let answer: unknown = null;
     try {
-      answer = text ? JSON.parse(text) : {};
+      answer = text ? JSON.parse(text) : null;
     } catch {
       // Not JSON: told below.
     }
-    // A 2xx that is not a JSON object is no answer of the plugin's: an endpoint pointing at some other page.
+    // A 2xx that is not a JSON object, an empty one among them, is no answer of the plugin's: an endpoint pointing at some other page.
     if (!answer || typeof answer !== "object" || Array.isArray(answer)) {
       throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not a JSON object): ${text}`, null);
     }

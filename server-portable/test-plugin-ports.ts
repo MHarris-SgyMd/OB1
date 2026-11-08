@@ -3700,6 +3700,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
           const at = new URL(r.url).pathname;
           if (at.endsWith("/recall")) return new Response("<html>sign in</html>", { status: 200, headers: { "content-type": "text/html" } });
           if (at.endsWith("/review-queue")) return Response.json([1, 2]);
+          if (at.endsWith("/recalls/r-1")) return new Response(null, { status: 204 });
           return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
         },
       });
@@ -3715,11 +3716,13 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       const html = await thrown(() => elsewhere.recall({ query: "q" }));
       const array = await thrown(() => elsewhere.listReviewQueue());
       const gateway = await thrown(() => elsewhere.inspectMemory("m"));
+      const empty = await thrown(() => elsewhere.getRecallTrace("r-1"));
       page.stop(true);
       assert(html instanceof AgentMemoryError && html.status === 200 && html.code === null && html.message.includes("not the plugin's answer")
         && array instanceof AgentMemoryError && array.status === 200 && array.message.includes("not the plugin's answer")
+        && empty instanceof AgentMemoryError && empty.status === 204 && empty.message.includes("not the plugin's answer")
         && gateway instanceof AgentMemoryError && gateway.status === 502 && gateway.body === "<html>bad gateway</html>" && gateway.message.includes("502 <html>bad gateway</html>"),
-        `OpenClaw: a 200 that is no JSON object and a 502 page each thrown as AgentMemoryError, the page's text kept (${String(html)}; ${String(array)}; ${String(gateway)})`);
+        `OpenClaw: a 200 that is no JSON object, an empty 204 and a 502 page each thrown as AgentMemoryError, the page's text kept (${String(html)}; ${String(array)}; ${String(empty)}; ${String(gateway)})`);
 
       // The recipes' example payloads and the recall answer's contract (recipes/openclaw-agent-memory/contracts), held to the plugin:
       // each example as a runtime would send it, and every field a recalled memory carries one the contract names (it allows no other).

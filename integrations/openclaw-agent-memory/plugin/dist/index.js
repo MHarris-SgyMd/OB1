@@ -73,7 +73,7 @@ var AgentMemoryClient = class {
     if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
     let answer = null;
     try {
-      answer = text ? JSON.parse(text) : {};
+      answer = text ? JSON.parse(text) : null;
     } catch {
     }
     if (!answer || typeof answer !== "object" || Array.isArray(answer)) {

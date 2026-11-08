@@ -555,14 +555,52 @@ class TestOB1Client:
         assert len(bodies) == 2 and bodies[0]["idempotency_key"] == "key" and "step_id" not in bodies[0]
         assert timeouts == [ob1_module._DEFAULT_WRITEBACK_TIMEOUT, 5.0]
 
-    def test_writeback_timeout_is_configured(self, hermes_home, monkeypatch):
-        (hermes_home / "ob1.json").write_text(json.dumps({"endpoint": "http://x", "writeback_timeout": 999}))
+    @pytest.mark.parametrize("given,kept", [(999, 255.0), (1, 8.0), ("soon", 60.0)])
+    def test_writeback_timeout_is_configured(self, hermes_home, monkeypatch, given, kept):
+        # At most the brain's idle timeout (255 s), at least the reads' default (8 s), 60 s for a value that is no number.
+        (hermes_home / "ob1.json").write_text(json.dumps({"endpoint": "http://x", "writeback_timeout": given}))
         monkeypatch.setenv("OPENBRAIN_KEY", "k")
         p = OB1MemoryProvider()
         p.initialize(session_id="s", hermes_home=str(hermes_home))
-        assert p._client._writeback_timeout == 255.0  # clamped to the brain's idle timeout
+        assert p._client._writeback_timeout == kept
 
-    @pytest.mark.parametrize("raw", [b"<html>login</html>", b"[1, 2]", b"\xff\xfe not utf-8"])
+    def test_an_unsplit_long_key_is_hashed(self):
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, idempotency_key="k" * 201)
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, idempotency_key="k" * 200)
+        assert len(bodies[0]["idempotency_key"]) == 64 and bodies[1]["idempotency_key"] == "k" * 200
+
+    def test_parts_stop_at_the_deadline(self, monkeypatch):
+        # Each part 25 s on a fake clock, a deadline 60 s out: the parts wait 60, 35 and 10 s, and the fourth is never
+        # started; the cut says the 30 memories kept and the 30 not sent.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        bodies, timeouts, fake = self._parts()
+
+        def slow(req, timeout=None):
+            clock[0] += 25
+            return fake(req, timeout)
+
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", slow):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": [f"l{i}" for i in range(60)]}, deadline=1060.0)
+        assert timeouts == [60.0, 35.0, 10.0]
+        assert len(cut.value.memories) == 30 and cut.value.unsent == 30
+
+    def test_nothing_is_sent_past_the_deadline(self, monkeypatch):
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        client.stop_by(ob1_module.time.monotonic() - 1)
+        with patch("urllib.request.urlopen", fake):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l1", "l2"]})
+        assert bodies == [] and cut.value.unsent == 2 and cut.value.memories == []
+
+
+    @pytest.mark.parametrize("raw", [b"<html>login</html>", b"[1, 2]", b"\xff\xfe not utf-8", b""])
     def test_ok_answer_that_is_no_json_object_raises(self, raw):
         # A 200 that is not a JSON object is no answer of the plugin's (an endpoint pointing at some other page):
         # a coded error, never a parse, decode or attribute error.
@@ -911,6 +949,72 @@ class TestSessionEnd:
         with patch("urllib.request.urlopen", fake):
             p.on_session_end([{"role": "assistant", "content": line} for line in lines])
         assert sent == [10] * 6, sent
+
+    def test_exit_waits_one_deadline_and_logs_what_was_cut(self, configured, monkeypatch, caplog):
+        # Session end and shutdown share one deadline (the write-back timeout from the first of them): a long
+        # session's parts stop at it, and what was not sent is logged at warning.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+
+        def slow(req, timeout=None):
+            clock[0] += 25
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            return _mock_urlopen_response({"memories": [{"memory_id": "m"}] * sent[-1]})
+
+        lines = [f"We decided to use tool number {i} for the job." for i in range(10)] + [f"Lesson learned: check item {i} before the release." for i in range(10)] \
+            + [f"The build failed because of module {i} again." for i in range(10)]
+        with patch("urllib.request.urlopen", slow), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in lines])
+            deadline = p._exit_at
+            p.shutdown()
+        assert deadline == 1060.0 and p._exit_at == deadline  # shutdown kept the session end's deadline
+        assert sent == [10, 10, 10]  # 25 s each: the third part started at 50 s, under the 60 s deadline
+        clock[0] = 1000.0
+        assert not any("not written back" in r.message for r in caplog.records)
+        p2 = OB1MemoryProvider()
+        p2.initialize(session_id="sess", hermes_home=str(configured))
+        sent.clear()
+
+        def slower(req, timeout=None):
+            clock[0] += 40
+            return slow(req, timeout)
+
+        with patch("urllib.request.urlopen", slower), caplog.at_level("WARNING"):
+            p2.on_session_end([{"role": "assistant", "content": line} for line in lines])
+        assert sent == [10]  # 65 s each: the first part ends past the 60 s deadline, so no other starts
+        assert any("20 finding(s) not written back by the exit deadline" in r.message for r in caplog.records)
+
+    def test_shutdown_waits_for_every_background_writeback(self, configured, caplog):
+        # Every background write-back is kept, not only the latest: shutdown joins each until the exit deadline,
+        # and says how many it cut.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        quick_done = threading.Event()
+        hold = threading.Event()
+        p._start_writeback(lambda: (time.sleep(0.05), quick_done.set()), "w1")
+        p._start_writeback(lambda: hold.wait(5), "w2")
+        p._exit_at = time.monotonic() + 0.3
+        with caplog.at_level("WARNING"):
+            p.shutdown()
+        hold.set()
+        assert quick_done.is_set()
+        assert any("1 background write-back(s) still running at the exit deadline" in r.message for r in caplog.records)
+        assert p._writeback_threads == []
+
+    def test_shutdown_waits_for_an_earlier_writeback_too(self, configured):
+        # A write-back that outlives the 2 s a later one gives it is still kept: shutdown waits for it, not only the latest.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        earlier_done = threading.Event()
+        p._start_writeback(lambda: (time.sleep(2.4), earlier_done.set()), "w1")
+        p._start_writeback(lambda: None, "w2")  # waits 2 s for w1, which is still running after
+        p._exit_at = time.monotonic() + 2.0
+        p.shutdown()
+        assert earlier_done.is_set()
 
     def test_skips_when_inactive(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)

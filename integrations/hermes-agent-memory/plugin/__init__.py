@@ -76,10 +76,15 @@ _WRITEBACK_PART_MEMORIES = 10
 _ID_MAX = 200
 
 
+def _within_bound(value: str) -> str:
+    """An id as the plugin takes it: the value, or its sha256 where it would
+    pass the plugin's 200 characters. The same value always gives the same id."""
+    return value if len(value) <= _ID_MAX else hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _part_id(value: str, n: int) -> str:
     """A part's own idempotency key or step id: ``value`` with ``:part<n>``,
-    or the value's sha256 with it where that would pass the plugin's 200
-    characters. The same value and part always give the same id."""
+    the value's sha256 standing for it where that would pass 200 characters."""
     part = f"{value}:part{n}"
     if len(part) <= _ID_MAX:
         return part
@@ -504,6 +509,17 @@ class OB1RequestError(RuntimeError):
         super().__init__(f"OB1 {method} {path} failed: HTTP {status} {what}{detail}".rstrip())
 
 
+class OB1WritebackCut(RuntimeError):
+    """A write-back in parts stopped at its deadline (Hermes exiting): the
+    parts sent before it were kept (``memories``, as the plugin answered
+    them), and ``unsent`` memories were never sent."""
+
+    def __init__(self, memories: List[Any], unsent: int):
+        self.memories = memories
+        self.unsent = unsent
+        super().__init__(f"OB1 write-back stopped at its deadline: {len(memories)} memories kept, {unsent} not sent")
+
+
 class _OB1Client:
     """Thin sync HTTP client for the brain's agent-memory plugin.
 
@@ -521,6 +537,21 @@ class _OB1Client:
         self._access_key = access_key
         self._timeout = timeout
         self._writeback_timeout = writeback_timeout
+        # When Hermes exits (time.monotonic()): no write-back part starts after it, and none waits past it.
+        self._stop_at: Optional[float] = None
+
+    def stop_by(self, deadline: float) -> None:
+        """No write-back part starts after ``deadline`` (time.monotonic()), and none waits past it."""
+        self._stop_at = deadline if self._stop_at is None else min(self._stop_at, deadline)
+
+    def _writeback_wait(self, deadline: Optional[float]) -> Optional[float]:
+        """How long the next write-back part may wait: the write-back timeout, or less where a deadline is nearer;
+        None once the deadline has passed."""
+        ends = [d for d in (deadline, self._stop_at) if d is not None]
+        if not ends:
+            return self._writeback_timeout
+        left = min(ends) - time.monotonic()
+        return min(self._writeback_timeout, left) if left > 0 else None
 
     def _request(self, method: str, path: str, *, body: Optional[dict] = None,
                  query: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> dict:
@@ -541,11 +572,12 @@ class _OB1Client:
             retry_after = e.headers.get("Retry-After") if e.headers else None
             raise OB1RequestError(method, path, e.code, err_body, retry_after) from e
         try:
-            answer = json.loads(raw) if raw else {}
+            answer = json.loads(raw) if raw else None
         except ValueError:
             answer = None
         if not isinstance(answer, dict):
-            # A 2xx that is not a JSON object is no answer of the plugin's: an endpoint pointing at some other page.
+            # A 2xx that is not a JSON object, an empty one among them, is no answer of the plugin's: an endpoint
+            # pointing at some other page.
             raise OB1RequestError(method, path, status, f"not the plugin's answer (not a JSON object): {raw}")
         return answer
 
@@ -602,7 +634,8 @@ class _OB1Client:
                   task_id: Optional[str] = None,
                   flow_id: Optional[str] = None,
                   step_id: Optional[str] = None,
-                  idempotency_key: Optional[str] = None) -> dict:
+                  idempotency_key: Optional[str] = None,
+                  deadline: Optional[float] = None) -> dict:
         # Answered {schema_version, memories}: each memory whole under a write
         # key, its memory_id and thought_id alone under a capture-only key.
         body: dict = {
@@ -627,26 +660,34 @@ class _OB1Client:
         if step_id:
             body["step_id"] = step_id
         parts = _split_payload(memory_payload)
+        sizes = [sum(len(v) for k, v in part.items() if k != "entities" and isinstance(v, list)) for part in parts]
         if len(parts) == 1:
             if idempotency_key:
-                body["idempotency_key"] = idempotency_key
-            return self._request("POST", "/writeback", body=body, timeout=self._writeback_timeout)
+                body["idempotency_key"] = _within_bound(idempotency_key)
+            wait = self._writeback_wait(deadline)
+            if wait is None:
+                raise OB1WritebackCut([], sizes[0])
+            return self._request("POST", "/writeback", body=body, timeout=wait)
         # More than a part: each part a write-back of its own, the parts' answers joined part after part (each in
         # the plugin's order of kinds). The plugin keys each memory by the write-back's key, or by one it makes of
         # the workspace, runtime, task, step and the memory's text, and the memory's index in the request: so each
         # part has a key, or a step, of its own (`:part<n>`), and the same text at the same index of two parts is
         # two memories, as it is in one write-back. A part refused or timed out raises, the parts before it kept
         # and the ones after it not sent: the same write-back sent again answers the kept ones, writing nothing
-        # twice, and finishes.
+        # twice, and sends the rest (a refusal that holds, an unsafe memory, refuses it again). No part starts
+        # after the deadline (Hermes exiting), and none waits past it: OB1WritebackCut says what was kept.
         answer: dict = {}
         memories: List[Any] = []
         for n, part in enumerate(parts):
+            wait = self._writeback_wait(deadline)
+            if wait is None:
+                raise OB1WritebackCut(memories, sum(sizes[n:]))
             body["memory_payload"] = part
             if idempotency_key:
                 body["idempotency_key"] = _part_id(idempotency_key, n)
             else:
                 body["step_id"] = _part_id(step_id or "step", n)
-            answer = self._request("POST", "/writeback", body=body, timeout=self._writeback_timeout)
+            answer = self._request("POST", "/writeback", body=body, timeout=wait)
             memories.extend(answer.get("memories") or [])
         return {**answer, "memories": memories}
 
@@ -813,6 +854,10 @@ class OB1MemoryProvider(MemoryProvider):
         self._session_id: str = ""
         self._turn_count: int = 0
         self._sync_thread: Optional[threading.Thread] = None
+        # Every background write-back still running (sync_turn's, on_pre_compress's): shutdown joins them all.
+        self._writeback_threads: List[threading.Thread] = []
+        # Hermes's exit deadline (time.monotonic()), set by the first of on_session_end and shutdown.
+        self._exit_at: Optional[float] = None
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_lock = threading.Lock()
         # (query, formatted_context, request_id, timestamp)
@@ -977,12 +1022,40 @@ class OB1MemoryProvider(MemoryProvider):
                 self._active = False
                 self._client = None
 
+    def _exit_deadline(self) -> float:
+        """Hermes's exit deadline: one write-back timeout from the first of on_session_end and shutdown, shared by
+        both, so exit waits for write-backs at most that long. The client starts no write-back part after it."""
+        if self._exit_at is None:
+            self._exit_at = time.monotonic() + float(self._config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))
+            if self._client:
+                self._client.stop_by(self._exit_at)
+        return self._exit_at
+
+    def _start_writeback(self, target, name: str) -> None:
+        """A background write-back, kept so shutdown can wait for it. The previous one gets 2 s to finish first,
+        as before, so turns' write-backs go roughly in order."""
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=2.0)
+        self._writeback_threads = [t for t in self._writeback_threads if t.is_alive()]
+        self._sync_thread = threading.Thread(target=target, daemon=True, name=name)
+        self._writeback_threads.append(self._sync_thread)
+        self._sync_thread.start()
+
     def shutdown(self) -> None:
-        for attr in ("_sync_thread", "_prefetch_thread"):
-            t = getattr(self, attr, None)
-            if t and t.is_alive():
-                t.join(timeout=5.0)
-            setattr(self, attr, None)
+        # Every background write-back still running gets until the exit deadline, which it starts no new part past.
+        deadline = self._exit_deadline()
+        for t in self._writeback_threads:
+            if t.is_alive():
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
+        cut = sum(1 for t in self._writeback_threads if t.is_alive())
+        if cut:
+            logger.warning("OB1: %d background write-back(s) still running at the exit deadline (writeback_timeout) were cut", cut)
+        self._writeback_threads = []
+        self._sync_thread = None
+        t = self._prefetch_thread
+        if t and t.is_alive():
+            t.join(timeout=5.0)
+        self._prefetch_thread = None
         with self._prefetch_lock:
             self._prefetch_cache = None
 
@@ -1222,13 +1295,12 @@ class OB1MemoryProvider(MemoryProvider):
                     task_id=task_id,
                     flow_id=flow_id,
                 )
+            except OB1WritebackCut as cut:
+                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back", cut.unsent)
             except Exception:
                 logger.debug("OB1 sync_turn writeback failed", exc_info=True)
 
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=2.0)
-        self._sync_thread = threading.Thread(target=_run, daemon=True, name="ob1-sync")
-        self._sync_thread.start()
+        self._start_writeback(_run, "ob1-sync")
 
     # ---- Session-end + pre-compress hooks ----------------------------
 
@@ -1279,7 +1351,12 @@ class OB1MemoryProvider(MemoryProvider):
                 provenance=provenance,
                 task_id=self._session_id or None,
                 flow_id=self._agent_identity,
+                # Exit waits for the session's findings at most one write-back timeout, shared with shutdown.
+                deadline=self._exit_deadline(),
             )
+        except OB1WritebackCut as cut:
+            logger.warning("OB1 session end: %d finding(s) not written back by the exit deadline (writeback_timeout); %d kept",
+                           cut.unsent, len(cut.memories))
         except Exception:
             logger.debug("OB1 on_session_end writeback failed", exc_info=True)
 
@@ -1334,13 +1411,12 @@ class OB1MemoryProvider(MemoryProvider):
                         flow_id=flow_id,
                         idempotency_key=f"precompress:{task_id or 'no-task'}:{len(messages)}",
                     )
+                except OB1WritebackCut as cut:
+                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written back", cut.unsent)
                 except Exception:
                     logger.debug("OB1 on_pre_compress writeback failed", exc_info=True)
 
-            if self._sync_thread and self._sync_thread.is_alive():
-                self._sync_thread.join(timeout=2.0)
-            self._sync_thread = threading.Thread(target=_run, daemon=True, name="ob1-precompress")
-            self._sync_thread.start()
+            self._start_writeback(_run, "ob1-precompress")
 
         # Build a concise summary for the compression prompt. Compression
         # itself is text-based, so we hand back a structured-but-readable

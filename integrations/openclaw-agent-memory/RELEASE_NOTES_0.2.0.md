@@ -18,7 +18,8 @@ which replaces the standalone Agent Memory API server after the brain's 2.0.0
   the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`);
   a retryable 503 carries its `Retry-After`. A body that is not JSON (a
   proxy's error page, or a 2xx from an endpoint that is not the plugin's) and
-  a 2xx that is no JSON object throw one too, never a bare parse error.
+  a 2xx that is no JSON object, an empty one among them, throw one too, never
+  a bare parse error.
 - Each call passes on only the fields its route takes: the plugin refuses a
   field it does not name, so one a model adds to a tool's arguments is
   dropped rather than failing the call.
