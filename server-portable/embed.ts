@@ -229,7 +229,7 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
   // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it, so a refused call waits for no slot,
   // and the span inside it, so the span times the call and not a wait; the deadline starts in exchange.
-  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, purpose: subject.kind, ...(signal ? { signal } : {}) },
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, local: at.local, purpose: subject.kind, ...(signal ? { signal } : {}) },
     () => withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
       const answer = await exchange<T>(cfg, path, body, at, what, signal);
       span.set(usageOf(answer));

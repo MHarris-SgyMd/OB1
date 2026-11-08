@@ -30,6 +30,16 @@ defaults:
   run:
     shell: bash
 
+# The suites run with the background slots off (SMD-3379 PR 2b-2b, the
+# maintainer, 2026-11-08): the defaults would hold every local stub's background
+# calls in each process a suite spawns, a connection per slot, and the rows that
+# test them set their own. A job that runs the compose stack sets it empty, so
+# compose hands the stack its defaults: deploy-stack checks preflight says them,
+# and the stack starts, stops and runs its flows with the hook installed — its
+# calls are live, so none takes a slot (review pass 3).
+env:
+  OB1_BACKGROUND_SLOTS: "off"
+
 # Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
 # GitHub moves to a new release on its own date), and every `uses:` names a
 # full commit SHA with the tag it was in a trailing comment; Dependabot
@@ -1700,6 +1710,9 @@ jobs:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack '))) }}
     steps:
@@ -1738,6 +1751,8 @@ jobs:
           grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
+          # The stack got the background slots' defaults, not the suites' off (SMD-3379 PR 2b-2b review pass 3).
+          grep -E 'background slots +chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\)' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
 
       # SMD-1875, the ticket's first Verify item on every PR: the compose
@@ -3017,6 +3032,9 @@ jobs:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-brains '))) }}
     steps:
@@ -3868,6 +3886,9 @@ jobs:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-auth '))) }}
     steps:
@@ -4631,6 +4652,9 @@ jobs:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-observability '))) }}
     steps:

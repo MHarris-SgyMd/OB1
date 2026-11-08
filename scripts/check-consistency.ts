@@ -11971,9 +11971,14 @@ function parityLinesIn(text: string): { runs: ParityRun[]; typechecks: { dir: st
  * The environment the comparison holds: the database URLs are the harness's,
  * so not compared; the verb says whether DATABASE_URL is set. OB1_TEST_COUNTS
  * is where a run's totals are written for the wiki (SMD-3614), not what it
- * tests, so it is not compared either.
+ * tests, so it is not compared either. OB1_BACKGROUND_SLOTS is the
+ * workflow's for every step and ci-parity.sh's for every row, held once
+ * below rather than on each line (SMD-3379 PR 2b-2b).
  */
-const UNHELD_ENV = ["OB1_TEST_COUNTS"];
+const UNHELD_ENV = ["OB1_TEST_COUNTS", "OB1_BACKGROUND_SLOTS"];
+/** The background slots the suites run with (SMD-3379 PR 2b-2b): the workflow's own env, and ci-parity.sh's export of it. */
+const SUITE_SLOTS = "off";
+const PARITY_SLOTS_LINE = `export OB1_BACKGROUND_SLOTS=${SUITE_SLOTS}`;
 const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL") && !UNHELD_ENV.includes(k));
 const heldEnv = (env: Record<string, string>): string => JSON.stringify(heldEntries(env).sort(([a], [b]) => a.localeCompare(b)));
 const parityLine = (verb: string, dir: string, script: string, args: string, env: Record<string, string>): string =>
@@ -12088,6 +12093,27 @@ function checkCiParity() {
   // Were these missed, the reading is broken, not the two files in step.
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+  // The background slots off in both, once each, as the comparison above leaves them out (SMD-3379 PR 2b-2b): the
+  // workflow's env for every job, ci-parity.sh's export before its first row.
+  const topSlots = isMapping(doc) && isMapping(doc.env) ? doc.env.OB1_BACKGROUND_SLOTS : undefined;
+  if (topSlots !== SUITE_SLOTS) fail(SUITE_WORKFLOW, `sets OB1_BACKGROUND_SLOTS ${JSON.stringify(topSlots ?? null)} in its env, not "${SUITE_SLOTS}": the suites run with the background slots off, a compose stack's job setting it empty (check 35, SMD-3379)`);
+  // A job that brings the compose stack up runs it as shipped: OB1_BACKGROUND_SLOTS empty in its env, so compose hands
+  // the stack the defaults rather than the suites' off (review pass 1).
+  const jobsOf = isMapping(doc) && isMapping(doc.jobs) ? Object.entries(doc.jobs) : [];
+  // A step's commands as the shell reads them: continued lines joined, comments dropped, so a comment or a message that
+  // names compose's `up` is no stack, and an `up` on a continuation line is one (review pass 2); canary.sh's up too.
+  const commands = (run: string) => run.replace(/\\\n/g, " ").split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")).filter((l) => !/^\s*(?:echo|printf|said|refused)\b/.test(l));
+  const bringsUp = (run: string) => commands(run).some((l) => /\bcompose\b.*\sup(?:\s|$)/.test(l) || /\bcanary\.sh\s+up\b/.test(l) || /\bfull-stack-up\.sh\b/.test(l));
+  const stackJobs = jobsOf.filter(([, j]) => isMapping(j) && Array.isArray(j.steps) && j.steps.some((st) => isMapping(st) && typeof st.run === "string" && bringsUp(st.run)));
+  // Each reading held: a comment and a message are no stack, a continued line is (probes).
+  if (bringsUp("# docker compose up -d") || bringsUp("  docker compose ps # then compose up -d") || bringsUp("refused 'x' compose up") || !bringsUp("docker compose -f a.yaml \\\n  up -d") || !bringsUp("./canary.sh up --no-refresh") || !bringsUp(".github/ci/full-stack-up.sh"))
+    fail(SELF, "check 35's stack-job reading no longer drops comments and messages and joins continued lines (SMD-3379)");
+  if (!stackJobs.length) fail(SELF, `check 35 reads no job of ${SUITE_WORKFLOW} that brings a compose stack up — the reading is broken`);
+  for (const [name, j] of stackJobs) {
+    const own = isMapping(j) && isMapping(j.env) ? j.env.OB1_BACKGROUND_SLOTS : undefined;
+    if (own !== "") fail(SUITE_WORKFLOW, `job ${name} brings a compose stack up with OB1_BACKGROUND_SLOTS ${JSON.stringify(own ?? null)} in its env, not "": the workflow's "${SUITE_SLOTS}" would reach the stack, which runs as shipped (check 35, SMD-3379)`);
+  }
+  if (readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n").filter((l) => l === PARITY_SLOTS_LINE).length !== 1) fail(PARITY_SCRIPT, `does not \`${PARITY_SLOTS_LINE}\` once, as ${SUITE_WORKFLOW}'s env does, so its suites would run with the background slots' defaults (check 35, SMD-3379)`);
   // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
   if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
     fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");
