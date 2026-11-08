@@ -521,15 +521,19 @@ export async function prioritiesOf(store: Pick<ThoughtStore, "effectivePriority"
 
 /**
  * The window re-ranked and filtered (SMD-3668): each match scored (1 − weight) × relevance + weight × priority —
- * relevance its score over the window's top score, priority its effective over PRIORITY_SPAN, capped at 1 — in that
- * order, a tie in the window's own; then, with a floor, only matches whose priority is known and at least it; then
- * the first `limit`. Pure, for the unit test.
+ * relevance its place in the window, (n − i) / n, so the first is 1 and the last 1/n; priority its effective over
+ * PRIORITY_SPAN, capped at 1 — in that order, a tie in the window's own; then, with a floor, only matches whose
+ * priority is known and at least it; then the first `limit`. Pure, for the unit test.
+ *
+ * By place, not score (review pass 2): the hybrid's score is its fusion score, 0 for a text match, for every row of
+ * a literal-only query without the literal, and for every row when no thought holds it — rows the search ordered by
+ * similarity or newness, which a score over the top's left to priority alone at any weight. The window's order is the
+ * search's own, ties and all; and the fusion scores bunch (the 40th about 0.6 of the first), which place does not.
  */
-export function rankByPriority<T extends { id: string; score: number }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number): T[] {
-  const top = Math.max(0, ...rows.map((r) => r.score));
-  const relevance = (r: T) => (top > 0 ? Math.max(0, r.score) / top : 0);
+export function rankByPriority<T extends { id: string }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number): T[] {
+  const n = rows.length;
   const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / PRIORITY_SPAN);
-  const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * relevance(r) + weight * priority(r) }));
+  const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * ((n - i) / n) + weight * priority(r) }));
   // The window's own order breaks a tie, so a weight of 0 with a floor keeps it.
   scored.sort((a, b) => b.s - a.s || a.i - b.i);
   const kept = min === null ? scored : scored.filter(({ r }) => prio[r.id]?.known === true && prio[r.id].effective >= min);

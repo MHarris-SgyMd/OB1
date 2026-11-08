@@ -524,10 +524,25 @@ export function minTrustHint(msg: string): string {
     : "";
 }
 
-/** The hint a search tool's fault carries, by what it asked for: min_trust's first, then prefer_current's; undefined when it asked for neither. */
-export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolean }): ((msg: string) => string) | undefined {
-  const hints = [...(asked.min_trust !== undefined ? [minTrustHint] : []), ...(asked.prefer_current ? [currentSearchHint] : [])];
+/** The hint a search tool's fault carries, by what it asked for: min_trust's first, then prefer_current's, then priority's; undefined when it asked for none. */
+export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolean; priority_weight?: number; min_priority?: number }): ((msg: string) => string) | undefined {
+  const ranked = (asked.priority_weight ?? 0) > 0 || asked.min_priority !== undefined;
+  const hints = [...(asked.min_trust !== undefined ? [minTrustHint] : []), ...(asked.prefer_current ? [currentSearchHint] : []), ...(ranked ? [priorityHint] : [])];
   return hints.length ? (msg) => hints.map((h) => h(msg)).find((t) => t !== "") ?? "" : undefined;
+}
+
+/**
+ * The hint an error from priority_weight's or min_priority's read carries (SMD-3668, review pass 2): the read is
+ * effective_priority (migration 122), over 116's assertions and 117's open items, so a brain short of 122 or a server
+ * role granted before 116 fails every ranked search. Unlike the claimed and moved labels the read does not degrade:
+ * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
+ */
+export function priorityHint(msg: string): string {
+  return /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight and min_priority read effective_priority, migration 122 (db/migrations/122_effective_priority.sql), which is not applied; search without them meanwhile"
+    : /permission denied for (table|function|relation) (priority_|open_item|ob1_|thought_facets|thought_sources|node_)/i.test(msg)
+    ? " — priority_weight and min_priority read effective_priority (migration 122), and the server's role needs the grants migrations 116, 117 and 122 add (db/README.md, Grants for a capturing role; migrate.ts --grant issues them, and a role granted before 116 must be granted again); search without them meanwhile"
+    : "";
 }
 
 /** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
@@ -709,26 +724,31 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     const notes: string[] = literal ? [literal] : [];
     // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
     const asText = vectorFailed?.matched === "text";
+    // SMD-3668 (review pass 2): a priority_weight above 0 ordered what follows, so a note saying what the order is by
+    // says so — the rows it names are still the window's, the order theirs no more.
+    const reranked = (v.priority?.weight ?? 0) > 0;
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
     // Past the page the shown are the newest of the first rows the scan met, not of every holder (review pass 9).
     if (asText && head.needleCounts[0] > data.length) notes.push(head.needleCounts[0] > TEXT_PAGE
-      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are the newest of the first ${TEXT_PAGE + 1} the scan found, not of all — page with search_thoughts_keyword.`
-      : `It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length} — raise limit or page with search_thoughts_keyword.`);
-    if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
+      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are ${reranked ? `drawn from the newest the scan found and ordered by priority_weight` : `the newest of the first ${TEXT_PAGE + 1} the scan found`}, not of all — page with search_thoughts_keyword.`
+      : `It is in ${thoughtCount(head.needleCounts[0])}; these are ${reranked ? `${data.length} of the newest, ordered by priority_weight` : `the newest ${data.length}`} — raise limit or page with search_thoughts_keyword.`);
+    if (asText && v.preferCurrent) notes.push(reranked ? "prefer_current does not rank a text match, and priority_weight orders these: a superseded one labelled." : "prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
-    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}${v.priority?.min != null ? " (or below min_priority)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")}${v.priority?.min != null ? " — lower min_priority, raise limit" : " — raise limit"} or use search_thoughts_keyword.`);
+    if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}${v.priority?.min != null ? " (or below min_priority)" : ""}${reranked ? " (or ranked past it by priority)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")}${v.priority?.min != null ? " — lower min_priority, raise limit" : " — raise limit"} or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     // prefer_current's window rides the value once; the note reads it off the first row.
-    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })), (v.priority?.weight ?? 0) > 0);
+    const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })), reranked);
     if (current) notes.push(current);
     // SMD-3668: how priority ranked or filtered the window.
     const prio = priorityNote(v.priority);
     if (prio) notes.push(prio);
     // Without a vector there is no similarity to rank the rest by (SMD-2891).
     if (head.literalOnly && !literal) {
-      notes.push(matchedAny.size
+      notes.push(reranked
+        ? `The query is only literals: the window was read ${matchedAny.size ? "exact matches first and the rest by similarity" : "by similarity alone"}${v.preferCurrent ? ", current ones first" : ""}, and priority_weight orders it below.`
+        : matchedAny.size
         ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
         : head.commonNeedles.length
           ? `The query is only literals, and too common to match exactly, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`

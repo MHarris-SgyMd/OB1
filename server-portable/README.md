@@ -443,31 +443,50 @@ window is, and reads their effective priority once for the whole window
 (`effective_priority`, migration 122, SMD-3667):
 
 - **A match's priority** is its own effective priority, as `docs/priority.md`
-  decision 5 composes it. A ticket's row reads as its ticket. Any other thought
-  takes its own stated level, else one inherited from the ticket it is about
-  (its metadata `ticket` or `issue`, else its standing subject) at one level less
-  a hop, counted only above unknown's 2. A finished ticket passes nothing down.
-  So a note filed under an Urgent ticket reads High, and one under a High ticket
-  stays unknown. A ticket its text only mentions doesn't count: inheritance
-  through mentions waits for SMD-3662's numbers ("Not decided here").
+  decision 5 composes it:
+  - A ticket's row reads as its ticket.
+  - Any other thought takes its own counted level, else one inherited from the
+    ticket it is about (its metadata `ticket` or `issue`, else its standing
+    subject). An inherited level is one less a hop, two hops at most, and
+    counts only above unknown's 2.
+  - A level counts when a key the operator classified stated it. An
+    unclassified or importer's key's statement is inferred, and not counted
+    until SMD-3670.
+  - A finished ticket's own row keeps its stated level: only its urgency and
+    what it unblocks drop. It passes nothing down to a note under it. To rank
+    finished work lower, add `prefer_current`.
+  - So a note filed under an Urgent ticket reads High, and one under a High
+    ticket stays unknown.
+  - A ticket its text only mentions doesn't count: inheritance through mentions
+    waits for SMD-3662's numbers ("Not decided here").
 - **`priority_weight`** orders the window by (1 − weight) × relevance + weight ×
-  priority. Relevance is a match's score over the window's top score. Priority is
-  its effective priority (a level, unknown counted as 2, plus urgency and what it
-  unblocks) over 9, the default weights' largest. Ties keep the window's order.
-- **`min_priority`** keeps the matches whose priority is known (stated, or
+  priority. Relevance is a match's place in the window, (n − i) / n: the first is
+  1 and the last 1/n. So the search's own order, ties and all, is what weighs,
+  and a text match or a literal-only query's similarity order is kept too. Their
+  fusion scores are 0, and a score over the top's would have left those rows to
+  priority alone. Priority is the effective priority (a level, unknown counted as
+  2, plus urgency and what it unblocks) over 9, the default weights' largest.
+  Ties keep the window's order.
+- **`min_priority`** keeps the matches whose priority is known (counted, or
   inherited from what they serve) and whose effective priority is at least the
   level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
   unknown priority never passes.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
-floor, how many it kept. The structured reply's `priority` carries the same. A
-search with either set isn't logged, as one with `min_trust` isn't: the query
-log has no column for them, and a replay would run it without. The read costs
-about 12 ms for a full window with no priorities stored (125 items, 5,000
-thoughts). The ChatGPT `search` tool takes only its query, so it never ranks by
-priority. `evals/eval-priority.ts` (SMD-3662) measures the weight before any
-default changes.
+floor, how many it kept. Under a weight, its notes on the order (a text
+match's newest, a literal-only query's similarity) say priority ordered it. The
+structured reply's `priority` carries the same.
+
+A search with either set isn't logged, as one with `min_trust` isn't: the query
+log has no column for them, and a replay would run it without. A brain short of
+migration 122, or a server role granted before 116, fails a ranked search with a
+hint naming the fix.
+
+The read costs about 6.5 ms for a full window with no priorities stored (100
+thoughts, 5,000 in the brain). The ChatGPT `search` tool takes only its query,
+so it never ranks by priority. `evals/eval-priority.ts` (SMD-3662) measures the
+weight before any default changes.
 
 ### Tickets that moved since a hit was written (migration 095)
 
