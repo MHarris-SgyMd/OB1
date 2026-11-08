@@ -6915,6 +6915,40 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     ["CONFIRM_NOT_YOURS", R({ code: "CONFIRM_NOT_YOURS", retryable: false, item: T }), /^Refused: open item 3333\S+ was proposed, not stated; a write key confirms it/],
   ];
   for (const [name, r, words] of itemRefusals) assert(r.isError === true && words.test(text(r)) && !text(r).includes("\n"), `${name} (an open item's): refused by its rule, in one line (${text(r)})`);
+  // The core's mapping (review passes 2 and 3): 123's own 42501 under mine is CLAIMS_UNREADABLE; another table's is a fault.
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const raising = (message: string) => ({ store: async () => ({ agenda: async () => { throw Object.assign(new Error(message), { errno: "42501" }); } }), logAgenda: async () => {} });
+    const P = { name: "k", scope: "read", agentId: undefined } as never;
+    const I = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, holder: "mine" } as never;
+    const mapped = await agendaRead(raising("agenda: holder mine reads work_claims, which this role may not (the claims group)") as never, P, I);
+    let other = "";
+    try { await agendaRead(raising("permission denied for table priority_assertions") as never, P, I); } catch (e) { other = (e as Error).message; }
+    assert(!mapped.ok && (mapped as { refusal: { code: string } }).refusal.code === "CLAIMS_UNREADABLE" && /priority_assertions/.test(other),
+      `123's own refusal under mine maps to CLAIMS_UNREADABLE; another table's 42501 stays a fault naming the table (${other})`);
+  }
+  // The core passes each flag to its own argument and writes one log row of the items returned (review pass 8: swapped
+  // flags and a dropped log call passed every suite).
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    let asked: Record<string, unknown> | null = null;
+    const logged: unknown[][] = [];
+    const ctx = {
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 }, boardSync: null, claimsRead: true, now: "2027-01-01T00:00:00.000Z" }; } }),
+      logAgenda: async (...a: unknown[]) => { logged.push(a); },
+    };
+    await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
+      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true } as never);
+    const a = asked as Record<string, unknown> | null;
+    assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
+           && logged.length === 1 && logged[0][2] === 7 && JSON.stringify(logged[0][3]) === '[{"kind":"ticket","key":"SMD-1","effective":4}]'
+           && (logged[0][1] as Record<string, unknown>).include_blocked === true,
+      `each flag reaches its own argument, and one log row carries the scope, the limit and the items (${JSON.stringify(a)}; ${JSON.stringify(logged)})`);
+  }
+  // The agenda (SMD-3669 review pass 2): holder mine on a role without the claims group is a refusal, in words.
+  const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);
+  assert(unreadable.isError === true && /^Refused: holder mine needs the claims this server's database role cannot read \(the claims group\); ask without holder$/.test(text(unreadable)),
+    `CLAIMS_UNREADABLE: refused in words, one line (${text(unreadable)})`);
   // 117's words read as the argument they name (review pass 1): a client reading values knows which to mend.
   const { itemProblemOf } = await import("./open-items.ts");
   const itemProblems = ["not an open item's id: 'x' (a uuid)", "an item's text is at most 1000 characters; this one has 1001", "an owner is at most 200 characters; this one has 201",
@@ -6939,6 +6973,73 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   const problems = ["not an item kind: 'x' (thought, ticket, entity or item)", "not a entity id: 'x' (a uuid)", "not a ticket key: 'x'", "a priority level is 0 (none) to 5 (critical); 9 is not", "not_before is after due_at: the item could not start before it is due",
     "a due reference takes both a kind and a key, or neither", "an item's due reference may not name itself", "a reason is at most 1000 characters; this one has 1001", "assert_priority: a maker's key name is at most 200 characters; this one has 201", "something else"].map(priorityProblemOf);
   assert(problems.join(",") === "kind,key,key,level,not_before,due_ref,due_ref,reason,key_name,other", `a 22023's words name their argument (${problems.join(",")})`);
+}
+
+console.log("\n[36] priority_weight and min_priority in the core and the words (SMD-3668): the blend's order with relevance by place, a tie in the window's order, the floor on a known priority alone, one read with each row as its own thought, the header notes, and the hint for a read that failed");
+{
+  const { rankByPriority, prioritiesOf, PRIORITY_SPAN, priorityWindow } = await import("./core/reads.ts");
+  const { priorityNote } = await import("./render.ts");
+  const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
+  const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
+  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n).map((r) => r.id).join("");
+  // 11-02's case in miniature: four Highs, the one with urgency last by meaning.
+  assert(order(0) === "abcd" && order(1) === "dabc" && order(0.6) === "abdc",
+    `four of one level: at 0 the window's order, at 1 the higher priority first and the rest in theirs, at 0.6 the urgent one no longer last (${order(0)}, ${order(1)}, ${order(0.6)})`);
+  // (1 − w) × relevance + w × priority, relevance by place (n − i) / n: d's 0.2 × 1/4 + 0.8 × 5/9 = 0.494 over a's
+  // 0.2 × 1 + 0.8 × 3/9 = 0.467; at 0.1, a's 0.933 over d's 0.281.
+  assert(PRIORITY_SPAN === 9 && order(0.8) === "dabc" && order(0.1) === "abcd",
+    `the blend weighs relevance by place and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
+  // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
+  // score 0, ordered by newness or similarity, and a score over the top's left them to priority alone at any weight.
+  // At 0.01 the window's order holds; a score-based relevance would put z4, the most urgent, first.
+  const zeros = [{ id: "z1", score: 0 }, { id: "z2", score: 0 }, { id: "z3", score: 0 }, { id: "z4", score: 0 }];
+  const zp = { z1: { effective: 1, known: true }, z2: { effective: 2, known: true }, z3: { effective: 3, known: true }, z4: { effective: 5, known: true } };
+  assert(rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",") === "z1,z2,z3,z4" && rankByPriority(zeros, zp, 1, null, 4).map((r) => r.id).join(",") === "z4,z3,z2,z1",
+    `rows that all score 0 keep the window's order at a small weight, and take priority's at 1 (${rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",")})`);
+  const mixed = { a: { effective: 2, known: false }, b: { effective: 1, known: true }, c: { effective: 3, known: true }, d: { effective: 4, known: true } };
+  assert(order(0, 3, 4, mixed) === "cd" && order(0, 1, 4, mixed) === "bcd" && order(0, 0, 4, mixed) === "bcd" && order(0, 5, 4, mixed) === "",
+    `the floor keeps a known priority at or above it alone, in the window's order at weight 0; an unknown, ordered as 2, never passes, not even at 0 (${order(0, 3, 4, mixed)}, ${order(0, 1, 4, mixed)}, ${order(0, 0, 4, mixed)})`);
+  assert(order(1, null, 2) === "da" && priorityWindow(10) === 40 && priorityWindow(30) === 100,
+    `the top limit after the order, of a window of min(100, 4 × limit) (${order(1, null, 2)}, ${priorityWindow(10)}, ${priorityWindow(30)})`);
+  // Fusion-sized scores (about 0.016 to 0.03) weigh nothing: place does, so the order is the same as for any scores.
+  const fusion = [{ id: "a", score: 0.03 }, { id: "b", score: 0.028 }, { id: "c", score: 0.025 }, { id: "d", score: 0.02 }];
+  assert(rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4).map((r) => r.id).join("") === "dabc",
+    `on fusion-sized scores meaning holds at 0.1 and priority leads at 1, as on any (${rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("")})`);
+  // The hint for a ranked search whose read failed (review pass 2): a brain short of 122, a role granted before 116.
+  const { searchHint, priorityHint } = await import("./render.ts");
+  const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
+  assert(/migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
+      && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
+      && hintNone === undefined && priorityHint("some other fault") === "",
+    "a ranked search's fault names migration 122 or the grants it needs; a search with neither input carries no priority hint");
+  // prioritiesOf: one read, each row asked as its own thought; 122 decides inheritance (review pass 1).
+  const asked: { kind: string; key: string }[][] = [];
+  const ep = (key: string, effective: number, level: number | null, inherited = false) =>
+    ({ item: { kind: "thought", key }, effective, level, inheritedFrom: inherited ? { kind: "ticket", key: "X-9", level: 4, hops: 1 } : null });
+  const answers: Record<string, ReturnType<typeof ep>> = { t1: ep("t1", 3, null, true), t2: ep("t2", 2, null), t3: ep("t3", 4, 4), t4: ep("t4", 0, 0) };
+  const store = { effectivePriority: async (items: { kind: string; key: string }[]) => { asked.push(items); return items.map((i) => answers[i.key]).filter(Boolean); } };
+  const got = await prioritiesOf(store as never, [{ id: "t1" }, { id: "t2" }, { id: "t3" }, { id: "t4" }, { id: "t1" }]);
+  assert(asked.length === 1 && JSON.stringify(asked[0]) === JSON.stringify(["t1", "t2", "t3", "t4"].map((key) => ({ kind: "thought", key }))),
+    `one read for the page, each row asked once as its own thought, no ticket key of its metadata sent (${JSON.stringify(asked)})`);
+  assert(JSON.stringify(got) === JSON.stringify({ t1: { effective: 3, known: true }, t2: { effective: 2, known: false }, t3: { effective: 4, known: true }, t4: { effective: 0, known: true } }),
+    `122's answer as it gives it: an inherited level known, an unknown not, a stated level known, a stated None known at 0 (${JSON.stringify(got)})`);
+  const none = await prioritiesOf({ effectivePriority: async () => [] } as never, [{ id: "z" }]);
+  assert(JSON.stringify(none) === JSON.stringify({ z: { effective: 0, known: false } }), `a row the read answered nothing for is unknown, at 0 (${JSON.stringify(none)})`);
+  // prefer_current's note after a priority re-rank: what the demotion did, the order left to the priority note.
+  const { currentNote } = await import("./render.ts");
+  const win = { rows: 40, known: 12, demoted: 7, syncedAt: null, exact: false };
+  const re = currentNote([{ window: win, demoted: ["completed"] }, { window: win, demoted: [] }], true);
+  assert(re === "Current first (prefer_current): 7 of the top 40 matches are settled, superseded or about finished tickets, their score ×0.25 before the priority ranking below orders them; 12 carry a lifecycle." && !/holding the query's literal|are demoted ones/.test(re ?? ""),
+    `re-ranked, the current-first note says what the demotion did and not where the rows sit (${re})`);
+  // The header note.
+  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6 });
+  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5 });
+  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0 });
+  assert(priorityNote(null) === null && priorityNote(undefined) === null
+      && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × each one's own effective priority (a ticket's row reads as its ticket); 6 of them carry a known priority."
+      && floored === "Read the top 40 matches for their priority; 5 of them carry a known priority; kept 2 at high (3) or above (min_priority, a known priority alone). A match past the top 40 was not read — raise limit to read further."
+      && capped!.endsWith("kept 0 at urgent (4) or above (min_priority, a known priority alone). A match past the top 100 was not read — the window is capped at 100."),
+    `the note: the blend and the known count; a floor's level and what it kept; a full window says a match past it was not read, and whether a larger limit reads further (${ranked} | ${floored} | ${capped})`);
 }
 
 report();

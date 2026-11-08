@@ -474,6 +474,9 @@ const FUNCTIONS = [
   // thought_facets.
   "thread_relink(text, boolean)",
   "ob1_thread_relink_subject()",
+  // 123 (SMD-3669): the agenda and the blockers it names.
+  "ob1_item_blockers(text, text)",
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone)",
 ];
 
 /**
