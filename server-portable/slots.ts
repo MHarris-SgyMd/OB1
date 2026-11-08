@@ -61,7 +61,7 @@
  * swallowed FIN — ends, its locks with it, within about a minute.
  */
 import { SQL } from "bun";
-import { setModelCallHook, type ModelCallHook, type ModelType, type ResolvedModelCall } from "./model-call.ts";
+import { noteSlotWait, setModelCallHook, type ModelCallHook, type ModelType, type ResolvedModelCall } from "./model-call.ts";
 
 /** A parsed OB1_BACKGROUND_SLOTS: each type's share, and per-model overrides keyed `type:model`. */
 export type BackgroundSlots = ReadonlyMap<string, number>;
@@ -419,7 +419,22 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   const hook: ModelCallHook = async (call, run, waiting) => {
     const share = shareOf(slots, call);
     if (!share) return run();
-    const held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, waiting);
+    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a).
+    const asked = performance.now();
+    // Whether it waited at all, by the hook's own word, apart from a slot taken at once (review pass 1).
+    let waited = false;
+    const told = () => {
+      waited = true;
+      waiting();
+    };
+    let held: Held | null;
+    try {
+      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told);
+    } catch (e) {
+      noteSlotWait(call, performance.now() - asked, "stopped", waited);
+      throw e;
+    }
+    noteSlotWait(call, performance.now() - asked, held ? "held" : "open", waited);
     try {
       return await run();
     } finally {

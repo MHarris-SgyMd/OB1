@@ -47,6 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
+import { backgroundSlotsFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -1111,6 +1112,15 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
   else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
+}
+
+// The background slots in force (SMD-3379 PR 2b-2a): only when set, off unless it is — a value the servers and the
+// passes cannot read leaves them off, with a line in each process's log an operator may never read.
+if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
+  const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
+  if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
+  else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
+  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -5551,7 +5561,7 @@ async function probed(operation: "embeddings" | "chat", model: string, base: str
     const r = await call();
     if (!r.ok) span.end("error", statusType(r.status));
     return r;
-  }, undefined, { "ob1.probe": "preflight" }));
+  }, undefined, { "ob1.probe": "preflight", "ob1.call.class": "background" }));
 }
 
 if (!deep) {
@@ -5721,7 +5731,7 @@ if (!jevCfg) {
   if (unresolved) {
     add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
   } else try {
-    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
+    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
     // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
     // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
@@ -5772,7 +5782,7 @@ if (!jevCfg) {
   } else {
     try {
       const t0 = performance.now();
-      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
       add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };
