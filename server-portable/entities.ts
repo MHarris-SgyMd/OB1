@@ -72,7 +72,7 @@
  * could not answer their reference lists, 15 to 22 windows of 24 parsed.
  */
 
-import { refuseEgress, type EmbedConfig } from "./embed.ts";
+import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens, type Chunk } from "./chunk.ts";
@@ -929,6 +929,8 @@ async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number
     // a server answering at 400 s fails at 300.1 s). The caller's deadline is
     // the one deadline.
     timeout: false,
+    // Never followed: the gate judged this base, not where a 3xx points (SMD-2908).
+    redirect: "manual",
     body: JSON.stringify({
       model,
       response_format: { type: "json_object" },
@@ -940,6 +942,8 @@ async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number
       messages: buildMessages(text, part),
     }),
   });
+  const redirected = refuseRedirect("Extraction", cfg.chat.base, r);
+  if (redirected) throw redirected;
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
     const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);

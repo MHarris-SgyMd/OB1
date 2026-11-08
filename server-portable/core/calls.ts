@@ -48,6 +48,7 @@ export const CALLS = {
   renew_claim: (c, p, i) => c.renewClaim(p, i),
   release_claim: (c, p, i) => c.releaseClaim(p, i),
   list_claims: (c, p, i) => c.listClaims(p, i),
+  thread: (c, p, i) => c.thread(p, i),
   // The plugin rides here too: 117 lets a plugin's call state a priority on an item its row stands for (SMD-3665 PR 2).
   set_priority: (c, p, i, o) => c.setPriority(p, i, { plugin: o.plugin }),
   clear_priority: (c, p, i) => c.clearPriority(p, i),
