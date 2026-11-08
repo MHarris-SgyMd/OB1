@@ -62,8 +62,8 @@
  * and a copy of it in the actor was indistinguishable from that fallback under
  * the mutant run — and every actor names the server as `via`, which the
  * trigger keeps in `actor_context`: the arm that holds the actor object's
- * arrival on every site. The
- * `source` column is judged against the thought's own `metadata.source`, which
+ * arrival on every site. The `source` column is judged against the thought's
+ * own `metadata.source`, which
  * is what the trigger writes when no actor names one: the arm fails for a
  * server that starts naming a source of its own (the first draft's server name
  * on an edit) and tolerates only a copy of the origin, the one case the rule

@@ -53,8 +53,8 @@ const writebackAnswerVersion = (v: string) => (v === "openbrain.openclaw.writeba
 const Channel = z.object({ kind: Id.nullish(), id: Id.nullish(), thread_id: Id.nullish() }).default({});
 const Runtime = z.object({ name: Id.default("unknown"), version: Id.nullish() }).default({ name: "unknown" });
 
-/** A memory as every operation answers it: the old server's shape, with its type, its review and its thought. */
 const Artifact = z.object({ kind: z.string(), uri: z.string(), description: z.string().nullable() });
+/** A memory as every operation answers it: the old server's shape, with its type, its review and its thought. */
 const Memory = z.object({
   memory_id: z.string(),
   /** The thought holding its text; null for one migrated whose thought was deleted. */
@@ -80,10 +80,10 @@ type Row = {
   lifecycle_status: (typeof LIFECYCLE)[number]; provenance_status: string; confidence: number; created_by: string;
   runtime_name: string | null; model: string | null; can_use_as_instruction: boolean; can_use_as_evidence: boolean;
   requires_user_confirmation: boolean; review_status: (typeof REVIEW)[number]; last_confirmed_at: Date | null; stale_after: Date | null;
-  created_at: Date; task_id: string | null; content_hash: string | null; metadata: Record<string, unknown>;
+  created_at: Date; task_id: string | null; metadata: Record<string, unknown>;
 };
 const iso = (d: Date | string | null) => (d === null ? null : new Date(d).toISOString());
-/** A JSON list as a bound parameter: Postgres reads it back as a set of rows. */
+/** A value as a bound parameter's JSON text, cast to jsonb at the site; a list of ids is read back as a set of rows. */
 const json = (v: unknown) => JSON.stringify(v);
 
 /** The artifacts of these memories, by memory. */
@@ -303,7 +303,6 @@ function thoughtMetadata(m: { workspace_id: string; memory_type: string; runtime
   return metadata;
 }
 
-
 /**
  * These memories read whole, in the order given (an id no memory has left out).
  * Every read of a whole memory is this one statement, its columns named: a `*`
@@ -314,7 +313,7 @@ async function memoriesOf(sql: PluginSql, ids: string[]): Promise<Row[]> {
   const rows = await sql<Row>`
     SELECT id, thought_id, workspace_id, project_id, channel_id, visibility, memory_type, summary, content, lifecycle_status, provenance_status,
            confidence::float8 AS confidence, created_by, runtime_name, model, can_use_as_instruction, can_use_as_evidence, requires_user_confirmation,
-           review_status, last_confirmed_at, stale_after, created_at, task_id, content_hash, metadata
+           review_status, last_confirmed_at, stale_after, created_at, task_id, metadata
       FROM memories WHERE id IN (SELECT jsonb_array_elements_text((${json(ids)}::text)::jsonb)::uuid)`;
   const by = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
   return ids.flatMap((id) => by.get(id.toLowerCase()) ?? []);
@@ -417,8 +416,10 @@ export default definePlugin({
           const contentHash = await sha256Hex(`${row.memory_type}:${row.content}`);
           const base = req.idempotency_key || [req.workspace_id, req.runtime.name, req.task_id || "taskless", req.step_id || "step"].map(keyPart).concat(contentHash).join(":");
           const key = `${base}:${index}`;
-          const [held] = await ctx.db.tx((sql) => sql<{ id: string; content_hash: string | null }>`
-            SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND md5(idempotency_key) = md5(${key}) AND idempotency_key = ${key}`);
+          // The memory this key holds in this workspace, if any: one statement for both reads below, beside the md5 index.
+          const heldBy = (sql: PluginSql) => sql<{ id: string; content_hash: string | null }>`
+            SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND md5(idempotency_key) = md5(${key}) AND idempotency_key = ${key}`;
+          const [held] = await ctx.db.tx(heldBy);
           if (held) {
             // The same memory sent again. A key holding other text is refused, never answered with that text.
             if (held.content_hash !== contentHash) return keyReused(key);
@@ -427,9 +428,9 @@ export default definePlugin({
           }
           const metadata = thoughtMetadata({ workspace_id: req.workspace_id, memory_type: row.memory_type, runtime_name: req.runtime.name, provenance_status: status, project_id: req.project_id, task_id: req.task_id });
           const captured = await ctx.call("capture_thought", { content: row.content, source: "agent-memory", metadata, ...(req.trust ? { trust: req.trust } : {}) });
+          if (!captured.ok) return coreRefused(captured.refusal);
           // A thought saved with no vector (the provider down, or the egress policy keeping the text in) is still kept, and
           // its memory with it: the brain's vector mender fills the vector in, and recall finds it from then on.
-          if (!captured.ok) return coreRefused(captured.refusal);
           const thoughtId = captured.value.id;
           const id = await ctx.db.tx(async (sql): Promise<string | null> => {
             const [made] = await sql<{ id: string }>`
@@ -449,8 +450,7 @@ export default definePlugin({
               RETURNING id::text AS id`;
             if (!made) {
               // Another write-back with this key landed first: its memory is this one if it holds this text, as above.
-              const [first] = await sql<{ id: string; content_hash: string | null }>`
-                SELECT id::text AS id, content_hash FROM memories WHERE workspace_id = ${req.workspace_id} AND md5(idempotency_key) = md5(${key}) AND idempotency_key = ${key}`;
+              const [first] = await heldBy(sql);
               return first && first.content_hash === contentHash ? first.id : null;
             }
             for (const s of req.source_refs) {
@@ -476,7 +476,7 @@ export default definePlugin({
           const stored = await memoriesOf(sql, ids);
           // A key that can only capture reads no memory: it is answered each memory's id and the thought its write-back
           // captured, as the core answers its capture, never the memory or a reviewer's change to it.
-          if (ctx.caller.scope !== "write") {
+          if (!person) {
             return ok({
               schema_version: writebackAnswerVersion(req.schema_version),
               memories: stored.map((r) => ({ memory_id: r.id, thought_id: writtenThought(r) })),
@@ -663,6 +663,8 @@ export default definePlugin({
           }
           if (related && !(await memoryById(sql, related))) return noSuchMemory(related);
           const a = r.action;
+          const newContent = a === "edit" ? r.content ?? null : null;
+          const newSummary = a === "edit" ? r.summary ?? null : null;
           await sql`
             UPDATE memories SET
               review_status = CASE ${a} WHEN 'confirm' THEN 'confirmed' WHEN 'evidence_only' THEN 'evidence_only' WHEN 'reject' THEN 'rejected'
@@ -674,10 +676,10 @@ export default definePlugin({
               requires_user_confirmation = CASE WHEN ${a} IN ('confirm', 'evidence_only') THEN false ELSE requires_user_confirmation END,
               last_confirmed_at = CASE ${a} WHEN 'confirm' THEN now() ELSE last_confirmed_at END,
               visibility = CASE ${a} WHEN 'restrict_scope' THEN ${r.visibility ?? "personal"} ELSE visibility END,
-              content = coalesce(${a === "edit" ? r.content ?? null : null}::text, content),
+              content = coalesce(${newContent}::text, content),
               thought_id = coalesce(${thoughtId}::uuid, thought_id),
-              summary = CASE WHEN ${a === "edit" ? r.summary ?? null : null}::text IS NOT NULL THEN ${a === "edit" ? r.summary ?? null : null}::text
-                             WHEN ${a === "edit" ? r.content ?? null : null}::text IS DISTINCT FROM content AND ${a === "edit" ? r.content ?? null : null}::text IS NOT NULL THEN ${a === "edit" && r.content !== undefined ? summaryOf(r.content) : null}::text
+              summary = CASE WHEN ${newSummary}::text IS NOT NULL THEN ${newSummary}::text
+                             WHEN ${newContent}::text IS DISTINCT FROM content AND ${newContent}::text IS NOT NULL THEN ${newContent === null ? null : summaryOf(newContent)}::text
                              ELSE summary END,
               updated_at = now()
             WHERE id = ${r.memory_id}::uuid`;

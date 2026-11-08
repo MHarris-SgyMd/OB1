@@ -276,7 +276,7 @@ retired: their directories and their rows in those suites went with SMD-1931's P
 | `update-thought-mcp` | **retired** (SMD-1931) | The core's `update_thought` tool and `PATCH /v1/thoughts/{id}`. |
 | `discord-capture` | **retired** (SMD-1931) | A README with no code. |
 | `kubernetes-deployment` | **retired** (SMD-1931; removed by SMD-2288) | No deployment target under compose-only (the ADR, "What this reverses or amends"). |
-| `agent-memory-api` | **plugin** (SMD-2310; ported by SMD-2690 PR 2a: `plugins/agent-memory`, its tables `schemas/agent-memory`'s in the plugin's schema) | Live clients (`hermes-agent-memory`, `openclaw-agent-memory`), which SMD-2690 PR 2b moves onto the plugin's routes. |
+| `agent-memory-api` | **plugin** (SMD-2310; ported by SMD-2690 PR 2a: `plugins/agent-memory`, with `schemas/agent-memory`'s tables in its own schema) | Live clients (`hermes-agent-memory`, `openclaw-agent-memory`), which SMD-2690 PR 2b moves onto the plugin's routes. |
 | `smart-ingest` | **plugin** (SMD-2310, port SMD-2690) | Its own tables (`schemas/smart-ingest`); document atomization the core does not do. |
 | `readwise-capture` | **plugin** (SMD-2310; ported by SMD-2690 PR 1: `plugins/readwise`, its hook at `/hooks/readwise/highlight`) | An inbound webhook. The plugin keeps the book id alone (a plugin makes no outbound call), so `schemas/readwise-books` stays as `readwise-import`'s cache. |
 | `slack-capture`, `telegram-capture` | **plugin at `/hooks/<name>`** (SMD-2101) | Inbound webhooks; SMD-2101 already carries them. |
