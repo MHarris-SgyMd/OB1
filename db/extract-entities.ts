@@ -2282,8 +2282,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 if (import.meta.main) {
   const cli = commandLine("extract-entities.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   if (cli.has("subjects")) {
     // The subject sweep (db/subject-sweep.ts, SMD-3306) takes its own flags: a
     // pass's beside it would be read as asked and do nothing (SMD-2015's kind).

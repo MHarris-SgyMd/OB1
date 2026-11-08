@@ -425,7 +425,7 @@ export function verdictDistribution(probabilities: Record<string, number>): Reco
  */
 function askWriter(cfg: EmbedConfig, messages: { role: "user"; content: string }[], signal?: AbortSignal): Promise<string> {
   // Through the model-call seam (SMD-3379 PR 2a): the request and the answer's read, as one call.
-  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, purpose: "writer", ...(signal ? { signal } : {}) }, () => writerExchange(cfg, messages, signal));
+  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, local: cfg.chat.local, purpose: "writer", ...(signal ? { signal } : {}) }, () => writerExchange(cfg, messages, signal));
 }
 
 /** askWriter's exchange, once the seam lets it run. */
