@@ -1118,40 +1118,40 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
 // embedding calls held to OB1_MODEL_SLOTS less one, the decide tier's to one, OB1_BACKGROUND_SLOTS' own shares over
 // them, holding every endpoint. A value the servers and the passes cannot read leaves the defaults, with a line in each
 // process's log an operator may never read; the host rule warns where a share leaves a model server no slot for live
-// calls — the decide tier aside, which answers one request at a time.
+// calls, and where a decide share above one queues background calls at a tier that answers one request at a time.
 {
   const st = slotsSettingFrom(env.OB1_BACKGROUND_SLOTS, env.OB1_MODEL_SLOTS);
+  const jevConfigured = resolveJevConfig(env);
+  // Whether a share's endpoint is local, by its type (a model's override by its prefix): what the defaults hold.
+  const endpointLocal = (k: string) => (k.startsWith("chat") ? chatEndpoint.local : k.startsWith("embed") ? embEndpoint.local : jevConfigured?.endpoint.local === true);
   const listed = (m: ReadonlyMap<string, number>) => [...m].map(([k, v]) => `${k}=${v}`).join(", ");
   const where = "background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named";
   // The local endpoints the defaults hold: chat and embeddings, one endpoint or two, and the decide tier's.
-  const locals = [...new Set([embEndpoint.local ? (chatEndpoint === embEndpoint ? "embeddings and chat" : "embeddings") : "", chatEndpoint !== embEndpoint && chatEndpoint.local ? "chat" : "", resolveJevConfig(env)?.endpoint.local ? "decide" : ""].filter(Boolean))];
+  const locals = [...new Set([embEndpoint.local ? (chatEndpoint === embEndpoint ? "embeddings and chat" : "embeddings") : "", chatEndpoint !== embEndpoint && chatEndpoint.local ? "chat" : "", jevConfigured?.endpoint.local ? "decide" : ""].filter(Boolean))];
   // The host rule: a chat or embedding share as large as the local server's slots leaves live calls none — set, on a
   // local endpoint, for OB1_MODEL_SLOTS speaks of the local server alone; by default, a server of one slot, where
   // some endpoint is local (review pass 1). The decide tier answers one request at a time, so a share of it above one
   // queues background calls ahead of a capture's live genre call.
-  const localType = (k: string) => (k.startsWith("chat") ? chatEndpoint.local : k.startsWith("embed") ? embEndpoint.local : false);
   const ownShares = [...(st.set ?? new Map<string, number>())];
-  const full = st.defaults === null ? [] : ownShares.filter(([k, v]) => localType(k) && v >= st.modelSlots).map(([k]) => k);
+  const full = st.defaults === null ? [] : ownShares.filter(([k, v]) => !k.startsWith("decide") && endpointLocal(k) && v >= st.modelSlots).map(([k]) => k);
   // OB1_MODEL_SLOTS reaches a held share only through a local chat or embedding endpoint: the decide tier's is one
   // whatever it says (review pass 2).
   const noReserve = st.defaults !== null && st.modelSlots === 1 && (chatEndpoint.local || embEndpoint.local);
-  // One fault, one warning: a share of its own as large as a server of one slot is that fault already (review pass 3).
-  const jevConfigured = resolveJevConfig(env);
   const decideQueue = st.defaults === null || jevConfigured === null ? [] : ownShares.filter(([k, v]) => k === "decide" && v > 1).map(([, v]) => v);
   if (st.defaults === null) add("background slots", "ok", `off (OB1_BACKGROUND_SLOTS) — background model calls are not held`);
   else {
     const own = st.set ? `; ${listed(st.set)} set (OB1_BACKGROUND_SLOTS), every endpoint's` : "";
-    // The defaults as they stand: a type the value's own share gives is its, everywhere (review pass 1); the decide
-    // tier's only where one is configured; none said where no endpoint is local.
-    // A type's default only where its endpoint is local: a remote one's calls are not held (review pass 2).
-    const typeLocal = (k: string) => (k === "chat" ? chatEndpoint.local : k === "embed" ? embEndpoint.local : jevConfigured?.endpoint.local === true);
-    const shown = new Map([...st.defaults].filter(([k]) => !st.set?.has(k) && typeLocal(k)));
+    // The defaults as they stand: a type the value's own share gives is its, everywhere (review pass 1); a type's
+    // default only where its endpoint is local, a remote one's calls not held (review pass 2); none said where no
+    // endpoint is local.
+    const shown = new Map([...st.defaults].filter(([k]) => !st.set?.has(k) && endpointLocal(k)));
     const byDefault = !locals.length
       ? "none by default: no endpoint is declared local (OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL)"
       : `${shown.size ? listed(shown) : "none"} by default on the local ${locals.join(", ")} endpoint(s)${chatEndpoint.local || embEndpoint.local ? ` (OB1_MODEL_SLOTS ${st.modelSlots}, ${st.modelSlots === 1 ? "none" : "one"} left for live calls)` : ""}`;
     const detail = `${byDefault}${own} — ${where}`;
     const problems = [...st.problems,
       ...(full.length ? [`${full.join(", ")} take${full.length === 1 ? "s" : ""} every one of the local server's OB1_MODEL_SLOTS ${st.modelSlots}, leaving live calls none`] : []),
+      // One fault, one warning: a share of its own as large as a server of one slot is that fault already (review pass 3).
       ...(noReserve && !full.length ? ["OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one"] : []),
       ...(decideQueue.length ? [`decide=${decideQueue[0]} queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time`] : [])];
     if (problems.length) add("background slots", "warn", `${problems.join("; ")} — in force: ${detail}`, "Correct the value as the line says: a chat or embedding share below OB1_MODEL_SLOTS, decide=1, OB1_MODEL_SLOTS the model server's parallel calls per model (its OLLAMA_NUM_PARALLEL) — a server of one slot leaves live calls none, so raise its OLLAMA_NUM_PARALLEL and OB1_MODEL_SLOTS together to 2 or more — or OB1_BACKGROUND_SLOTS=off.");
