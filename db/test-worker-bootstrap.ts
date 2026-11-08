@@ -16,7 +16,7 @@
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -436,7 +436,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 
   // fault — what a follower does with a provider error (SMD-2636 PR 3a), on followClassify's split: paused for, an
   // outage at once, the probe's to decide, the thought's, or the request's shape; and whether it makes a suspect.
-  const extractFields = (e: unknown) => requestShapeRefused(e, /max_tokens|max_completion_tokens|completion tokens|response_format|reasoning_effort|frequency_penalty/i);
+  const extractFields = (e: unknown) => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
   const faults: [unknown, { act: string; suspect: boolean }, string, Parameters<typeof fault>[1]?][] = [
     [own(408), { act: "pause", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
     [own(408, "litellm.Timeout: Request timed out."), { act: "pause", suspect: true }, "a 408 whose words say \"timed out\" (a gateway's): the status outranks the words (SMD-3311 review pass 1)"],
@@ -456,6 +456,8 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     [own(400, "the tool call timed out"), { act: "probe", suspect: true }, "a 400 saying \"timed out\": an answer, the probe's to decide"],
     [own(401), { act: "probe", suspect: true }, "a 401: probed first, not every worker stopped unprobed (the maintainer's, 2026-11-05)"],
     [own(402), { act: "probe", suspect: true }, "a 402: the same"],
+    [own(402, '{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 120."}}'), { act: "fatal", suspect: true }, "a 402 saying the call asks more than the account affords: the request's, which the probe's one token is not (review pass 1)"],
+    [new ProbeRefused("the judge call timed out after 120 s, and a one-token call was refused: 401"), { act: "fatal", suspect: true }, "consolidate's ProbeRefused: a deadline whose probe was refused, the request's (review pass 1)"],
     [own(403), { act: "probe", suspect: true }, "a 403: the same"],
     [own(404, "404 page not found"), { act: "probe", suspect: true }, "a 404 naming no model: the same"],
     [own(302), { act: "probe", suspect: true }, "a redirect, which no call follows: the same (the probe refuses one)"],
@@ -471,8 +473,16 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const probed = ([["up", "thought"], ["refused", "fatal"], ["out", "outage"], ["missing", "outage"]] as const).filter(([state, want]) => probedFault(state === "up" ? { state } : { state, why: "w" }) !== want);
   ok(probed.length === 0, `probedFault: answered the thought's, refused the request's, no answer or the model missing an outage (${probed.map(([s]) => s).join(", ") || "all four"})`);
   ok(requestShapeRefused(own(400, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(422, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(400, "bad words"), /reasoning_effort/)
-    && requestShapeRefused(http(400, '{"error":"response_format unsupported"}'), /response_format/),
-    "requestShapeRefused: a 400 naming a field, in its message or the provider's words, and no other status");
+    && requestShapeRefused(http(400, '{"error":"response_format unsupported"}'), /response_format/)
+    && !requestShapeRefused(own(400, '{"error":{"message":"invalid input","param":"messages"},"input":"a note on response_format"}'), /response_format/),
+    "requestShapeRefused: a 400 naming a field in the provider's own error words, not an echo of the request's input, and no other status (review pass 1)");
+  // Each field of each worker's list, and the answer budget not the judge's (review pass 1, mutant: one field each held).
+  const fieldWrong = [
+    ...["max_tokens", "max_completion_tokens", "completion tokens", "response_format", "reasoning_effort", "frequency_penalty"].map((f) => [f, EXTRACT_REQUEST_FIELDS, true] as const),
+    ...["response_format", "reasoning_effort"].map((f) => [f, JUDGE_REQUEST_FIELDS, true] as const),
+    ...["max_tokens", "max_completion_tokens", "frequency_penalty"].map((f) => [f, JUDGE_REQUEST_FIELDS, false] as const),
+  ].filter(([f, fields, want]) => requestShapeRefused(own(400, `{"error":{"message":"${f} is not supported"}}`), fields) !== want).map(([f, fields]) => `${f} in ${fields === EXTRACT_REQUEST_FIELDS ? "extract's" : "the judge's"}`);
+  ok(fieldWrong.length === 0, `each worker's request fields: extract's six, the judge's two and not the answer budget (${fieldWrong.join(", ") || "all eleven"})`);
 
   // A stop ends a probe in flight, as "out" (review pass 1).
   const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });

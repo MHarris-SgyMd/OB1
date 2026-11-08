@@ -5922,7 +5922,7 @@ if (want("10")) {
 
   // SMD-2636 PR 3a: a 4xx no rule reads is the probe's to decide under --follow (the maintainer's rule, 2026-11-05),
   // where every 4xx stopped every worker, unprobed. A 403 the probe answers past is the thought's — recorded failed,
-  // the follower running on; a 401 the probe gets no answer past is the provider's outage, waited out, the thought
+  // the follower running on; a 401 whose probe meets a 503 is the provider's outage, waited out, the thought
   // extracted after. Stopped at 30 s each if they run on.
   for (const c of [
     { status: 403, probes: [] as number[], want: "failed", text: "Lena's note the provider's content policy refuses." },
@@ -5960,7 +5960,7 @@ if (want("10")) {
     }
     const waited = lines.some((l) => new RegExp(`the provider is not answering \\(Extraction request to [^)]*${c.status}`).test(l));
     assert(row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded"),
-           `under --follow a ${c.status} is probed first: ${c.want === "failed" ? "answered, the thought's, recorded failed and the follower running on" : "no answer, the provider's outage, waited out and the thought extracted"} (SMD-2636 PR 3a; ${row}, exit ${code}${ended ? "" : " at the stop"}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+           `under --follow a ${c.status} is probed first: ${c.want === "failed" ? "answered, the thought's, recorded failed and the follower running on" : "its probe meeting a 503, the provider's outage, waited out and the thought extracted"} (SMD-2636 PR 3a; ${row}, exit ${code}${ended ? "" : " at the stop"}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     if (note) await sql`SELECT delete_thought(${note}::uuid, NULL::jsonb)`;
   }
 
@@ -6951,6 +6951,8 @@ if (want("10e")) {
   /** What GET /models lists, and whether a gone-stub* escalation model is served, for a follower's cases below (SMD-2599 review pass 4). */
   let listedIds: string[] = ["stub-meta"];
   let goneServed = false;
+  /** While set, the big-stub escalation model answers 403, a project without access to it (SMD-2636 PR 3a). */
+  let bigRefused = false;
   const escModel = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -6958,6 +6960,8 @@ if (want("10e")) {
       if (req.method === "GET") return Response.json({ object: "list", data: listedIds.map((id) => ({ id })) });
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
       if (body.model?.startsWith("gone-stub") && !goneServed) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      // The escalation model's access refused, its calls and probes alike (SMD-2636 PR 3a, review pass 1).
+      if (bigRefused && body.model === "big-stub") return new Response(JSON.stringify({ error: { message: "Project does not have access to model big-stub" } }), { status: 403 });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -7052,6 +7056,36 @@ if (want("10e")) {
       goneServed = false;
       restorePauses();
     }
+  }
+
+  // SMD-2636 PR 3a, review pass 1: an escalated call refused (a 403, the project without access to the escalation
+  // model) is probed on the escalation model, not the metadata model, which would answer and read every escalating
+  // thought its own: refused, the request's — exit 2, the remedy naming OB1_EXTRACT_ESCALATE_MODEL, nothing failed.
+  // Stopped at 20 s if it runs on.
+  {
+    const restorePauses = shortenPauses();
+    listedIds = ["stub-meta", "big-stub"];
+    bigRefused = true;
+    const lines: string[] = [];
+    const stop = new AbortController();
+    const guard = setTimeout(() => stop.abort(), 20_000);
+    let code = -1;
+    let refusedNote = "";
+    try {
+      const running = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "big-stub" }, workers: 1, follow: 1, signal: stop.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      refusedNote = await seedOne("The runaway widget report, whose escalation model the project cannot reach.");
+      await running;
+    } finally {
+      clearTimeout(guard);
+      bigRefused = false;
+      listedIds = ["stub-meta"];
+      restorePauses();
+    }
+    const refusedRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${refusedNote}::uuid AND work_type LIKE 'extract:%'`)[0] as { status: string } | undefined)?.status;
+    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => /OB1_EXTRACT_ESCALATE_MODEL against the provider/.test(l)),
+           `an escalated call refused is probed on the escalation model: refused, exit 2, the remedy naming OB1_EXTRACT_ESCALATE_MODEL, the thought not failed (SMD-2636 PR 3a, review pass 1; exit ${code}, ${refusedRow}; ${lines.filter((l) => /refus|403/.test(l)).join(" | ").slice(0, 240)})`);
   }
 
   escModel.stop(true);
@@ -15237,6 +15271,8 @@ if (want("16")) {
   let judge429 = 0;
   /** While above zero, the next judge calls answer a 400 naming reasoning_effort, the request's shape (SMD-2636 PR 3a); two, as the judge asks again without logprobs. */
   let judgeShape400 = 0;
+  /** While above zero, the next judge calls hang until their timeout, one each (SMD-2636 PR 3a, review pass 1). */
+  let judgeHang = 0;
   /** While set, a probe answered (not one the outage turns away) is refused 401 (SMD-2636 PR 2). */
   let judgeProbeRefuses = false;
   /** The prompts of the calls an outage turned away (SMD-2636 PR 2, review pass 3): whose call met it. */
@@ -15294,6 +15330,10 @@ if (want("16")) {
       if (judge400TimedOut > 0) {
         judge400TimedOut--;
         return new Response(JSON.stringify({ error: { message: "the tool call timed out" } }), { status: 400 });
+      }
+      if (judgeHang > 0) {
+        judgeHang--;
+        return neverAnswers();
       }
       if (judgeShape400 > 0) {
         judgeShape400--;
@@ -16950,6 +16990,8 @@ if (want("16")) {
   for (const c of [
     { what: "401", arm: () => { judgeCallScript.push(401); judgeProbeRefuses = true; }, words: /refuses the request itself \(Judge request to [^)]*401/, probed: true },
     { what: "reasoning_effort 400", arm: () => { judgeShape400 = 2; }, words: /refuses the request itself \(Judge request to [^)]*400[^)]*reasoning_effort/, probed: false },
+    // A pair's deadline whose probe is refused: the request's, as extract's deadline is (review pass 1), not the pair's timeout.
+    { what: "timeout", arm: () => { judgeHang = 1; judgeProbeRefuses = true; }, words: /refuses the request itself \(the judge call timed out after \d+ s, and a one-token call was refused/, probed: true },
   ]) {
     const restorePauses = shortenPauses();
     const lines: string[] = [];
@@ -16974,6 +17016,7 @@ if (want("16")) {
       judgeCallScript.length = 0;
       judgeProbeRefuses = false;
       judgeShape400 = 0;
+      judgeHang = 0;
       restorePauses();
     }
     const newerRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${pairSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;

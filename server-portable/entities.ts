@@ -942,12 +942,15 @@ async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number
       messages: buildMessages(text, part),
     }),
   });
+  // The model called rides on a refusal, so a follower probes that one (SMD-2636 PR 3a): the escalation model's refusal
+  // is not the metadata model's to answer.
   const redirected = refuseRedirect("Extraction", cfg.chat.base, r);
-  if (redirected) throw redirected;
+  if (redirected) throw Object.assign(redirected, { model });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
     const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
-    (err as Error & { status?: number }).status = r.status;
+    (err as Error & { status?: number; model?: string }).status = r.status;
+    (err as Error & { status?: number; model?: string }).model = model;
     throw err;
   }
   // Streamed when asked (SMD-1960), and the body read as what it IS rather

@@ -1190,8 +1190,10 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   gMode = "cut";
   let closed = "";
   let closedCalls = -1;
-  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { closed = (e as Error).message; closedCalls = callsMadeBy(e); }
-  assert(/closed mid-answer/.test(closed) && /socket/i.test(closed) && /80 characters/.test(closed) && closedCalls === 1, `a stream cut mid-answer throws a socket error naming what arrived, counted as one call, rather than a malformed answer (${closed.slice(0, 100)}; calls ${closedCalls})`);
+  let closedCode: unknown;
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { closed = (e as Error).message; closedCalls = callsMadeBy(e); closedCode = (e as { code?: unknown }).code; }
+  // ECONNRESET, so a follower reads it as no connection by its code (SMD-2636 PR 3a, review pass 1).
+  assert(/closed mid-answer/.test(closed) && /socket/i.test(closed) && /80 characters/.test(closed) && closedCalls === 1 && closedCode === "ECONNRESET", `a stream cut mid-answer throws a socket error naming what arrived, counted as one call, rather than a malformed answer (${closed.slice(0, 100)}; calls ${closedCalls})`);
 
   // A finishing frame ends the read as [DONE] does, and a complete answer is
   // never an abort whatever it repeats (fifth review pass, both probed).

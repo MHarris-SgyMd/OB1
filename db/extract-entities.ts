@@ -197,7 +197,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -375,12 +375,11 @@ const STOP_NOTE_WAIT_MS = 1_500;
 const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
 
 /**
- * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming a field every extraction call sends
- * and the probe does not — the answer budget (max_tokens, max_completion_tokens: "completion tokens"), response_format,
- * reasoning_effort, the penalised retry's frequency_penalty, the fields the closing remedy names. The probe would answer
- * it and read it the thought's, failing the pool one row at a time; classifyError's maxTokensFatal, widened.
+ * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming one of EXTRACT_REQUEST_FIELDS. The
+ * probe would answer it and read it the thought's, failing the pool one row at a time; classifyError's maxTokensFatal,
+ * widened.
  */
-const extractRequestFault = (e: unknown): boolean => requestShapeRefused(e, /max_tokens|max_completion_tokens|completion tokens|response_format|reasoning_effort|frequency_penalty/i);
+const extractRequestFault = (e: unknown): boolean => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; limit: number; follow: number };
@@ -1747,9 +1746,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // timeout, as a model busy with another worker's call may need it: answered, the thought's;
                 // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
                 // and another worker's outage is joined unprobed (review pass 1).
+                // The model whose call failed is the one probed: the escalation model's refusal is not the
+                // metadata model's to answer (review pass 1).
+                const calledModel = (e as { model?: unknown }).model;
+                const probedModel = WINDOWING.escalateModel && calledModel === WINDOWING.escalateModel ? WINDOWING.escalateModel : cfg.metadataModel;
                 if (act === "probe") {
                   if (stopping) return;
-                  act = outage.reason !== null ? "outage" : probedFault(await probe(TIMEOUT_S * 1000, halt.signal));
+                  act = outage.reason !== null ? "outage" : probedFault(await probe(TIMEOUT_S * 1000, halt.signal, probedModel));
+                  if (act === "fatal" && probedModel !== cfg.metadataModel) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
                 }
                 const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
                 if (down) {
@@ -1759,7 +1763,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
                     providerStops++;
                     // The escalation model gone since the start: the outage probes it (review pass 2).
-                    if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
+                    // So does one it probed for a call it made, unanswered (review pass 1).
+                    if (begins && (escalationGone || probedModel !== cfg.metadataModel) && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
                     halt.abort();
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                     return;
