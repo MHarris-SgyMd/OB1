@@ -1565,12 +1565,16 @@ else {
   // An orphan's edge alone, under a key no thought holds: a warning too.
   await ctx.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ('${thB}'::uuid, 'relation', jsonb_build_object('relation', 'evolves', 'target', '${thA}', 'judge_key', 'thread:v1', 'key', 'ticket:SMD-9121'))`);
   const thrOrphan = await run(PF);
+  // What a whole linking would add (the closed edge: 1) or take away (the orphan's: -1), from the row's two counts.
+  const edgeGap = (out: string) => { const m = /(\d+) edge\(s\) standing, (\d+) once every thread read is linked/.exec(row(out, "threads")); return m ? Number(m[2]) - Number(m[1]) : NaN; };
   await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9121'`);
   assert(/^\s*✓\s+threads\s+\d+ thread\(s\), \d+ thought\(s\) in them, \d+ edge\(s\) standing — every thread linked\s*$/m.test(thrOk.out)
-      && /^\s*!\s+threads\s+\d+ thread\(s\), \d+ of \d+ edge\(s\) a whole linking leaves standing; 1 key\(s\) whose edges differ from their thread's\s*$/m.test(thrWarn.out)
+      && /^\s*!\s+threads\s+\d+ thread\(s\); \d+ edge\(s\) standing, \d+ once every thread read is linked; 1 key\(s\) whose edges differ from their thread's\s*$/m.test(thrWarn.out)
+      && edgeGap(thrWarn.out) === 1
       && /^\s*→ Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names each key, --key <key> re-links one\)\. /.test(fix(thrWarn.out, "threads"))
       && !row(thrWarn.out, "threads").includes("SMD-9120") && relinkedAgain.added === 1
-      && /^\s*!\s+threads\s+\d+ thread\(s\), \d+ of \d+ edge\(s\) a whole linking leaves standing; 1 key\(s\) no thought holds still carrying edges\s*$/m.test(thrOrphan.out),
+      && /^\s*!\s+threads\s+\d+ thread\(s\); \d+ edge\(s\) standing, \d+ once every thread read is linked; 1 key\(s\) no thought holds still carrying edges\s*$/m.test(thrOrphan.out)
+      && edgeGap(thrOrphan.out) === -1,
          `the threads row: the linked thread ok; its edge closed, a warning with the run that links it, naming no key, and an orphan's edge alone a warning too (${row(thrOk.out, "threads").trim()} / ${row(thrWarn.out, "threads").trim()})`);
   // Judged relations and thread edges are each read under a bound of their own: a brain of 20,000 thread edges (raw,
   // with no lineage) still has a judged relation without its row named, where one bound for both read 10,000 rows of

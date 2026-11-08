@@ -690,9 +690,10 @@ thoughts in them, and whether every thread's standing edges (migration 120) are 
 edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, or a gap a delete left; a key
 no thought holds that still carries edges is counted beside it. Either names the run that links them, `cd db && bun
 threads.ts --url <the owner's url>`. The census is bounded and exact: the first 10,000 standing subjects and thread
-edges in key order, a key the bound cuts left out. Past the bound the row says how many keys it read, and `threads.ts
---status` reads every key and names those that differ. It names no key here, since a phrase key is the judge model's
-words. `not counted` before migration 120. Preflight's `threads` row reads the same census and warns, never fails, on a
+edges in key order, a key the bound cuts left out. Past the bound its counts are of the subject keys read, and it says
+so and how many; `threads.ts --status` reads every key and names those that differ. It names no key here, since a phrase
+key is the judge model's words. `not counted` before migration 120, and when the first key in key order alone passes
+the bound, so that no key was read (preflight warns then). Preflight's `threads` row reads the same census and warns, never fails, on a
 key that differs.
 `Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
 pass's findings show without a query. `Proposals` is the queue a reviewer works:
@@ -759,7 +760,9 @@ heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
-SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
+SMD-2682; the work threads' census as `threads`, `{ threads, thoughts, standing, whole, unlinked,
+orphaned, keys, complete }` — counts of the subject keys read (`keys`), `complete` false when it stopped at its
+bound, null before 120 — SMD-3306 PR 7a-2c; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
 did not answer, null with no entry before 079 (or when its field was not read),
 and 0, not read, when there is nothing to count, SMD-2680) or

@@ -900,7 +900,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { ago, boardPairsValue, boardSyncValue, brainInfo, deniedObject, formatBytes, heartbeatState, ledgerStatus, newProgress, snapshotFacts, parseHeartbeats, parseHnswOptions, proposalsValue, readDatabaseFacts, relationsValue, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { ago, boardPairsValue, boardSyncValue, brainInfo, deniedObject, formatBytes, heartbeatState, ledgerStatus, newProgress, snapshotFacts, parseHeartbeats, parseHnswOptions, proposalsValue, readDatabaseFacts, relationsValue, renderBrainInfo, threadsRow, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -1627,6 +1627,30 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
       && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
     `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
+  // Preflight's threads row (SMD-3306 PR 7a-2c), from the fact alone: every branch, the counts in --status's shape.
+  {
+    const r = (t: Parameters<typeof threadsRow>[0], u?: Parameters<typeof threadsRow>[1]) => threadsRow(t, u);
+    const f = (over: Partial<NonNullable<Facts["threads"]>> = {}) => ({ threads: 5, thoughts: 12, standing: 7, whole: 7, unlinked: 0, orphaned: 0, keys: 9, complete: true, ...over });
+    const rows = {
+      pre: r(null), refused: r(null, { reason: "refused", message: "permission denied for table thought_facets" }), invisible: r(null, { reason: "invisible", message: "thought_facets is not on the search_path" }),
+      timeout: r(null, { reason: "timeout", message: "canceling statement due to statement timeout" }), other: r(null, { reason: "error", message: "boom" }),
+      none: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false })),
+      ok: r(f()), okPartial: r(f({ complete: false, keys: 4 })),
+      differ: r(f({ standing: 12, whole: 5, unlinked: 1, orphaned: 2 })), differPartial: r(f({ standing: 3, whole: 4, unlinked: 1, complete: false, keys: 4 })),
+    };
+    assert(rows.pre.status === "skip" && /^no thread_relink — migration 120 \(SMD-3306\) is not applied/.test(rows.pre.detail)
+        && rows.refused.status === "warn" && rows.refused.detail === "could not verify: permission denied for table thought_facets" && /--groups capture,server \(db\/README\.md, Grants for a capturing role\)\.$/.test(rows.refused.fix ?? "")
+        && rows.invisible.status === "warn" && /^Put that schema on the server role's search_path/.test(rows.invisible.fix ?? "")
+        && rows.timeout.status === "warn" && /outran the statement cap; run preflight again once it has finished, or read it whole: cd db && bun threads\.ts --url <the owner's connection string> --status\.$/.test(rows.timeout.fix ?? "")
+        && rows.other.status === "warn" && /^The check reads thought_facets and thoughts/.test(rows.other.fix ?? "")
+        && rows.none.status === "warn" && rows.none.detail === "could not verify: the first key in key order alone passes the census's bound (10000 rows), so no key was read" && /^Read every key: .* --status, which names/.test(rows.none.fix ?? "")
+        && rows.ok.status === "ok" && rows.ok.detail === "5 thread(s), 12 thought(s) in them, 7 edge(s) standing — every thread linked" && rows.ok.fix === undefined
+        && rows.okPartial.status === "ok" && rows.okPartial.detail === "5 thread(s) among the first 4 subject key(s) read, 12 thought(s) in them, 7 edge(s) standing — each read linked; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
+        && rows.differ.status === "warn" && rows.differ.detail === "5 thread(s); 12 edge(s) standing, 5 once every thread read is linked; 1 key(s) whose edges differ from their thread's, 2 key(s) no thought holds still carrying edges"
+        && /^Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches;/.test(rows.differ.fix ?? "")
+        && rows.differPartial.detail === "5 thread(s) among the first 4 subject key(s) read; 3 edge(s) standing, 4 once every thread read is linked; 1 key(s) whose edges differ from their thread's; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)",
+      `preflight's threads row, from the fact alone: skipped before 120; each unread reason its remedy; nothing read a warning; linked ok, past the bound saying so; keys differing warned in --status's shape (${JSON.stringify(Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, v.status])))})`);
+  }
   // The Threads row (SMD-3306 PR 7a-2c): linked, read past the bound, keys differing, before 120, and not read.
   const census = (over: Partial<NonNullable<Facts["threads"]>> = {}) => ({ threads: 719, thoughts: 2218, standing: 1499, whole: 1499, unlinked: 0, orphaned: 0, keys: 3948, complete: true, ...over });
   const thrLinked = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census() }), 1000));
@@ -1634,16 +1658,18 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const thrDiffer = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ unlinked: 1, orphaned: 2, complete: false, keys: 2500 }) }), 1000));
   const thrOne = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 1, thoughts: 1, unlinked: 2 }) }), 1000));
   const thrOrphans = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ orphaned: 3 }) }), 1000));
+  const thrNone = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false }) }), 1000));
   const thrPre = renderBrainInfo(await brainInfo(server, async () => planted(119, { threads: null }), 1000));
   const thrLost = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "refused", message: "permission denied for table thoughts" } } }), 1000));
   assert(/^Threads: +719 \(2,218 thoughts in them\), every one linked$/m.test(thrLinked)
-      && /^Threads: +719 \(2,218 thoughts in them\), each read linked — the first 1 key read, past the census's bound: cd db && bun threads\.ts --url <url> --status reads every key$/m.test(thrPartial)
-      && /^Threads: +719 \(2,218 thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\) — the first 2,500 keys read, past the census's bound: cd db && bun threads\.ts --url <url> --status reads every key$/m.test(thrDiffer)
+      && /^Threads: +719 among the first 1 subject key read \(2,218 thoughts in them\), each read linked — the census stops at 10,000 rows: cd db && bun threads\.ts --url <the owner's url> --status reads every key$/m.test(thrPartial)
+      && /^Threads: +719 among the first 2,500 subject keys read \(2,218 thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\) — the census stops at 10,000 rows: cd db && bun threads\.ts --url <the owner's url> --status reads every key$/m.test(thrDiffer)
+      && /^Threads: +not counted — the first key in key order alone passes the census's bound \(10,000 rows\): cd db && bun threads\.ts --url <the owner's url> --status reads every key$/m.test(thrNone)
       && /^Threads: +1 \(1 thought in them\); 2 keys whose edges differ from their thread's — /m.test(thrOne)
       && /^Threads: +719 \(2,218 thoughts in them\); 3 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\)$/m.test(thrOrphans)
       && /^Threads: +not counted — migration 120 is not applied \(it keeps the threads' edges\)$/m.test(thrPre)
       && /^Threads: +\? \(thoughts not readable by this role\)$/m.test(thrLost),
-    `the table's Threads row: linked, read past the bound, keys differing (one and many), orphaned keys alone, before 120, and not read (${[thrLinked, thrPartial, thrDiffer, thrOne, thrPre, thrLost].map((t) => line(t, "Threads")).join(" / ")} / ${line(thrOrphans, "Threads")})`);
+    `the table's Threads row: linked, read past the bound, keys differing (one and many), orphaned keys alone, nothing read past the bound, before 120, and not read (${[thrLinked, thrPartial, thrDiffer, thrOne, thrPre, thrLost].map((t) => line(t, "Threads")).join(" / ")} / ${line(thrOrphans, "Threads")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,

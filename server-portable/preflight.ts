@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, threadsRow, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -4942,31 +4942,8 @@ if (configFailed) {
         // read but the thread's own works without its edges. It names no key:
         // db/threads.ts --status does.
         {
-          const t = facts.threads;
-          const linkCommand = "cd db && bun threads.ts --url <the owner's connection string>";
-          if (t === null) {
-            const u = facts.unread.threads;
-            if (!u) add("threads", "skip", "no thread_relink — migration 120 (SMD-3306) is not applied, so no thread's edges stand yet.");
-            // The census reads thought_facets and thoughts.
-            else if (u.reason === "refused")
-              add("threads", "warn", `could not verify: ${u.message}`,
-                  "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).");
-            else if (u.reason === "invisible")
-              add("threads", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
-            else add("threads", "warn", `could not verify: ${u.message}`,
-                     u.reason === "timeout"
-                       ? `A migration, a long transaction or a threads.ts batch may hold thought_facets, or the census outran the statement cap; run preflight again once it has finished, or read it whole: ${linkCommand} --status.`
-                       : "The check reads thought_facets and thoughts; the message says why it failed.");
-          } else {
-            const scope = t.complete ? "" : `; the first ${t.keys} key(s) read, past the census's bound (${linkCommand} --status reads every key)`;
-            if (t.unlinked === 0 && t.orphaned === 0)
-              add("threads", "ok", `${t.threads} thread(s), ${t.thoughts} thought(s) in them, ${t.standing} edge(s) standing — ${t.complete ? "every thread linked" : "each read linked"}${scope}`);
-            else {
-              const differ = [t.unlinked ? `${t.unlinked} key(s) whose edges differ from their thread's` : "", t.orphaned ? `${t.orphaned} key(s) no thought holds still carrying edges` : ""].filter(Boolean).join(", ");
-              add("threads", "warn", `${t.threads} thread(s), ${t.standing} of ${t.whole} edge(s) a whole linking leaves standing; ${differ}${scope}`,
-                  `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names each key, --key <key> re-links one). A brain upgraded to 120 links every thread so once; a gap after it is a delete the deleting role could not re-link (120's NOT HERE). Every read but the thread's own works meanwhile.`);
-            }
-          }
+          const r = threadsRow(facts.threads, facts.unread.threads);
+          add("threads", r.status, r.detail, r.fix);
         }
 
         // The ledger's highest migration against the tree this server was built
