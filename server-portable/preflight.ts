@@ -5857,7 +5857,7 @@ if (decideTier?.own) {
     row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
     want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false, down: "warn",
     serviceHost: "", names: "decide mode's adapter", start: START, notRunning: START, notListening: START,
-    refusedMeans: "every verdict decide mode asks for is refused before it is sent, and db/consolidate.ts refuses to start (a ProviderError of kind egress)",
+    refusedMeans: "the verdict is never sent (a ProviderError of kind egress), that pair recorded on its claim and the next judged; db/consolidate.ts refuses to start only when the policy refuses every call",
   });
 }
 
