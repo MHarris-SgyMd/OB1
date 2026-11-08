@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  H2O-Lightning-4B behind ob1-jev/1 on 127.0.0.1:8022 (jev/h2o/serve.py), the tier consolidation's decide mode asks
+  (SMD-3115, SMD-3326). A host process: PyTorch MPS runs only on the host. The stack reaches it at
+  http://host.containers.internal:8022 under podman machine (OB1_CONSOLIDATE_DECIDER_URL).
+
+  Fill in the three placeholders (jev/h2o/README.md, "Deploy"), save as
+  ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist, then
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
+  __PYTHON__    the venv's python (decider-4b's venv: torch, transformers, fastapi, uvicorn)
+  __SERVE_PY__  a serve.py that won't move under it: a checkout pinned to a release, not a working worktree
+  __HOME__      your home directory, for the log
+  Kept alive: preflight fails a server start while OB1_CONSOLIDATE_DECIDER_URL names a tier that does not answer.
+  Remove: launchctl bootout gui/$(id -u)/com.openbrain.h2o-tier; rm ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openbrain.h2o-tier</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-I</string>
+    <string>__SERVE_PY__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>JEV_PORT</key>
+    <string>8022</string>
+    <!-- The weights are cached at first start; offline after that, a start never reaches the network. -->
+    <key>HF_HUB_OFFLINE</key>
+    <string>1</string>
+    <!-- SMD-2082's admission bound (serve.py's defaults); every brain on the machine shares it. -->
+    <key>JEV_MAX_QUEUED</key>
+    <string>8</string>
+    <key>JEV_MAX_QUEUED_BYTES</key>
+    <string>33554432</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/private/tmp</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/ob1-h2o-tier.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/ob1-h2o-tier.log</string>
+</dict>
+</plist>

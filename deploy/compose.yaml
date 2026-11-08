@@ -832,12 +832,13 @@ services:
       # (SMD-1901). The server never judges; preflight, which runs in this
       # container, reports it beside the metadata model and probes it with --deep.
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
-      # The typed-decision tier (SMD-2050; the jev service below). The server
-      # never decides; preflight, which runs in this container, dials the tier
-      # when OB1_JEV_BASE_URL is set and fails the start when it does not
-      # answer — so no fallback here: a default would fail every stack that
-      # does not run the profile. With it, deploy/.env names
-      # OB1_JEV_BASE_URL=http://jev:8020 and OB1_JEV_LOCAL=1.
+      # The typed-decision tier (SMD-2050; the jev service below). The REST
+      # core's capture asks it for a thought's genre (SMD-2323); preflight,
+      # which runs in this container, dials the tier when OB1_JEV_BASE_URL is
+      # set and fails the start when it does not answer — so no fallback here:
+      # a default would fail every stack that does not run the profile. With
+      # it, deploy/.env names OB1_JEV_BASE_URL=http://jev:8020 and
+      # OB1_JEV_LOCAL=1.
       OB1_JEV_BASE_URL: ${OB1_JEV_BASE_URL:-}
       OB1_JEV_MODEL: ${OB1_JEV_MODEL:-}
       OB1_JEV_LOCAL: ${OB1_JEV_LOCAL:-}
@@ -845,6 +846,12 @@ services:
       # verdict and OB1_JUDGE_MODEL writes only the proposals it calls. The
       # workers inherit this block; preflight here names the pass key by it.
       OB1_CONSOLIDATE_DECIDER: ${OB1_CONSOLIDATE_DECIDER:-}
+      # Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B
+      # on the host (jev/h2o/README.md), reached as
+      # http://host.containers.internal:8022 under podman machine. Unset,
+      # decide mode asks the shared tier above.
+      OB1_CONSOLIDATE_DECIDER_URL: ${OB1_CONSOLIDATE_DECIDER_URL:-}
+      OB1_CONSOLIDATE_DECIDER_LOCAL: ${OB1_CONSOLIDATE_DECIDER_LOCAL:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
       # What may leave the box (SMD-1903): whether a thought's text may reach
       # an endpoint not declared local — deny (the default), allow or off —

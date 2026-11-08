@@ -17830,16 +17830,28 @@ if (want("16")) {
       const denv: Record<string, string | undefined> = {
         ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
         OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
+        OB1_CONSOLIDATE_DECIDER_URL: "", OB1_CONSOLIDATE_DECIDER_LOCAL: "",
       };
       const decide = (e: Record<string, string | undefined>, ...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: e as Record<string, string>, cwd: HERE });
       const last = (out: string) => out.trim().split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300);
 
       const noTier = await decide({ ...denv, OB1_JEV_BASE_URL: "" });
-      assert(noTier.code === 2 && /OB1_CONSOLIDATE_DECIDER is h2o-stub and OB1_JEV_BASE_URL is unset/.test(noTier.out) && tierCalls === 0 && writerCalls === 0,
+      assert(noTier.code === 2 && /OB1_CONSOLIDATE_DECIDER is h2o-stub and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set/.test(noTier.out) && tierCalls === 0 && writerCalls === 0,
         `decide mode with no tier is refused at start, naming both knobs (exit ${noTier.code}: ${last(noTier.out)})`);
       const heldElsewhere = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other" });
       assert(heldElsewhere.code === 2 && /OB1_JEV_MODEL is h2o-other and OB1_CONSOLIDATE_DECIDER is h2o-stub/.test(heldElsewhere.out),
         `…and so is a tier held to a model the key would not name (exit ${heldElsewhere.code}: ${last(heldElsewhere.out)})`);
+      // Decide mode's own tier (SMD-3326, a tier per caller): asked with the shared tier unset, and held to the decider
+      // whatever OB1_JEV_MODEL says, since the shared tier is no longer the decider's.
+      const OWN_TIER = { OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${tier.port}`, OB1_CONSOLIDATE_DECIDER_LOCAL: "1" };
+      const ownDry = await decide({ ...denv, OB1_JEV_BASE_URL: "", OB1_JEV_MODEL: "", OB1_JEV_LOCAL: "", ...OWN_TIER }, "--dry-run");
+      const ownBanner = ownDry.out.split("\n").filter((l) => /^\s*(decide|tier):/.test(l));
+      assert(ownDry.code === 0 && ownBanner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
+          && ownBanner.some((l) => /^\s*tier:\s+/.test(l) && /OB1_CONSOLIDATE_DECIDER_LOCAL/.test(l)) && tierCalls === 0,
+        `decide mode's own tier at OB1_CONSOLIDATE_DECIDER_URL is asked with the shared tier unset, its banner naming its own local knob (exit ${ownDry.code}: ${ownBanner.join(" | ").trim().slice(0, 300)})`);
+      const ownHeld = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other", ...OWN_TIER }, "--dry-run");
+      assert(ownHeld.code === 0 && !/OB1_JEV_MODEL is h2o-other/.test(ownHeld.out),
+        `…and the shared tier's OB1_JEV_MODEL no longer refuses it, the shared tier no longer the decider's (exit ${ownHeld.code}: ${last(ownHeld.out)})`);
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))

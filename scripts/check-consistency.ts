@@ -10462,7 +10462,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "integrations/openclaw-agent-memory/plugin/README.md": { by: ["integrations/openclaw-agent-memory/plugin/package.json"], why: "in the plugin's npm files list, which no job packs" },
   "integrations/agent-memory-api/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
   "jev/README.md": { by: ["db/consolidate.ts", "jev/test-jev.ts"], why: "named in messages" },
-  "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
+  "jev/h2o/README.md": { by: ["db/consolidate.ts", "server-portable/preflight.ts"], why: "named in preflight's and decide mode's messages" },
   "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
   "recipes/openclaw-agent-memory/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
   "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },

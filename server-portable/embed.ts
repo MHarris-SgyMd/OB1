@@ -444,12 +444,12 @@ export type ProviderEndpoint = {
    * where preflight's credential rule calls it local.
    */
   local: boolean;
-  /** The knob that declared it, when `local`: what a row or a banner names (second review pass); OB1_JEV_LOCAL for the decision tier (jev.ts, SMD-2050). */
+  /** The knob that declared it, when `local`: what a row or a banner names (second review pass); OB1_JEV_LOCAL for the decision tier (jev.ts, SMD-2050), OB1_CONSOLIDATE_DECIDER_LOCAL for decide mode's own (SMD-3326). */
   declaredBy?: LocalKnob;
 };
 
 /** The knobs that declare an endpoint local. */
-export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL";
+export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL" | "OB1_CONSOLIDATE_DECIDER_LOCAL";
 
 /**
  * A base URL's user and password, out of it: the base without them, and the
