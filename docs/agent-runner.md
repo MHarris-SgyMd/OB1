@@ -120,7 +120,7 @@ Each tick, after reconciling the runner's own runs (step 0, below), the runner t
 
 * team SMD, in a project of the "Open Brain — self-hosted AI memory" initiative, in the state named Backlog, of the backlog type, assigned to no one and delegated to no agent, with no character in its title that doesn't show;
 * carries SMD-4086's label and not the label that hands a ticket to a person. Linear's history, read whole, shows that every add of the label at or after its last add is the maintainer's own, made directly: the maintainer as the user, and no bot. Any change to the description or the title at or after that add, the maintainer's own included, voids the label until the maintainer adds it again on its own. Other changes, such as the priority or a relation, leave it standing: the label vouches for the text;
-* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate, with the ticket's relations read whole. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL, and no REST operation carries it until SMD-3669's agenda read lands.
+* **unblocked:** every Linear blocker is Done, Canceled or a Duplicate, with the ticket's relations read whole. The brain's `node_state` is not read: the read `graph-centrality --startable` uses needs a database URL, and SMD-3669's agenda read (`GET /v1/agenda`, migration 123) now carries startability: open blockers, live claims and `not_before`.
 * **nobody's work** (CLAUDE.md step 1, from the branches on GitHub and in the main checkout):
   * no unmerged branch or worktree carries the ticket's id, matched as a whole id (`smd-408` is not `smd-4087`). A branch is done with once a PR from it merged or closed into `main` at the commit it points at now, with none open; one at another commit, or with no PR, may be work not merged or not pushed yet, and a stacked PR merged or closed into another branch frees nothing. This covers branches of this repo and of the main checkout, and the main checkout's worktrees. A PR is looked up in this repo owner's account alone, so a branch of the bot's fork holds its ticket until reconciliation deletes it;
   * no open PR names the ticket in its head branch or title, or in its body when the maintainer or the bot opened it. Anyone can open a PR on this public repo, and one body could name every ticket;
@@ -130,7 +130,7 @@ A live claim whose PR merged or closed is stale. The runner skips its ticket and
 
 The label proves less than it seems. Linear records an add made through the maintainer's personal API key just as it records the maintainer's own click, so any agent session with that key's write access can add the label. For the label to be the maintainer's own word, agent sessions hold only read access to Linear, or a key of their own (`scripts/agent-runner/README.md`, "What the label proves").
 
-Once the agenda read lands (SMD-3669, ranked by effective priority, SMD-3667), the runner reads it, filtered by the label, instead of querying Linear.
+The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda item carries no ticket state, assignee, delegate, title or label history, so the rule's Backlog, unassigned, title and label checks stay Linear's.
 
 ## A run, step by step
 
