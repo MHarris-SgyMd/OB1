@@ -214,6 +214,12 @@ jobs:
       # and a whole dry run on stubs that sends nothing but reads.
       - name: The agent runner's selection and dry run
         run: bun scripts/agent-runner/dry-run.ts --self-check
+      # SMD-4088 (SMD-4087 cut 2a): the runner sessions' profile on fixtures —
+      # the guard's decisions, the settings, environment and command line, the
+      # launcher's checks on a stand-in for Claude Code, and the probes' mock.
+      # The probes themselves need the pinned Claude Code and macOS's sandbox.
+      - name: The agent runner sessions' profile
+        run: bun scripts/agent-runner/probes.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.

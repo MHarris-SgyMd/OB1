@@ -10446,15 +10446,16 @@ const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg
  * allowlist denies fails too.
  */
 const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
-  "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs, and in a recipe's example payload" },
+  "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/probes-check.ts", "scripts/agent-runner/probes.ts"], why: "named by the session-capture hook's test, which repo-consistency runs, in a recipe's example payload, and in the agent-runner probes' fixtures (planted in a clone or named in a refused-path case, none read)" },
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
-  "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
+  "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts", "scripts/agent-runner/probes-check.ts", "scripts/agent-runner/probes.ts"], why: "named in messages, and in the agent-runner probes' fixtures (planted in a clone or named in a refused-path case, not read)" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
   "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "integrations/package.json"], why: "named in messages and integrations/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
-  "README.md": { by: ["db/ingest-records.ts", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/probes.ts", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, in a plugin's npm files list, and by the agent-runner probe harness's \"README.md\" token (which resolves to the repo root's as well), not read" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
   "docs/01-getting-started.md": { by: ["db/test-schema.ts", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
+  "docs/agent-runner.md": { by: ["scripts/agent-runner/probes-check.ts"], why: "named in the self-check's assertion text (the probe list matches the design) and a refused-path case; it opens no file" },
   "docs/connector-taxonomy.md": { by: ["docs/connector-registry.json", "scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs; the registry names it as its spec" },
   "docs/vendored-disposition.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
   "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts", "evals/consolidate-labels.json"], why: "named in messages, assertion text and a label file's note" },
@@ -10463,6 +10464,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
   "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
   "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },
+  "scripts/agent-runner/README.md": { by: ["scripts/agent-runner/probes.ts"], why: "the probe harness's \"README.md\" token resolves from its own directory to this file; it plants a README in the clone, not this one" },
 };
 /** The tracked files a token in a code file can name: the token from the root, its leading ./, ../ and / taken off, and the token from the file's own directory. */
 function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<string> {
@@ -11287,6 +11289,7 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
   "scripts/check-consistency.ts": {
     "db/ci-parity.sh": reads("the local mirror of CI runs the checker; no CI job runs it"),
     "integrations/test-writes.ts": reads("asserts over the checker's text (thoughtWritesAroundIn), in data-layer"),
+    "scripts/agent-runner/probes-check.ts": names("a refusedPart test case lists it among the paths the guard allows; it opens no file"),
     "scripts/gen-tools.ts": names("a sentence in the note it writes into tools.json"),
     "scripts/gen-version.ts": names("a sentence in the comment it writes into db/version.mjs"),
     "scripts/mechanism-yield.ts": names("a sample commit body in its own cases"),
