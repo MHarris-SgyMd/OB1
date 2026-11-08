@@ -21,7 +21,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { isRedirect, ProviderError, providerDown, refuseRedirect, refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
-import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
+import { DecisionRefused, jevInfo, type JevConfig } from "../server-portable/jev.ts";
 import { modelCall } from "../server-portable/model-call.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -231,6 +231,9 @@ export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {
   if (status !== undefined && isRedirect(status)) return "fatal";
   if (opts.maxTokensFatal && status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
   if (status === 400 && refusesLength(status, msg)) return "thought";
+  // The decision tier's 422: one decision it cannot read faithfully (jev.ts, SMD-3326) — this thought's, so it is
+  // recorded failed with the tier's words, not a stop of every worker that the next run meets again.
+  if (e instanceof DecisionRefused) return "thought";
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
   return "thought";
@@ -410,6 +413,8 @@ export function followClassify(e: unknown): FollowVerdict {
   }
   const http = answerStatus(e);
   if (e instanceof ProviderError && e.kind === "egress") return "thought";
+  // The decision tier's 422 (classifyError's rule): this decision's, not the provider's state, so no probe decides it.
+  if (e instanceof DecisionRefused) return "thought";
   if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
   if (http !== null) {
     if (http === 429 || http === 503 || modelMissing(e)) return "backpressure";
