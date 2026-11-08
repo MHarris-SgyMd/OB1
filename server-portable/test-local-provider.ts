@@ -1800,7 +1800,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       modelCall(call(), work(300)),
       Bun.sleep(50).then(() => asLive(() => modelCall(call(META_MODEL, "live"), async () => { liveAt = Date.now() - t0; }))),
       Bun.sleep(50).then(() => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "test" }, async () => { embedAt = Date.now() - t0; })),
-      Bun.sleep(150).then(async () => { heldConns = await semConns(); }),
+      Bun.sleep(200).then(async () => { heldConns = await semConns(); }),
     ]);
     const both = Date.now() - t0;
     // A connection that let its slot go is kept 2 s for the next call (review pass 5), and a closed backend leaves
@@ -1819,7 +1819,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // each process, so it gets the next slot but one this process lets go however many calls this one has waiting — back
     // to back, or three workers at once (review pass 2: it waited for the whole backlog; 2b's polls let it lose a coin
     // toss for each slot, ten in a row one run in a few hundred; PR 2c-1's queue).
-    for (const shape of [{ workers: 1, calls: 14, most: 2 }, { workers: 3, calls: 21, most: 2 }]) {
+    for (const shape of [{ workers: 1, calls: 14, most: 3 }, { workers: 3, calls: 21, most: 3 }]) {
       const startsA: number[] = [];
       const backlog = Promise.all(Array.from({ length: shape.workers }, async () => {
         for (let i = 0; i < shape.calls / shape.workers; i++) await modelCall(call(), async () => { startsA.push(Date.now()); await Bun.sleep(150); });
@@ -1835,8 +1835,8 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const [askedAt, childAt] = (await new Response(child.stdout).text()).trim().split("\n").map(Number);
       await child.exited;
       await backlog;
-      // The call this process has at the queue's head as the other asks, and one more where the other's ask is printed a
-      // moment before it reaches the queue.
+      // The call this process has at the queue's head as the other asks, and one or two more where the other's ask is
+      // printed before its connection opens and it reaches the queue (a loaded runner's connect taking a call's time).
       const passedBy = startsA.filter((t) => t > askedAt && t < childAt).length;
       assert(childAt > askedAt && askedAt > 0 && passedBy <= shape.most,
         `a call in another process gets the next slot but one this one's ${shape.workers === 1 ? "back-to-back calls" : "three workers"} let go once it asks, in the queue behind the one call this process has in it: ${passedBy} of ${startsA.length} started between its ask and its run`);
@@ -1934,7 +1934,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       }
     }
     // …a wait in the queue as long as the calls ahead of it: a role's lock_timeout and statement_timeout, here 100 ms,
-    // do not end it, the semaphore's sessions setting both to none (PR 2c-1: ended, the call would fail open and run).
+    // do not end it, the semaphore's sessions setting both to none (PR 2c-1: ended, the call would fail open and run);
+    // nor does its idle_session_timeout end the slot's session, idle while its call runs (review pass 1: the lock
+    // went with it, three calls running at chat=1).
     {
       const admin = new SQL({ url: URL_, max: 1 });
       const ahead = new SQL({ url: URL_, max: 1 });
@@ -1942,21 +1944,32 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const timedSaid: string[] = [];
       try {
         const [{ role }] = (await admin`SELECT current_user AS role`) as { role: string }[];
+        // Connected before the role's timeouts are set, so they hold its own session to none of them.
+        await ahead`SELECT 1`;
         await admin.unsafe(`ALTER ROLE "${role}" SET lock_timeout = '100ms'`);
         await admin.unsafe(`ALTER ROLE "${role}" SET statement_timeout = '100ms'`);
+        await admin.unsafe(`ALTER ROLE "${role}" SET idle_session_timeout = '100ms'`);
         await ahead`SELECT pg_advisory_lock(hashtext(${key}), -2)`;
         let ranAt = 0;
-        const behind = modelCall(call(), async () => { ranAt = Date.now(); }).catch((e: unknown) => { timedSaid.push((e as Error).message); });
+        let heldMidCall: boolean | null = null;
+        const behind = modelCall(call(), async () => {
+          ranAt = Date.now();
+          await Bun.sleep(300);
+          // The slot still held 300 ms into the call: another session cannot take it.
+          [{ got: heldMidCall }] = (await ahead`SELECT NOT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
+        }).catch((e: unknown) => { timedSaid.push((e as Error).message); });
         await Bun.sleep(400);
         const ranBefore = ranAt;
         await ahead`SELECT pg_advisory_unlock(hashtext(${key}), -2)`;
         await behind;
-        assert(ranBefore === 0 && ranAt > 0 && timedSaid.length === 0,
-          `a role's lock_timeout and statement_timeout of 100 ms do not end a wait of 400 ms in the share's queue: the call ran once the queue was let go, not before (${ranBefore ? "ran early" : "waited"})`);
+        await ahead`SELECT pg_advisory_unlock_all()`;
+        assert(ranBefore === 0 && ranAt > 0 && timedSaid.length === 0 && heldMidCall === true,
+          `a role's lock_timeout and statement_timeout of 100 ms do not end a wait of 400 ms in the share's queue: the call ran once the queue was let go, not before (${ranBefore ? "ran early" : "waited"}); its idle_session_timeout of 100 ms leaves the slot held 300 ms into the call (${heldMidCall})`);
       } finally {
         const [{ role }] = (await admin`SELECT current_user AS role`) as { role: string }[];
         await admin.unsafe(`ALTER ROLE "${role}" RESET lock_timeout`);
         await admin.unsafe(`ALTER ROLE "${role}" RESET statement_timeout`);
+        await admin.unsafe(`ALTER ROLE "${role}" RESET idle_session_timeout`);
         await timed.uninstall();
         await admin.close();
         await ahead.close();
@@ -2032,10 +2045,81 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         const letGo = Date.now();
         await holds`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
         await waiting;
-        assert(subs.length === 1 && ranAt - letGo < 900,
+        assert(subs.length === 1 && ranAt - letGo < 700,
           `a subscription dropped while a call heads the queue is re-subscribed, and the head tries again then: the slot let go untold meanwhile taken ${ranAt - letGo} ms on`);
       } finally {
         await holds.close();
+        await admin.close();
+      }
+    }
+    // Processes counting a share's slots differently queue apart: a call of a chat=3 process does not wait behind a
+    // chat=1 process's head, whose queue it is not, for the slot free to it (review pass 1: a chat=3 process made 13
+    // calls in 5 s behind a chat=1 one with long calls, 677 alone).
+    {
+      const narrowHead = new SQL({ url: URL_, max: 1 });
+      const wide = installBackgroundSlots({ url: URL_!, raw: "chat=3", log: () => {} });
+      try {
+        // A chat=1 head: its queue (-2) held, its slot 0 taken, napping.
+        await narrowHead`SELECT pg_advisory_lock(hashtext(${key}), -2), pg_advisory_lock(hashtext(${key}), 0)`;
+        const t0 = Date.now();
+        let ranMs = -1;
+        const cut = setTimeout(() => { narrowHead`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 2000);
+        await modelCall(call(), async () => { ranMs = Date.now() - t0; });
+        clearTimeout(cut);
+        assert(ranMs >= 0 && ranMs < 300, `a chat=3 process's call takes a slot free to it at once, ${ranMs} ms, not waiting behind a chat=1 process's head`);
+      } finally {
+        await wide.uninstall();
+        await narrowHead.close();
+      }
+    }
+    // A subscription that fails to open — a role at its connection limit, the head's own session its one connection — is
+    // said once and asked again while the call waits, so the head hears the channel once the database lets it (review
+    // pass 1: kept, a failed one left the head deaf for as long as calls waited, every process behind it waiting its
+    // tries out).
+    {
+      const admin = new SQL({ url: URL_, max: 1 });
+      const holder = new SQL({ url: URL_, max: 1 });
+      const role = "ob1_slots_limited";
+      const limitedUrl = new URL(URL_!);
+      limitedUrl.username = role;
+      limitedUrl.password = "limited";
+      const limSaid: string[] = [];
+      let lim: { uninstall: () => Promise<void> } | undefined;
+      try {
+        await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
+        await admin.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD 'limited' CONNECTION LIMIT 1`);
+        lim = installBackgroundSlots({ url: limitedUrl.toString(), raw: "chat=1", log: (l) => limSaid.push(l) });
+        const listens = async () => Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE usename = ${role} AND query ILIKE 'LISTEN%'`)[0].c);
+        const handoffs: number[] = [];
+        let heardAfter = 0;
+        for (let i = 0; i < 3; i++) {
+          await holder`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
+          let ranAt = 0;
+          const waiting = modelCall(call(), async () => { ranAt = Date.now(); });
+          if (i === 0) {
+            // Refused at the head's first wait, then the limit lifted: asked again within LISTEN_RETRY_MS and a try.
+            await Bun.sleep(300);
+            await admin.unsafe(`ALTER ROLE ${role} CONNECTION LIMIT -1`);
+            for (let k = 0; k < 60 && heardAfter === 0; k++) { await Bun.sleep(100); heardAfter = await listens(); }
+          }
+          await Bun.sleep(300);
+          // Let go as another process of PR 2c-1's does: the unlock, then the channel told.
+          const letGo = Date.now();
+          await holder`SELECT pg_advisory_unlock(hashtext(${key}), 0), pg_notify(${SLOTS_CHANNEL}, ${key})`;
+          await waiting;
+          handoffs.push(ranAt - letGo);
+        }
+        assert(limSaid.filter((l) => /channel could not be heard/.test(l)).length === 1 && heardAfter === 1 && handoffs.every((h) => h >= 0 && h < 300),
+          `a subscription refused at a role's connection limit is said once and asked again while the call waits: heard once the limit is lifted (${heardAfter}), each slot then told taken at once (${JSON.stringify(handoffs)} ms; ${JSON.stringify(limSaid.map((l) => l.slice(0, 70)))})`);
+      } finally {
+        await lim?.uninstall();
+        await holder.close();
+        // Its connections gone before the role is dropped.
+        for (let k = 0; k < 50; k++) {
+          if (Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE usename = ${role}`)[0].c) === 0) break;
+          await Bun.sleep(50);
+        }
+        await admin.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
         await admin.close();
       }
     }
@@ -2258,8 +2342,9 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     }
   }
   // A waiter's connection that closes while it heads the share's queue, before any slot — a Postgres restart, here its
-  // backend terminated: Bun reconnects quietly, the call takes the queue again on the new session, and the slot it then
-  // takes is no lost one (review pass 3: said lost at the unlock; PR 2c-1: the queue, not 2b's mark).
+  // backend terminated as it naps: Bun reconnects quietly, the call takes the queue again on the new session at once, not
+  // at its next try, and the slot it then takes is no lost one (review pass 3: said lost at the unlock; PR 2c-1: the
+  // queue, not 2b's mark; its review pass 1: the head slept its nap out).
   {
     const reSaid: string[] = [];
     const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => reSaid.push(l) });
@@ -2272,17 +2357,23 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const waiting = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
       let before = 0;
       for (let i = 0; i < 50 && before === 0; i++) { await Bun.sleep(50); before = await marks(); }
+      // Napping once subscribed: its subscription's backend there, a round of tries after it, then the nap of a second
+      // or two.
+      let subscribed = 0;
+      for (let i = 0; i < 100 && subscribed === 0; i++) { await Bun.sleep(10); subscribed = Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`)[0].c); }
+      await Bun.sleep(50);
       // The waiter's backend: the one holding the queue, not the channel's.
       const [row] = (await admin`SELECT pid AS old FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967294 AND granted`) as { old: number }[];
       const old = row?.old ?? 0;
       await admin`SELECT pg_terminate_backend(${old})`;
+      const cutAt = Date.now();
       let after = 0;
-      // Taken again at the head's next try, a second or two on.
-      for (let i = 0; i < 100 && after === 0; i++) { await Bun.sleep(50); after = await marks(old); }
+      for (let i = 0; i < 200 && after === 0; i++) { await Bun.sleep(10); after = await marks(old); }
+      const againMs = Date.now() - cutAt;
       await other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
       const ran = await waiting;
-      assert(before === 1 && after === 1 && ran === "ran" && !reSaid.some((l) => /was lost/.test(l)),
-        `a waiter whose connection closes while it heads the queue takes it again on the new session (${before}, then ${after}), and the slot it takes is not said lost (${ran}; ${JSON.stringify(reSaid.map((l) => l.slice(0, 80)))})`);
+      assert(before === 1 && subscribed === 1 && after === 1 && againMs < 600 && ran === "ran" && !reSaid.some((l) => /was lost/.test(l)),
+        `a waiter whose connection closes while it heads the queue, napping, takes it again on the new session ${againMs} ms on (${before}, then ${after}), and the slot it takes is not said lost (${ran}; ${JSON.stringify(reSaid.map((l) => l.slice(0, 80)))})`);
     } finally {
       await inst.uninstall();
       await other.close();
