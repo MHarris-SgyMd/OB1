@@ -5722,7 +5722,9 @@ type TierProbe = {
   /**
    * A tier that answers nothing, or not as the tier: "fail" for the shared one, which the server itself asks (capture's
    * genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation pass asks —
-   * that pass refuses at its start and waits out an outage, and a pass's tier must not stop the server starting.
+   * until it answers a follower waits for it and a one-shot run fails each thought it cannot decide (review pass 2: this
+   * said the pass refuses, which only another model or a URL that is not a tier does), and a pass's tier must not stop
+   * the server starting.
    */
   down: "fail" | "warn";
   /** The compose service's name, so a host of that name gets the service's remedies, and every other the start one. */
@@ -5760,7 +5762,9 @@ async function tierRows(t: TierProbe): Promise<void> {
     const knob = t.wantKnob;
     if (want && info.model.name !== want) {
       add(TIER, t.wantFails ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${t.wantFails ? "" : " — db/consolidate.ts refuses to start; capture is unaffected"}`,
-          `Point ${t.baseKnob} at the tier serving ${want}, or set ${knob}=${info.model.name}${knob === "OB1_CONSOLIDATE_DECIDER" ? " (a new pass key)" : ""}.`);
+          `Point ${t.baseKnob} at the tier serving ${want}, or set ${knob}=${info.model.name}${knob === "OB1_CONSOLIDATE_DECIDER" ? " (a new pass key)" : ""}`
+          // The shared tier held to the decider: decide mode can have a tier of its own instead (review pass 2).
+          + `${t.baseKnob !== "OB1_CONSOLIDATE_DECIDER_URL" && knob === "OB1_CONSOLIDATE_DECIDER" ? `, or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL` : ""}.`);
     } else {
       add(TIER, "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${want ? ` (${knob})` : ""}`);
     }
@@ -5798,7 +5802,8 @@ async function tierRows(t: TierProbe): Promise<void> {
   if (!deep) {
     add(`${t.row} decision`, "skip", "not checked — pass --deep to make one decision");
   } else if (!results.some((r) => r.name === TIER && r.status === "ok")) {
-    add(`${t.row} decision`, "skip", `not checked — the ${TIER} row ${t.down === "fail" ? "failed" : "warned"}`);
+    // Named as the row ended, not as a down tier would end it: the shared tier's held to the decider warns (review pass 2).
+    add(`${t.row} decision`, "skip", `not checked — the ${TIER} row ${results.some((r) => r.name === TIER && r.status === "fail") ? "failed" : "warned"}`);
   } else {
     try {
       const t0 = performance.now();
@@ -5816,6 +5821,11 @@ const jevCfg = resolveJevConfig(env);
 // Decide mode's own tier (a tier per caller, SMD-3326): when OB1_CONSOLIDATE_DECIDER_URL names one, the shared tier is
 // no longer the decider's, and decide mode's gets rows of its own.
 const decideTier = resolvedEmbed.decider ? resolveDecideTier(env) : null;
+// Its URL with no decider is read by nothing: say so, rather than run judge mode without a word (review pass 2).
+if (!resolvedEmbed.decider && (env.OB1_CONSOLIDATE_DECIDER_URL ?? "").trim()) {
+  add("decide tier", "warn", "OB1_CONSOLIDATE_DECIDER_URL is set, but OB1_CONSOLIDATE_DECIDER is not — decide mode is off, so nothing asks that tier and the consolidation pass judges with OB1_JUDGE_MODEL",
+      "Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL.");
+}
 if (!jevCfg) {
   add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (capture's genre facet and the spikes ask it; decide mode reads its own at OB1_CONSOLIDATE_DECIDER_URL)");
 } else {
@@ -5845,7 +5855,7 @@ if (decideTier?.own) {
   // shortcut said ok while the pass would refuse a model other than the decider, or an undeclared endpoint).
   // A host process, not a compose service (decided 2026-10-25): H2O-Lightning-4B runs on PyTorch MPS, which only the
   // host has, so its adapter runs beside the stack, kept running by a LaunchAgent (jev/h2o/README.md).
-  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; the consolidation pass refuses to start until it answers.";
+  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; until it answers, a consolidation follower (sleep's) waits for it, and a one-shot run fails each thought it cannot decide (--retry-failed returns them).";
   await tierRows({
     row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
     want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false, down: "warn",

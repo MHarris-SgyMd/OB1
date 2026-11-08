@@ -13,8 +13,8 @@
   __PYTHON__    the venv's python (decider-4b's venv: torch, transformers, fastapi, uvicorn)
   __SERVE_PY__  a serve.py that won't move under it: a checkout pinned to a release, not a working worktree
   __HOME__      your home directory, for the log
-  Kept alive: while OB1_CONSOLIDATE_DECIDER_URL names a tier that does not answer, preflight warns and the
-  consolidation pass refuses to start.
+  Kept alive: while OB1_CONSOLIDATE_DECIDER_URL names a tier that does not answer, preflight warns, a
+  consolidation follower waits for it, and a one-shot pass fails each thought it can't decide.
   Remove: launchctl bootout gui/$(id -u)/com.openbrain.h2o-tier; rm ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
 -->
 <plist version="1.0">

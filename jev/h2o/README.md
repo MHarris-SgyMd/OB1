@@ -172,6 +172,12 @@ Unset, `OB1_CONSOLIDATE_DECIDER_URL` falls back to the shared tier at
 `OB1_JEV_BASE_URL`, with `OB1_JEV_LOCAL`, and `OB1_JEV_MODEL` must then name
 the decider; brains set up before SMD-3326 keep working that way.
 
+**Moving such a brain to its own tier,** unset `OB1_JEV_BASE_URL`,
+`OB1_JEV_LOCAL` and `OB1_JEV_MODEL`, or point them at another tier. Left at
+:8022, they keep H2O the shared tier: preflight still dials it on every start
+and fails the start when it is down, and capture's genre facet keeps asking
+it. Unset, the genre facet is off.
+
 **Keep it running.** `com.openbrain.h2o-tier.plist.example` is a LaunchAgent
 for it. It starts the adapter at login, restarts it when it exits, and logs to
 `~/Library/Logs/ob1-h2o-tier.log`. Point it at a `serve.py` that won't move
@@ -183,9 +189,10 @@ first with one start by hand. It prints a ready line once the 9.1 GB are down
 and checked; stop it then. Then install the agent:
 
 ```bash
-JEV_PORT=8023 <venv>/bin/python -I <a stable checkout>/jev/h2o/serve.py   # once: wait for "ready", then Ctrl-C
-sed -e "s|__PYTHON__|$HOME/decider-probe/.venv/bin/python|" \
-    -e "s|__SERVE_PY__|<a stable checkout>/jev/h2o/serve.py|" \
+VENV=<decider-4b's venv>; CHECKOUT=<a stable checkout>              # absolute paths
+JEV_PORT=8023 "$VENV/bin/python" -I "$CHECKOUT/jev/h2o/serve.py"   # once: wait for "ready", then Ctrl-C
+sed -e "s|__PYTHON__|$VENV/bin/python|" \
+    -e "s|__SERVE_PY__|$CHECKOUT/jev/h2o/serve.py|" \
     -e "s|__HOME__|$HOME|" jev/h2o/com.openbrain.h2o-tier.plist.example \
   > ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openbrain.h2o-tier.plist
@@ -203,8 +210,11 @@ To try it by hand instead: `JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py`
 - **When the tier is down.** Preflight's decide tier row dials
   `OB1_CONSOLIDATE_DECIDER_URL` on every server start and warns when nothing
   answers. The server still starts, since only the consolidation pass asks this
-  tier, and capture and search don't wait on it. The pass refuses at its start
-  until the tier answers.
+  tier, and capture and search don't wait on it. Until it answers, a
+  consolidation follower (sleep's) waits for it, and a one-shot
+  `bun db/consolidate.ts` fails each thought it can't decide
+  (`--retry-failed` returns them). Only a tier serving another model, or a URL
+  that is not a tier, refuses the pass at its start.
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.

@@ -5907,10 +5907,12 @@ if (want("10")) {
   assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through the shared tier \(OB1_JEV_BASE_URL\); \S+ only writes the proposals it calls \(OB1_CONSOLIDATE_DECIDER, pass key consolidate:verdict-v1\.4\+\S+@p\d+d\d+\)/.test(decideUp.out)
       && /✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(decideUp.out, "jev tier")),
          `a tier serving the decider: decide mode's row names the pass key, and the tier row the knob that held it (${row(decideUp.out, "consolidate decide mode").trim().slice(0, 200)})`);
-  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
   assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(row(decideElse.out, "jev tier"))
-      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(decideElse.out, "jev tier")),
-         `a tier serving another model than the decider warns, naming the decider's knob (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
+      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\), or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(decideElse.out, "jev tier"))
+      // The skip names the row as it ended (review pass 2: it said "failed" after this warn).
+      && /·\s+jev decision\s+not checked — the jev tier row warned/.test(decideElse.out),
+         `a tier serving another model than the decider warns, naming the decider's knob and decide mode's own tier, and --deep's skip says it warned (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
   const decideHeld = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "verdict-v1.4", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
   assert(/!\s+consolidate decide mode\s+OB1_JEV_MODEL is verdict-v1\.4 and OB1_CONSOLIDATE_DECIDER is h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideHeld.out)
       && /✓\s+jev tier\s+.* serves verdict-v1\.4 .* \(OB1_JEV_MODEL\)\s*$/.test(row(decideHeld.out, "jev tier")),
@@ -5951,6 +5953,12 @@ if (want("10")) {
   assert(/✓\s+jev tier/.test(ownSameElse.out) && /!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b/.test(row(ownSameElse.out, "decide tier"))
       && /!\s+decide egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(ownSameElse.out),
          `…so at the shared tier's URL, a model other than the decider and a missing OB1_CONSOLIDATE_DECIDER_LOCAL each warn, though the jev rows pass (${row(ownSameElse.out, "decide tier").trim().slice(0, 140)})`);
+  // Its URL with no decider is read by nothing (review pass 2): a warning, not silence and judge mode.
+  const urlAlone = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: undefined });
+  assert(/!\s+decide tier\s+OB1_CONSOLIDATE_DECIDER_URL is set, but OB1_CONSOLIDATE_DECIDER is not — decide mode is off/.test(urlAlone.out)
+      && /→ Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(urlAlone.out, "decide tier"))
+      && !/decide egress/.test(urlAlone.out),
+         `OB1_CONSOLIDATE_DECIDER_URL with no decider warns that nothing reads it, and dials nothing (${row(urlAlone.out, "decide tier").trim().slice(0, 160)})`);
   const ownDeep = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" }, "--deep");
   assert(/✓\s+decide decision\s+one binary decision in \d+ ms/.test(ownDeep.out), `--deep makes one decision through decide mode's own tier (${row(ownDeep.out, "decide decision").trim().slice(0, 120)})`);
 
