@@ -22,10 +22,9 @@
  *                        read faithfully (its own markers in the text, labels
  *                        past its token budget, a context an adapter will not
  *                        cut or cannot encode — the whole request is refused,
- *                        naming the
- *                        decision), 499 the caller left before its turn,
- *                        500 the model failed, 503 the queue of a tier that
- *                        bounds it is full (jev/h2o; Retry-After: seconds)
+ *                        naming the decision), 499 the caller left before its
+ *                        turn, 500 the model failed, 503 the queue of a tier
+ *                        that bounds it is full (jev/h2o; Retry-After: seconds)
  *
  * Probabilities are conditional on the options supplied, and the tier always
  * adds one of its own — INSUFFICIENT_EVIDENCE — so a model can decline rather

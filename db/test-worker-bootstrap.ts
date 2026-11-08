@@ -121,7 +121,8 @@ const deny = resolveEgressPolicy({});
     "a DecisionRefused is still a ProviderError of kind http and status 422");
   ok(classifyError(refused) === "thought" && followClassify(refused) === "thought",
     "the decision tier's 422 is the thought's, to classifyError and to a follower alike");
-  ok(classifyError(new ProviderError("Chat request failed: 422 unprocessable", "http", 422)) === "fatal" && followClassify(new ProviderError("Chat request failed: 422 unprocessable", "http", 422)) === "probe-decides",
+  const chat422 = new ProviderError("Chat request failed: 422 unprocessable", "http", 422);
+  ok(classifyError(chat422) === "fatal" && followClassify(chat422) === "probe-decides",
     "…and any other 422 is as before: fatal, and a probe decides it under --follow");
   // The one rule extract adds: a 400 about the answer budget. Without the option
   // it reads as this thought's length (refusesLength matches "tokens") and is the

@@ -64,10 +64,9 @@ Knobs:
   the thought failed and stops the worker. So set `JEV_MAX_QUEUED` above the
   decide workers of every brain sharing the tier. In review pass 4 the default,
   8, lost nothing to 10 workers at a 1 s read; a bound of 1 under 4 workers
-  failed two good thoughts.
-  A body over `JEV_MAX_QUEUED_BYTES` on its own could never
-  be admitted, so it gets 413, as a body over `JEV_MAX_BODY_BYTES` does, not a
-  503 that asks for a retry.
+  failed two good thoughts. A body over `JEV_MAX_QUEUED_BYTES` on its own could
+  never be admitted, so it gets 413, as a body over `JEV_MAX_BODY_BYTES` does,
+  not a 503 that asks for a retry.
 - **A caller that leaves while it waits** is dropped then (499), its admission
   and bytes released, and its request is never read. A caller that leaves while
   its body is still arriving gets 499 too. A failing check on whether the caller
@@ -93,11 +92,11 @@ Knobs:
   - Every context is encoded to count its tokens. Its UTF-8 length is no bound,
     because the tokenizer normalizes to NFC first, which can lengthen a text:
     10,666 × U+FB2C is 31,998 bytes and 42,664 tokens.
-  - The count runs on a thread of the default pool, not the event loop: 64 contexts of
-    20,000 U+FB2C took 1.35 s, during which `/health` would not answer. A
-    context the tokenizer cannot encode (a lone surrogate, which JSON allows)
-    is a 422 naming the decision, recorded against that pair like a context
-    too long.
+  - The count runs on a thread of the default pool, not the event loop: 64
+    contexts of 20,000 U+FB2C took 1.35 s, during which `/health` would not
+    answer. A context the tokenizer cannot encode (a lone surrogate, which JSON
+    allows) is a 422 naming the decision, recorded against that pair like a
+    context too long.
   - The context cap of 20,000 characters keeps most text under the 32,000
     tokens. Only text past 1.6 tokens a character crosses it: a Yi syllable
     (U+A000) reads as 3 tokens, so 19,999 of them are 59,997 tokens.
@@ -105,19 +104,19 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Twenty-two mutants, one per mechanism, each fail it: eight
-  worker threads, the read on the event loop, no count bound, no byte bound, no
-  refusal before the body, no drop while waiting, no check at its turn, no 422,
-  bytes never released, a body over the byte bound alone answered 503, a body
-  stream that breaks and escapes, a caller check that raises and escapes,
-  tokens estimated from bytes, a 409 for the model's own name, and a cancelled
-  waiter's acquire left running, no body deadline, the token count on the
-  event loop, an encode failure escaping, a per-chunk deadline, the prompt
+  server runs it in CI. Twenty-two mutants, one per mechanism, each fail it:
+  eight worker threads, the read on the event loop, no count bound, no byte
+  bound, no refusal before the body, no drop while waiting, no check at its
+  turn, no 422, bytes never released, a body over the byte bound alone answered
+  503, a body stream that breaks and escapes, a caller check that raises and
+  escapes, tokens estimated from bytes, a 409 for the model's own name, a
+  cancelled waiter's acquire left running, no body deadline, the token count on
+  the event loop, an encode failure escaping, a per-chunk deadline, the prompt
   built without the record, an unset knob refused, and an unencodable context
   answered 400.
 
-**Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
-model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):
+**Measured on the dogfood Mac** (2026-11-08, MPS float16, the real model, the
+hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):
 
 | What | Result |
 | -- | -- |

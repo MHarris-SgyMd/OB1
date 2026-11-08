@@ -33,9 +33,9 @@ is bounded (the knobs SMD-2082 defines for the ob1-jev/1 adapters; jev/serve.ts'
 tickets): at most JEV_MAX_QUEUED requests admitted at once, the one being read included, and at most
 JEV_MAX_QUEUED_BYTES of their bodies held. Past either, a request is answered 503 with Retry-After before its body is
 read when Content-Length shows it, or as soon as the bytes read pass it; a body larger than JEV_MAX_QUEUED_BYTES on its
-own is a 413, since no wait would admit it. A request whose caller leaves while it waits, or mid-body, is dropped then
-(499), its bytes released, never read. The request path is `handle`, free of the web framework and the model, so
-test_serve.py holds it with the standard library alone.
+own is a 413, since no wait would admit it. A body not all arrived within 30 s is a 408, its place released. A request
+whose caller leaves while it waits, or mid-body, is dropped then (499), its bytes released, never read. The request
+path is `handle`, free of the web framework and the model, so test_serve.py holds it with the standard library alone.
 
 A record this model would read in part gets the contract's 422, naming the decision and its token count (SMD-3326,
 decided 2026-11-08): a context over max_state_tokens (32,000 in serve_config.json) is refused, not cut to its head and
@@ -393,9 +393,9 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
 
     In order: 413 for a Content-Length over 8 MB, or over JEV_MAX_QUEUED_BYTES on its own; 503 when admission is full,
     or when the body (its Content-Length, or the bytes as they arrive) would pass the held-bytes bound; 413 for a body
-    that runs past either limit; 499 for a caller gone mid-body; 400 malformed; 409 another model; 422 for a context
-    the model would read only in part; 499 for a caller gone before its turn; the result, or 500 when the model
-    fails."""
+    that runs past either limit; 408 for a body not all arrived within BODY_TIMEOUT_S; 499 for a caller gone mid-body;
+    400 malformed; 409 another model; 422 for a context the model would read only in part, or cannot encode; 499 for a
+    caller gone before its turn; the result, or 500 when the model fails."""
     # A body no wait could admit is a 413, not a 503 a caller would retry for ever (review pass 1): over 8 MB, or over
     # the held-bytes bound on its own (a JEV_MAX_QUEUED_BYTES set below a valid body).
     def too_big(n):

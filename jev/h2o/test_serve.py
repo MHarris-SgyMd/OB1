@@ -15,8 +15,14 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [7] a context over max_state_tokens: the whole request refused with a 422 naming the decision and its token count,
       nothing read
   [8] 400, 409 and 500 as before, and the gate's counts back to zero after every path
+  [9] a knob or Content-Length of a non-ASCII digit: the knob refused by name, the length read as undeclared; an unset
+      knob is its default
+  [10] a request naming the model it serves is read; one cancelled while it waits is never read
+  [11] a body that stalls, or trickles past its deadline, is a 408; the token count runs off the event loop; a context
+      the tokenizer cannot encode is a 422
+  [12] each prompt holds the decision's record
 """
-import asyncio, importlib.util, json, sys, threading, time
+import asyncio, importlib.util, json, os, sys, threading, time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("h2o_serve", Path(__file__).with_name("serve.py"))
@@ -262,7 +268,6 @@ async def main():
     print("\n[9] digits are ASCII digits")
     # str.isdigit() is True for "²", which int() refuses (review pass 2): a knob so set got a traceback, not its
     # refusal, and a Content-Length so set escaped handle as the framework's 500.
-    import os
     refused = []
     for raw in ("²", "0", "-3", "1.5"):
         os.environ["JEV_TEST_KNOB"] = raw
