@@ -2300,6 +2300,53 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
   if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [17] done" });
 }
 
+console.log("\n[18] The priority label through both doors (SMD-3668 PR 2): a thought naming a High ticket due tomorrow carries it on search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch — over REST its fields and terms, over MCP the line, the title prefix and a value without the terms; a ticket's own row reads as its ticket, once; a ticket with no priority is no label, and a result naming none keeps ChatGPT's shape");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  const row = async (issue: string) => {
+    const content = `${issue} — [18] the priority label's ticket ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog" })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return String(id);
+  };
+  const rowId = await row("SMD-9921");
+  await row("SMD-9922");
+  const set = await rest("POST", "/v1/priorities/ticket/SMD-9921", { level: 3, due_at: tomorrow });
+  const cap = await rest("POST", "/v1/thoughts", { content: "[18] the priority label: a plan naming SMD-9921 and SMD-9922" });
+  const tid = String(cap.body.id);
+  const plain = await rest("POST", "/v1/thoughts", { content: "[18] the priority label: a plan naming no ticket" });
+  const pid = String(plain.body.id);
+  type Row = Record<string, unknown> & { id: string; priority?: Record<string, unknown>[] | null };
+  const pick = (rows: unknown, id: string) => (rows as Row[] | undefined)?.find((r) => r.id === id);
+  const [compat, compatMcp, st, stMcp, kw, kwMcp, list, listMcp, fetched, fetchedMcp, rowMcp] = await Promise.all([
+    // The ticket's key, a literal, so both thoughts naming it rank first whatever the test embedder makes of the words.
+    rest("POST", "/v1/search/compat", { query: "SMD-9921" }), mcp("search", { query: "SMD-9921" }),
+    rest("POST", "/v1/search", { query: "SMD-9921", limit: 10 }), mcp("search_thoughts", { query: "SMD-9921", limit: 10 }),
+    rest("POST", "/v1/search/keyword", { query: "[18] the priority label: a plan naming SMD" }), mcp("search_thoughts_keyword", { query: "[18] the priority label: a plan naming SMD" }),
+    rest("GET", "/v1/thoughts?limit=100"), mcp("list_thoughts", { limit: 100 }),
+    rest("GET", `/v1/thoughts/${tid}`), mcp("fetch", { id: tid }), mcp("fetch", { id: rowId }),
+  ]);
+  const restRows = [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row];
+  const due = `by the end of ${tomorrow} (UTC)`;
+  assert(set.status === 200 && restRows.every((r) => r?.priority?.length === 1 && r.priority[0].kind === "ticket" && r.priority[0].key === "SMD-9921" && r.priority[0].self === false
+        && r.priority[0].effective === 5 && r.priority[0].level === 3 && r.priority[0].urgency === 2 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
+    `over REST each of the five carries the High due tomorrow, its terms named; the unknown SMD-9922 no label (${JSON.stringify(restRows.map((r) => r?.priority?.map((p) => `${p.key} ${p.effective}`)))})`);
+  const line = `Priority: ticket SMD-9921 at 5 (high (3); +2 due ${due}).`;
+  const scs = [pick(stMcp.sc.hits, tid), pick(kwMcp.sc.hits, tid), pick(listMcp.sc.thoughts, tid)];
+  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 5 && !("terms" in h.priority[0])),
+    `over MCP the three text tools print the line, and their values carry the item without its terms (${stMcp.text.match(/Priority: .*/)?.[0]})`);
+  const title = `[priority: ticket SMD-9921 high (3), due ${due}] `;
+  const compatHit = pick(JSON.parse(compatMcp.text).results, tid);
+  const plainMcp = JSON.parse((await mcp("search", { query: '"a plan naming no ticket"' })).text);
+  const compatPlain = pick(plainMcp.results, pid);
+  assert(String(compatHit?.title).startsWith(title) && String(JSON.parse(fetchedMcp.text).title).startsWith(title)
+      && String(JSON.parse(rowMcp.text).title).startsWith(`[priority: this ticket's row (SMD-9921) high (3), due ${due}] `) && JSON.parse(rowMcp.text).priority.length === 1
+      && compatPlain !== undefined && JSON.stringify(Object.keys(compatPlain)) === '["id","title","url"]',
+    `search's and fetch's titles start with the prefix, a ticket's own row once as its ticket; a result naming none keeps ChatGPT's shape (${compatHit?.title} | ${JSON.parse(rowMcp.text).title})`);
+  await sql`DELETE FROM thoughts WHERE content LIKE '%[18] the priority label%'`;
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

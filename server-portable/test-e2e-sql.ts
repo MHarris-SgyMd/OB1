@@ -4222,6 +4222,34 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     const loggedPlain = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
     assert(loggedAfter === loggedBefore && loggedPlain === loggedAfter + 1,
       `a priority-ranked search is not logged (the log has no column for it), a plain one is (${loggedBefore} → ${loggedAfter} → ${loggedPlain})`);
+    // PR 2, the label, read by the same ADR: each hit's own priority first (a ticket's row as its ticket, once), then
+    // the tickets it is filed under or names; a ranked search's label comes from its one window read.
+    type Pr = { kind: string; key: string; self: boolean; effective: number; level: number | null; inheritedFrom: { key: string } | null; settled: boolean; urgency: number };
+    const plainAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter });
+    const labelOf = (r: typeof plainAll, id: string) => (((r.sc?.hits ?? []) as { id: string; priority: Pr[] | null }[]).find((h) => h.id === id)?.priority ?? null);
+    const said = (r: typeof plainAll, id: string) => (labelOf(r, id) ?? []).map((p) => `${p.self ? "self:" : ""}${p.kind}:${p.kind === "thought" ? "-" : p.key}:${p.effective}${p.settled ? ":settled" : ""}`).join(" ");
+    const want: [string, string][] = [
+      [underUrgent, "self:thought:-:3 ticket:PWU-1:4"],
+      [urgentRow, "self:ticket:PWU-1:4"],
+      [doneRow, "self:ticket:PWD-1:4:settled"],
+      [underDone, "ticket:PWD-1:4:settled"],
+      [underHigh, `ticket:${last}:5`],
+      [statedNone, "self:thought:-:0 ticket:PWU-1:4"],
+      [mention, "ticket:PWU-1:4"],
+      [low, "self:thought:-:1"],
+    ];
+    const wrong = want.filter(([id, w]) => said(plainAll, id) !== w).map(([id, w]) => `${name.get(id)}: ${said(plainAll, id)} ≠ ${w}`);
+    assert(!plainAll.isError && wrong.length === 0,
+      `each hit's label: a note under an Urgent ticket itself High by inheritance, then the ticket; a ticket's row once, as its ticket; a finished one settled at its level; a note under it nothing of its own; a mention the ticket alone; a stated None and a Low their own (${wrong.join("; ") || "all as the ADR reads them"})`);
+    assert(plainAll.text.includes("Priority: this thought at 3 (inherited 3 from ticket PWU-1 (urgent (4), 1 hop)); ticket PWU-1 at 4 (urgent (4)).")
+        && plainAll.text.includes(`Priority: ticket ${last} at 5 (high (3); +2 due by the end of ${tomorrow} (UTC)).`),
+      `the text says each item's effective priority and its terms (${plainAll.text.match(/Priority: .*/)?.[0]})`);
+    const rankedAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, priority_weight: 0.5 });
+    assert(!rankedAll.isError && want.every(([id, w]) => said(rankedAll, id) === w),
+      `a ranked search's hits carry the same labels, from its one window read (${want.filter(([id, w]) => said(rankedAll, id) !== w).map(([id]) => name.get(id)).join(", ")})`);
+    const fetched = JSON.parse((await call("fetch", { id: underUrgent })) as string) as { title: string; priority: Pr[] };
+    assert(fetched.title.startsWith("[priority: this thought high (3) inherited from ticket PWU-1; ticket PWU-1 urgent (4)] ") && fetched.priority.length === 2,
+      `fetch's title starts with the prefix (${fetched.title.slice(0, 120)})`);
   } finally {
     // The key's kind first, on its own: a failed capture leaves `made` short a row, and the delete after must not stop it
     // (review pass 2). set_agent_kind takes no NULL: the kind the key had, put back by hand.
