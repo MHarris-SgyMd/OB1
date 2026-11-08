@@ -175,12 +175,12 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 /**
  * A result's judged relations as a typed field (SMD-2726; SMD-3306 PR 7a-2b): each relation's id, word, side, the
- * judge's confidence, when it was judged and whether it is stale, and the other thought's id, time and superseding
- * thought — its title, the thought's own words, rides the text. Null when they were not read, and from a REST core
- * older than this MCP server.
+ * judge's confidence, when it was last judged and whether it is stale, and the other thought's id, trust, time and
+ * superseding thought — its title, the thought's own words, rides fetch's and the relations read's text alone. Null
+ * when they were not read, and from a REST core older than this MCP server.
  */
 const relationsField = (relations: readonly RelationShown[] | null | undefined) =>
-  Array.isArray(relations) ? relations.map((r) => ({ id: r.id, relation: r.relation, otherIs: r.otherIs, other: { id: r.other.id, created_at: r.other.created_at, supersededBy: r.other.supersededBy }, confidence: r.confidence, judgedAt: r.judgedAt, stale: r.stale })) : null;
+  Array.isArray(relations) ? relations.map((r) => ({ id: r.id, relation: r.relation, otherIs: r.otherIs, other: { id: r.other.id, trust: r.other.trust, created_at: r.other.created_at, supersededBy: r.other.supersededBy }, confidence: r.confidence, judgedAt: r.judgedAt, stale: r.stale })) : null;
 const relationsFields = (h: { relations?: readonly RelationShown[] | null; relationsMore?: number }) =>
   ({ relations: relationsField(h.relations), relationsMore: h.relationsMore ?? 0 });
 
@@ -618,6 +618,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }
 
+    const onPage = new Map(data.map((t, i) => [t.id, `Result ${i + 1}`]));
     const results = data.map(
       (t, i) => {
         const m = t.metadata || {};
@@ -647,8 +648,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         if (held) parts.push(`⚠ Claimed: ${held}`);
-        // SMD-2726: its judged relations — labels, so the rank above is unchanged.
-        const related = relationsWords(t.relations, t.relationsMore ?? 0);
+        // SMD-2726: its judged relations — labels, so the rank above is unchanged; another hit named by its place.
+        const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
         if (related) parts.push(`↔ Relations: ${related}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
@@ -705,6 +706,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
+    if (data.some((t) => t.relations?.some((r) => r.stale))) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -740,6 +742,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         `search_thoughts for a match by meaning, or a shorter fragment of the same string.`;
     }
 
+    const onPage = new Map(data.map((t, i) => [t.id, `Result ${offset + i + 1}`]));
     const results = data.map((t, i) => {
       const m = t.metadata || {};
       // SMD-1328: as the search block above — absent, not a fake 1970.
@@ -759,7 +762,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
       const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
       if (held) parts.push(`⚠ Claimed: ${held}`);
-      const related = relationsWords(t.relations, t.relationsMore ?? 0);
+      const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
       if (related) parts.push(`↔ Relations: ${related}`);
       const topics = metaList(m.topics, TAG_MAX);
       if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
@@ -776,13 +779,14 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${staleKey(data)}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
   return render(o, ({ thoughts: data, sort, cursor }) => {
     if (!data.length) return "No thoughts found.";
+    const onPage = new Map(data.map((t, i) => [t.id, `item ${i + 1}`]));
     const results = data.map(
       (t, i) => {
         const m = t.metadata || {};
@@ -794,7 +798,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // SMD-3599: who holds a ticket it names, after the superseded mark.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         // SMD-2726: its judged relations, after the claims.
-        const related = relationsWords(t.relations, t.relationsMore ?? 0);
+        const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
         const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
@@ -818,7 +822,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${staleKey(data)}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -839,20 +843,31 @@ const RELATION_SAID: Record<RelationWord, { older: string; newer: string }> = {
   duplicate: { older: "duplicates", newer: "duplicated by" },
   distinct: { older: "distinct from (a look-alike about another subject)", newer: "distinct from (a look-alike about another subject)" },
 };
-/** A relation's marks: the judge's confidence, and whether its texts moved since or the other thought is superseded. */
-const relationMarks = (r: RelationShown) =>
-  [r.confidence === null ? "no confidence given" : `confidence ${r.confidence.toFixed(2)}`, r.stale ? "edited since judged" : "", r.other.supersededBy ? `the other superseded by ${r.other.supersededBy}` : ""].filter(Boolean).join("; ");
 /**
- * A result's relations on one line, or null for none: each its words, the other thought's title quoted — its own
- * words, cut to 80 — its id and its marks; then how many more, which the relations tool reads.
+ * A relation's marks: the judge's confidence, whether its texts moved since, and whether the other thought is
+ * superseded — by the thought it is read on, said so (review pass 1).
  */
-function relationsWords(relations: readonly RelationShown[] | null | undefined, more = 0): string | null {
+const relationMarks = (r: RelationShown, self: string) =>
+  [r.confidence === null ? "no confidence given" : `confidence ${r.confidence.toFixed(2)}`, r.stale ? "edited since judged" : "",
+    r.other.supersededBy === null ? "" : r.other.supersededBy === self ? "the other superseded by this thought" : `the other superseded by ${r.other.supersededBy}`].filter(Boolean).join("; ");
+/**
+ * A result's relations on one line, or null for none: each its words, the other thought by its place when it is
+ * another result on the page, else by its id — never its title (review pass 1, the maintainer's call: titles crowded
+ * the page and carried outside text into filtered reads) — and its marks; then how many more, which the relations
+ * tool reads.
+ */
+function relationsWords(relations: readonly RelationShown[] | null | undefined, more: number, self: string, onPage: ReadonlyMap<string, string>): string | null {
   if (!relations?.length) return null;
-  const one = (r: RelationShown) => `${RELATION_SAID[r.relation][r.otherIs]} ${JSON.stringify(oneLine(snipText(r.other.title, 80)))} (ID ${r.other.id}; ${relationMarks(r)})`;
+  const one = (r: RelationShown) => `${RELATION_SAID[r.relation][r.otherIs]} ${onPage.get(r.other.id) ?? `ID ${r.other.id}`} (${relationMarks(r, self)})`;
   return `${relations.map(one).join("; ")}${more > 0 ? `; and ${more} more, which the relations tool reads` : ""}.`;
 }
 /** Relations not read are said, not left to read as none (as the claims are). */
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
+/** What a stale mark means, once per reply that shows one (review pass 1: the page's lines said it with no key). */
+const STALE_KEY = "A relation marked edited since judged was judged on a text that has changed since: its word may no longer hold — read both thoughts before relying on it.";
+const staleKey = (data: readonly { relations?: readonly RelationShown[] | null }[]) => (data.some((t) => t.relations?.some((r) => r.stale)) ? `\n${STALE_KEY}` : "");
+/** An other thought's title as fetch and the relations read quote it: an outside text's marked so, outside the quote (review pass 1). */
+const relatedTitle = (r: RelationShown) => `${r.other.trust === "ingested" ? "[ingested] " : ""}${JSON.stringify(oneLine(r.other.title ?? ""))}`;
 /** relations: the thought, the word asked for, the count and cursor, and each relation's typed fields — no title. */
 const safeRelations: Safe<RelationsResult> = (v) => ({ id: v.id, relation: v.relation, total: v.total, cursor: v.cursor, relations: relationsField(v.relations) });
 
@@ -863,11 +878,13 @@ export function renderRelations(o: Outcome<RelationsResult>): Reply {
     const head = `Thought ${id}: ${total} standing judged${word} relation${total === 1 ? "" : "s"}, strongest first${relations.length < total ? `, ${relations.length} on this page` : ""}:`;
     // A page past the cursor emptied by a re-judge between pages, or a cursor from another thought's read.
     if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a re-judge changed them since that page, or the cursor came from another read. Read them again from the start.)`;
-    const rows = relations.map((r, i) => `${i + 1}. ${RELATION_SAID[r.relation][r.otherIs]} ${JSON.stringify(oneLine(r.other.title))}\n   ID: ${r.other.id}\n   ${relationMarks(r)}; judged ${r.judgedAt ?? "at an unknown time"} (relation ${r.id})`);
-    const stale = relations.some((r) => r.stale) ? "\n\nA relation edited since judged was judged on a text that has changed: the word may no longer hold, until the judge reads the pair again." : "";
+    const rows = relations.map((r, i) => `${i + 1}. ${RELATION_SAID[r.relation][r.otherIs]} ${relatedTitle(r)}\n   ID: ${r.other.id}\n   ${relationMarks(r, id)}; last judged ${r.judgedAt ?? "at an unknown time"} (relation ${r.id})`);
+    const stale = relations.some((r) => r.stale) ? `\n\n${STALE_KEY} It stands until the judge reads the pair again.` : "";
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\` with id ${id}${relation === null ? "" : ` and relation ${relation}`} for the next page.` : "";
     return `${head}\n\n${rows.join("\n\n")}${stale}${more}`;
-  }, (r) => r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a relations cursor — pass the `cursor` the previous page ended with, as it was given, with the same id and relation."
+  }, (r) => r.code === "REFUSED_CURSOR" ? r.reason === "filters"
+      ? "Refused: that cursor was made for another thought or another `relation` — pass it with the id and relation of the page that ended with it, or leave out `after` to start from the strongest."
+      : "Refused: `after` is not a relations cursor — pass the `cursor` the previous page ended with, as it was given, with the same id and relation."
     : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
       : unknownRefusal(r), safeRelations);
 }
@@ -1993,7 +2010,9 @@ const CLAIMED_KEY = "How to read a `⚠ Claimed` line: a claim whose id is in yo
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);
   const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
-  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) };
+  // SMD-2726: a related thought of outside text has its title marked as this one's is (review pass 1).
+  const relations = Array.isArray(v.relations) ? { relations: v.relations.map((r) => r.other.trust === "ingested" && r.other.title !== undefined ? { ...r, other: { ...r.other, title: `[ingested] ${r.other.title}` } } : r) } : {};
+  return { ...v, ...relations, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) };
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;

@@ -854,24 +854,29 @@ lineage row at the two texts judged. The reads below show the judge's relations 
 thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads`.
 
 - **`relations`** (read scope; REST `GET /v1/relations`) reads one thought's standing judged relations, both sides of
-  each pair, strongest first: by confidence, then the newest judged, then by id.
+  each pair, strongest first: by confidence (rounded to six places), then the newest recorded, then by id.
   - `relation` keeps one word. `limit` relations a page, 1–100, default 20; more carry a `cursor`, passed back as
-    `after` with the same `id` and `relation`. `total` counts every one under the word.
-  - **Each relation** carries its id and word; the other thought's id, title, time and `supersededBy`; `otherIs`, which
-    says whether the other is the older or the newer (so evolves reads "evolves from" on the newer and "evolved into"
-    on the older); the confidence; `judgedAt`; and `stale`.
+    `after` with the same `id` and `relation` (a cursor made for another is refused). `total` counts every one under
+    the word.
+  - **Each relation** carries its id and word; the other thought's id, title, `trust`, time and `supersededBy`;
+    `otherIs`, which says whether the other is the older or the newer (so evolves reads "evolves from" on the newer and
+    "evolved into" on the older); the confidence; `judgedAt`, when it was last judged; and `stale`.
   - **`stale`** is the lineage row's fingerprints no longer those of the two texts: a text was edited since it was
     judged, so the word may no longer hold. Such a relation stands, shown, until SMD-2726's `rebuild_derived` arm
-    closes it and the judge reads the pair again. On stable late on 2026-11-07, 1,295 of 6,524 were stale.
-  - **Refusals.** Another tool's cursor is `REFUSED_CURSOR`. An unknown id is `NOT_FOUND`.
-- **Every read of a thought** carries its relations: `search`, `search_thoughts`, `search_thoughts_keyword` and
-  `list_thoughts` the first 5 per result, `fetch` the first 20, with `relationsMore` for the rest. One read per page.
-  The compat shapes (`search`, `fetch`) carry them only where a thought has some. `relations: null` says they couldn't
-  be read, such as for a role without `derivations`, and the log says why; the read goes on.
-- **MCP** prints a `↔ Relations:` line per result, each other thought's title quoted. Its structured value leaves the
-  titles out.
+    closes it and the judge reads the pair again. A relation with no lineage row reads not stale, as
+    `consolidate.ts --list relations` reads it. On stable late on 2026-11-07, 1,295 of 6,524 were stale.
+  - **Refusals.** Another tool's cursor, or one made for another id or word, is `REFUSED_CURSOR`. An unknown id is
+    `NOT_FOUND`.
+- **Every read of a thought** carries its relations: `search_thoughts`, `search_thoughts_keyword` and `list_thoughts`
+  the first 5 per result, `fetch` the first 20, with `relationsMore` for the rest. One read per page. A page's labels
+  carry no title: MCP's `↔ Relations:` line names another result on the page by its place (`Result 3`, `item 3`) and
+  any other thought by its id. Titles are fetch's and the `relations` read's, an outside text's marked `[ingested]`.
+  The ChatGPT-shape `search` carries none, and `fetch` carries them only where a thought has some. `relations: null`
+  says they couldn't be read, and the log says why; the read goes on.
+- **MCP's structured value** leaves the titles out.
 
-The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds.
+The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds. A role without either
+gives `relations: null` on the reads, and faults the `relations` operation, the error naming the table.
 
 ## Worker-queue write actions
 

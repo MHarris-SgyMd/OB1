@@ -233,7 +233,7 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * an unknown field through, and then only the results it is about carry it.
  */
 export type SearchResult = {
-  results: ({ id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number } & ReturnType<typeof claimedResult> & ReturnType<typeof relationsResult>)[];
+  results: ({ id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number } & ReturnType<typeof claimedResult>)[];
   /** Present only when the provider did not answer for the query, and the results are its exact matches alone (SMD-2891); with none, the search is refused EMBEDDING_PROVIDER_UNAVAILABLE. */
   vectorFailed?: QueryVectorFailed;
 };
@@ -256,7 +256,8 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       needles: f.needles.filter((_, i) => f.needleCounts[i] === 0), commonNeedles: f.commonNeedles });
   }
   const store = await ctx.store();
-  const [moved, claimed, related] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows), relationsOf(store, r.rows)]);
+  // No relations here (review pass 1, the maintainer's call): ChatGPT's search shape is a list to fetch from, and fetch carries them.
+  const [moved, claimed] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows)]);
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
@@ -265,7 +266,6 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       trust: t.metadata?.trust,
       ...resultLabel(moved[t.id]),
       ...claimedResult(claimed, t.id),
-      ...relationsResult(related, t.id),
     })),
     ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}),
   });
@@ -284,7 +284,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const [, claimed, threads, related] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED)]);
+  const [, claimed, threads, related] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true)]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),

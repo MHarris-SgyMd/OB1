@@ -999,20 +999,24 @@ export const RELATIONS_SHOWN = 5;
 /** How many a fetched thought carries; the rest are counted, and the `relations` read pages them. */
 export const RELATIONS_FETCHED = 20;
 /**
- * Where a page of one thought's relations ends, in their order — strongest first: the confidence (absent as -1),
- * then the newest judged, then the relation's id, each descending. `rank` is Postgres's text of the confidence as
- * numeric, `at` its text of the relation's created_at, so a cursor compares exactly what the order read.
+ * Where a page of one thought's relations ends, in their order — strongest first: the confidence rounded to six
+ * places (absent as -1), then the newest recorded (the facet's created_at), then the relation's id, each descending.
+ * `rank` is Postgres's text of that rounded numeric — a confidence 084 takes unrounded from a direct write keeps a
+ * cursor short (review pass 1) — and `at` its text of the facet's created_at, so a cursor compares exactly what the
+ * order read.
  */
 export type RelationPosition = { rank: string; at: string; id: string };
 /**
  * One judged relation as seen from one thought's side: the relation's id (its facet's) and word, the other thought
- * (its id, time and its text's head) and whether it is the older or the newer of the pair — a relation sits on the
- * newer and names the older, so evolves reads "evolves from" on the newer and "evolved into" on the older — the
- * confidence (null when the judge gave none), when it was judged, its position, and whether either text moved since
- * (`stale`: the lineage row's fingerprints no longer those of the two texts, as --list relations' EDITED SINCE JUDGED).
+ * (its id, time, its text's head and its `metadata.trust`) and whether it is the older or the newer of the pair — a
+ * relation sits on the newer and names the older, so evolves reads "evolves from" on the newer and "evolved into" on
+ * the older — the confidence (null when the judge gave none), when it was last judged (its lineage row's produced_at,
+ * which a re-judge keeping the word moves while the facet stays: review pass 1; the facet's created_at without one),
+ * its position, and whether either text moved since (`stale`: the lineage row's fingerprints no longer those of the
+ * two texts, as --list relations' EDITED SINCE JUDGED; a relation with no lineage row reads not stale, as there).
  */
 export type RelationEdge = {
-  id: string; relation: RelationWord; otherIs: "older" | "newer"; other: { id: string; created_at: string | null; content: string };
+  id: string; relation: RelationWord; otherIs: "older" | "newer"; other: { id: string; created_at: string | null; content: string; trust: string | null };
   confidence: number | null; judgedAt: string | null; position: RelationPosition; stale: boolean;
 };
 /** A thought's relations as read: how many stand under the read's filter, and the page of them. */
@@ -1028,7 +1032,7 @@ export function normaliseRelationEdge(r: Record<string, unknown>): RelationEdge 
   const confidence = r.confidence == null ? null : Number(r.confidence);
   return {
     id: r.id, relation, otherIs,
-    other: { id: r.other_id, created_at: isoTimestampOrNull(r.other_created_at ?? null), content: String(r.other_content ?? "") },
+    other: { id: r.other_id, created_at: isoTimestampOrNull(r.other_created_at ?? null), content: String(r.other_content ?? ""), trust: textOrNull(r.other_trust) },
     confidence: confidence !== null && Number.isFinite(confidence) ? confidence : null,
     judgedAt: isoTimestampOrNull(r.judged_at ?? null),
     position: { rank: String(r.rank), at: String(r.at), id: r.id },

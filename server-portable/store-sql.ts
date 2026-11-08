@@ -1572,7 +1572,9 @@ export class SqlStore implements ThoughtStore {
   /**
    * SMD-2726 (SMD-3306 PR 7a-2b): each thought's standing judged relations, from both sides — the facets on it
    * (thought_facets' thought_id index; it the newer) and those naming it (084's target index; it the older) — under
-   * the window's word, strongest first, the first `limit` after its position, and how many stand under the word.
+   * the window's word, strongest first, the first `limit` after its position, and how many stand under the word. The
+   * naming side is held to the ids as text too: joined on the expression alone, the planner misread its rows and
+   * scanned every facet from a page of ten (review pass 1: 100 ms at 400k relations, 3 ms bounded).
    * `stale` reads the relation's lineage row (084: written with it, under its judge key) against the two texts now,
    * as consolidate.ts --list relations does. A thought with none is absent.
    */
@@ -1596,9 +1598,10 @@ export class SqlStore implements ThoughtStore {
                  f.thought_id, ids.of, f.payload->>'judge_key',
                  f.payload->>'confidence', f.created_at
             FROM ids JOIN thought_facets f ON f.payload->>'target' = ids.of::text
-           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'),
+           WHERE f.kind = 'relation' AND f.payload->>'target' = ANY(${this.sql.array(ids, "TEXT")}::text[])
+             AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'),
         w AS (
-          SELECT e.*, COALESCE(e.confidence::numeric, -1) AS rank FROM e
+          SELECT e.*, COALESCE(round(e.confidence::numeric, 6), -1) AS rank FROM e
            WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
         page AS (
           SELECT * FROM (
@@ -1609,7 +1612,8 @@ export class SqlStore implements ThoughtStore {
           SELECT page.of, page.n, jsonb_build_object(
                    'id', page.id::text, 'relation', page.relation, 'other_is', page.other_is,
                    'other_id', page.other::text, 'other_created_at', o.created_at, 'other_content', left(o.content, ${THREAD_HEAD_CHARS}::int),
-                   'confidence', page.confidence, 'judged_at', page.created_at, 'rank', page.rank::text, 'at', page.created_at::text,
+                   'other_trust', o.metadata->>'trust',
+                   'confidence', page.confidence, 'judged_at', COALESCE(d.produced_at, page.created_at), 'rank', page.rank::text, 'at', page.created_at::text,
                    'stale', d.id IS NOT NULL AND (content_fingerprint_of(tol.content) IS DISTINCT FROM d.input_fingerprints[1]
                                                   OR content_fingerprint_of(tn.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edge
             FROM page
