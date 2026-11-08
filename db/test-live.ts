@@ -17841,14 +17841,14 @@ if (want("16")) {
       const heldElsewhere = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other" });
       assert(heldElsewhere.code === 2 && /OB1_JEV_MODEL is h2o-other and OB1_CONSOLIDATE_DECIDER is h2o-stub/.test(heldElsewhere.out),
         `…and so is a tier held to a model the key would not name (exit ${heldElsewhere.code}: ${last(heldElsewhere.out)})`);
-      // Decide mode's own tier (SMD-3326, a tier per caller): asked with the shared tier unset, and held to the decider
+      // Decide mode's own tier (SMD-3326, a tier per caller): resolved with the shared tier unset, and held to the decider
       // whatever OB1_JEV_MODEL says, since the shared tier is no longer the decider's.
       const OWN_TIER = { OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${tier.port}`, OB1_CONSOLIDATE_DECIDER_LOCAL: "1" };
       const ownDry = await decide({ ...denv, OB1_JEV_BASE_URL: "", OB1_JEV_MODEL: "", OB1_JEV_LOCAL: "", ...OWN_TIER }, "--dry-run");
       const ownBanner = ownDry.out.split("\n").filter((l) => /^\s*(decide|tier):/.test(l));
       assert(ownDry.code === 0 && ownBanner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
           && ownBanner.some((l) => /^\s*tier:\s+/.test(l) && /OB1_CONSOLIDATE_DECIDER_LOCAL/.test(l)) && tierCalls === 0,
-        `decide mode's own tier at OB1_CONSOLIDATE_DECIDER_URL is asked with the shared tier unset, its banner naming its own local knob (exit ${ownDry.code}: ${ownBanner.join(" | ").trim().slice(0, 300)})`);
+        `decide mode's own tier at OB1_CONSOLIDATE_DECIDER_URL is resolved with the shared tier unset, its banner naming its own local knob, and a dry run asks it nothing (exit ${ownDry.code}: ${ownBanner.join(" | ").trim().slice(0, 300)})`);
       const ownHeld = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other", ...OWN_TIER }, "--dry-run");
       assert(ownHeld.code === 0 && !/OB1_JEV_MODEL is h2o-other/.test(ownHeld.out),
         `…and the shared tier's OB1_JEV_MODEL no longer refuses it, the shared tier no longer the decider's (exit ${ownHeld.code}: ${last(ownHeld.out)})`);

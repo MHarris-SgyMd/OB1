@@ -5722,9 +5722,8 @@ type TierProbe = {
   /**
    * A tier that answers nothing, or not as the tier: "fail" for the shared one, which the server itself asks (capture's
    * genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation pass asks —
-   * until it answers a follower waits for it and a one-shot run fails each thought it cannot decide (review pass 2: this
-   * said the pass refuses, which only another model or a URL that is not a tier does), and a pass's tier must not stop
-   * the server starting.
+   * until it answers that pass decides nothing (jev/h2o/README.md, "When the tier is down", says how a follower and a
+   * one-shot run each go on; review passes 2 and 3), and a pass's tier must not stop the server starting.
    */
   down: "fail" | "warn";
   /** The compose service's name, so a host of that name gets the service's remedies, and every other the start one. */
@@ -5827,7 +5826,7 @@ if (!resolvedEmbed.decider && (env.OB1_CONSOLIDATE_DECIDER_URL ?? "").trim()) {
       "Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL.");
 }
 if (!jevCfg) {
-  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (capture's genre facet and the spikes ask it; decide mode reads its own at OB1_CONSOLIDATE_DECIDER_URL)");
+  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (capture's genre facet and the spikes ask it; decide mode can have its own at OB1_CONSOLIDATE_DECIDER_URL)");
 } else {
   // The stack's own service name resolves only while the service runs: the
   // profile is down, or `compose restart api` ran — which does not start
@@ -5855,7 +5854,7 @@ if (decideTier?.own) {
   // shortcut said ok while the pass would refuse a model other than the decider, or an undeclared endpoint).
   // A host process, not a compose service (decided 2026-10-25): H2O-Lightning-4B runs on PyTorch MPS, which only the
   // host has, so its adapter runs beside the stack, kept running by a LaunchAgent (jev/h2o/README.md).
-  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; until it answers, a consolidation follower (sleep's) waits for it, and a one-shot run fails each thought it cannot decide (--retry-failed returns them).";
+  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; the consolidation pass decides nothing until it answers (jev/h2o/README.md, \"When the tier is down\").";
   await tierRows({
     row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
     want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false, down: "warn",
