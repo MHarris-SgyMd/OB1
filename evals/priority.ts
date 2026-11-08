@@ -40,7 +40,9 @@ import type { SQL } from "bun";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { issueFacets, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
+import { issueFacets, linearAdapter, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
+import { recordStructure } from "../db/ingest-structure.ts";
+import { ACTOR_NAME as BOARD_SYNC, priorityStep } from "../db/sync-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
 
@@ -55,14 +57,13 @@ export type BoardMeta = { issue: string; status: string; status_type: "backlog" 
 /**
  * What the gold rests on that search cannot see: a due time, a stated level
  * (docs/priority.md's 0–5, absent where nobody states one: unknown), done,
- * the blocks links, a claim. Today's rows carry only what main's reads read —
- * the text, and a board row's facets as board-sync writes them — and none of
- * main's reads reads these. A later read's PR plants the facts its own store
- * reads (SMD-3663's assertions, a claim in work_claims, Linear's blocks
- * relations through board-sync's links) by extending the seeding below: a
- * new registration, with the baseline re-run in that PR and BAR held by its
- * own pin, so the bar a read is judged by never moves with it. A read never
- * reads these from ITEMS: that is the answer's side.
+ * the blocks links, a claim. The first registration's rows carried only what
+ * main's search reads: the text, and a board row's facets as board-sync
+ * writes them. The second (SMD-3669 PR 2) plants these where a priority read's
+ * store reads them (plantFacts, below: 116's statements, 117's open items, a
+ * claim in work_claims, board-sync's links), with the baseline re-run on it
+ * and BAR held by its own pin, so the bar a read is judged by never moves with
+ * it. A read never reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
 
@@ -187,7 +188,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "0139fc455cb15104";
+export const REGISTERED_CORPUS = "0a3583768bdfe9da";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -333,6 +334,116 @@ export async function plantRows(sql: SQL, rows: readonly SeedRow[]): Promise<num
     });
   }
   return Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
+}
+
+/**
+ * The facts a priority read's store reads, planted after the rows (SMD-3669 PR 2, the second registration): what
+ * the gold rests on, written where a deployed brain keeps it, by the writers that keep it there.
+ *   - A board item: its issue recorded as board-sync records the head it has just written (recordStructure: the
+ *     source, its blocks links, its mentions), board-sync declared a priority source by the operator (116), and
+ *     board-sync's own priority step stating each ticket's level from its Linear priority. Its done and its blockers
+ *     are the issue's own fields; its claim (facts.claimed) is another agent's, in work_claims.
+ *   - A personal note, every one, chatter too (the maintainer, 2026-11-08): an open item opened from it by its
+ *     writer (117), due on its facts' day, done when its facts say so, and its stated level (facts.level) the
+ *     operator's statement on the item (116), the operator's key classified operator.
+ * Days are calendar days in UTC from the run's own day, so the urgency windows (119, 122) read the same each run.
+ */
+export type FactPlan = {
+  board: number[];
+  claims: string[];
+  items: { index: number; actor: string; due: string | null; done: boolean; level: number | null }[];
+};
+
+/** The run's day moved by `days`, YYYY-MM-DD in UTC. */
+export function dayFrom(today: string, days: number): string {
+  return new Date(Date.parse(`${today}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** What plantFacts writes for `items` on the day `today`: pure, so --self-check reads it. */
+export function factPlan(items: readonly Item[], today: string): FactPlan {
+  const plan: FactPlan = { board: [], claims: [], items: [] };
+  items.forEach((it, index) => {
+    if (it.issue) {
+      plan.board.push(index);
+      if (it.facts.claimed) plan.claims.push(it.issue.identifier);
+      return;
+    }
+    plan.items.push({
+      index, actor: `priority-eval-${it.writer}`,
+      due: it.facts.dueInDays === undefined ? null : dayFrom(today, it.facts.dueInDays),
+      done: it.facts.done === true, level: it.facts.level ?? null,
+    });
+  });
+  return plan;
+}
+
+/** Who holds a claimed board item: another agent's key, not the read key the eval's reads run under. */
+export const CLAIMANT = "priority-eval-other-agent";
+/** The operator's key, whose statements on the personal items are the operator's. */
+export const OPERATOR = "priority-eval-operator";
+
+/** What the database holds once plantFacts has run, read back, not counted as written: a fact dropped on the way is seen. */
+export type PlantedFacts = { structures: number; links: number; stated: number; claims: number; items: number; done: number; levels: number };
+
+/**
+ * Plant factPlan's facts for `rows` (seedRow's, planted), `today` the run's day. Throws on any refusal: a fact not
+ * planted would score a read on a corpus other than the registered one.
+ */
+export async function plantFacts(sql: SQL, store: SqlStore, items: readonly Item[], rows: readonly SeedRow[], today: string): Promise<PlantedFacts> {
+  const plan = factPlan(items, today);
+  const run = `priority-eval@${ISSUE_CLOCK}`;
+  for (const i of plan.board) {
+    await sql.begin(async (tx) => { await recordStructure(tx, rows[i].id, linearAdapter.map(items[i].issue!), run, { take: true }); });
+  }
+  const [declared] = (await sql`SELECT declare_priority_source(${BOARD_SYNC}, true) AS r`) as { r: { ok: boolean; error?: string } }[];
+  if (!declared.r.ok) throw new Error(`declare_priority_source(${BOARD_SYNC}): ${declared.r.error}`);
+  const step = await priorityStep(sql, { name: BOARD_SYNC });
+  if (!("step" in step)) throw new Error(`board-sync's priority step is off: ${step.off}`);
+  const tally = await step.step.run({ dryRun: false });
+  if (tally.refused.length) throw new Error(`board-sync's priority step was refused: ${tally.refused.join(", ")}`);
+  for (const issue of plan.claims) {
+    const r = await store.claimWork({ issue, label: "another agent's branch", leaseSeconds: 86_400, actor: { name: CLAIMANT } });
+    if (r.outcome !== "claimed") throw new Error(`claim_work(${issue}): ${r.outcome} ${r.code ?? ""}`);
+  }
+  // The operator's key classified as SETUP.md classifies a brain's own: an unclassified key's statement is tier 4,
+  // inferred, which 122 counts only when asked.
+  await sql`SELECT set_agent_kind(${OPERATOR}, 'operator')`;
+  for (const p of plan.items) {
+    const actor = { name: p.actor };
+    const opened = await store.openItem({ text: items[p.index].text, dueAt: p.due ?? undefined, originThought: rows[p.index].id, actor, scope: "write" });
+    if (opened.outcome !== "opened" || !opened.item) throw new Error(`open_item(${items[p.index].key}): ${opened.outcome} ${opened.code ?? ""} ${opened.message ?? ""}`);
+    if (p.done) {
+      const done = await store.setItemStatus({ id: opened.item.id, status: "done", actor, scope: "write" });
+      if (done.outcome === "refused") throw new Error(`set_item_status(${items[p.index].key}): ${done.code} ${done.message ?? ""}`);
+    }
+    if (p.level !== null) {
+      const stated = await store.assertPriority({ kind: "item", key: opened.item.id, level: p.level, actor: { name: OPERATOR }, scope: "write" });
+      if (stated.outcome !== "asserted") throw new Error(`assert_priority(${items[p.index].key}): ${stated.outcome} ${stated.code ?? ""} ${stated.message ?? ""}`);
+    }
+  }
+  // Every statement planted is one 122 counts: tier 4 (inferred) would read as unknown and pass unseen.
+  const [inferred] = (await sql`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NULL AND tier = 4`) as { n: number }[];
+  if (inferred.n > 0) throw new Error(`${inferred.n} planted statement(s) are tier 4 (inferred), which effective_priority counts only when asked`);
+  const [n] = (await sql`
+    SELECT (SELECT count(*)::int FROM thought_sources WHERE system = 'linear') AS structures,
+           (SELECT count(*)::int FROM thought_facets WHERE kind = 'link' AND valid_until IS NULL AND payload->>'relation' = 'blocks') AS links,
+           (SELECT count(*)::int FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'ticket' AND maker_name = ${BOARD_SYNC} AND tier = 2) AS stated,
+           (SELECT count(*)::int FROM work_claims WHERE released_at IS NULL AND expires_at > now() AND holder_name = ${CLAIMANT}) AS claims,
+           (SELECT count(*)::int FROM open_items) AS items,
+           (SELECT count(*)::int FROM open_items WHERE status = 'done') AS done,
+           (SELECT count(*)::int FROM priority_assertions WHERE closed_at IS NULL AND item_kind = 'item' AND maker_name = ${OPERATOR} AND tier = 1) AS levels`) as PlantedFacts[];
+  return { structures: n.structures, links: n.links, stated: n.stated, claims: n.claims, items: n.items, done: n.done, levels: n.levels };
+}
+
+/** What plantFacts should read back for `items`: the plan's counts, a board item's links and levels its issue's own. */
+export function plannedFacts(items: readonly Item[]): PlantedFacts {
+  const plan = factPlan(items, "2000-01-01");
+  const board = plan.board.map((i) => items[i].issue!);
+  return {
+    structures: board.length, links: board.reduce((a, b) => a + (b.relations?.nodes ?? []).filter((r) => r.type === "blocks").length, 0),
+    stated: board.filter((b) => b.priorityLabel !== "No priority").length, claims: plan.claims.length,
+    items: plan.items.length, done: plan.items.filter((p) => p.done).length, levels: plan.items.filter((p) => p.level !== null).length,
+  };
 }
 
 /** The two search tools a baseline read, or a measured read's callTool, calls. */
@@ -584,8 +695,40 @@ export type MeasureInput = { query: string; embedding: number[]; store: SqlStore
  */
 export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureInput) => Promise<readonly string[]> };
 
-/** The reads under measurement. Empty until SMD-3668 or SMD-3669 lands one; each joins here with its ticket. */
-export const MEASURED: readonly MeasuredRead[] = [];
+/**
+ * SMD-3669's agenda, as a client would put it to a question (the maintainer, 2026-11-08): the agenda takes no query,
+ * so the read searches the query as the plain baseline does (`search`, its defaults) and orders those hits by the
+ * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda is
+ * the default one (every source, startable and unclaimed work only), at its cap. A hit is the agenda's item when it
+ * is the ticket's row (the thought board-sync recorded the ticket on, read by fetch's metadata) or an open item's
+ * origin thought (list_items). Priority orders what is relevant; it adds nothing search did not find.
+ */
+export const AGENDA_READ: MeasuredRead = {
+  name: "agenda", ticket: "SMD-3669",
+  run: async ({ query, store, callTool }) => {
+    const hits = await callTool("search", { query });
+    const agenda = await store.agenda({ limit: 100, includeBlocked: false, includeClaimed: false, includeProposed: false });
+    const place = new Map(agenda.items.map((it, i) => [`${it.kind}:${it.key}`, i] as const));
+    // A hit's place on the agenda: its ticket's, when it is a board row; else the best of the open items read from it.
+    const placeOf = async (id: string): Promise<number | undefined> => {
+      const m = (await store.getThought(id))?.metadata as { source?: unknown; issue?: unknown } | undefined;
+      if (m?.source === "linear" && typeof m.issue === "string") return place.get(`ticket:${m.issue}`);
+      const from = await store.listItems({ statuses: ["open"], overdue: false, originThought: id, limit: 100 });
+      const at = from.items.map((i) => place.get(`item:${i.id}`)).filter((n): n is number => n !== undefined);
+      return at.length ? Math.min(...at) : undefined;
+    };
+    const rank = new Map<string, number>();
+    for (const id of hits) {
+      const at = await placeOf(id);
+      if (at !== undefined) rank.set(id, at);
+    }
+    const listed = hits.filter((id) => rank.has(id)).sort((a, b) => rank.get(a)! - rank.get(b)!);
+    return [...listed, ...hits.filter((id) => !rank.has(id))];
+  },
+};
+
+/** The reads under measurement, each with its ticket. */
+export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ];
 
 /** A measured read's ids as scored: each once, first occurrence kept, the top READ_K. */
 export function measuredIds(ids: readonly string[]): string[] {
@@ -684,8 +827,9 @@ export function dogfoodProblems(raw: unknown): string[] {
 
 /**
  * What each baseline read scored at REGISTERED_CORPUS, recorded (main
- * 8aa855f1, 2026-11-02): top-1 and top-3 as prompt counts, mean tau to three
- * places. `--seeded` fails when a run differs, so a change to search on main
+ * 8aa855f1, 2026-11-02; the same at the second registration on main 601b0452,
+ * 2026-11-08, the facts planted beside the rows moving no search): top-1 and
+ * top-3 as prompt counts, mean tau to three places. `--seeded` fails when a run differs, so a change to search on main
  * that moves the baseline is seen, not absorbed.
  *
  * A record of today's main, not part of the registration. The verdict always
