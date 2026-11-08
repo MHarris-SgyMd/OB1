@@ -46,7 +46,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsLine, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -29576,6 +29576,97 @@ if (want("47")) {
   } finally {
     if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
     await sql`DELETE FROM thoughts WHERE content LIKE '[47]%'`;
+    await sql.close();
+  }
+}
+
+if (want("47b")) {
+  console.log("\n[47b] The threads' census bounded (SMD-3306 PR 7a-2c): brain_info's and preflight's read, db/threads.ts --status's with a bound — the standing subjects and the thread edges walked in key order, at most the bound each, a key either walk cuts left out so every key read is read whole; an unlinked thread and orphaned keys counted within the keys read, none past the cut; complete only when nothing was cut; brain_info's threads fact and its Threads line, which name no key; a brain without 120 carries none");
+  // Its own client: [24] closed the suite's.
+  const sql = new SQL({ url: URL_!, max: 1 });
+  const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runThreads({ url: URL_!, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    return { code, out: outs.join("\n"), err: errs.join("\n") };
+  };
+  const thought = async (label: string, created: string) =>
+    ((await sql`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`[47b] ${label}`}, ${{ source: "live" }}::jsonb, ${created}::timestamptz)
+      RETURNING id::text AS id`)[0] as { id: string }).id;
+  const subject = async (id: string, key: string) =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'model', 'subject:qwen3.8:27b@p1', NULL::uuid,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
+  const edge = (newer: string, older: string, key: string) =>
+    sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${newer}::uuid, 'relation', ${{ relation: "evolves", target: older, judge_key: "thread:v1", key }}::jsonb)`;
+  // Keys that sort before every other key the suite writes (a phrase's digits before any letter, phrase before pr,
+  // ticket and version), so a bound counts their rows from the first: P1 < P2 < OB < P3 < OD < PE.
+  const P1 = "phrase:0000 a", P2 = "phrase:0000 b", OB = "phrase:0000 bb", P3 = "phrase:0000 c", OD = "phrase:0000 d", PE = "phrase:0000 e";
+  let renamed = false;
+  try {
+    // Settled first: every other section's thread linked, so the counts below are this section's alone.
+    const settle = await threads({});
+    const [before] = (await sql`
+      SELECT (SELECT count(*) FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL AND payload->>'key' < ${P1})::int AS s,
+             (SELECT count(*) FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key' AND payload->>'key' < ${P1})::int AS e`) as { s: number; e: number }[];
+    // Three threads of three thoughts each, written through the subjects' door, so each is linked; then P2's edges
+    // taken away (an upgrade's unlinked thread), an orphan's edge under OB, and eight under OD.
+    const ids: string[] = [];
+    for (const [i, key] of [P1, P2, P3].entries())
+      for (let j = 1; j <= 3; j++) {
+        const id = await thought(`${key} #${j}`, `2026-10-0${i + 1}T0${j}:00:00Z`);
+        ids.push(id);
+        await subject(id, key);
+      }
+    const [p1a, p1b, p1c, p2a, , , p3a, p3b, p3c] = ids;
+    // A fourth thread of two after OD, so a bound of 10 cuts the subjects' walk too (inside PE), the edges' first.
+    for (let j = 1; j <= 2; j++) await subject(await thought(`${PE} #${j}`, `2026-10-05T0${j}:00:00Z`), PE);
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${P2}`;
+    await edge(p2a, p1a, OB);
+    for (const [n, o] of [[p1b, p1a], [p1c, p1a], [p1c, p1b], [p1a, p1b], [p3b, p3a], [p3c, p3a], [p3c, p3b], [p3a, p3b]] as const) await edge(n, o, OD);
+    const whole = await threadCensus(sql, UNBOUNDED);
+    const [c3, c4, c7, c10] = [await threadCensus(sql, 3), await threadCensus(sql, 4), await threadCensus(sql, 7), await threadCensus(sql, 10)];
+    const status = await threads({ status: true });
+    assert(settle.code === 0 && before.s === 0 && before.e === 0,
+      `the brain settled, and this section's keys sort before every other key: no subject or thread edge before them (${JSON.stringify(before)})`);
+    assert(whole.complete && whole.unlinked === 1 && whole.orphaned === 2 && JSON.stringify(whole.first) === JSON.stringify([P2, OB, OD])
+        && status.out.includes(`  keys:      ${P2}, ${OB}, ${OD} — --key <key> re-links one`),
+      `with no bound the census reads every key: P2 unlinked, OB and OD orphaned, named in key order, as --status says (${JSON.stringify(whole)})`);
+    // A bound of 3 ends exactly at P1's last thought: the cut is P2's first row, so P1 is read whole, P2 left out.
+    assert(!c3.complete && c3.keys === 1 && c3.threads === 1 && c3.unlinked === 0 && c3.orphaned === 0,
+      `a bound of 3 ending at a key's last row reads that key whole and leaves the next out (${JSON.stringify(c3)})`);
+    // A bound of 4 cuts P2's walk at its second thought: P2 is left out, unlinked as it is; P1 alone is read.
+    assert(!c4.complete && c4.keys === 1 && c4.threads === 1 && c4.thoughts === 3 && c4.standing === 2 && c4.whole === 2 && c4.unlinked === 0 && c4.orphaned === 0 && c4.first.length === 0,
+      `a bound of 4 cuts the subjects' walk inside P2: P2 is left out whole, P1 read and linked, not complete (${JSON.stringify(c4)})`);
+    // A bound of 7 cuts P3's walk: P1 and P2 read, P2 unlinked; OB, before the cut, orphaned; P3 and OD left out.
+    assert(!c7.complete && c7.keys === 2 && c7.unlinked === 1 && c7.orphaned === 1 && JSON.stringify(c7.first) === JSON.stringify([P2, OB]) && c7.standing === 3 && c7.whole === 4,
+      `a bound of 7 cuts the subjects' walk inside P3: P1 and P2 read, P2 unlinked, OB orphaned before the cut, P3 and OD left out (${JSON.stringify(c7)})`);
+    // A bound of 10 cuts both walks: the subjects' inside PE, the edges' first, inside OD's eight; the first cut
+    // holds, so OD is left out whole, and PE with it.
+    assert(!c10.complete && c10.keys === 3 && c10.unlinked === 1 && c10.orphaned === 1 && JSON.stringify(c10.first) === JSON.stringify([P2, OB]) && c10.standing === 5 && c10.whole === 6,
+      `a bound of 10 lets the edges' walk cut first, inside OD: P1, P2 and P3 read, OD left out whole, not complete (${JSON.stringify(c10)})`);
+
+    // brain_info's fact: the same census at its bound, its counts and no key; the Threads line says so.
+    const facts = await readDatabaseFacts(sql as never, { stats: false });
+    const t = facts.threads;
+    const line = threadsLine(facts);
+    assert(t !== null && t.complete && t.unlinked === 1 && t.orphaned === 2 && !("first" in t)
+        && /^[\d,]+ \([\d,]+ thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\)$/.test(line)
+        && !line.includes("phrase:"),
+      `brain_info's threads fact counts the same keys and names none, its line giving the remedy (${line})`);
+
+    // Linked again, the census finds nothing to do; a brain without 120 carries no fact (null, no entry).
+    const relinked = await threads({});
+    const after = await threadCensus(sql, UNBOUNDED);
+    await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
+    renamed = true;
+    const without = await readDatabaseFacts(sql as never, { stats: false });
+    await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    renamed = false;
+    assert(relinked.code === 0 && after.complete && after.unlinked === 0 && after.orphaned === 0
+        && without.threads === null && !("threads" in without.unread) && threadsLine(without) === "not counted — migration 120 is not applied (it keeps the threads' edges)",
+      `linked again, nothing differs; a brain without 120 carries no threads fact and says why (${JSON.stringify(after)} | ${threadsLine(without)})`);
+  } finally {
+    if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[47b]%'`;
     await sql.close();
   }
 }

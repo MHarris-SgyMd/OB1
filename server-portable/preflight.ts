@@ -412,7 +412,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -4930,6 +4930,42 @@ if (configFailed) {
             else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
+          }
+        }
+
+        // The work threads (SMD-3306 PR 7a-2c): whether each thread's edges (120)
+        // are the ones its thoughts want, from the record's own read (brain-info.ts
+        // threadCensus), so this row and brain_info say one thing. Bounded and
+        // exact: the first keys in key order, a key the bound cuts left out; the
+        // row says when it stopped there. An unlinked key warns — a thread the
+        // upgrade has not linked, or a gap a delete left — and never fails: every
+        // read but the thread's own works without its edges. It names no key:
+        // db/threads.ts --status does.
+        {
+          const t = facts.threads;
+          const linkCommand = "cd db && bun threads.ts --url <the owner's connection string>";
+          if (t === null) {
+            const u = facts.unread.threads;
+            if (!u) add("threads", "skip", "no thread_relink — migration 120 (SMD-3306) is not applied, so no thread's edges stand yet.");
+            // The census reads thought_facets and thoughts.
+            else if (u.reason === "refused")
+              add("threads", "warn", `could not verify: ${u.message}`,
+                  "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).");
+            else if (u.reason === "invisible")
+              add("threads", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
+            else add("threads", "warn", `could not verify: ${u.message}`,
+                     u.reason === "timeout"
+                       ? `A migration, a long transaction or a threads.ts batch may hold thought_facets, or the census outran the statement cap; run preflight again once it has finished, or read it whole: ${linkCommand} --status.`
+                       : "The check reads thought_facets and thoughts; the message says why it failed.");
+          } else {
+            const scope = t.complete ? "" : `; the first ${t.keys} key(s) read, past the census's bound (${linkCommand} --status reads every key)`;
+            if (t.unlinked === 0 && t.orphaned === 0)
+              add("threads", "ok", `${t.threads} thread(s), ${t.thoughts} thought(s) in them, ${t.standing} edge(s) standing — ${t.complete ? "every thread linked" : "each read linked"}${scope}`);
+            else {
+              const differ = [t.unlinked ? `${t.unlinked} key(s) whose edges differ from their thread's` : "", t.orphaned ? `${t.orphaned} key(s) no thought holds still carrying edges` : ""].filter(Boolean).join(", ");
+              add("threads", "warn", `${t.threads} thread(s), ${t.standing} of ${t.whole} edge(s) a whole linking leaves standing; ${differ}${scope}`,
+                  `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names each key, --key <key> re-links one). A brain upgraded to 120 links every thread so once; a gap after it is a delete the deleting role could not re-link (120's NOT HERE). Every read but the thread's own works meanwhile.`);
+            }
           }
         }
 

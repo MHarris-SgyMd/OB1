@@ -1555,6 +1555,23 @@ else {
   const relinked = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
   assert(relinked.added === 1 && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the edge closed, its thread re-linked — the edge stands again with its row, and the check is ok again");
+  // The threads row (SMD-3306 PR 7a-2c) reads brain_info's census of the same thread: linked, ok; its edge taken away,
+  // a warning with the run that links it, naming no key; linked again for what follows.
+  const PF = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" };
+  const thrOk = await run(PF);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9120'`);
+  const thrWarn = await run(PF);
+  const relinkedAgain = (await ctx.unsafe(`SELECT thread_relink('ticket:SMD-9120') AS r`))[0].r as { added: number };
+  // An orphan's edge alone, under a key no thought holds: a warning too.
+  await ctx.unsafe(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ('${thB}'::uuid, 'relation', jsonb_build_object('relation', 'evolves', 'target', '${thA}', 'judge_key', 'thread:v1', 'key', 'ticket:SMD-9121'))`);
+  const thrOrphan = await run(PF);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = 'ticket:SMD-9121'`);
+  assert(/^\s*✓\s+threads\s+\d+ thread\(s\), \d+ thought\(s\) in them, \d+ edge\(s\) standing — every thread linked\s*$/m.test(thrOk.out)
+      && /^\s*!\s+threads\s+\d+ thread\(s\), \d+ of \d+ edge\(s\) a whole linking leaves standing; 1 key\(s\) whose edges differ from their thread's\s*$/m.test(thrWarn.out)
+      && /^\s*→ Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names each key, --key <key> re-links one\)\. /.test(fix(thrWarn.out, "threads"))
+      && !row(thrWarn.out, "threads").includes("SMD-9120") && relinkedAgain.added === 1
+      && /^\s*!\s+threads\s+\d+ thread\(s\), \d+ of \d+ edge\(s\) a whole linking leaves standing; 1 key\(s\) no thought holds still carrying edges\s*$/m.test(thrOrphan.out),
+         `the threads row: the linked thread ok; its edge closed, a warning with the run that links it, naming no key, and an orphan's edge alone a warning too (${row(thrOk.out, "threads").trim()} / ${row(thrWarn.out, "threads").trim()})`);
   // Judged relations and thread edges are each read under a bound of their own: a brain of 20,000 thread edges (raw,
   // with no lineage) still has a judged relation without its row named, where one bound for both read 10,000 rows of
   // whichever came first.

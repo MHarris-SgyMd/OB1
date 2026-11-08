@@ -47,6 +47,8 @@ import type { SQL } from "bun";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { subjectKeyValid } from "../server-portable/subject.ts";
+// The census (--status) is brain_info's and preflight's too, read here with no bound (SMD-3306 PR 7a-2c).
+import { threadCensus, UNBOUNDED } from "../server-portable/brain-info.ts";
 
 const FLAGS = { url: "one", key: "one", batch: "one", status: "none", "dry-run": "none" } as const;
 const HINTS = { url: "<postgres://…>", key: "<subject key> (ticket:SMD-123, pr:727, version:v1.2.3, phrase:…)", batch: "<N> keys a transaction at most (1–200)" };
@@ -72,41 +74,6 @@ type Relink = { ok: boolean; key: string; thoughts: number; closed: number; adde
 async function hasThreads(sql: SQL): Promise<boolean> {
   const [r] = (await sql`SELECT to_regprocedure('thread_relink(text, boolean)') IS NOT NULL AS ok`) as { ok: boolean }[];
   return r.ok;
-}
-
-/**
- * The threads' census (--status): each thread's edges compared with the ones its thoughts want, edge by edge, as
- * thread_relink reads them — a count alone would pass a thread linked wrong with the right number of edges — and the
- * first ten keys that differ, in key order.
- */
-async function census(sql: SQL): Promise<{ threads: number; thoughts: number; standing: number; whole: number; unlinked: number; orphaned: number; first: string[] | null }> {
-  const [r] = (await sql`
-    WITH k AS (
-      SELECT payload->>'key' AS key, count(*)::int AS n
-        FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL GROUP BY 1
-    ), want AS (
-      SELECT w.key, w.newer, w.older FROM (
-        SELECT s.payload->>'key' AS key, s.thought_id AS newer,
-               lag(s.thought_id) OVER (PARTITION BY s.payload->>'key' ORDER BY t.created_at, t.id) AS older
-          FROM thought_facets s JOIN thoughts t ON t.id = s.thought_id
-         WHERE s.kind = 'subject' AND s.valid_until IS NULL) w
-       WHERE w.older IS NOT NULL
-    ), have AS (
-      SELECT payload->>'key' AS key, thought_id AS newer, (payload->>'target')::uuid AS older
-        FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key'
-    ), differ AS (
-      SELECT key FROM (SELECT key, newer, older FROM want EXCEPT SELECT key, newer, older FROM have) missing
-      UNION
-      SELECT key FROM (SELECT key, newer, older FROM have EXCEPT SELECT key, newer, older FROM want) stray
-    )
-    SELECT (SELECT count(*) FROM k WHERE n >= 2)::int AS threads,
-           (SELECT coalesce(sum(n), 0) FROM k WHERE n >= 2)::int AS thoughts,
-           (SELECT count(*) FROM have)::int AS standing,
-           (SELECT count(*) FROM want)::int AS whole,
-           (SELECT count(*) FROM differ d WHERE EXISTS (SELECT 1 FROM k WHERE k.key = d.key))::int AS unlinked,
-           (SELECT count(*) FROM differ d WHERE NOT EXISTS (SELECT 1 FROM k WHERE k.key = d.key))::int AS orphaned,
-           (SELECT array_agg(key ORDER BY key) FROM (SELECT key FROM differ ORDER BY key LIMIT 10) f) AS first`) as { threads: number; thoughts: number; standing: number; whole: number; unlinked: number; orphaned: number; first: string[] | null }[];
-  return r;
 }
 
 /** What a re-link writes that this role lacks, and the groups that grant it (consolidate.ts's words for its door's). */
@@ -189,13 +156,13 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       return 2;
     }
     if (STATUS) {
-      const c = await census(sql);
+      const c = await threadCensus(sql, UNBOUNDED);
       out(`  threads:   ${c.threads} (subject keys two thoughts or more hold), ${c.thoughts} thought(s) in them`);
       out(`  edges:     ${c.standing} standing, ${c.whole} once every thread is linked`);
       out(c.unlinked === 0 && c.orphaned === 0
         ? "  linked:    every thread — nothing to do"
         : `  linked:    ${c.unlinked} key(s) whose edges differ from their thread's${c.orphaned ? `, ${c.orphaned} key(s) no thought holds still carrying edges` : ""} — threads.ts without --status links them`);
-      const named = c.first ?? [];
+      const named = c.first;
       if (named.length) out(`  keys:      ${named.join(", ")}${c.unlinked + c.orphaned > named.length ? `, and ${c.unlinked + c.orphaned - named.length} more` : ""} — --key <key> re-links one`);
       return 0;
     }

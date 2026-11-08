@@ -2612,8 +2612,11 @@ bun threads.ts --url …                         # links them (--batch N keys a 
 bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete
 ```
 
-A thought stands in one thread until its subjects are a set (PR 7a-3); the
-thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
+`--status`'s census is the one `brain_info`'s `Threads` row and preflight's
+`threads` row read, which stop at the first 10,000 subjects and thread edges in
+key order; `--status` reads it with no bound (SMD-3306 PR 7a-2c). A thought
+stands in one thread until its subjects are a set (PR 7a-3); the thread's read
+and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the re-link,
 the validator, the judge's door beside a thread, the deletes with and without
 the writes, a replace that keeps its key, a write and a delete under REPEATABLE

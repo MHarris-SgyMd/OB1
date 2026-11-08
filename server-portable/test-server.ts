@@ -1627,6 +1627,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
       && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
     `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
+  // The Threads row (SMD-3306 PR 7a-2c): linked, read past the bound, keys differing, before 120, and not read.
+  const census = (over: Partial<NonNullable<Facts["threads"]>> = {}) => ({ threads: 719, thoughts: 2218, standing: 1499, whole: 1499, unlinked: 0, orphaned: 0, keys: 3948, complete: true, ...over });
+  const thrLinked = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census() }), 1000));
+  const thrPartial = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ complete: false, keys: 1 }) }), 1000));
+  const thrDiffer = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ unlinked: 1, orphaned: 2, complete: false, keys: 2500 }) }), 1000));
+  const thrOne = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 1, thoughts: 1, unlinked: 2 }) }), 1000));
+  const thrOrphans = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ orphaned: 3 }) }), 1000));
+  const thrPre = renderBrainInfo(await brainInfo(server, async () => planted(119, { threads: null }), 1000));
+  const thrLost = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "refused", message: "permission denied for table thoughts" } } }), 1000));
+  assert(/^Threads: +719 \(2,218 thoughts in them\), every one linked$/m.test(thrLinked)
+      && /^Threads: +719 \(2,218 thoughts in them\), each read linked — the first 1 key read, past the census's bound: cd db && bun threads\.ts --url <url> --status reads every key$/m.test(thrPartial)
+      && /^Threads: +719 \(2,218 thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\) — the first 2,500 keys read, past the census's bound: cd db && bun threads\.ts --url <url> --status reads every key$/m.test(thrDiffer)
+      && /^Threads: +1 \(1 thought in them\); 2 keys whose edges differ from their thread's — /m.test(thrOne)
+      && /^Threads: +719 \(2,218 thoughts in them\); 3 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's url> links them \(--status names them\)$/m.test(thrOrphans)
+      && /^Threads: +not counted — migration 120 is not applied \(it keeps the threads' edges\)$/m.test(thrPre)
+      && /^Threads: +\? \(thoughts not readable by this role\)$/m.test(thrLost),
+    `the table's Threads row: linked, read past the bound, keys differing (one and many), orphaned keys alone, before 120, and not read (${[thrLinked, thrPartial, thrDiffer, thrOne, thrPre, thrLost].map((t) => line(t, "Threads")).join(" / ")} / ${line(thrOrphans, "Threads")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,

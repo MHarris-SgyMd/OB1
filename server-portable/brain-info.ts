@@ -155,6 +155,22 @@ export interface DatabaseFacts {
    */
   relations: StandingRelations | null;
   /**
+   * The work threads' census (SMD-3306 PR 7a-2c; thread-census.ts): the
+   * threads, the thoughts in them, the edges standing and wanted, and the
+   * keys whose standing edges are not the ones their thread wants — unlinked
+   * (a key a thought holds: a thread the upgrade has not linked, a gap a
+   * delete left) or orphaned (a key none holds that still carries edges).
+   * Bounded and exact (the maintainer's call, 2026-11-08): the first
+   * THREAD_CENSUS_BOUND standing subjects and thread edges in key order, a key
+   * the bound cuts left out; `complete` false says it stopped there, and
+   * db/threads.ts --status reads them all. It names no key: a phrase key is
+   * the judge model's words, and the record carries none. Null before 120
+   * (no entry: no thread edge stands, so every thread would read unlinked),
+   * or not read (`unread` names it). Not a stats read: preflight's threads
+   * row reads it.
+   */
+  threads: ThreadsFact | null;
+  /**
    * What became of the findings db/board-findings.ts posted to the board
    * (087, SMD-2682): each (ticket pair, word) this brain posted, as accepted,
    * rejected, withdrawn, open or unanswered (see findingOutcome), and the
@@ -1059,6 +1075,114 @@ const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
             JOIN thoughts n ON n.id = p.newer_id
            WHERE p.status = 'pending') x`;
 
+// ── The work threads' census (SMD-3306 PR 7a-2c) ──────────────────────────────
+//
+// Whether each thread's standing edges (migration 120) are the ones its
+// thoughts want, edge by edge, as thread_relink reads them — one definition for db/threads.ts --status, brain_info and
+// preflight's threads row.
+//
+// A thread is the thoughts holding one standing subject key (111), in created_at order, ties by id; it wants an
+// `evolves` edge of origin `thread` from each member to the one before it. A count alone would pass a thread linked
+// wrong with the right number of edges, so the census compares the edges themselves. A key whose standing edges differ
+// from its thread's is unlinked: a thread the upgrade has not linked yet, a gap a delete left, or a raw writer's change
+// (120's NOT HERE). A key no thought holds that still carries edges is orphaned.
+//
+// The maintainer's decision (2026-11-08): brain_info and preflight read it bounded and exact. The standing subjects are
+// walked in key order through 111's key index, at most `bound` rows; a key the bound cuts is left out, so every key read
+// is read whole. The thread edges are walked the same way through 120's key index, under the same keys and the keys
+// before the cut that no thought holds, at most `bound` rows; a key their bound cuts is left out too. So what is read
+// is exact, and `complete` says whether it was all: past the bound it is the keys before the first cut alone. A brain
+// the upgrade left unlinked shows in any keys read; a gap a delete left shows only within them — db/threads.ts --status
+// reads with no bound.
+
+/** How many standing subjects, and how many thread edges, a bounded census reads at most. */
+export const THREAD_CENSUS_BOUND = 10_000;
+/** A census with no bound (db/threads.ts --status): a LIMIT no table reaches. */
+export const UNBOUNDED = Number.MAX_SAFE_INTEGER;
+/** How many differing keys the census names, in key order. */
+export const THREAD_CENSUS_NAMED = 10;
+
+/**
+ * The census as read: the threads (keys held by two thoughts or more) and the thoughts in them; the edges standing and
+ * the edges a whole linking leaves (each thread's thoughts less one); the keys whose edges differ (`unlinked`, a key a
+ * thought holds; `orphaned`, one none holds) and the first of them, in key order; how many keys were read; and whether
+ * the census read every standing subject and thread edge (`complete`), or stopped at the bound.
+ */
+export type ThreadCensus = {
+  threads: number; thoughts: number; standing: number; whole: number;
+  unlinked: number; orphaned: number; first: string[];
+  keys: number; complete: boolean;
+};
+
+const n = (v: unknown, field: string): number => {
+  const x = typeof v === "string" ? Number(v) : v;
+  if (typeof x !== "number" || !Number.isSafeInteger(x) || x < 0) throw new Error(`the thread census answered a ${field} that is not a count`);
+  return x;
+};
+
+/** The census's row → ThreadCensus; throws on a row not of its shape. */
+export function threadCensusValue(r: Record<string, unknown> | undefined): ThreadCensus {
+  if (!r) throw new Error("the thread census answered no row");
+  const first = Array.isArray(r.first) ? r.first.filter((k): k is string => typeof k === "string") : [];
+  return {
+    threads: n(r.threads, "thread count"), thoughts: n(r.thoughts, "thought count"), standing: n(r.standing, "edge count"), whole: n(r.whole, "wanted edge count"),
+    unlinked: n(r.unlinked, "unlinked count"), orphaned: n(r.orphaned, "orphaned count"), first,
+    keys: n(r.keys, "key count"), complete: r.complete === true,
+  };
+}
+
+/**
+ * Reads the census, at most `bound` standing subjects and `bound` thread edges (UNBOUNDED: all). One statement. Throws
+ * what Postgres throws: a brain before 120 has no thread edges and reads every thread unlinked, so a caller asks only
+ * where 120 stands.
+ */
+export async function threadCensus(sql: SqlTag, bound: number = THREAD_CENSUS_BOUND): Promise<ThreadCensus> {
+  const rows = await sql`
+    WITH s_all AS (
+      SELECT payload->>'key' AS key, thought_id
+        FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL
+       ORDER BY payload->>'key' LIMIT ${bound}::bigint + 1
+    ), s_cut AS (
+      SELECT key FROM s_all ORDER BY key OFFSET ${bound}::bigint LIMIT 1
+    ), e_all AS (
+      SELECT payload->>'key' AS key, thought_id AS newer, (payload->>'target')::uuid AS older
+        FROM thought_facets
+       WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key'
+         AND (NOT EXISTS (SELECT 1 FROM s_cut) OR payload->>'key' < (SELECT key FROM s_cut))
+       ORDER BY payload->>'key' LIMIT ${bound}::bigint + 1
+    ), e_cut AS (
+      SELECT key FROM e_all ORDER BY key OFFSET ${bound}::bigint LIMIT 1
+    ), upto AS (
+      -- The first cut, of the subjects' walk or the edges': every key before it is read whole on both sides.
+      SELECT LEAST((SELECT key FROM s_cut), (SELECT key FROM e_cut)) AS key
+    ), s AS (
+      SELECT s_all.* FROM s_all, upto WHERE upto.key IS NULL OR s_all.key < upto.key
+    ), k AS (
+      SELECT key, count(*)::int AS n FROM s GROUP BY key
+    ), want AS (
+      SELECT w.key, w.newer, w.older FROM (
+        SELECT s.key, s.thought_id AS newer, lag(s.thought_id) OVER (PARTITION BY s.key ORDER BY t.created_at, t.id) AS older
+          FROM s JOIN thoughts t ON t.id = s.thought_id) w
+       WHERE w.older IS NOT NULL
+    ), have AS (
+      SELECT e_all.key, e_all.newer, e_all.older FROM e_all, upto WHERE upto.key IS NULL OR e_all.key < upto.key
+    ), differ AS (
+      SELECT key FROM (SELECT key, newer, older FROM want EXCEPT SELECT key, newer, older FROM have) missing
+      UNION
+      SELECT key FROM (SELECT key, newer, older FROM have EXCEPT SELECT key, newer, older FROM want) stray
+    )
+    SELECT (SELECT count(*) FROM k WHERE n >= 2)::int AS threads,
+           (SELECT coalesce(sum(n), 0) FROM k WHERE n >= 2)::int AS thoughts,
+           (SELECT count(*) FROM have)::int AS standing,
+           (SELECT count(*) FROM want)::int AS whole,
+           (SELECT count(*) FROM differ d WHERE EXISTS (SELECT 1 FROM k WHERE k.key = d.key))::int AS unlinked,
+           (SELECT count(*) FROM differ d WHERE NOT EXISTS (SELECT 1 FROM k WHERE k.key = d.key))::int AS orphaned,
+           (SELECT array_agg(key ORDER BY key) FROM (SELECT key FROM differ ORDER BY key LIMIT ${THREAD_CENSUS_NAMED}::int) f) AS first,
+           (SELECT count(*) FROM k)::int AS keys,
+           (SELECT key IS NULL FROM upto) AS complete`;
+  return threadCensusValue(rows[0]);
+}
+
 /** The standing relations by word, and the pairs judged distinct (102) beside them. */
 const RELATIONS_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
@@ -1478,6 +1602,8 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                WHERE c.oid = to_regclass('schema_migrations')) AS ledger_resolves_to,
              -- 079's pair rule, which the findings' board pairs apply (SMD-2680).
              to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS tickets_linked,
+             -- 120's re-link (SMD-3306 PR 7a-2c): where it stands, thread edges do; before it every thread would read unlinked.
+             to_regprocedure('thread_relink(text, boolean)') IS NOT NULL AS thread_relink,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
                -- Daemonic Brain's ledger resolves only if the table the path
@@ -1527,6 +1653,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       workers: null,
       proposals: null,
       relations: null,
+      threads: null,
       findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
@@ -1589,6 +1716,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         read: async (sp) => { facts.proposals = proposalsValue((await PROPOSALS_SQL(sp))[0]); },
         clear: () => { facts.proposals = null; },
       },
+      // Not a stats read either: preflight's threads row reads it (SMD-3306 PR 7a-2c). Bounded: two index walks of at
+      // most THREAD_CENSUS_BOUND rows each, and the thoughts they name.
+      ...(cat.thread_relink === true
+        ? [{ field: "threads", table: "thought_facets" as const, joins: ["thoughts" as const],
+             read: async (sp: SqlTag) => { facts.threads = threadsFact(await threadCensus(sp)); },
+             clear: () => { facts.threads = null; } }]
+        : []),
       // The board pairs last, each its own read, and only where 079's rule is
       // there to apply (null, no entry, before it): the costly reads, so a
       // timeout or a deadline takes them alone — the queue's first, the one a
@@ -1762,6 +1896,11 @@ export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & {
 };
 
 export type LedgerStatus = "current" | "behind" | "ahead" | null;
+
+/** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
+export type ThreadsFact = Omit<ThreadCensus, "first">;
+/** A census → the record's fact: the keys it named left out. */
+export const threadsFact = ({ first: _named, ...counts }: ThreadCensus): ThreadsFact => counts;
 
 export interface BrainInfo extends ServerFacts {
   /**
@@ -2174,6 +2313,25 @@ function relationsLine(db: DatabaseSummary): string {
 }
 
 /**
+ * The Threads row (SMD-3306 PR 7a-2c): the threads and whether every key read is linked, how far a bounded census read,
+ * or why it was not read.
+ */
+export function threadsLine(db: Pick<DatabaseSummary, "threads" | "unread" | "highestMigration">): string {
+  const t = db.threads;
+  if (t === null) {
+    if ("threads" in db.unread) return `? (${deniedObject(db.unread.threads.message)?.name ?? "thought_facets"} ${unreadWords(db.unread.threads)})`;
+    return "not counted — migration 120 is not applied (it keeps the threads' edges)";
+  }
+  const num = (n: number) => n.toLocaleString("en-US");
+  const head = `${num(t.threads)} (${num(t.thoughts)} thought${t.thoughts === 1 ? "" : "s"} in them)`;
+  const scope = t.complete ? "" : ` — the first ${num(t.keys)} key${t.keys === 1 ? "" : "s"} read, past the census's bound: cd db && bun threads.ts --url <url> --status reads every key`;
+  if (t.unlinked === 0 && t.orphaned === 0) return `${head}, ${t.complete ? "every one linked" : "each read linked"}${scope}`;
+  const differ = [t.unlinked ? `${num(t.unlinked)} key${t.unlinked === 1 ? "" : "s"} whose edges differ from ${t.unlinked === 1 ? "its" : "their"} thread's` : "",
+    t.orphaned ? `${num(t.orphaned)} key${t.orphaned === 1 ? "" : "s"} no thought holds still carrying edges` : ""].filter(Boolean).join(", ");
+  return `${head}; ${differ} — cd db && bun threads.ts --url <the owner's url> links them (--status names them)${scope}`;
+}
+
+/**
  * The Findings row: what became of the findings posted to the board, and the
  * acceptance rate over those answered (SMD-2682); none, or why not read.
  */
@@ -2296,6 +2454,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
     );
   }
   lines.push(row("Proposals", proposalsLine(db)));
+  lines.push(row("Threads", threadsLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   const calls = modelCallsLine(db);
