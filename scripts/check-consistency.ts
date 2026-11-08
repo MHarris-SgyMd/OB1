@@ -12105,10 +12105,10 @@ function checkCiParity() {
   // A step's commands as the shell reads them: continued lines joined, comments dropped, so a comment or a message that
   // names compose's `up` is no stack, and an `up` on a continuation line is one (review pass 2); canary.sh's up too.
   const commands = (run: string) => run.replace(/\\\n/g, " ").split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")).filter((l) => !/^\s*(?:echo|printf|said|refused)\b/.test(l));
-  const bringsUp = (run: string) => commands(run).some((l) => /\bcompose\b.*\sup(?:\s|$)/.test(l) || /\bcanary\.sh\s+up\b/.test(l));
+  const bringsUp = (run: string) => commands(run).some((l) => /\bcompose\b.*\sup(?:\s|$)/.test(l) || /\bcanary\.sh\s+up\b/.test(l) || /\bfull-stack-up\.sh\b/.test(l));
   const stackJobs = jobsOf.filter(([, j]) => isMapping(j) && Array.isArray(j.steps) && j.steps.some((st) => isMapping(st) && typeof st.run === "string" && bringsUp(st.run)));
   // Each reading held: a comment and a message are no stack, a continued line is (probes).
-  if (bringsUp("# docker compose up -d") || bringsUp("  docker compose ps # then compose up -d") || bringsUp("refused 'x' compose up") || !bringsUp("docker compose -f a.yaml \\\n  up -d") || !bringsUp("./canary.sh up --no-refresh"))
+  if (bringsUp("# docker compose up -d") || bringsUp("  docker compose ps # then compose up -d") || bringsUp("refused 'x' compose up") || !bringsUp("docker compose -f a.yaml \\\n  up -d") || !bringsUp("./canary.sh up --no-refresh") || !bringsUp(".github/ci/full-stack-up.sh"))
     fail(SELF, "check 35's stack-job reading no longer drops comments and messages and joins continued lines (SMD-3379)");
   if (!stackJobs.length) fail(SELF, `check 35 reads no job of ${SUITE_WORKFLOW} that brings a compose stack up — the reading is broken`);
   for (const [name, j] of stackJobs) {

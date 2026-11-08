@@ -34,7 +34,9 @@ defaults:
 # maintainer, 2026-11-08): the defaults would hold every local stub's background
 # calls in each process a suite spawns, a connection per slot, and the rows that
 # test them set their own. A job that runs the compose stack sets it empty, so
-# compose hands the stack its defaults and they run end to end as shipped.
+# compose hands the stack its defaults: deploy-stack checks preflight says them,
+# and the stack starts, stops and runs its flows with the hook installed — its
+# calls are live, so none takes a slot (review pass 3).
 env:
   OB1_BACKGROUND_SLOTS: "off"
 
@@ -1735,6 +1737,8 @@ jobs:
           grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
+          # The stack got the background slots' defaults, not the suites' off (SMD-3379 PR 2b-2b review pass 3).
+          grep -E 'background slots +chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\)' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
 
       # SMD-1875, the ticket's first Verify item on every PR: the compose
