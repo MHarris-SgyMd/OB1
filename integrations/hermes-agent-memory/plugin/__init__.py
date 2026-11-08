@@ -26,6 +26,7 @@ Install:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,10 @@ _DEFAULT_WORKSPACE_ID = "default"
 _DEFAULT_PROJECT_ID: Optional[str] = None  # null in payloads when unset
 _DEFAULT_MAX_RECALL_RESULTS = 10
 _DEFAULT_API_TIMEOUT = 8.0
+# A write-back's own timeout: each memory is a capture with its model calls (an embedding and a metadata call), run
+# one after another in the request, so a part of ten can take tens of seconds against a cloud model. At most 255 s,
+# the brain's own idle timeout.
+_DEFAULT_WRITEBACK_TIMEOUT = 60.0
 _MIN_CAPTURE_LENGTH = 10
 _DEFAULT_CONFIDENCE = 0.7
 # How long a queue_prefetch result is considered fresh before prefetch()
@@ -63,12 +68,25 @@ _PREFETCH_TTL_SECONDS = 90.0
 # (not OpenClaw). See plugins/agent-memory/index.ts.
 _RECALL_SCHEMA_VERSION = "openbrain.agent_memory.recall.v1"
 _WRITEBACK_SCHEMA_VERSION = "openbrain.agent_memory.writeback.v1"
-# The most memories one write-back may hold: the plugin refuses more (TOO_MANY_MEMORIES), each memory a capture
-# with its model calls in the one request. A longer payload is sent in parts.
-_WRITEBACK_MAX_MEMORIES = 50
+# The most memories one write-back request carries. The plugin takes at most 50 (TOO_MANY_MEMORIES), but each memory
+# is a capture with its model calls, one after another in the request, so a longer payload is sent in parts of ten:
+# each part's request stays well inside the write-back timeout, and a part that fails costs that part alone.
+_WRITEBACK_PART_MEMORIES = 10
+# The plugin's bound on an id: an idempotency key or a step id, a part's suffix included.
+_ID_MAX = 200
 
 
-def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_MAX_MEMORIES) -> List[Dict[str, Any]]:
+def _part_id(value: str, n: int) -> str:
+    """A part's own idempotency key or step id: ``value`` with ``:part<n>``,
+    or the value's sha256 with it where that would pass the plugin's 200
+    characters. The same value and part always give the same id."""
+    part = f"{value}:part{n}"
+    if len(part) <= _ID_MAX:
+        return part
+    return f"{hashlib.sha256(value.encode('utf-8')).hexdigest()}:part{n}"
+
+
+def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_PART_MEMORIES) -> List[Dict[str, Any]]:
     """A memory_payload as parts of at most ``limit`` memories each, in its own
     order: every item of every list but ``entities`` is one memory. One part
     when it fits; ``entities`` rides with the first part."""
@@ -112,6 +130,7 @@ def _default_config() -> dict:
         "auto_capture": True,
         "max_recall_results": _DEFAULT_MAX_RECALL_RESULTS,
         "api_timeout": _DEFAULT_API_TIMEOUT,
+        "writeback_timeout": _DEFAULT_WRITEBACK_TIMEOUT,
         "default_confidence": _DEFAULT_CONFIDENCE,
         # Default-on: an agent's own writes land as review_status="pending" by
         # default (governance); recall must include unconfirmed or the agent
@@ -195,6 +214,11 @@ def _load_ob1_config(hermes_home: str) -> dict:
         config["api_timeout"] = max(1.0, min(30.0, float(config.get("api_timeout", _DEFAULT_API_TIMEOUT))))
     except Exception:
         config["api_timeout"] = _DEFAULT_API_TIMEOUT
+
+    try:
+        config["writeback_timeout"] = max(8.0, min(255.0, float(config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))))
+    except Exception:
+        config["writeback_timeout"] = _DEFAULT_WRITEBACK_TIMEOUT
 
     try:
         config["default_confidence"] = max(0.0, min(1.0, float(config.get("default_confidence", _DEFAULT_CONFIDENCE))))
@@ -491,13 +515,15 @@ class _OB1Client:
     appropriately.
     """
 
-    def __init__(self, endpoint: str, access_key: str, timeout: float):
+    def __init__(self, endpoint: str, access_key: str, timeout: float,
+                 writeback_timeout: float = _DEFAULT_WRITEBACK_TIMEOUT):
         self._endpoint = endpoint.rstrip("/")
         self._access_key = access_key
         self._timeout = timeout
+        self._writeback_timeout = writeback_timeout
 
     def _request(self, method: str, path: str, *, body: Optional[dict] = None,
-                 query: Optional[Dict[str, Any]] = None) -> dict:
+                 query: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> dict:
         url = f"{self._endpoint}{path}"
         if query:
             url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
@@ -507,18 +533,21 @@ class _OB1Client:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read().decode("utf-8")
+            with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
                 status = getattr(resp, "status", 200)
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
             retry_after = e.headers.get("Retry-After") if e.headers else None
             raise OB1RequestError(method, path, e.code, err_body, retry_after) from e
         try:
-            return json.loads(raw) if raw else {}
+            answer = json.loads(raw) if raw else {}
         except ValueError:
-            # A 2xx that is not JSON is no answer of the plugin's: an endpoint pointing at some other page.
-            raise OB1RequestError(method, path, status, f"not the plugin's answer (not JSON): {raw}") from None
+            answer = None
+        if not isinstance(answer, dict):
+            # A 2xx that is not a JSON object is no answer of the plugin's: an endpoint pointing at some other page.
+            raise OB1RequestError(method, path, status, f"not the plugin's answer (not a JSON object): {raw}")
+        return answer
 
     @staticmethod
     def _id(value: str) -> str:
@@ -601,18 +630,23 @@ class _OB1Client:
         if len(parts) == 1:
             if idempotency_key:
                 body["idempotency_key"] = idempotency_key
-            return self._request("POST", "/writeback", body=body)
-        # More than the plugin takes at once: each part a write-back of its own, the answers' memories joined in
-        # order. A key given is each part's own (the plugin keys each memory by it and its index in the part).
-        # A part refused raises, the parts before it kept: the same write-back sent again answers them, writing
-        # nothing twice, and finishes.
+            return self._request("POST", "/writeback", body=body, timeout=self._writeback_timeout)
+        # More than a part: each part a write-back of its own, the parts' answers joined part after part (each in
+        # the plugin's order of kinds). The plugin keys each memory by the write-back's key, or by one it makes of
+        # the workspace, runtime, task, step and the memory's text, and the memory's index in the request: so each
+        # part has a key, or a step, of its own (`:part<n>`), and the same text at the same index of two parts is
+        # two memories, as it is in one write-back. A part refused or timed out raises, the parts before it kept
+        # and the ones after it not sent: the same write-back sent again answers the kept ones, writing nothing
+        # twice, and finishes.
         answer: dict = {}
         memories: List[Any] = []
         for n, part in enumerate(parts):
             body["memory_payload"] = part
             if idempotency_key:
-                body["idempotency_key"] = f"{idempotency_key}:part{n}"
-            answer = self._request("POST", "/writeback", body=body)
+                body["idempotency_key"] = _part_id(idempotency_key, n)
+            else:
+                body["step_id"] = _part_id(step_id or "step", n)
+            answer = self._request("POST", "/writeback", body=body, timeout=self._writeback_timeout)
             memories.extend(answer.get("memories") or [])
         return {**answer, "memories": memories}
 
@@ -934,6 +968,7 @@ class OB1MemoryProvider(MemoryProvider):
                     endpoint=self._endpoint,
                     access_key=self._access_key,
                     timeout=self._api_timeout,
+                    writeback_timeout=self._config["writeback_timeout"],
                 )
                 # No health probe: the plugin has no keyless route to ask, and
                 # a first recall or write-back that fails is logged as it fails.

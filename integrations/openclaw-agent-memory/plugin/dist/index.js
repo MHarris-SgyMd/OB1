@@ -71,11 +71,15 @@ var AgentMemoryClient = class {
     });
     const text = await response.text();
     if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
+    let answer = null;
     try {
-      return text ? JSON.parse(text) : {};
+      answer = text ? JSON.parse(text) : {};
     } catch {
-      throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not JSON): ${text}`, null);
     }
+    if (!answer || typeof answer !== "object" || Array.isArray(answer)) {
+      throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not a JSON object): ${text}`, null);
+    }
+    return answer;
   }
   recall(input) {
     const request = only(input, FIELDS.recall);

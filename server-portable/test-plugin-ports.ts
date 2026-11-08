@@ -3686,6 +3686,40 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
         && doc?.id === mem.memory_id && doc?.content === inspected.memory.content && doc?.updatedAt === inspected.memory.freshness.created_at
         && corpusDocument({}, "openbrain://memory/x", "x") === null,
         `OpenClaw's memory corpus: a recall's hit by its memory_id and freshness, and get_memory's {memory} read as the document (${JSON.stringify(hit)}; ${JSON.stringify(doc)})`);
+      // Its time is when a person last confirmed the memory, before when it was written.
+      const confirmedNow = await oc.reviewMemory(mem.memory_id, { action: "confirm", actor_label: "openclaw:test" });
+      const confirmedDoc = corpusDocument(await oc.inspectMemory(mem.memory_id), `openbrain://memory/${mem.memory_id}`, mem.memory_id);
+      const lastConfirmed = confirmedNow.memory?.freshness?.last_confirmed_at;
+      assert(typeof lastConfirmed === "string" && lastConfirmed !== mem.freshness.created_at && confirmedDoc?.updatedAt === lastConfirmed && confirmedDoc?.provenanceLabel === "instruction",
+        `OpenClaw's memory corpus dates a confirmed memory by its confirmation, not its writing (${lastConfirmed} | ${confirmedDoc?.updatedAt})`);
+      // An answer that is not the plugin's (a sign-in page, a JSON array, a gateway's error page): a coded error, its text kept.
+      const page = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (r) => {
+          const at = new URL(r.url).pathname;
+          if (at.endsWith("/recall")) return new Response("<html>sign in</html>", { status: 200, headers: { "content-type": "text/html" } });
+          if (at.endsWith("/review-queue")) return Response.json([1, 2]);
+          return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+        },
+      });
+      const elsewhere = new AgentMemoryClient({ endpoint: `http://127.0.0.1:${page.port}/x`, accessKey: "k", workspaceId: "w" });
+      const thrown = async (f: () => Promise<unknown>) => {
+        try {
+          await f();
+          return null;
+        } catch (e) {
+          return e;
+        }
+      };
+      const html = await thrown(() => elsewhere.recall({ query: "q" }));
+      const array = await thrown(() => elsewhere.listReviewQueue());
+      const gateway = await thrown(() => elsewhere.inspectMemory("m"));
+      page.stop(true);
+      assert(html instanceof AgentMemoryError && html.status === 200 && html.code === null && html.message.includes("not the plugin's answer")
+        && array instanceof AgentMemoryError && array.status === 200 && array.message.includes("not the plugin's answer")
+        && gateway instanceof AgentMemoryError && gateway.status === 502 && gateway.body === "<html>bad gateway</html>" && gateway.message.includes("502 <html>bad gateway</html>"),
+        `OpenClaw: a 200 that is no JSON object and a 502 page each thrown as AgentMemoryError, the page's text kept (${String(html)}; ${String(array)}; ${String(gateway)})`);
 
       // The recipes' example payloads and the recall answer's contract (recipes/openclaw-agent-memory/contracts), held to the plugin:
       // each example as a runtime would send it, and every field a recalled memory carries one the contract names (it allows no other).

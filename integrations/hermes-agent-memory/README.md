@@ -83,6 +83,8 @@ cat > ~/.hermes/ob1.json <<'EOF'
   "auto_recall": true,
   "auto_capture": true,
   "max_recall_results": 10,
+  "api_timeout": 8,
+  "writeback_timeout": 60,
   "default_confidence": 0.7,
   "require_review_by_default": true
 }
@@ -196,4 +198,4 @@ integrations/hermes-agent-memory/
 pytest plugin/tests/
 ```
 
-Run them in Hermes' Python environment, which has the `agent` and `tools` modules the plugin imports. 87 tests cover pure helpers, schema shapes and routes on the wire, the plugin's refusal codes, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.
+Run them in Hermes' Python environment, which has the `agent` and `tools` modules the plugin imports. 96 tests cover pure helpers, schema shapes and routes on the wire, the plugin's refusal codes, a write-back sent in parts, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.
