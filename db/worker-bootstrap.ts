@@ -214,13 +214,14 @@ export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
  * embed.ts) is the thought's; any other 4xx is fatal (stop the pass), and so is a
  * redirect, which no call follows (SMD-2908); a connection
  * error is transient; anything else is the thought's. Their followers read a
- * provider error through `fault` instead, on followClassify's split alone
- * (SMD-2636 PR 3a; `maxTokensFatal`'s rule there is EXTRACT_REQUEST_FIELDS).
+ * provider error through `fault` instead, on followClassify's split, not this
+ * function's rules (SMD-2636 PR 3a).
  *
  * `maxTokensFatal` (extract only): a 400 naming the answer budget
  * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
  * every thought — so it is fatal rather than read as this thought's length
  * (refusesLength matches "tokens") and failing the pool one row at a time.
+ * Under --follow, `fault` reads it through EXTRACT_REQUEST_FIELDS, widened.
  */
 export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {}): ErrorKind {
   const status = (e as { status?: number }).status;
@@ -332,10 +333,10 @@ function providerWords(e: unknown): string {
  * whose own words name a model as not found — Ollama's `model "x" not found,
  * try pulling it first`, OpenAI's and vLLM's `The model `x` does not exist`
  * or `model_not_found`. A 404 that names no model is a wrong base URL
- * (Ollama's `404 page not found`): fatal to classifyError, and under --follow
- * probed first (`fault`, SMD-2636 PR 3a). classifyError calls both
- * fatal; a --follow worker that has seen the model answer at start reads
- * this one as the provider's state — Ollama pulling or swapping the model —
+ * (Ollama's `404 page not found`). classifyError calls both fatal; under
+ * --follow a wrong base URL is probed first (`fault`, SMD-2636 PR 3a), and a
+ * worker that has seen the model answer at start reads a missing model as the
+ * provider's state — Ollama pulling or swapping the model —
  * and waits it out.
  */
 export function modelMissing(e: unknown): boolean {
@@ -452,7 +453,7 @@ export function fault(e: unknown, o: { requestFault?: (e: unknown) => boolean; m
   if (e instanceof ProbeRefused) return { act: "fatal", suspect: true };
   // Before the verdict: followClassify reads a 400 naming tokens as the thought's length.
   const status = answerStatus(e);
-  if (status !== null && status >= 400 && status < 500 && o.requestFault?.(e)) return { act: "fatal", suspect: true };
+  if (o.requestFault?.(e)) return { act: "fatal", suspect: true };
   // The account short of what the call asks, which the probe's one token is not (review pass 1).
   if (status === 402 && /afford/i.test(errorWords(providerWords(e)))) return { act: "fatal", suspect: true };
   switch (followClassify(e)) {
@@ -676,7 +677,7 @@ export class ProviderDown extends Error {
 /**
  * A call that failed where the probe after it was refused — a deadline, and then a key or a base the probe could not
  * pass: thrown by a worker that probes its own timeouts (consolidate's pairs) so the worker's catch reads it the
- * request's, as `fault` reads extract's (SMD-2636 PR 3a, review pass 1). `tier`: the decision tier's probe refused it.
+ * request's, as `probedFault` reads extract's (SMD-2636 PR 3a, review pass 1). `tier`: the decision tier's probe refused it.
  */
 export class ProbeRefused extends Error {
   override name = "ProbeRefused";

@@ -5921,7 +5921,7 @@ if (want("10")) {
   }
 
   // SMD-2636 PR 3a: a 4xx no rule reads is the probe's to decide under --follow (the maintainer's rule, 2026-11-05),
-  // where every 4xx stopped every worker, unprobed. A 403 the probe answers past is the thought's — recorded failed,
+  // where before every 4xx stopped every worker unprobed. A 403 the probe answers past is the thought's — recorded failed,
   // the follower running on; a 401 whose probe meets a 503 is the provider's outage, waited out, the thought
   // extracted after. Stopped at 30 s each if they run on.
   for (const c of [
@@ -6953,7 +6953,7 @@ if (want("10e")) {
   /** What GET /models lists, and whether a gone-stub* escalation model is served, for a follower's cases below (SMD-2599 review pass 4). */
   let listedIds: string[] = ["stub-meta"];
   let goneServed = false;
-  /** While set, the big-stub escalation model answers 403, a project without access to it (SMD-2636 PR 3a). */
+  /** While set, the big-stub escalation model answers 403, a project without access to it (SMD-2636 PR 3a, review pass 1). */
   let bigRefused = false;
   /** While set, the stub-meta metadata model answers the same (SMD-2636 PR 3a, review pass 2). */
   let metaRefused = false;
@@ -7066,9 +7066,9 @@ if (want("10e")) {
   }
 
   // SMD-2636 PR 3a, review passes 1 and 2: a call refused is probed on the model it called. An escalated call refused
-  // (a 403, the project without access to the escalation model) is probed on the escalation model, not the metadata
-  // model, which would answer and read every escalating thought its own — refused, exit 2, the remedy naming
-  // OB1_EXTRACT_ESCALATE_MODEL; and with escalation set, a metadata call refused is still probed on the metadata model,
+  // (a 403, the project without access to the escalation model) is probed on the escalation model — refused, exit 2,
+  // the remedy naming OB1_EXTRACT_ESCALATE_MODEL — not the metadata model, which would answer and read every
+  // escalating thought its own; and with escalation set, a metadata call refused is still probed on the metadata model,
   // its remedy OB1_METADATA_MODEL. Nothing failed either way. Stopped at 20 s each if they run on.
   for (const c of [
     { who: "escalation", set: () => { bigRefused = true; }, text: "The runaway widget report, whose escalation model the project cannot reach.", knob: "OB1_EXTRACT_ESCALATE_MODEL" },

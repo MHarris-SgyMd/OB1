@@ -378,11 +378,7 @@ const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
 const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
 
-/**
- * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming one of EXTRACT_REQUEST_FIELDS. The
- * probe would answer it and read it the thought's, failing the pool one row at a time; classifyError's maxTokensFatal,
- * widened.
- */
+/** `fault`'s requestFault under --follow (SMD-2636 PR 3a): a 400 naming one of EXTRACT_REQUEST_FIELDS. */
 const extractRequestFault = (e: unknown): boolean => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
 
 /** The run's numbers, each the option given or the CLI's default. */
@@ -1736,24 +1732,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // an outage at once, but the escalation model the start could not confirm the request's — or the
                 // probe's to decide, or the thought's, or the request's shape. A run without --follow keeps
                 // classifyError's rules.
-                let act: FollowerFault["act"];
-                if (FOLLOW) {
-                  const read = fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") });
-                  act = read.act;
-                  streakSuspect ||= read.suspect;
-                } else {
-                  const kind = classifyError(e, { maxTokensFatal: true });
-                  act = kind === "transient" ? "pause" : kind;
-                  streakSuspect = true;
-                }
-                // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
-                // timeout, as a model busy with another worker's call may need it: answered, the thought's;
-                // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
-                // and another worker's outage is joined unprobed (review pass 1).
+                const kind = FOLLOW ? null : classifyError(e, { maxTokensFatal: true });
+                const read: FollowerFault = kind === null ? fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") }) : { act: kind === "transient" ? "pause" : kind, suspect: true };
+                let act = read.act;
+                streakSuspect ||= read.suspect;
                 // The model whose call was refused is the one probed — an answered refusal names it; a deadline or a
                 // lost connection names none, probed on the metadata model as before — so the escalation model's
                 // refusal is not the metadata model's to answer (review pass 1).
                 const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
+                // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
+                // timeout, as a model busy with another worker's call may need it: answered, the thought's;
+                // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
+                // and another worker's outage is joined unprobed (review pass 1).
                 let probeWhy: string | null = null;
                 /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
                 let probeAnswered = false;

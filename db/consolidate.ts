@@ -263,10 +263,7 @@ export const MAX_STALE_DAYS = 2_000_000;
  */
 export const JUDGE_TIMEOUT_S = 120;
 
-/**
- * The request's shape refused, read under --follow (SMD-2636 PR 3a): a 400 naming one of JUDGE_REQUEST_FIELDS. The
- * probe would answer it and read it the thought's, failing the pool one row at a time.
- */
+/** `fault`'s requestFault under --follow (SMD-2636 PR 3a): a 400 naming one of JUDGE_REQUEST_FIELDS. */
 const consolidateRequestFault = (e: unknown): boolean => requestShapeRefused(e, JUDGE_REQUEST_FIELDS);
 
 /**
@@ -2202,16 +2199,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // (SMD-2636 PR 3a): paused for, then an outage; an outage at once — the model missing, a pair's
                 // timeout the probe got no answer past either (processRow's ProviderDown); the probe's to decide;
                 // the thought's; or the request's shape. A run without --follow keeps classifyError's rules.
-                let act: FollowerFault["act"];
-                if (FOLLOW) {
-                  const read = fault(e, { requestFault: consolidateRequestFault });
-                  act = read.act;
-                  streakSuspect ||= read.suspect;
-                } else {
-                  const kind = classifyError(e);
-                  act = kind === "transient" ? "pause" : kind;
-                  streakSuspect = true;
-                }
+                const kind = FOLLOW ? null : classifyError(e);
+                const read: FollowerFault = kind === null ? fault(e, { requestFault: consolidateRequestFault }) : { act: kind === "transient" ? "pause" : kind, suspect: true };
+                let act = read.act;
+                streakSuspect ||= read.suspect;
                 // The probe decides, as extract-entities.ts's (a 401, a 404 naming no model, a 400 no rule reads):
                 // answered, the thought's; refused, the request's; no answer, the provider's. A stopping pass hands
                 // the thought back, and another worker's outage is joined unprobed.

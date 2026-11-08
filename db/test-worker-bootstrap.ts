@@ -435,7 +435,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   ok(ownWrong.length === 0, `followClassify reads the workers' own call errors as embed.ts's of the same status, and a deadline as a timeout (${ownWrong.join("; ") || `all ${ownCells.length}`})`);
 
   // fault — what a follower does with a provider error (SMD-2636 PR 3a), on followClassify's split: paused for, an
-  // outage at once, the probe's to decide, the thought's, or the request's shape; and whether it makes a suspect.
+  // outage at once, the probe's to decide, the thought's, or the request's; and whether it makes a suspect.
   const extractFields = (e: unknown) => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
   const faults: [unknown, { act: string; suspect: boolean }, string, Parameters<typeof fault>[1]?][] = [
     [own(408), { act: "pause", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
@@ -458,7 +458,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     [own(402), { act: "probe", suspect: true }, "a 402: the same"],
     [own(402, '{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 120."}}'), { act: "fatal", suspect: true }, "a 402 saying the call asks more than the account affords: the request's, which the probe's one token is not (review pass 1)"],
     [new ProbeRefused("the judge call timed out after 120 s, and a one-token call was refused: 401"), { act: "fatal", suspect: true }, "consolidate's ProbeRefused: a deadline whose probe was refused, the request's (review pass 1)"],
-    [own(403), { act: "probe", suspect: true }, "a 403: the same"],
+    [own(403), { act: "probe", suspect: true }, "a 403: probed first, as a 401"],
     [own(404, "404 page not found"), { act: "probe", suspect: true }, "a 404 naming no model: the same"],
     [own(302), { act: "probe", suspect: true }, "a redirect, which no call follows: the same (the probe refuses one)"],
     [own(400, "content filtered"), { act: "probe", suspect: true }, "a 400 no rule reads: the probe's — answered, the thought's (a content filter)"],

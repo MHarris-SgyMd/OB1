@@ -949,9 +949,7 @@ async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
     const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
-    (err as Error & { status?: number; model?: string }).status = r.status;
-    (err as Error & { status?: number; model?: string }).model = model;
-    throw err;
+    throw Object.assign(err, { status: r.status, model });
   }
   // Streamed when asked (SMD-1960), and the body read as what it IS rather
   // than what its content-type says (sixth review pass: an SSE body under
