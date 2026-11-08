@@ -4414,8 +4414,8 @@ writers that keep them there:
   statement on the item, the operator's key classified as `SETUP.md` classifies a brain's own.
 
 A personal note's facts sit on its open item, not on the note. So a read that scores thoughts, as SMD-3668's
-`priority_weight` does, sees the tickets' levels and none of the notes': measuring it needs a decision on where those
-facts go, and a registration of its own.
+`priority_weight` does, sees the tickets' levels and none of the notes'. The maintainer decided (2026-11-08) that it
+should see them: SMD-4149 has `effective_priority` read a thought's open items, and re-measures both reads.
 
 The run reads the facts back and fails unless the database holds exactly the plan's, line for line, duplicates
 counted: every source and the row it sits on, every link but a text reference, every live claim, every open item by

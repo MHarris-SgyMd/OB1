@@ -66,7 +66,8 @@ export type BoardMeta = { issue: string; status: string; status_type: "backlog" 
  * and BAR held by its own pin, so the bar a read is judged by never moves with
  * it. A personal note's facts sit on its open item, not on the note: a read
  * that scores thoughts (SMD-3668's priority_weight) sees the tickets' levels
- * and none of the notes', so its measurement needs a decision of its own.
+ * and none of the notes', until effective_priority reads a thought's open
+ * items (SMD-4149, the maintainer's call, 2026-11-08).
  * A read never reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
