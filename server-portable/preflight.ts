@@ -27,7 +27,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, maskUrl, missingDatabaseUrl, POSTGREST_RETIRED, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
@@ -47,6 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
+import { backgroundSlotsFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -926,6 +927,14 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
     const ms = Math.max(1, Math.round(performance.now() - started));
+    // A redirect is an answer from this address, but the brain's calls follow none (SMD-2908): if they are redirected
+    // too, each fails. A warning, not a failure: /models may redirect where the calls do not, which --deep tells.
+    if (isRedirect(r.status)) {
+      const to = r.headers.get("location");
+      add(row, "warn", `${shown} answers with a redirect — HTTP ${r.status} to GET /models${to ? `, to ${shownLocation(to, `${at.base}/models`)}` : ""}, in ${ms} ms; the brain's calls follow no redirect (SMD-2908), so if they are redirected too, each fails`,
+          `Set ${knob} to where it points, or run --deep to see whether the calls are redirected.`);
+      return;
+    }
     // An outage's status (5xx, 408, 429) is the provider there and not ready — a
     // server still loading, a proxy whose backend is down: the runtime's probe
     // reads it as an outage, so the start does too (review pass 2).
@@ -1103,6 +1112,15 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
   else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
+}
+
+// The background slots in force (SMD-3379 PR 2b-2a): only when set, off unless it is — a value the servers and the
+// passes cannot read leaves them off, with a line in each process's log an operator may never read.
+if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
+  const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
+  if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
+  else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
+  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -5512,6 +5530,20 @@ let probes = 0;
 const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line, kind) => telemetrySaid.push({ line, kind }), undefined, { oneShot: true }) : false;
 
 /**
+ * A --deep probe's redirect (SMD-2908), or null: the row's words and its fix. The probes follow none, as the
+ * server's calls follow none — following one would dial, under a row naming the base, wherever it points.
+ */
+function redirectRow(r: Response, at: ProviderEndpoint, knob: string): { detail: string; fix: string } | null {
+  if (!isRedirect(r.status)) return null;
+  const to = r.headers.get("location");
+  void r.body?.cancel().catch(() => {});
+  return {
+    detail: `${shownBase(at)} answered ${r.status}${to ? `, redirecting to ${shownLocation(to, r.url || at.base)}` : ""} — the brain's calls follow no redirect, which would carry the text past the egress gate (SMD-2908)`,
+    fix: `Set ${knob} to where it points; the egress gate then judges that base.`,
+  };
+}
+
+/**
  * A probe as a provider call's span and point, marked `ob1.probe` so a backend
  * tells it from the server's calls when both carry one service's name: its
  * time to the answer's headers, its error the status a provider refused with
@@ -5525,7 +5557,7 @@ async function probed(operation: "embeddings" | "chat", model: string, base: str
     const r = await call();
     if (!r.ok) span.end("error", statusType(r.status));
     return r;
-  }, undefined, { "ob1.probe": "preflight" }));
+  }, undefined, { "ob1.probe": "preflight", "ob1.call.class": "background" }));
 }
 
 if (!deep) {
@@ -5547,8 +5579,12 @@ if (!deep) {
         input: "preflight",
         ...(wantsTruncation ? { dimensions: embDim } : {}),
       }),
+      redirect: "manual",
     }));
-    if (!r.ok) {
+    const redirected = redirectRow(r, embEndpoint, "OB1_LLM_BASE_URL");
+    if (redirected) {
+      add("embedding provider", "fail", redirected.detail, redirected.fix);
+    } else if (!r.ok) {
       add("embedding provider", "fail", `${shownBase(embEndpoint)} returned ${r.status}`,
           r.status === 401 ? rejectedRemedy(embEndpoint, "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)", "OB1_LLM_BASE_URL") : "Check the provider's status and credit balance.");
     } else {
@@ -5611,8 +5647,12 @@ if (deep) {
           response_format: { type: "json_object" },
           messages: [{ role: "user", content: 'Reply with only this JSON: {"ok":true}' }],
         }),
+        redirect: "manual",
       }));
-      if (!m.ok) {
+      const redirected = redirectRow(m, chatEndpoint, chatEndpoint === embEndpoint ? "OB1_LLM_BASE_URL" : "OB1_CHAT_BASE_URL");
+      if (redirected) {
+        add(row, "fail", `${model}: ${redirected.detail}`, `${redirected.fix} ${consequence}`);
+      } else if (!m.ok) {
         add(row, "fail", `${model} returned ${m.status} from ${shownBase(chatEndpoint)}`,
             (m.status === 401
               ? `${chatEndpoint === embEndpoint
@@ -5687,7 +5727,7 @@ if (!jevCfg) {
   if (unresolved) {
     add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
   } else try {
-    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
+    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
     // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
     // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
@@ -5738,7 +5778,7 @@ if (!jevCfg) {
   } else {
     try {
       const t0 = performance.now();
-      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" });
+      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
       add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };

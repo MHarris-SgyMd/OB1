@@ -32,9 +32,10 @@
  * preflight reads the knobs only to check the tier. The spikes are the callers.
  */
 
-import { baseUrlOr, ProviderError, providerEndpoint, refuseEgress, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { baseUrlOr, isRedirect, ProviderError, providerEndpoint, providerErrorType, refuseEgress, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressEnv, type EgressPolicy, type EgressSubject } from "./egress.ts";
-import { modelCall } from "./model-call.ts";
+import { currentCallClass, modelCall } from "./model-call.ts";
+import { withProviderSpan } from "./spans.ts";
 import {
   INSUFFICIENT_EVIDENCE,
   JEV_CONTRACT,
@@ -110,15 +111,18 @@ export function resolveJevConfig(env: JevEnv): JevConfig | null {
  * packed batch), not the call: a bound on the whole call is a `signal`, e.g.
  * AbortSignal.timeout(…), which every request of the call shares.
  */
-type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
+type CallOpts = { signal?: AbortSignal; timeoutMs?: number; probe?: string };
 
 /**
  * One exchange with the tier, through the model-call seam (SMD-3379 PR 2a): a decision, or the tier's /info, which
  * asks no model but is still one of the tier's one-at-a-time requests.
  */
 function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info" | "/decide", body: unknown, opts: CallOpts): Promise<T> {
+  // Under a client span, as a provider call's (SMD-3379 PR 2b-2a): `decide <model>`, its point labelled live or
+  // background, and preflight's probes marked so (`probe`), as its embedding and chat probes are (review pass 1). The
+  // provider alert leaves the tier's calls out (the maintainer, 2026-11-07).
   return modelCall({ type: "decide", model: cfg.model, base: cfg.endpoint.base, purpose: path === "/info" ? "info" : "decision", ...(opts.signal ? { signal: opts.signal } : {}) },
-    () => jevExchange<T>(cfg, method, path, body, opts));
+    () => withProviderSpan("decide", cfg.model, cfg.endpoint.base, () => jevExchange<T>(cfg, method, path, body, opts), providerErrorType, { "ob1.call.class": currentCallClass(), ...(opts.probe ? { "ob1.probe": opts.probe } : {}) }));
 }
 
 /** exchange's request, once the seam lets it run: the deadline, the status kept, the body capped in a message, the JSON parsed. */
@@ -160,8 +164,13 @@ async function jevExchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/in
   }
   const capped = text.slice(0, 500);
   // A redirect is not followed (it could point off the box); its Location is the useful part.
-  const location = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
-  if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${location}` : ""} ${capped}`.trimEnd(), "http", r.status, capped);
+  // Printed as refuseRedirect prints one: userinfo and query masked, capped (SMD-2908); and its body left out, which
+  // commonly repeats the target whole, query and all ("Found. Redirecting to …", review pass 3).
+  if (isRedirect(r.status)) {
+    const location = r.headers.get("location");
+    throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status}${location ? ` redirecting to ${shownLocation(location, `${at}${path}`)}` : ""}`, "http", r.status);
+  }
+  if (!r.ok) throw new ProviderError(`${what} request to ${at}${path} failed: ${r.status} ${capped}`.trimEnd(), "http", r.status, capped);
   try {
     return JSON.parse(text) as T;
   } catch {

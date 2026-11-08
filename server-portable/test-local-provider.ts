@@ -1713,7 +1713,8 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     const { inHandCalls, callWaitsFor } = await import("../db/lease.ts");
     const holds = new Map<string, number>([["a", 200], ["b", 400]]);
     const seenPasses: (string | undefined)[] = [];
-    const before = setModelCallHook(async (call, run) => { seenPasses.push(call.pass); await Bun.sleep(holds.get(call.purpose) ?? 0); return run(); });
+    // A hold is a wait, told as the hook starts it (review pass 6).
+    const before = setModelCallHook(async (call, run, waiting) => { seenPasses.push(call.pass); if (holds.has(call.purpose)) waiting(); await Bun.sleep(holds.get(call.purpose) ?? 0); return run(); });
     try {
       const calls2 = inHandCalls(() => false);
       const entry = calls2.begin("w");
@@ -1748,6 +1749,1000 @@ console.log("\n[11] Every model call goes through the model-call seam, live insi
     return /fetch\s*\([\s\S]{0,200}?(\/chat\/completions|\/embeddings|\/decide|\$\{path\})/.test(src) && !/^import [^;]*from "(\.\/|\.\.\/|\.\.\/server-portable\/)model-call\.ts";/m.test(src);
   });
   assert(bare.length === 0, `every file that sends a model request imports the model-call seam (${bare.map((f) => f.split("/").slice(-2).join("/")).join(", ") || "none bare"})`);
+}
+
+console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a model server's slots across the brain's processes by advisory locks, live calls never; off unless set; a stop ends a wait; the semaphore fails open (SMD-3379 PR 2b-1)");
+{
+  const { backgroundSlotsFrom, normalisedBase, shareOf, installBackgroundSlots, SLOTS_APP } = await import("./slots.ts");
+  const { modelCall, asLive, withCallWaits } = await import("./model-call.ts");
+  const { pausableTimeout, inHandCalls, callWaitsFor: waitsFor, idleWhile, StoppedWaiting } = await import("../db/lease.ts");
+  // The setting: types and per-model overrides; off by default; a value that does not parse said, the hook left off.
+  const parsed = backgroundSlotsFrom("chat=1, embed=2,decide=1,chat:qwen3.8:27b=3");
+  const refused = ["chat=0", "chat=17", "talk=1", "decide:x=1", "chat:=1", "chat=1,chat=2", "chat", "chat:m=1,chat : m=2"].map((r) => backgroundSlotsFrom(r).problem ?? "");
+  const spaced = backgroundSlotsFrom("chat : qwen3.8:27b = 2").slots;
+  assert(backgroundSlotsFrom(undefined).slots === null && backgroundSlotsFrom(" off ").slots === null && !backgroundSlotsFrom("").problem
+    && JSON.stringify([...(parsed.slots ?? new Map())]) === JSON.stringify([["chat", 1], ["embed", 2], ["decide", 1], ["chat:qwen3.8:27b", 3]]) && refused.every(Boolean)
+    && spaced?.get("chat:qwen3.8:27b") === 2
+    && /"chat" has no =N/.test(refused[6]) && /names no model type/.test(refused[2]),
+    `OB1_BACKGROUND_SLOTS reads types and per-model overrides, is off unset or off, and refuses a zero, too many, an unknown type, a model on the decide tier, an empty model, a repeat (spaced or not) and a bare name, each in its own words; spaces about a model's name are not part of it (${JSON.stringify(refused.map((r) => r.slice(0, 40)))})`);
+  // A call's share: per normalised server and model, the decide tier per server; live and unlisted types none.
+  const sl = parsed.slots!;
+  const bg = (type: "embed" | "chat" | "decide", model: string | undefined, base: string) => shareOf(sl, { type, model, base, cls: "background" });
+  const decideKey = bg("decide", "m1", "http://t")?.key;
+  assert(normalisedBase("HTTP://User:pw@Ollama.Local:11434/v1/") === "http://ollama.local:11434/v1"
+    && bg("chat", "llama3.2", "http://h/v1")?.key === "ob1:slot:chat:http://h/v1:llama3.2" && bg("chat", "llama3.2", "http://h/v1")?.limit === 1
+    && bg("chat", "qwen3.8:27b", "http://h/v1")?.limit === 3 && decideKey === "ob1:slot:decide:http://t" && decideKey === bg("decide", "m2", "http://t/")?.key
+    && shareOf(sl, { type: "chat", model: "llama3.2", base: "http://h/v1", cls: "live" }) === null
+    && shareOf(backgroundSlotsFrom("chat=1").slots!, { type: "embed", model: "e", base: "http://h/v1", cls: "background" }) === null,
+    "a share is per normalised model server and model, a model's override over its type's, the decide tier per server alone; a live call and a type left out count against none");
+  // Off: no hook, the call runs at once.
+  const off = installBackgroundSlots({ url: URL_!, raw: undefined });
+  assert(!off.installed, "unset, no hook is set");
+  const watch = new SQL({ url: URL_, max: 1 });
+  const waitingLocks = async (db: SQL) => Number((await db`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND granted`)[0].c);
+  const semConns = async () => Number((await watch`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`)[0].c);
+  const call = (model = META_MODEL, cls?: "live") => ({ type: "chat" as const, model, base: PROVIDER, purpose: "test", ...(cls ? { cls } : {}) });
+  const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(), cls: "background" })!.key;
+  // On, chat=1: three background chat calls one at a time across the semaphore; a live one and an embedding at once.
+  const said: string[] = [];
+  const on = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => said.push(l) });
+  try {
+    let inFlight = 0, most = 0;
+    const work = (ms: number) => async () => { inFlight++; most = Math.max(most, inFlight); await Bun.sleep(ms); inFlight--; return ms; };
+    const t0 = Date.now();
+    let liveAt = 0, embedAt = 0, heldConns = -1;
+    await Promise.all([
+      modelCall(call(), work(300)),
+      modelCall(call(), work(300)),
+      modelCall(call(), work(300)),
+      Bun.sleep(50).then(() => asLive(() => modelCall(call(META_MODEL, "live"), async () => { liveAt = Date.now() - t0; }))),
+      Bun.sleep(50).then(() => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "test" }, async () => { embedAt = Date.now() - t0; })),
+      Bun.sleep(150).then(async () => { heldConns = await semConns(); }),
+    ]);
+    const both = Date.now() - t0;
+    // A connection that let its slot go is kept 2 s for the next call (review pass 5), and a closed backend leaves
+    // pg_stat_activity a few ms after its close, more under load (review pass 3).
+    const keptConns = await semConns();
+    let idleConns = keptConns;
+    for (let i = 0; i < 175 && idleConns > 0; i++) { await Bun.sleep(20); idleConns = await semConns(); }
+    assert(on.installed && most === 1 && both >= 900 && liveAt < 250 && embedAt < 250 && heldConns === 2 && keptConns >= 1 && keptConns <= 2 && idleConns === 0 && said.length === 0,
+      `chat=1: three background chat calls run one at a time (${both} ms for three of 300), a live call and an unlisted embedding at once beside them (${liveAt} ms, ${embedAt} ms); two connections while a call holds its slot and two queue — the holder's and one poller's — one or two kept for the next call, none once idle (${heldConns}, ${keptConns}, ${idleConns}); nothing said`);
+    // Each model's share its own: three models under chat=1 run at once, none queued behind another's.
+    const t2 = Date.now();
+    const starts: number[] = [];
+    await Promise.all(["m-a", "m-b", "m-c"].map((m) => modelCall(call(m), async () => { starts.push(Date.now() - t2); await Bun.sleep(300); })));
+    assert(starts.length === 3 && Math.max(...starts) < 250, `three models under chat=1 each take their own share's slot at once (${JSON.stringify(starts)} ms)`);
+    // Another process waiting: this one's calls, back to back, sit out a poll before each first try, and the other gets
+    // a slot let go rather than waiting out the whole backlog (review pass 2: it waited for all of it); three workers
+    // at once, so one always polls here, their poller not woken by a slot this process lets go while the other waits
+    // (review pass 6), so each slot goes to whichever poller asks first.
+    for (const shape of [{ workers: 1, calls: 14, most: 4 }, { workers: 3, calls: 21, most: 10 }]) {
+      const startsA: number[] = [];
+      const backlog = Promise.all(Array.from({ length: shape.workers }, async () => {
+        for (let i = 0; i < shape.calls / shape.workers; i++) await modelCall(call(), async () => { startsA.push(Date.now()); await Bun.sleep(150); });
+      }));
+      for (let i = 0; i < 100 && startsA.length === 0; i++) await Bun.sleep(10);
+      const child = Bun.spawn(["bun", "-e", `
+        const { installBackgroundSlots } = await import("./slots.ts");
+        const { modelCall } = await import("./model-call.ts");
+        installBackgroundSlots({ url: process.env.DATABASE_URL, raw: "chat=1" });
+        console.log(Date.now());
+        await modelCall({ type: "chat", model: ${JSON.stringify(META_MODEL)}, base: ${JSON.stringify(PROVIDER)}, purpose: "test" }, async () => console.log(Date.now()));
+        process.exit(0);`], { cwd: import.meta.dir, env: { ...process.env, DATABASE_URL: URL_ }, stdout: "pipe", stderr: "pipe" });
+      const [askedAt, childAt] = (await new Response(child.stdout).text()).trim().split("\n").map(Number);
+      await child.exited;
+      await backlog;
+      // Back to back, each slot let go goes to the other process's poller more often than not (it asks within a poll,
+      // this one's next call after one): four in a row lost is about one run in a few thousand. Three at once, a coin
+      // each: eleven in a row lost about one in two thousand.
+      const passedBy = startsA.filter((t) => t > askedAt && t < childAt).length;
+      assert(childAt > askedAt && askedAt > 0 && passedBy <= shape.most,
+        `a call in another process gets one of the first slots this one's ${shape.workers === 1 ? "back-to-back calls" : "three workers"} let go once it asks, not after the backlog: ${passedBy} of ${startsA.length} started between its ask and its run`);
+    }
+    // Two processes with backlogs on one share go through it, not deferring to each other's marks in turn: two of them,
+    // two workers and 150 calls of 1 ms each at chat=2 (review pass 8: 80 calls in 30 s, each a poll sat out).
+    {
+      const child = () => Bun.spawn(["bun", "-e", `
+        const { installBackgroundSlots } = await import("./slots.ts");
+        const { modelCall } = await import("./model-call.ts");
+        installBackgroundSlots({ url: process.env.DATABASE_URL, raw: "chat=2" });
+        const t0 = Date.now();
+        let done = 0;
+        await Promise.all([0, 1].map(async () => {
+          for (let i = 0; i < 150 && Date.now() - t0 < 10_000; i++) {
+            await modelCall({ type: "chat", model: ${JSON.stringify(META_MODEL)}, base: ${JSON.stringify(PROVIDER)}, purpose: "test" }, () => Bun.sleep(1));
+            done++;
+          }
+        }));
+        console.log(JSON.stringify({ done, ms: Date.now() - t0 }));
+        process.exit(0);`], { cwd: import.meta.dir, env: { ...process.env, DATABASE_URL: URL_ }, stdout: "pipe", stderr: "pipe" });
+      const both = [child(), child()];
+      const results = await Promise.all(both.map(async (c) => { const out = await new Response(c.stdout).text(); await c.exited; try { return JSON.parse(out.trim()) as { done: number; ms: number }; } catch { return { done: -1, ms: -1 }; } }));
+      assert(results.every((r) => r.done === 300 && r.ms < 8000),
+        `two processes with backlogs on one share both go through it, neither deferring to the other in turn (${JSON.stringify(results)})`);
+    }
+    // No other process waiting, a slot this process lets go goes to its own poller at once, not at its next poll:
+    // ten 10 ms calls two at a time run in about their own time (review pass 6: a poll a handoff, 36 s for 424
+    // embeddings against 0.6).
+    {
+      const tw = Date.now();
+      await Promise.all(Array.from({ length: 2 }, async () => { for (let i = 0; i < 5; i++) await modelCall(call(), () => Bun.sleep(10)); }));
+      const wokeMs = Date.now() - tw;
+      assert(wokeMs < 1500, `ten 10 ms calls two at a time under chat=1, no other process waiting, run in ${wokeMs} ms — each slot let go handed to this process's poller at once`);
+      // …and 1 ms calls, a slot let go between a poller's try and its nap tried again at once, not lost to a poll's
+      // nap (review pass 7: 424 such calls took 13 s against 0.6 off). A lost wake is a handoff of a nap, 250 ms at
+      // least: counted, one allowed for a loaded runner. Without the count of slots let go, 28 over 200 ms in 800.
+      const starts: number[] = [], ends: number[] = [];
+      const tq = Date.now();
+      await Promise.all(Array.from({ length: 2 }, async () => {
+        // Cut at 10 s, so wakes lost on every handoff fail the row rather than run it for minutes.
+        for (let i = 0; i < 400 && Date.now() - tq < 10_000; i++) await modelCall(call(), async () => { starts.push(Date.now()); await Bun.sleep(1); ends.push(Date.now()); });
+      }));
+      const quickMs = Date.now() - tq;
+      starts.sort((a, b) => a - b);
+      ends.sort((a, b) => a - b);
+      const slow = starts.slice(1).filter((s, k) => s - ends[k] > 200).length;
+      assert(slow <= 1 && starts.length === 800, `eight hundred 1 ms calls two at a time run in ${quickMs} ms, ${slow} handoff(s) over 200 ms — no wake lost between a poller's try and its nap`);
+    }
+    // Another process waiting — here a session holding the share's WAITING lock — a slot this process lets go is not
+    // handed to its own napping poller: it takes it at its next poll, not at once. Five handoffs, one gap at least past
+    // 100 ms (all five under it about one run in a thousand; woken, each is a few ms).
+    {
+      const waiter = new SQL({ url: URL_, max: 1 });
+      const gaps: number[] = [];
+      let deferMarks = [0, 0];
+      try {
+        await waiter`SELECT pg_advisory_lock_shared(hashtext(${key}), -1)`;
+        // A call that finds the lock held sits out a poll unmarked: marked, the other process's next call would read it
+        // and defer in turn, two backlogs deferring to each other on every call (review pass 8); nor on a lock of its
+        // own, slot -2, pass 8's other try (holders read as 4294967294).
+        const marks = async (objid: number) => Number((await waiter`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = ${objid} AND classid::bigint = (hashtext(${key})::bigint & 4294967295) AND granted`)[0].c);
+        const deferring = modelCall(call(), async () => undefined);
+        await Bun.sleep(150);
+        deferMarks = [await marks(4294967295), await marks(4294967294)];
+        await deferring;
+        for (let i = 0; i < 5; i++) {
+          let polling = 0;
+          const holder = modelCall(call(), () => Bun.sleep(900)).then(() => Date.now());
+          await Bun.sleep(50);
+          const poller = modelCall(call(), async () => { polling = Date.now(); });
+          const releasedAt = await holder;
+          await poller;
+          gaps.push(polling - releasedAt);
+        }
+      } finally {
+        // Let go before the close: a closed backend's locks go a moment after, and the next row's free call, seeing
+        // the WAITING lock still held, would sit out a poll and tell a wait (review pass 7: one idle run in five).
+        await waiter`SELECT pg_advisory_unlock_shared(hashtext(${key}), -1)`.catch(() => {});
+        await waiter.close();
+      }
+      assert(deferMarks[0] === 1 && deferMarks[1] === 0, `a call sitting out a poll for another process's waiter holds no waiting lock meanwhile (${JSON.stringify(deferMarks)} holders of -1, -2)`);
+      assert(gaps.length === 5 && Math.max(...gaps) > 100,
+        `another process waiting, a slot this process lets go waits for its own poller's next poll rather than waking it (${JSON.stringify(gaps)} ms after each release)`);
+    }
+    // The call's observer is told of a wait only where the hook waits: a call whose slot is free tells it nothing, one
+    // queued behind another tells it once (review pass 6: told before every hook, a stopping pass gave back calls
+    // that never waited).
+    {
+      const told = { waiting: 0, running: 0 };
+      const observer = { waiting: () => { told.waiting++; }, running: () => { told.running++; } };
+      await withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      const free = { ...told };
+      // Queued: a holder, a poller, and two calls behind it — one queued with the poller, before it finds no slot free,
+      // told when it does; one after, told as it queues — both while the holder still holds.
+      const holder = modelCall(call(), () => Bun.sleep(300));
+      await Bun.sleep(30);
+      const poller = modelCall(call(), async () => undefined);
+      const early = withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      await Bun.sleep(30);
+      const behind = withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      await Bun.sleep(30);
+      const toldWhileQueued = told.waiting;
+      await Promise.all([holder, poller, early, behind]);
+      const queued = { ...told };
+      // …and one whose slot another process holds, told once too.
+      const elsewhere = new SQL({ url: URL_, max: 1 });
+      try {
+        await elsewhere`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+        setTimeout(() => { elsewhere`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 300);
+        await withCallWaits(observer, () => modelCall(call(), async () => undefined));
+      } finally {
+        await elsewhere.close();
+      }
+      assert(free.waiting === 0 && free.running === 0 && toldWhileQueued === 2 && queued.waiting === 2 && queued.running === 2 && told.waiting === 3 && told.running === 3,
+        `a call whose slot is free tells its observer nothing (${JSON.stringify(free)}); two queued behind this process's poller, before and after it finds no slot free, tell it while queued (${toldWhileQueued}) and once each way (${JSON.stringify(queued)}), and one whose slot another process holds (${JSON.stringify(told)})`);
+    }
+    // Another process holding the share's one slot: the call waits until it lets go.
+    const other = new SQL({ url: URL_, max: 1 });
+    try {
+      const [{ got }] = (await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
+      const t1 = Date.now();
+      // A tagged query runs only once awaited or then'd: so then'd here.
+      setTimeout(() => { other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 600);
+      await modelCall(call(), async () => undefined);
+      const waitedForOther = Date.now() - t1;
+      assert(got && waitedForOther >= 550, `a slot another process holds is waited for: the call ran ${waitedForOther} ms later, once it let go`);
+    } finally {
+      await other.close();
+    }
+    // A call's stop ends its wait, rejecting with the stop's reason, the slot not taken: queued behind this process's
+    // own call, and contending for a slot another process holds — a stop, not the database not answering.
+    const holder = modelCall(call(), work(600));
+    for (let i = 0; i < 100 && inFlight === 0; i++) await Bun.sleep(20);
+    const stopper = new AbortController();
+    setTimeout(() => stopper.abort(new Error("the pass stopped")), 100);
+    const stopped = await modelCall({ ...call(), signal: stopper.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    await holder;
+    const otherHolds = new SQL({ url: URL_, max: 1 });
+    let contended = "";
+    try {
+      await otherHolds`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const stopper2 = new AbortController();
+      setTimeout(() => stopper2.abort(new Error("the pass stopped")), 400);
+      // Let go later, so a wait the stop did not end runs the call rather than hanging the suite.
+      setTimeout(() => { otherHolds`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 1500);
+      contended = await modelCall({ ...call(), signal: stopper2.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    } finally {
+      await otherHolds.close();
+    }
+    assert(stopped === "rejected: the pass stopped" && contended === "rejected: the pass stopped" && said.length === 0,
+      `a call's stop ends its wait for a slot, rejecting with its reason, nothing said: queued behind this process's call (${stopped}) and contending with another process's (${contended})`);
+  } finally {
+    await on.uninstall();
+  }
+  // Calls fanned out with every slot free tell their observers of no wait — not for queueing behind the poller's own
+  // statements — so a stopping pass gives none of them back (review pass 7: seven of eight told, seven answered
+  // blurbs thrown away at a stop).
+  {
+    // The row before's stopped poller lets its waiting lock go with its session, a moment after: waited out first.
+    const looker = new SQL({ url: URL_, max: 1 });
+    try {
+      for (let i = 0; i < 50; i++) {
+        if ((await waitingLocks(looker)) === 0) break;
+        await Bun.sleep(20);
+      }
+    } finally {
+      await looker.close();
+    }
+    const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
+    try {
+      let toldFan = 0;
+      const observer = { waiting: () => { toldFan++; }, running: () => {} };
+      await Promise.all(Array.from({ length: 8 }, () => withCallWaits(observer, () => modelCall(call(), () => Bun.sleep(50)))));
+      assert(toldFan === 0, `eight calls fanned out under chat=8, every slot free, tell their observers of no wait (${toldFan} told)`);
+    } finally {
+      await wide.uninstall();
+    }
+  }
+  // A stop telling the queue behind another caller's poller aborts each queued call — every one, though each it stops
+  // leaves the queue as the telling goes (review pass 8: every other skipped, one running its call through the stop).
+  {
+    const narrow = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+    const holder = new SQL({ url: URL_, max: 1 });
+    try {
+      await holder`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      // Let go at 3 s, so a call the stop missed runs, and says so, rather than hanging the row.
+      setTimeout(() => { holder`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 3000);
+      // Queued in the poller's tick, before it finds no slot free, so its telling goes through the queue.
+      const t0 = Date.now();
+      const pollerCall = modelCall(call(), async () => "poller");
+      const queued = Array.from({ length: 4 }, (_, i) => {
+        const stop = new AbortController();
+        const observer = { waiting: () => stop.abort(new Error(`stopped ${i}`)), running: () => {} };
+        return withCallWaits(observer, () => modelCall({ ...call(), signal: stop.signal }, async () => `ran ${i}`))
+          .then((r) => r, (e: unknown) => `${(e as Error).message} at ${Date.now() - t0}`);
+      });
+      const ended = await Promise.all(queued);
+      await pollerCall;
+      assert(ended.every((r, i) => r.startsWith(`stopped ${i} at`) && Number(r.split(" at ")[1]) < 1500),
+        `a stop telling the queue behind another caller's poller stops all four queued calls at once (${JSON.stringify(ended)})`);
+    } finally {
+      await narrow.uninstall();
+      await holder.close();
+    }
+  }
+  // The process's stop ends a wait for a caller that hands none: the install's `stop`, and `uninstall`, which leaves a
+  // call already running its slot until it ends.
+  for (const how of ["stop", "uninstall"] as const) {
+    const procStop = new AbortController();
+    const saidHere: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", stop: procStop.signal, log: (l) => saidHere.push(l) });
+    const other = new SQL({ url: URL_, max: 1 });
+    try {
+      let firstRunning = false;
+      const first = modelCall(call(), () => { firstRunning = true; return Bun.sleep(600).then(() => "first"); });
+      for (let i = 0; i < 100 && !firstRunning; i++) await Bun.sleep(20);
+      setTimeout(() => { if (how === "stop") procStop.abort(new Error("the process is stopping")); else void inst.uninstall(); }, 100);
+      const second = await modelCall(call(), async () => "second").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const [{ got: duringHeld }] = (await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0) AS got`) as { got: boolean }[];
+      const firstDone = await first;
+      assert(/rejected: .*the process is stopping/.test(second) && !duringHeld && firstDone === "first" && !saidHere.some((l) => /did not answer/.test(l)),
+        `the process's ${how} ends a wait, rejecting as a stop, not an outage, while the running call keeps its slot to its end (${second}; slot free while held ${duringHeld})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+    }
+  }
+  // A slot's connection was lost while its call ran — a Postgres restart, here its backend terminated: said as lost,
+  // not as a pooler, and the unlock not waiting on a reconnect.
+  {
+    const lostSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => lostSaid.push(l) });
+    const admin = new SQL({ url: URL_, max: 1 });
+    try {
+      let endedAt = 0;
+      const t0 = Date.now();
+      const got = await modelCall(call(), async () => {
+        await admin`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`;
+        await Bun.sleep(200);
+        endedAt = Date.now();
+        return "answer";
+      });
+      const releaseMs = Date.now() - endedAt;
+      const after = await modelCall(call(), async () => "next");
+      assert(got === "answer" && after === "next" && lostSaid.some((l) => /connection was lost while its call ran/.test(l)) && !lostSaid.some((l) => /pooler/.test(l)) && releaseMs < 1000,
+        `a slot whose connection was lost while its call ran is said as lost, not as a pooler; the call's answer kept, its release ${releaseMs} ms, the next call slotted (${JSON.stringify(lostSaid.map((l) => l.slice(0, 80)))}, ${Date.now() - t0} ms in all)`);
+    } finally {
+      await inst.uninstall();
+      await admin.close();
+    }
+  }
+  // A poller's connection that closes while it waits, before any lock — a Postgres restart, here its backend
+  // terminated: Bun reconnects quietly, the call takes its WAITING lock again on the new session, and the slot it then
+  // takes is no lost one (review pass 3: said lost at the unlock, the mark gone for the rest of the wait).
+  {
+    const reSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => reSaid.push(l) });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    // Slot -1 reads 4294967295 as pg_locks' oid; a backend other than `not`, so the terminated one's lock is left out.
+    const marks = async (not = 0) => Number((await admin`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND objid = 4294967295 AND mode = 'ShareLock' AND granted AND pid <> ${not}`)[0].c);
+    try {
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const waiting = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      let before = 0;
+      for (let i = 0; i < 50 && before === 0; i++) { await Bun.sleep(50); before = await marks(); }
+      const [row] = (await admin`SELECT pid AS old FROM pg_stat_activity WHERE application_name = ${SLOTS_APP}`) as { old: number }[];
+      const old = row?.old ?? 0;
+      await admin`SELECT pg_terminate_backend(${old})`;
+      let after = 0;
+      for (let i = 0; i < 50 && after === 0; i++) { await Bun.sleep(50); after = await marks(old); }
+      await other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
+      const ran = await waiting;
+      assert(before === 1 && after === 1 && ran === "ran" && !reSaid.some((l) => /was lost/.test(l)),
+        `a poller whose connection closes while it waits marks itself waiting again on the new session (${before}, then ${after}), and the slot it takes is not said lost (${ran}; ${JSON.stringify(reSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
+    }
+  }
+  /**
+   * A proxy in front of the test Postgres: `pass`; `stall`, every byte dropped, as a paused container or a frozen host
+   * does; `close`, the next connection to send a byte closed, as a Postgres restart ends a session mid-statement;
+   * `closeSecond`, each connection closed at its first write after the server's third ReadyForQuery — the session up,
+   * and its first statement answered whether Bun sends it in one sync or two — so every session answers once and then
+   * ends. `opened` counts the connections made through it.
+   */
+  const pgProxy = () => {
+    const pg = new URL(URL_!);
+    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[]; ready: number };
+    const state = { mode: "pass" as "pass" | "stall" | "close" | "closeSecond", opened: 0 };
+    // ReadyForQuery messages in a chunk from the server: 'Z', length 5.
+    const readies = (d: Uint8Array) => { let n = 0; for (let i = 0; i + 4 < d.length; i++) if (d[i] === 0x5a && d[i + 1] === 0 && d[i + 2] === 0 && d[i + 3] === 0 && d[i + 4] === 5) n++; return n; };
+    const listener = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
+      open(c) {
+        state.opened++;
+        c.data = { buf: [], ready: 0 };
+        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) { if (state.mode === "stall") return; c.data.ready += readies(d); c.write(d); }, close() { c.end(); }, error() { c.end(); } } })
+          .then((up) => { c.data.up = up; for (const b of c.data.buf) up.write(b); c.data.buf = []; }, () => c.end());
+      },
+      data(c, d) {
+        if (state.mode === "stall") return;
+        if (state.mode === "close") { state.mode = "pass"; c.end(); return; }
+        if (state.mode === "closeSecond" && c.data.ready >= 3) { c.end(); return; }
+        if (c.data.up) c.data.up.write(d); else c.data.buf.push(new Uint8Array(d));
+      },
+      close(c) { c.data.up?.end(); },
+    } });
+    const via = new URL(URL_!);
+    via.hostname = "127.0.0.1";
+    via.port = String(listener.port);
+    return { url: via.toString(), stop: (closeActive?: boolean) => listener.stop(closeActive), get mode() { return state.mode; }, set mode(m) { state.mode = m; }, get opened() { return state.opened; } };
+  };
+  // A session the database ends mid-statement after it has answered — a restart, a terminate — is asked again on a
+  // fresh one, not read as an outage: the queue behind it is not let through without slots (review pass 3: one
+  // terminate ran a five-call backlog at once under chat=1).
+  {
+    const proxy = pgProxy();
+    const closeSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => closeSaid.push(l), connectS: 1 });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    try {
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      let inFlight = 0, most = 0;
+      const one = () => modelCall(call(), async () => { inFlight++; most = Math.max(most, inFlight); await Bun.sleep(100); inFlight--; return "ran"; })
+        .then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const calls = [one(), one(), one()];
+      let marked = 0;
+      for (let i = 0; i < 50 && marked === 0; i++) {
+        await Bun.sleep(50);
+        marked = await waitingLocks(admin);
+      }
+      proxy.mode = "close";
+      // Read through a function: the setter's value would otherwise narrow the reads after it.
+      const modeNow = (): string => proxy.mode;
+      for (let i = 0; i < 100 && modeNow() === "close"; i++) await Bun.sleep(20);
+      const closed = modeNow() === "pass";
+      await Bun.sleep(700);
+      await other`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
+      const ran = await Promise.all(calls);
+      assert(marked === 1 && closed && ran.every((r) => r === "ran") && most === 1 && !closeSaid.some((l) => /did not answer/.test(l)),
+        `a poller's session closed mid-statement is asked again on a fresh one: the three calls ran one at a time (${most} at most), nothing said down (${JSON.stringify(closeSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
+      proxy.stop(true);
+    }
+  }
+  // A database that stops answering after the slot is taken — a proxy in front of Postgres dropping every byte, as a
+  // paused container or a frozen host does: the unlock gives up at the bound, the call's answer kept, said as lost; the
+  // next call fails open at the bound rather than waiting with no end (review pass 2: both waited past every stop).
+  {
+    const proxy = pgProxy();
+    const stallSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 1 });
+    // Cut at 6 s, so a wait with no bound fails the row rather than hanging the suite.
+    const cut = setTimeout(() => proxy.stop(true), 6000);
+    try {
+      let endedAt = 0;
+      const answer = await modelCall(call(), async () => { proxy.mode = "stall"; await Bun.sleep(100); endedAt = Date.now(); return "answer"; });
+      const heldMs = Date.now() - endedAt;
+      const t1 = Date.now();
+      const next = await modelCall(call(), async () => "next").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      const nextMs = Date.now() - t1;
+      assert(answer === "answer" && heldMs < 1800 && stallSaid.some((l) => /connection was lost while its call ran \(no answer in 1 s\)/.test(l)) && next === "next" && nextMs < 2500 && stallSaid.some((l) => /did not answer/.test(l)),
+        `a database that stops answering while a slot is held: the unlock gives up at the bound (the answer back ${heldMs} ms after the call ended), said as lost; the next call fails open in ${nextMs} ms (${JSON.stringify(stallSaid.map((l) => l.slice(0, 90)))})`);
+    } finally {
+      clearTimeout(cut);
+      await inst.uninstall();
+      proxy.stop(true);
+    }
+  }
+  // Calls back to back reuse the connection the one before let go, not one each (review pass 5: a fast re-embed took
+  // twice as long, a backend started per call).
+  {
+    const proxy = pgProxy();
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: () => {}, connectS: 1 });
+    try {
+      for (let i = 0; i < 5; i++) await modelCall(call(), async () => undefined);
+      assert(proxy.opened === 1, `five background calls back to back open one connection between them (${proxy.opened})`);
+    } finally {
+      await inst.uninstall();
+      proxy.stop(true);
+    }
+  }
+  // A database that ends each session after it has answered once — a restart loop, an operator's terminates — is asked
+  // again a poll later, not in a loop: the connections opened stay near one a poll (review pass 5: asked again at
+  // once, with no cap).
+  {
+    const proxy = pgProxy();
+    const loopSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => loopSaid.push(l), connectS: 1 });
+    const other = new SQL({ url: URL_, max: 1 });
+    try {
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      proxy.mode = "closeSecond";
+      const stopper = new AbortController();
+      const waiting = modelCall({ ...call(), signal: stopper.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      await Bun.sleep(1500);
+      const opened = proxy.opened;
+      stopper.abort(new Error("the case ended"));
+      // A stop the call does not honour would loop for ever: 3 s on, the proxy passes and the slot is let go, so the
+      // row fails instead of hanging the suite.
+      const cut = setTimeout(() => { proxy.mode = "pass"; other`SELECT pg_advisory_unlock_all()`.then(() => {}, () => {}); }, 3000);
+      const ended = await waiting;
+      clearTimeout(cut);
+      assert(ended === "rejected: the case ended" && opened >= 2 && opened <= 10 && !loopSaid.some((l) => /did not answer/.test(l)),
+        `a database ending each session after it answers once is asked again a poll later, not in a loop: ${opened} connections in 1.5 s, the call waiting on, not failed open (${ended}; ${JSON.stringify(loopSaid.map((l) => l.slice(0, 70)))})`);
+    } finally {
+      await inst.uninstall();
+      await other.close();
+      proxy.stop(true);
+    }
+  }
+  // A database that stops answering a poller that has answered fails it open at the bound, not asked again on a fresh
+  // session: a statement unanswered is no session ended (review pass 3).
+  {
+    const proxy = pgProxy();
+    const pollSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => pollSaid.push(l), connectS: 1 });
+    const other = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    const cut = setTimeout(() => proxy.stop(true), 8000);
+    try {
+      await other`SELECT pg_try_advisory_lock(hashtext(${key}), 0)`;
+      const polling = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      let marked = 0;
+      for (let i = 0; i < 50 && marked === 0; i++) {
+        await Bun.sleep(50);
+        marked = await waitingLocks(admin);
+      }
+      const openedBefore = proxy.opened;
+      proxy.mode = "stall";
+      const ran = await polling;
+      assert(marked === 1 && ran === "ran" && proxy.opened === openedBefore && pollSaid.some((l) => /did not answer \(no answer in 1 s\)/.test(l)),
+        `a poller its database stops answering fails open at the bound, no fresh session tried (${proxy.opened - openedBefore} opened; ${ran}; ${JSON.stringify(pollSaid.map((l) => l.slice(0, 80)))})`);
+    } finally {
+      clearTimeout(cut);
+      await inst.uninstall();
+      await other.close();
+      await admin.close();
+      proxy.stop(true);
+    }
+  }
+  // A stop while a call's connect hangs — a database that takes the connection and never answers — ends the
+  // wait at once, as a stop; and a URL Bun refuses as it builds the client fails open rather than rejecting the call.
+  {
+    const stall = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open() {}, data() {} } });
+    const stallSaid: string[] = [];
+    // One hook at a time: an install replaces the hook before it.
+    const inst = installBackgroundSlots({ url: `postgres://postgres:x@127.0.0.1:${stall.port}/none`, raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 5 });
+    let stopped = "", stopMs = 0, built = "";
+    try {
+      const stopper = new AbortController();
+      const t0 = Date.now();
+      setTimeout(() => stopper.abort(new Error("the pass stopped")), 100);
+      stopped = await modelCall({ ...call(), signal: stopper.signal }, async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      stopMs = Date.now() - t0;
+    } finally {
+      await inst.uninstall();
+      stall.stop(true);
+    }
+    const badUrl = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:99999/none", raw: "chat=1", log: () => {} });
+    try {
+      built = await modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    } finally {
+      await badUrl.uninstall();
+    }
+    assert(stopped === "rejected: the pass stopped" && stopMs < 1000 && !stallSaid.some((l) => /did not answer/.test(l)) && built === "ran",
+      `a stop during a connect that hangs ends the wait in ${stopMs} ms, as a stop (${stopped}); a URL Bun refuses as it builds the client fails open (${built})`);
+  }
+  // Fail open: a semaphore whose database does not answer — here a port that takes each connection and closes it,
+  // counting them — lets the call run without a slot, said once, within its connection's bound; then not asked
+  // again for 30 s, the call queued behind the one that found it down included. Each failed open once tries the
+  // same number of connections: the pair's tries are one call's.
+  let tries = 0;
+  const closer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(sock) { tries++; sock.end(); }, data() {} } });
+  const openSaid: string[] = [];
+  const deadUrl = `postgres://postgres:x@127.0.0.1:${closer.port}/none`;
+  const lone = installBackgroundSlots({ url: deadUrl, raw: "chat=1", log: () => {}, connectS: 1 });
+  await modelCall(call(), async () => "alone").catch(() => "rejected").finally(() => lone.uninstall());
+  const triesOne = tries;
+  tries = 0;
+  const dead = installBackgroundSlots({ url: deadUrl, raw: "chat=1", log: (l) => openSaid.push(l), connectS: 1 });
+  try {
+    const tOpen = Date.now();
+    const ran = await Promise.all([modelCall(call(), async () => "a"), modelCall(call(), async () => "b")]).then((r) => r.join(), (e: unknown) => `rejected: ${(e as Error).message}`);
+    const triesFirst = tries;
+    const openMs = Date.now() - tOpen;
+    const again = await modelCall(call(), async () => "c").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+    assert(ran === "a,b" && again === "c" && openSaid.filter((l) => /did not answer/.test(l)).length === 1 && triesOne >= 1 && triesFirst === triesOne && tries === triesFirst && openMs < 2500,
+      `a semaphore whose database does not answer fails open: the calls run within the connection's bound (${openMs} ms), said once, and the database is not asked again meanwhile, the queued call included (${triesOne} connection tries alone, ${triesFirst} for a pair, ${tries} after a later call; ${JSON.stringify(openSaid)})`);
+  } finally {
+    await dead.uninstall();
+    closer.stop(true);
+  }
+  await watch.close();
+  // A pass's first stop aborts a call in hand waiting on the hook, and one that starts to after it, the thought to go
+  // back as that stop; a call idle on the gate or running inside idleWhile — the decider's — is left to finish
+  // (review passes 5 and 6).
+  {
+    const ih = inHandCalls(() => false);
+    const running = ih.begin("w1"), onHook = ih.begin("w2");
+    running.waiting = true;
+    waitsFor(() => ih.get("w2")).waiting();
+    const swept = ih.abortWaiting();
+    const later = ih.begin("w3");
+    const laterWaits = waitsFor(() => ih.get("w3"));
+    const afterRun = ih.begin("w4");
+    afterRun.noWait = false;
+    const ranWaits = waitsFor(() => ih.get("w4"));
+    ranWaits.waiting();
+    ranWaits.running();
+    laterWaits.waiting();
+    assert(swept === 1 && !running.aborted && onHook.aborted && onHook.abort.signal.reason instanceof StoppedWaiting && later.aborted && later.abort.signal.reason instanceof StoppedWaiting && afterRun.slotWait === false,
+      `a first stop aborts the call waiting on the hook (${swept} swept), not the one idle around a running call, and a call that starts to wait after it; a call's slot wait ends when it runs`);
+  }
+  // A wait on the hook begun before idleWhile — its argument evaluated first, the decider's call queued — ends inside
+  // it with the entry still idle: no call N12 aborts (review pass 7: running() set it running again).
+  {
+    const ih = inHandCalls(() => false);
+    const c = ih.begin("w");
+    c.since = Date.now() - 10_000;
+    const obs = waitsFor(() => ih.get("w"));
+    obs.waiting();
+    let inside = { waiting: false, aborted: -1 };
+    const pending = new Promise<void>((resolve) => setTimeout(resolve, 50));
+    const idling = idleWhile(c, pending.then(() => { obs.running(); inside = { waiting: c.waiting, aborted: ih.abortInHand(0) }; }));
+    await idling;
+    assert(inside.waiting && inside.aborted === 0 && !c.waiting && !c.idle,
+      `a wait begun before idleWhile ends inside it with the entry idle, N12 aborting nothing (${JSON.stringify(inside)}), and idle once it returns`);
+  }
+  // The pair's bound pauses while its calls wait: 600 ms, paused from about 400 to 900, fires about 200 ms after the
+  // resume. Bounded tight on its early side, with room on its late one for a loaded runner's timer (review pass 4):
+  // resumed in full it would fire 400 ms late, never paused 500 ms early.
+  const d = pausableTimeout(600);
+  const tFire = Date.now();
+  let pausedAt = 0, resumedAt = 0;
+  setTimeout(() => { pausedAt = Date.now() - tFire; d.waits.waiting(); }, 400);
+  setTimeout(() => { resumedAt = Date.now() - tFire; d.waits.running(); }, 900);
+  await new Promise<void>((resolve) => d.signal.addEventListener("abort", () => resolve(), { once: true }));
+  const firedAt = Date.now() - tFire;
+  d.dispose();
+  const expected = resumedAt + (600 - pausedAt);
+  assert(firedAt >= expected - 20 && firedAt < expected + 250 && (d.signal.reason as Error).name === "TimeoutError",
+    `a pausable deadline stops while its calls wait and goes on with what was left: paused at ${pausedAt}, resumed at ${resumedAt}, fired at ${firedAt} ms (expected ${expected}), a TimeoutError`);
+}
+
+console.log("\n[13] A redirect is never followed: each call that sends brain text refuses a 3xx where it lands, each probe reads it as refused, and the origin it points at receives nothing (SMD-2908)");
+{
+  const { resolveEmbedConfig, createEmbedder, providerCall, providerEndpoint, ProviderError, providerDown, refuseRedirect } = await import("./embed.ts");
+  const { linearClient } = await import("../db/linear-api.ts");
+  const { judgePair } = await import("./consolidate.ts");
+  const { extractEntities } = await import("./entities.ts");
+  const { resolveJevConfig, jevInfo } = await import("./jev.ts");
+  const { probeChat, probeTier, modelListed, classifyError } = await import("../db/worker-bootstrap.ts");
+  const { deliverTelegram } = await import("../db/weekly-digest.ts");
+  // The far origin: anything that reaches it went past the gate's judgement of the base.
+  const farSeen: string[] = [];
+  const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farSeen.push(`${req.method} ${new URL(req.url).pathname} ${await req.text()}`); return Response.json({ data: [], choices: [] }); } });
+  // The base the gate judged: a stand-in declared local that redirects every request to the same path at the far origin.
+  let status = 307;
+  /** Set, a relative Location the stand-in answers instead (review pass 2: it must resolve against the URL that answered). */
+  let relative = "";
+  /** Set, the stand-in answers its 3xx with no Location at all. */
+  let noLocation = false;
+  // Its body repeats the target whole, as Express's default does ("Found. Redirecting to …"): a message that prints the
+  // body undoes the target's masking (review pass 3).
+  const near = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => {
+    const location = relative || `http://127.0.0.1:${far.port}${new URL(req.url).pathname}`;
+    return new Response(`Found. Redirecting to ${location}`, { status, headers: noLocation ? {} : { location } });
+  } });
+  const NEAR = `http://127.0.0.1:${near.port}/v1`;
+  const FAR = `127.0.0.1:${far.port}`;
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: NEAR, OB1_METADATA_MODEL: META_MODEL, OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM) });
+    const failure = (p: Promise<unknown>) => p.then(() => "answered", (e: unknown) => e);
+    const asRedirect = (e: unknown, s: number) => e instanceof ProviderError && e.kind === "http" && e.status === s && /never followed/.test(e.message) && e.message.includes(FAR);
+    // Every 3xx a provider might send, through providerCall: the embedder's and a chat call's.
+    for (const s of [301, 302, 303, 307, 308]) {
+      status = s;
+      const emb = await failure(createEmbedder(() => cfg).getEmbedding("private text", { kind: "re-embed" }));
+      const chat = await failure(providerCall(cfg, "/chat/completions", { model: META_MODEL, messages: [{ role: "user", content: "private text" }] }, { kind: "capture" }));
+      assert(asRedirect(emb, s) && asRedirect(chat, s), `a ${s}: providerCall's embedding and chat calls each fail as a redirect never followed, naming where it pointed (${String(emb)}; ${String(chat)})`);
+    }
+    status = 307;
+    const judged = await failure(judgePair({ content: "private older", createdAt: null }, { content: "private newer", createdAt: null }, cfg));
+    const extracted = await failure(extractEntities("Ada works on private text.", cfg, undefined, { kind: "extraction" }));
+    assert(asRedirect(judged, 307) && asRedirect(extracted, 307), `the judge and extraction fail as a redirect never followed (${String(judged)}; ${String(extracted)})`);
+    // A refused redirect is no outage, and a worker stops its pass on it: every call to that base would meet it.
+    assert(providerDown(judged) === null && classifyError(judged) === "fatal" && classifyError(extracted, { maxTokensFatal: true }) === "fatal",
+      `a redirect is no outage (providerDown null) and fatal to a worker's pass (${JSON.stringify(providerDown(judged))}, ${classifyError(judged)})`);
+    // The probes: a worker's chat probe reads a redirect as refused, never up; the model list as unknown.
+    const probe = await probeChat({ base: NEAR, headers: {} }, META_MODEL, 5000);
+    const listed = await modelListed({ base: NEAR, headers: {} }, META_MODEL, META_MODEL, 5000);
+    assert(probe.state === "refused" && "why" in probe && /never followed/.test(probe.why) && listed === "unknown",
+      `a worker's probe reads a redirect as refused, not up, and the model list as unknown (${JSON.stringify(probe)}; ${listed})`);
+    // The decide tier's client already refused one (jev.ts); its probe now reads that as refused, not an outage waited out.
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${near.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
+    const tierInfo = await failure(jevInfo(jev));
+    const tier = await probeTier(jev, "stub-decider", 5000);
+    assert((tierInfo as { status?: number }).status === 307 && tier.state === "refused", `the decide tier's client fails on a redirect and its probe reads it as refused (${String(tierInfo)}; ${JSON.stringify(tier)})`);
+    // Its message masks the target's query, and leaves out the body that repeats it (review pass 3).
+    relative = "http://evil.example/x?key=private-query-key";
+    const tierHostile = await failure(jevInfo(jev));
+    relative = "";
+    const tierMsg = tierHostile instanceof Error ? tierHostile.message : String(tierHostile);
+    assert(tierMsg.includes("redirecting to http://evil.example/x?…") && !tierMsg.includes("private-query-key") && (tierHostile as { body?: string }).body === "",
+      `the decide tier's message masks a target's query and prints no body that repeats it (${tierMsg})`);
+    // The digest's Telegram post: refused, not retried, and the bot token in the redirect's target never printed.
+    const token = "123456:private-bot-token";
+    const tg = await failure(deliverTelegram(providerEndpoint(NEAR, undefined, true), token, "42", "the digest's private text"));
+    const tgMsg = tg instanceof Error ? tg.message : String(tg);
+    // Its target is named by host alone: a path that echoes the token can spell it any way a server likes (review pass 2).
+    assert(tg instanceof ProviderError && tg.status === 307 && /never followed/.test(tgMsg) && tgMsg.includes(`redirecting to http://${FAR}/…:`) && !/private-bot-token|bot123456/.test(tgMsg) && !/sendMessage/.test(tgMsg.split("redirecting to")[1] ?? ""),
+      `the digest's Telegram post fails as a redirect, naming only the target's host, never the token in its path (${tgMsg})`);
+    // A relative target is resolved against the URL that answered, as fetch would, not the base: the base's last
+    // segment is kept (review pass 2: against the base, `embeddings-v2` read as http://host/embeddings-v2).
+    relative = "embeddings-v2";
+    const rel = await failure(createEmbedder(() => cfg).getEmbedding("private text", { kind: "re-embed" }));
+    relative = "";
+    const relMsg = rel instanceof Error ? rel.message : String(rel);
+    assert(relMsg.includes(`redirecting to ${NEAR}/embeddings-v2:`), `a relative target resolves against the URL that answered (${relMsg})`);
+    // The Linear client, which board-findings posts brain rows through under the gate: refused, its key sent nowhere else.
+    const gql = linearClient("lin_api_private", fetch, { url: `${NEAR}/graphql`, timeoutMs: 5000 });
+    const lin = await failure(gql("query { viewer { id } }"));
+    const linMsg = lin instanceof Error ? lin.message : String(lin);
+    assert((lin as { status?: number }).status === 307 && /never followed/.test(linMsg) && linMsg.includes(FAR) && !linMsg.includes("lin_api_private"),
+      `the Linear client fails on a redirect, naming the target's host and not its key (${linMsg})`);
+    // A 3xx with no Location names no target, not Linear's own host (review pass 3).
+    noLocation = true;
+    const linBare = await failure(gql("query { viewer { id } }"));
+    noLocation = false;
+    const linBareMsg = linBare instanceof Error ? linBare.message : String(linBare);
+    assert((linBare as { status?: number }).status === 307 && !linBareMsg.includes("redirecting to") && /never followed/.test(linBareMsg),
+      `a Linear 3xx with no Location names no target (${linBareMsg})`);
+    assert(farSeen.length === 0, `the far origin received nothing from any of them (${JSON.stringify(farSeen).slice(0, 300)})`);
+    // How a target prints: a protocol-relative one's userinfo masked, a query's key not printed, a long one capped.
+    const hostile = refuseRedirect("Embeddings", NEAR, new Response(null, { status: 302, headers: { location: `//user:pass@evil.example/v1/x?key=private-query-key&pad=${"a".repeat(5000)}` } }));
+    const hostileMsg = hostile?.message ?? "";
+    assert(hostile !== null && hostileMsg.includes("http://***@evil.example/v1/x?…") && !/user|pass|private-query-key/.test(hostileMsg) && hostileMsg.length < 600,
+      `a protocol-relative target's userinfo and a query's key are not printed, and the target is capped (${hostileMsg.length} chars: ${hostileMsg.slice(0, 200)})`);
+    const long = refuseRedirect("Embeddings", NEAR, new Response(null, { status: 307, headers: { location: `http://far.example/${"b".repeat(5000)}` } }));
+    assert(long !== null && long.message.length < 600 && long.message.includes("…"), `a 5,000-character target prints capped (${long?.message.length} chars)`);
+  } finally {
+    near.stop(true);
+    far.stop(true);
+  }
+  // A guard over the files, as [11]'s: every fetch call (fetch, globalThis.fetch, Bun.fetch, an injected fetchImpl) in
+  // the servers', the REST core's, db/'s, the MCP server's and the plugins' files passes redirect: "manual" or "error"
+  // in its options, so a dialler added later cannot follow one by leaving it out — whatever its URL says, since the
+  // digest's builds its URL a line before (a guard keyed on a model path in the call missed it). Read by the
+  // TypeScript parser (review pass 2: a scanner of its own read a comment's or a string's `redirect: "manual"` as the
+  // option, a spread after it as nothing, and skipped a call after a regex literal's quote). `fetch` named but not
+  // called — passed, assigned, a default — is counted too, so an alias cannot dial unread. Each call or alias that
+  // dials no brain text is named with why.
+  const ts = (await import("typescript")).default;
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const here = dirname(fileURLToPath(import.meta.url));
+  /** A directory's .ts files, its subdirectories' too when `deep`, node_modules and the test files left out. */
+  const tsIn = (d: string, deep: boolean): string[] => readdirSync(d).flatMap((f) => {
+    const p = join(d, f);
+    if (f === "node_modules") return [];
+    if (statSync(p).isDirectory()) return deep ? tsIn(p, true) : [];
+    return p.endsWith(".ts") && !/\/test-[^/]*\.ts$/.test(p) ? [p] : [];
+  });
+  const files = [...[here, join(here, "core"), join(here, "rest"), join(here, "../db"), join(here, "../mcp-server")].flatMap((d) => tsIn(d, false)), ...tsIn(join(here, "../plugins"), true)];
+  type Node = import("typescript").Node;
+  type Expression = import("typescript").Expression;
+  /** The receivers whose `.fetch` is the runtime's own: read off one, uncalled, it is an alias. */
+  const GLOBAL_FETCH = new Set(["globalThis", "Bun", "self", "window"]);
+  /** fetch, fetchImpl, or any x.fetch / x["fetch"]: an injected `opts.fetch(...)` is checked as fetch is (review pass 3). */
+  const isFetch = (e: Expression): boolean =>
+    (ts.isIdentifier(e) && (e.text === "fetch" || e.text === "fetchImpl"))
+    || (ts.isPropertyAccessExpression(e) && e.name.text === "fetch")
+    || (ts.isElementAccessExpression(e) && ts.isStringLiteral(e.argumentExpression) && e.argumentExpression.text === "fetch");
+  /** The runtime's fetch read off its global, as globalThis.fetch or Bun["fetch"]. */
+  const isGlobalFetch = (n: Node): boolean =>
+    (ts.isPropertyAccessExpression(n) && n.name.text === "fetch" && ts.isIdentifier(n.expression) && GLOBAL_FETCH.has(n.expression.text))
+    || (ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression) && n.argumentExpression.text === "fetch" && ts.isIdentifier(n.expression) && GLOBAL_FETCH.has(n.expression.text));
+  /** Whether a call's options say redirect "manual" or "error", with no spread after it that could say otherwise. */
+  const refuses = (init: Expression | undefined): boolean => {
+    if (!init || !ts.isObjectLiteralExpression(init)) return false;
+    let ok = false;
+    for (const p of init.properties) {
+      if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && p.name.text === "redirect") ok = ts.isStringLiteral(p.initializer) && (p.initializer.text === "manual" || p.initializer.text === "error");
+      else if (ts.isShorthandPropertyAssignment(p) && p.name.text === "redirect") ok = false;
+      else if (ts.isSpreadAssignment(p)) ok = false;
+    }
+    return ok;
+  };
+  /** A source's fetch calls, guarded or not by line, and `fetch` named but not called (an alias, a default, an argument) by line. */
+  const scan = (src: string): { guarded: number; unguarded: number[]; aliases: number[] } => {
+    const sf = ts.createSourceFile("scanned.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const out = { guarded: 0, unguarded: [] as number[], aliases: [] as number[] };
+    const line = (n: Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+    const visit = (n: Node): void => {
+      if (ts.isCallExpression(n) && isFetch(n.expression)) {
+        if (refuses(n.arguments[1])) out.guarded++;
+        else out.unguarded.push(line(n));
+      } else if (isGlobalFetch(n) && !(ts.isCallExpression(n.parent) && n.parent.expression === n)) {
+        // globalThis.fetch read but not called: assigned, passed, a default (review pass 3).
+        out.aliases.push(line(n));
+      } else if (ts.isIdentifier(n) && n.text === "fetch") {
+        const p = n.parent;
+        // Not an alias: the callee itself, a member's name (x.fetch, read above when its receiver is the runtime's), a
+        // property's or method's name, a type (typeof fetch), a declaration's own name. Shorthand `{ fetch }` is one.
+        const named = (ts.isCallExpression(p) && p.expression === n) || (ts.isPropertyAccessExpression(p) && p.name === n)
+          || ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isMethodSignature(p) || ts.isPropertySignature(p)) && p.name === n)
+          || ts.isTypeQueryNode(p) || ts.isQualifiedName(p) || ((ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p) || ts.isParameter(p)) && p.name === n);
+        if (!named) out.aliases.push(line(n));
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+  };
+  // The scanner's own teeth, on the shapes two cold reads found a scanner of its own passing (review passes 1 and 2).
+  const fixtures: [string, string, { unguarded: number; aliases?: number }][] = [
+    ["a redirect that follows", 'await fetch(u, { method: "POST", redirect: "follow" });', { unguarded: 1 }],
+    ["a regex literal's paren and quote, then a call", 'const re = /"\\(/; await fetch(u, { method: "POST" });\nawait fetch(x, { redirect: "manual" });', { unguarded: 1 }],
+    ["a URL's // in a string before the call", 'const u = "http://h"; await fetch(u, { method: "POST" });', { unguarded: 1 }],
+    ["an injected fetchImpl", 'const r = await fetchImpl(url, { method: "POST" });', { unguarded: 1 }],
+    ["globalThis.fetch and Bun.fetch", 'await globalThis.fetch(u, { method: "POST" }); await Bun.fetch(u, { method: "POST" });', { unguarded: 2 }],
+    ["the option in a comment", 'await fetch(u, { method: "POST", // redirect: "manual"\n body });', { unguarded: 1 }],
+    ["the option in a string", "await fetch(u, { body: JSON.stringify({ x: 'redirect: \"manual\"' }) });", { unguarded: 1 }],
+    ["a spread after the option", 'await fetch(u, { redirect: "manual", ...opts });', { unguarded: 1 }],
+    ["an alias", "const f = fetch; await f(u, {});", { unguarded: 0, aliases: 1 }],
+    ["a guarded call, a comment's apostrophe inside, a spread before", 'await fetch(u, {\n  ...base,\n  // the caller\'s deadline\n  redirect: "manual",\n});', { unguarded: 0, aliases: 0 }],
+    ["globalThis.fetch aliased, Bun.fetch a default", "const f = globalThis.fetch; function g(h = Bun.fetch) { return h; }", { unguarded: 0, aliases: 2 }],
+    ["an injected opts.fetch called, and globalThis[\"fetch\"]", 'await opts.fetch(u, { method: "POST" }); await globalThis["fetch"](u, { method: "POST" });', { unguarded: 2, aliases: 0 }],
+  ];
+  const teeth = fixtures.map(([what, src, want]) => { const s = scan(src); return { what, got: { unguarded: s.unguarded.length, aliases: s.aliases.length }, want }; });
+  assert(teeth.every((t) => t.got.unguarded === t.want.unguarded && (t.want.aliases === undefined || t.got.aliases === t.want.aliases)),
+    `the guard's scanner counts each shape a cold read found passing as unguarded or an alias, and a guarded call as guarded (${JSON.stringify(teeth.filter((t) => t.got.unguarded !== t.want.unguarded || (t.want.aliases !== undefined && t.got.aliases !== t.want.aliases)))})`);
+  /** Calls and aliases that dial no brain text, by repository path and kind, with the count there and why. */
+  const NOT_DIALLERS = new Map<string, { calls?: number; aliases?: number }>([
+    ["db/bench-live.ts", { calls: 1 }], // the benchmark's calls to the brain's own /mcp
+    ["server-portable/oauth-edge.ts", { calls: 1 }], // a pass-through: its caller passes redirect: "manual"
+    ["mcp-server/exchange.ts", { calls: 1 }], // globalThis.fetch(request): the Request it builds carries redirect: "manual"
+    ["db/linear-api.ts", { aliases: 1 }], // fetchImpl's default, whose every call is read above
+    ["db/board-findings.ts", { aliases: 2 }], // handed to linearClient as its fetchImpl, whose calls are read above
+    ["db/sync-linear.ts", { aliases: 4 }], // a local array named fetch (the identifiers to fetch), not the global
+    ["server-portable/api.ts", { calls: 1 }], // app.fetch: the REST core's own Hono app, in process
+    ["mcp-server/index.ts", { calls: 1 }], // app.fetch: the MCP server's own app, in process
+    ["mcp-server/stack.ts", { calls: 2 }], // restCore.fetch and app.fetch: the stack's servers, in process
+    ["server-portable/core/calls.ts", { calls: 1 }], // c.fetch: the core's fetch-a-thought operation, no HTTP
+  ]);
+  const root = join(here, "..");
+  const unread: string[] = [];
+  const allowed = new Map<string, { calls: number; aliases: number }>();
+  let guarded = 0;
+  for (const f of files) {
+    // By its whole repository path: two plugins' files of one name are two entries (review pass 3).
+    const name = f.slice(root.length + 1);
+    const found = scan(readFileSync(f, "utf8"));
+    guarded += found.guarded;
+    const known = NOT_DIALLERS.get(name);
+    if (known) allowed.set(name, { calls: found.unguarded.length, aliases: found.aliases.length });
+    else unread.push(...found.unguarded.map((l) => `${name}:${l}`), ...found.aliases.map((l) => `${name}:${l} (an alias)`));
+  }
+  const allowedRight = [...NOT_DIALLERS].every(([name, want]) => allowed.get(name)?.calls === (want.calls ?? 0) && allowed.get(name)?.aliases === (want.aliases ?? 0));
+  assert(unread.length === 0 && allowedRight && guarded >= 15,
+    `every fetch call passes redirect "manual" or "error", and none is aliased, those that dial no brain text aside (${guarded} do; ${unread.join(", ") || "none unread"}; allowed ${JSON.stringify([...allowed])})`);
+}
+
+console.log("\n[14] Model calls measured: every call's own time at the seam and its class on the provider's point, a span for the decide tier, a slot wait by how it ended, and each pass's tallies on its stamp, where no telemetry runs (SMD-3379 PR 2b-2a)");
+{
+  const { asLive, asPass, currentCallClass, modelCall, modelCallTallies } = await import("./model-call.ts");
+  const { currentTracing, useTracing, NO_SPAN } = await import("./spans.ts");
+  const { resolveEmbedConfig, providerCall } = await import("./embed.ts");
+  const { resolveJevConfig, jevInfo } = await import("./jev.ts");
+  const { installBackgroundSlots } = await import("./slots.ts");
+  const { passStamper, stampKey } = await import("../db/pass-stamp.ts");
+  const { parseHeartbeats, modelCallsWords } = await import("./brain-info.ts");
+  type Labels = Record<string, string | number | boolean | undefined>;
+  const points: { name: string; value: number; labels: Labels }[] = [];
+  const spans: { name: string; attributes: Labels }[] = [];
+  const before = currentTracing();
+  useTracing({
+    run: async (name, request, fn) => { spans.push({ name, attributes: { ...request.attributes } }); return fn(NO_SPAN); },
+    record: (name, _spec, value, labels) => { points.push({ name, value, labels: { ...labels } }); },
+  });
+  const pass = "measured";
+  const tally = () => modelCallTallies()[pass];
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: PROVIDER, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_METADATA_MODEL: META_MODEL });
+    const embBody = { model: EMB_MODEL, input: ["measured"] };
+    // A background embedding and a live one under one pass: each call's own time a point, labelled with its class,
+    // purpose and pass; the provider's point labelled with its class; the pass's tally counting both.
+    await asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" }));
+    await asLive(() => asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" })));
+    const seam = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.pass"] === pass);
+    const provider = spans.filter((sp) => sp.name === `embeddings ${EMB_MODEL}`);
+    const t1 = tally();
+    assert(seam.length === 2 && seam.map((p) => p.labels["ob1.call.class"]).join() === "background,live"
+        && seam.every((p) => p.labels["ob1.model.type"] === "embed" && p.labels["gen_ai.request.model"] === EMB_MODEL && p.labels["ob1.call.purpose"] === "capture" && p.labels["server.address"] === "127.0.0.1" && p.value >= 0 && p.labels["error.type"] === undefined)
+        && provider.slice(-2).map((sp) => sp.attributes["ob1.call.class"]).join() === "background,live"
+        && t1?.calls.background === 1 && t1.calls.live === 1 && t1.callMs >= 0,
+      `each call's own time is a point at the seam labelled with its class, purpose and pass, the provider's span carries the class, and the pass's tally counts both (${JSON.stringify({ seam: seam.map((p) => p.labels["ob1.call.class"]), tally: t1 })})`);
+    // A call that names its class, unlike its context's, runs under it: its provider span reads the class its point has
+    // (review pass 1).
+    const named = await asPass(pass, () => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "named", cls: "live" }, async () => currentCallClass()));
+    const namedPoint = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "named").at(-1);
+    assert(named === "live" && namedPoint?.labels["ob1.call.class"] === "live",
+      `a call naming its class runs under it, the provider's span and the seam's point one class (${named}, ${namedPoint?.labels["ob1.call.class"]})`);
+    // The decide tier's exchange under a client span of its own, `decide <model>`.
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
+    await asPass(pass, () => jevInfo(jev));
+    const decide = spans.find((sp) => sp.name === "decide stub-decider");
+    const decidePoint = points.find((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.model.type"] === "decide" && p.labels["ob1.call.purpose"] === "info");
+    // Preflight's probe of the tier marked as one, as its embedding and chat probes are: the provider alert leaves it out.
+    await jevInfo(jev, { probe: "preflight" });
+    const probeSpan = spans.filter((sp) => sp.name === "decide stub-decider").at(-1);
+    assert(decide?.attributes["gen_ai.operation.name"] === "decide" && decide.attributes["ob1.call.class"] === "background" && decide.attributes["ob1.probe"] === undefined && decidePoint !== undefined
+        && probeSpan?.attributes["ob1.probe"] === "preflight",
+      `the decide tier's call runs under a client span of its own, a probe's marked as one, and its time is a point at the seam (${JSON.stringify(decide?.attributes)})`);
+    // A call that throws: its point names how it failed, and it is counted, as a failure too.
+    const callsBefore = tally()!.calls.background;
+    const failuresBefore = tally()!.failed;
+    await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw new TypeError("measured to fail"); })).catch(() => undefined);
+    const failed = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1);
+    // An overload, a timeout and a body are told apart, in the provider point's words (review pass 1).
+    const failWith = async (e: unknown) => {
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw e; })).catch(() => undefined);
+      return points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1)?.labels["error.type"];
+    };
+    const { ProviderError } = await import("./embed.ts");
+    const kinds = [
+      await failWith(new ProviderError("overloaded", "http", 503)),
+      await failWith(new ProviderError("too slow", "timeout")),
+      // A body that is no JSON carries its 2xx, as embed.ts's and jev.ts's do (review pass 2: it read `_OTHER`).
+      await failWith(new ProviderError("no JSON", "body", 200)),
+      await failWith(new ProviderError("an http error with no status", "http")),
+      await failWith(new ProviderError("refused by the gate", "egress")),
+      await failWith(Object.assign(new Error("the judge's call answered 429"), { status: 429 })),
+      await failWith(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })),
+      // Another throw's `kind` is no label: its name is (review pass 2).
+      await failWith(Object.assign(new RangeError("a kind of its own"), { kind: "some_arbitrary_kind" })),
+    ];
+    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === callsBefore + 9 && tally()!.failed === failuresBefore + 9 && kinds.join() === "503,timeout,invalid_body,http,egress,429,ECONNREFUSED,RangeError",
+      `a call that throws is a point naming how it failed — a status, a timeout, a body, the runtime's code, else the throw's name — and counted a failure (${JSON.stringify(kinds)})`);
+    // Waits for a slot, by how each ended: held — the second of two under chat=1 waiting for the first — then stopped,
+    // then run without one where the semaphore's database does not answer.
+    const held = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+    try {
+      const work = () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, () => Bun.sleep(150));
+      await asPass(pass, () => Promise.all([work(), work()]));
+      const stop = new AbortController();
+      stop.abort(new Error("stopped before it waited"));
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test", signal: stop.signal }, async () => "ran")).catch(() => undefined);
+    } finally {
+      await held.uninstall();
+    }
+    const dead = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:1/none", raw: "chat=1", log: () => {}, connectS: 1 });
+    try {
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => "ran"));
+    } finally {
+      await dead.uninstall();
+    }
+    const waits = points.filter((p) => p.name === "ob1.model.slot.wait.duration" && p.labels["ob1.pass"] === pass);
+    const ends = waits.map((p) => p.labels["ob1.slot.outcome"]);
+    const w = tally()!.slotWaits;
+    const longest = Math.max(...waits.filter((p) => p.labels["ob1.slot.outcome"] === "held").map((p) => p.value));
+    assert(ends.filter((e) => e === "held").length === 2 && ends.includes("stopped") && ends.includes("open")
+        && waits.every((p) => p.labels["ob1.model.type"] === "chat" && p.labels["gen_ai.request.model"] === META_MODEL)
+        && longest >= 0.1 && w.held === 2 && w.stopped === 1 && w.open === 1 && w.waited === 1 && w.maxMs >= 100 && w.totalMs >= w.maxMs
+        && waits.filter((p) => p.labels["ob1.slot.waited"] === true).length === 1,
+      `an ask for a slot is a point by how it ended — two held, the second waiting ${Math.round(longest * 1000)} ms, one stopped, one run without a slot — only the one that waited marked so, and the pass's tally counts each (${JSON.stringify(w)})`);
+    // The pass stamp carries the process's tallies; brain_info reads them back and says them.
+    let written = "";
+    const fakeSql = ((_strings: TemplateStringsArray, ...values: unknown[]) => { written = String(values[1]); return Promise.resolve([]); }) as unknown as import("bun").SQL;
+    const stamper = passStamper({ sql: fakeSql, worker: "extract", job: "extract:measured", intervalS: 60 });
+    await stamper.stamp("ok");
+    const stamped = JSON.parse(written) as { models?: Record<string, unknown> };
+    // The row as the database hands it back: its key, and its value as text.
+    const beats = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: written, at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    const words = modelCallsWords(beats.heartbeats) ?? "";
+    assert(JSON.stringify(stamped.models?.[pass]) === JSON.stringify(modelCallTallies()[pass]) && beats.heartbeats[0]?.models?.[pass]?.slotWaits.held === 2
+        && /extract:measured measured: \d+ background, 2 live call\(s\), [\d.]+ m?s each, \d+ failed — 4 asked for a slot, [\d.]+ m?s in all, the longest [\d.]+ m?s; 1 waited, 1 ran without one, 1 stopped/.test(words),
+      `the pass stamp carries the process's tallies, and brain_info reads them back and says them (${words.slice(Math.max(0, words.indexOf("extract:measured measured:")), 400)})`);
+    // A stamp whose tallies are not of the shape is left off whole.
+    const bad = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 0 }, failed: 0, callMs: -1, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    assert(bad.heartbeats[0] !== undefined && bad.heartbeats[0].models === undefined && modelCallsWords(bad.heartbeats) === null,
+      "a stamp whose tallies are not of the shape has them left off, the row read and nothing said of them");
+    // Nor figures one process cannot write: more waits than asks, a longest wait past all of them (review pass 2).
+    const forged = (slotWaits: Record<string, number>, failed = 0) => parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 1 }, failed, callMs: 5, slotWaits } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]).heartbeats[0]?.models;
+    const fine = { held: 2, open: 0, stopped: 0, waited: 1, totalMs: 10, maxMs: 9 };
+    assert(forged({ held: 1, open: 0, stopped: 0, waited: 2, totalMs: 9, maxMs: 9 }) === undefined && forged({ held: 2, open: 0, stopped: 0, waited: 1, totalMs: 9, maxMs: 10 }) === undefined
+        && forged(fine, 2) === undefined && forged(fine, 1)?.measured?.failed === 1
+        && forged(fine)?.measured?.slotWaits.waited === 1,
+      "tallies no process writes — more waits than asks, a longest wait past them all, more failures than calls — are left off; consistent ones read");
+    // The row's times on figures it is handed: under a second in whole milliseconds, else seconds to a tenth (review
+    // pass 1's "0.0 s"); the row above matches either unit, so a loaded runner's second does not fail it (review pass 2).
+    const wordsOf = (callMs: number, failed: number) => modelCallsWords(parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 2 }, failed, callMs, slotWaits: { held: 2, open: 0, stopped: 0, waited: 1, totalMs: 1500, maxMs: 999 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]).heartbeats) ?? "";
+    const knownWords = wordsOf(61, 0);
+    // 999.5 ms a call is "1.0 s", compared once rounded (review pass 3); the failures said beside the time (pass 3).
+    const roundedWords = wordsOf(1999, 1);
+    assert(knownWords === "since each worker started, as last stamped: extract:measured measured: 2 background call(s), 31 ms each — 2 asked for a slot, 1.5 s in all, the longest 999 ms; 1 waited"
+        && roundedWords.includes("2 background call(s), 1.0 s each, 1 failed — 2 asked"),
+      `the row says a time under a second in milliseconds, a longer one in seconds, and its failures (${knownWords} | ${roundedWords})`);
+  } finally {
+    useTracing(before);
+  }
 }
 
 server.stop();

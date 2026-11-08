@@ -482,9 +482,10 @@ import {
   UPDATE_THOUGHT_SIGNATURE_10,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
+import { createEmbedder, isRedirect, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
@@ -1787,15 +1788,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   /**
    * Whether a failure reads as the configuration's — a wrong width, no
    * embedding in the reply, a body that is not JSON, a model or a route the
-   * endpoint refuses (400–404) — rather than this row's or the moment's: a
+   * endpoint refuses (400–404), a redirect — rather than this row's or the moment's: a
    * timeout, a 408/429, a 5xx, a dropped connection and a database error are
    * all left to the row, since the probe's stand-in must not halt a run on a
    * rate limit (third review pass).
    */
   function configShaped(e: unknown): boolean {
     // 402 included (fifth review pass): a hosted provider out of credit answers
-    // it, and that is the account's state, not the row's.
-    if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 402, 403, 404].includes(e.status ?? 0));
+    // it, and that is the account's state, not the row's. A redirect too
+    // (SMD-2908): never followed, so the base redirects every row's call.
+    if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && ([400, 401, 402, 403, 404].includes(e.status ?? 0) || isRedirect(e.status ?? 0)));
     const msg = (e as Error).message ?? "";
     return /Embedding width mismatch|returned no embedding/.test(msg);
   }
@@ -1813,7 +1815,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   };
   if (!probeGate.allowed) {
-    out(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404) halts the run, anything else is the row's`);
+    out(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404, a redirect) halts the run, anything else is the row's`);
   } else {
     try {
       await embedder.getEmbedding("reembed.ts provider probe", probeSubject);
@@ -2038,6 +2040,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let abortedInHand = 0;
   /** Each worker's embedding call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   let beats = 0;
   /** Worker ids with leases possibly outstanding, for a forced exit. */
   const activeWorkers = new Set<string>();
@@ -2549,43 +2554,31 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   /**
    * After a pass a worker halted on the provider's outage: the row says so —
    * failed, then waiting mid-pass — and the follower probes until the provider
-   * answers, a stop ending the wait (extract-entities.ts's waitForProvider).
+   * answers, a stop ending the wait (waitOutProvider, whose rules are this
+   * wait's, SMD-2636 PR 2).
    */
   const waitForProvider = async (): Promise<void> => {
     if (!FOLLOW || outage.reason === null || stopping || configError !== null) return;
     await stamper?.stamp("failed");
-    const down = Date.now();
-    // The probe's schedule carried across outages that come back at once, nothing settled between: a rate
-    // limit the probe passes and no row gets past waits longer each time, to the cap (ProviderOutage's
-    // resumeFrom; review pass 2: every 5 s for as long as it lasted; pass 3: a limit some rows get past
-    // starts over; pass 4: a row recorded failed is settled too).
-    const from = outage.resumeFrom(done + failed, 60_000 + FOLLOW * 1000);
-    const schedule = outageWait(from) >= OUTAGE_MS.max
-      ? `every ${OUTAGE_MS.max / 60_000} min`
-      : `after ${outageWait(from) / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`;
-    err(`  the embedding provider is not answering (${outage.reason.slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)} ${schedule}${from > 0 ? " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)" : ""}`);
-    const waited = (async () => {
-      await stamper?.providerWait?.(true);
-      try {
-        const subject = probeGate.allowed ? probeSubject : outageSubject ?? probeSubject;
-        let step = from;
-        const probe = () => { step++; return embedProbe(onStop.signal, subject); };
-        const answered = await probeUntil(probe, onStop.signal, (p) => !isOut(p), sleepUnless, from);
-        if (answered !== null && answered.state === "refused") {
-          // Answered with a refusal — a key revoked while it was away: the request's, not the provider back (review pass 3).
-          configError = answered.why;
-          err(`  the embedding provider answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
-        } else if (answered !== null) {
-          outage.end(step, done + failed);
-          outageSubject = null;
-          pollNow = true;
-          out(`  the embedding provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-        }
-      } finally {
-        await stamper?.providerWait?.(false);
-      }
-    })();
-    await (stamper ? stamper.during(waited) : waited);
+    // The carry, the refusal and the poll at once are waitOutProvider's (SMD-2679 PR 4a-2b's rules): this wait counts
+    // thoughts finished or recorded failed, one call each.
+    const subject = probeGate.allowed ? probeSubject : outageSubject ?? probeSubject;
+    const waited = waitOutProvider({
+      who: "the embedding provider",
+      calls: `${embedConfig.embeddingModel} at ${shownBase(embedConfig.embeddings)}`,
+      outage,
+      probe: (wake) => embedProbe(wake, subject),
+      settled: () => done + failed,
+      pollS: FOLLOW,
+      wake: onStop.signal,
+      writer: { out, err },
+      stamper,
+    });
+    const back = await (stamper ? stamper.during(waited) : waited);
+    if (back === "answered") {
+      outageSubject = null;
+      pollNow = true;
+    } else if (back !== null) configError = back.refused;
   };
   // The admit gate before the start's drain (SMD-3379 PR 1b), under the follower's stamp, so a long wait does not
   // read as a stale row (review pass 1); a stop while it waits ends the run there.
@@ -2696,7 +2689,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return hardStopped ? 130 : 0;
   }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
   if (SUMMARY) {
     printCounts(after, "after");
     await printDuplicateGroups();
@@ -2741,6 +2734,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 if (import.meta.main) {
   const cli = commandLine("reembed.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const workers = cli.int("workers", { absent: 2, min: 1, max: MAX_WORKERS });
   const batch = cli.int("batch", { absent: 8, min: 1, max: MAX_BATCH });
   const modes = {

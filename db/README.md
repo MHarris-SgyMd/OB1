@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and twenty-one (121) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and twenty-two (122) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2504,6 +2504,20 @@ batch. Running it again is how board-sync's thoughts, written through `db/` and 
 the core's capture, gain their items, and how a capture whose items were not proposed
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
+
+Migration 122 adds the composed read, `effective_priority(items, weights, now)`
+(SMD-3667, docs/priority.md decision 5). For each `{kind, key}` it returns the
+order a ranking read uses and every term that made it: the counted level (116's
+winner, an inferred statement left out unless the weights count it), else a level
+inherited from what the item serves (a parent ticket, the ticket a thought is
+about, an open item's origin thought; one less a hop, two hops, only above
+unknown's 2), else unknown's 2; urgency from its due time in calendar days in UTC
+(+2 by the end of tomorrow, +1 by the end of the seventh day, +3 overdue in
+their place, none at level 0 or once settled); and +0.5 or +1 for the open items
+it blocks, transitively to depth 3. The weights are docs/priority.md's,
+overridden by name. It reads; nothing is stored, and `node_state` is unchanged.
+The agenda (SMD-3669) and search (SMD-3668) will call it; today the store's
+`effectivePriority` is its only caller.
 
 Migration 119 makes a due date alone mean the end of that day (SMD-3778, the
 maintainer's rule of 2026-11-05): `ob1_item_due` reads `2027-03-01` as the next
@@ -5104,8 +5118,10 @@ passes meet their start's refusals again, and each names which it is:
   retried on SMD-2599's schedule (5 s, doubling, at most 5 min) — a model
   re-pulled, a 402 cleared by topping up credit, a gateway's passing
   401/403/404 — and at a pass's first start ends it with 2;
-- a refusal mid-pass (the provider refusing the request itself) ends the
-  scheduler with 2, as it ends a follower — so the same 402 ends it mid-pass
+- a refusal mid-pass of extract or consolidate (the provider refusing the
+  request itself, or, since SMD-2636 PR 2, refusing an outage wait's probe)
+  ends the scheduler with 2, as it ends a follower (re-embed's, either way,
+  sets it down for the period, above) — so the same 402 ends it mid-pass
   and is retried when a period's start meets it first;
 - but the subject sweep's: whatever refuses it, at the check, a period's
   start or mid-pass, sets it down for the period alone, or holds it — another
@@ -5178,6 +5194,15 @@ work, not something to finish by hand, unless the record names another model
 — a stopped scheduler's offered beside the hand run, one or the other; the rows
 read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
+
+Since SMD-3379 PR 2b-2a it carries `models`, as a follower's stamp does once
+its process has made a model call: its calls by pass (`extract`,
+`consolidate`, `reembed`, `subjects`, `-` for none) since the process began —
+by class, how many failed, their own time, and their asks for a slot by how
+each ended (`held`, `open`, `stopped`), how many waited at all, their time in
+all and the longest. No telemetry runs in a worker, so the stamp carries what
+the servers' `ob1.model.call.duration` and `ob1.model.slot.wait.duration`
+points do; `brain_info`'s Model calls row says it.
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 its stops (a hard stop counted on them, 093: a paused period's abort): how
@@ -6973,11 +6998,11 @@ refused for as long as the brain is at `max_connections`, so that one is still
 warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
 out the same way.
 - **Outages:** a transient error past the pauses (a 408 among them, read through `followClassify`, where a one-shot run reads it as the request's: `followerFault`, SMD-3311), the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
-- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text. The wait (`waitOutProvider`, SMD-2636 PR 2) carries its schedule on: a wait beginning within a minute and a poll of the last one's answer, nothing having got past the provider since, goes on from the last one's step. Extract's and consolidate's followers, which spend the pauses before an outage begins, add them to that window. What got past is re-embed's thoughts finished or recorded failed; extract's too, and its windows of a long thought answered and kept; consolidate's thoughts finished having asked the judge, and recorded failed. A probe answered with a refusal — a chat probe's 401, 402, 403 or 404 (a key revoked or credit run out while the provider was away, or a proxy answering 404 before its route is back), or a redirect, which no call follows (SMD-2908), the decision tier's probe refused, or re-embed's meeting any error neither an outage nor a missing model — ends the follower with 2, nothing marked failed, its remedy naming the tier's or the escalation model's setting when the refused probe was theirs. After an answer, the follower polls again at once.
 - **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; no follower on a 429, a 503 or the model not served, which make no suspect (`followClassify`'s backpressure; extract's and consolidate's since SMD-3311), and re-embed's probe tells a thought's 400 (answered) from the request's (refused too). With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
-- **Re-embed's follower** reads each thought's error by `followClassify`: the thought's only when it names the thought (its length, the egress gate, its data) or the provider answers the probe's text right after; else the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one). It has no pauses: one 5xx, 408, 429 or timeout is an outage, one coming back within a minute and a poll interval of the probe answering, nothing re-embedded since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
-- **One copy** (SMD-2636 PR 1): the start probe's refusal (`probeAtStart`, extract's and consolidate's), the wait at the start (`waitAtStart`), the database wait (`waitForDatabase`), the pass it does not end (`followedPass`, extract's and consolidate's) and the leases returned later (`Unreturned`) are `worker-bootstrap.ts`'s, each worker passing its own words and probe. The outage wait and a fault's reading are still each worker's.
+- **Re-embed's follower** reads each thought's error by `followClassify`: the thought's only when it names the thought (its length, the egress gate, its data) or the provider answers the probe's text right after; else the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one). It has no pauses: one 5xx, 408, 429 or timeout is an outage, one coming back within a minute and a poll interval of the probe answering, no thought finished or recorded failed since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
+- **One copy** (SMD-2636 PR 1): the start probe's refusal (`probeAtStart`, extract's and consolidate's), the wait at the start (`waitAtStart`), the database wait (`waitForDatabase`), the pass it does not end (`followedPass`, extract's and consolidate's) and the leases returned later (`Unreturned`) are `worker-bootstrap.ts`'s, each worker passing its own words and probe; the outage wait too (`waitOutProvider`, PR 2). A fault's reading is still each worker's.
 
 A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
@@ -6988,7 +7013,10 @@ that refuse before connecting and the outage rules and schedule, the schedule
 carried across outages included, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
 [10], [16] and [9f] each follower outlasting a database cut through a relay and a
 provider outage (a 503, and in [10] the model missing, a hung provider, a
-thought that fails every time, and the refusal at start; in [9f] a 503 at the
+thought that fails every time, and the refusal at start; in [10] and [16] a
+second outage carrying the first's schedule, a key revoked mid-wait, the poll
+at once after an answer and a stop while the wait's probe hangs (in [9f]
+too), and in [16] a thought whose pairs are asked again; in [9f] a 503 at the
 start and mid-pass, the check during one, the model missing mid-pass, a
 thought that fails every time, a 429 under three workers and one the probe
 passes, a key revoked mid-wait, a deadlock and a statement timeout at the

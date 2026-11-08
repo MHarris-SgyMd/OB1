@@ -93,12 +93,16 @@
  *   - the model missing;
  *   - a pair's timeout after which a one-token probe gets no answer either.
  * In each case the thought goes back to the pool unrecorded and the follower
- * probes the judge model until it answers. A thought that fails the same way
- * right after a probe answered is recorded failed — unless every error of its
- * streak was the provider holding calls back (a 429, a 503, the model not
- * served), which makes no suspect (SMD-3311). A follower probes once
- * before it writes anything, and refuses an unserved model, a refused key or
- * a wrong base URL with exit 2.
+ * probes the judge model until it answers (worker-bootstrap.ts's
+ * waitOutProvider, SMD-2636 PR 2): an outage back soon after the last one's
+ * answer, nothing got past the provider since, carries the probe's schedule
+ * on; a probe the provider refuses ends the follower, exit 2; an answer polls
+ * again at once. A thought that fails the same way right after a probe
+ * answered is recorded failed — unless every error of its streak was the
+ * provider holding calls back (a 429, a 503, the model not served), which
+ * makes no suspect (SMD-3311). A follower probes once before it writes
+ * anything, and refuses an unserved model, a refused key or a wrong base URL
+ * with exit 2.
  *
  * ── The key ─────────────────────────────────────────────────────────────────
  * `consolidate:<model>@p<prompt version>`. A different model or prompt is a
@@ -163,10 +167,11 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeAtStart, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, probeAtStart, probeChat, probeRefusal, probeTier, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -179,7 +184,7 @@ import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -723,22 +728,33 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // beside the sweep, a call up to 1,020 s, such a thought is still failed, not looped at the pool's head for ever
   // (SMD-3306 PR 6b-2's review pass 3, the definitions reviewer's: hang after hang, an outage each).
   const outage = new ProviderOutage(undefined, () => SUSPECT_WINDOW.ms + 5 * Math.max(0, limitNow() - TIMEOUT_S) * 1000);
-  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  /**
+   * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps: the sleep
+   * scheduler's, which also sets extraction to the newer work while the judge waits (SMD-3008), or this follower's own
+   * (SMD-2905). The schedule carries on waitOutProvider's rules, counting thoughts finished having asked the judge and
+   * thoughts recorded failed (`settled` below says why); an answer polls again at once; a refusal ends the follower,
+   * exit 2, its remedy naming the tier when the tier's probe was refused.
+   */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
-    const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""} after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said on the row it stamps: the sleep scheduler's, which also sets
-    // extraction to the newer work while the judge waits (SMD-3008), or this
-    // follower's own (SMD-2905); a stop wakes the probes, so the end is said
-    // before the pass settles.
-    await stamper?.providerWait?.(true);
-    try {
-      if (await probeUntil(() => probe(undefined, wake), wake, (p) => !isOut(p))) {
-        outage.end();
-        out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-      }
-    } finally {
-      await stamper?.providerWait?.(false);
+    const back = await waitOutProvider({
+      who: "the provider",
+      calls: `${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""}`,
+      outage,
+      probe: (w) => probe(undefined, w),
+      // Thoughts finished having asked the judge, and thoughts recorded failed: not pairs, which a thought put back asks
+      // again from its first (review pass 5), nor a thought with no candidate, finished without a call (review pass 1).
+      settled: () => doneAsked + failed,
+      pollS: FOLLOW,
+      pausesBefore: true,
+      wake,
+      writer: { out, err },
+      stamper,
+    });
+    if (back === "answered") pollNow = true;
+    else if (back !== null) {
+      configError = back.refused;
+      refusedByTier = back.tier === true;
+      stopping = true;
     }
   }
   /** The start's refusal of what a probe found — the judge model unserved, or the endpoint refusing — or null. */
@@ -1529,6 +1545,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let gate: AbortSignal = onStop.signal;
   let done = 0;
   let failed = 0;
+  /** Of `done`, the thoughts that asked the judge at least once: the outage wait's count, with `failed` (SMD-2636 PR 2). */
+  let doneAsked = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
   /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
@@ -1539,6 +1557,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let abortedInHand = 0;
   /** Each worker's judge call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
+  // The first stop gives back a thought whose call waits for a slot, rather than waiting out other processes' calls
+  // (SMD-3379 PR 2b-1, review pass 5).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   let beats = 0;
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
@@ -1580,7 +1601,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** `metadata_hash`, `md5(metadata::text)`, is read for the thought a worker claims (claimAfterWait), not for an older side. */
   type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean; metadata_hash?: string | null };
   type Candidate = { older_id: string; similarity: number; shared_entities: number };
-  type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }
+  /** `called`: the thought's pairs put at least one question to the judge that it answered (the outage wait's count, SMD-2636 PR 2). */
+  type Outcome = { outcome: "succeeded"; called?: true } | { outcome: "failed"; error: string } | { outcome: "vanished" }
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
     | { outcome: "abandoned" }
     /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
@@ -1656,6 +1678,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pair, the first pair of a retry included (review pass 1).
    */
   async function processRow(row: Row, workerId: string, asked: { at: number }): Promise<Outcome> {
+    /** Pairs of this thought the judge answered, this attempt (a retry after a pause starts again): whether its finish got past the provider. */
+    let answered = 0;
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1761,12 +1785,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
-        const callSignal = AbortSignal.any([AbortSignal.timeout(limitS * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
+        // The pair's bound counts its calls' own time: a wait for a slot on the model-call seam pauses it, told by
+        // the worker's waits observer beside its call in hand (SMD-3379 PR 2b-1); the limit as this call starts.
+        const deadline = pausableTimeout(limitS * 1000);
+        const callSignal = AbortSignal.any([deadline.signal, onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
         // deadline for all three calls, as for the judge's one.
-        j = jev ? await decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
-                : await judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS });
+        try {
+          j = await withCallWaits(callWaitsFor(() => inCall.get(workerId), deadline.waits), () =>
+            jev ? decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
+                : judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS }));
+        } finally {
+          deadline.dispose();
+        }
       } catch (e) {
         llmMs += Date.now() - t0;
         // The hard stop aborted the call: the thought is abandoned, not failed.
@@ -1800,6 +1832,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       llmMs += Date.now() - t0;
       if (hardStopped) return { outcome: "abandoned" };
       totals.pairs++;
+      answered++;
       if (j.malformed) {
         totals.malformed++;
         problems.push(`pair with ${c.older_id}: ${j.unknownVerdict !== undefined ? `the model answered the verdict "${j.unknownVerdict}", not one of prompt ${CONSOLIDATE_PROMPT_VERSION}'s five (${VERDICTS.join(", ")}) — a model keeping to an older prompt's words` : "the model's answer was not JSON of the expected shape"}${staleRow ? " (its stale proposal stands)" : ""}`);
@@ -1999,7 +2032,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (await settleStale(s, `no longer a candidate pair — ${why}`, s.older_fingerprint, row.fingerprint, "not-a-candidate", why)) staleMet.settledOut.add(s.id);
     }
     if (problems.length) return { outcome: "failed", error: `${problems.length} of ${candidates.length} pair(s) not judged: ${problems.join("; ").slice(0, 400)}` };
-    return { outcome: "succeeded" };
+    return answered > 0 ? { outcome: "succeeded", called: true } : { outcome: "succeeded" };
   }
 
   // Written inside the worker closures below, which control-flow analysis does
@@ -2007,6 +2040,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
+  /** The configError is the decision tier's, its probe refused in an outage wait: the remedy names the tier (SMD-2636 PR 2, review pass 1). */
+  let refusedByTier = false;
 
   /**
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
@@ -2326,6 +2361,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             err(`  ${b.thought_id}: ${outcome.error}`);
           } else {
             done++;
+            if (outcome.called) doneAsked++;
           }
           outage.settled(b.thought_id);
           progress();
@@ -2500,11 +2536,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 102 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1) — said
   // beside relations' note too, so fixing the role does not reveal the migration only then (review pass 3).
   if (saidMissing) out(RELATIONS_OFF ? `  distinct: not stored either — ${NO_102}` : `  distinct: not stored this run — ${NO_102}; a pair judged unrelated at the floor now has its edge closed, as before 102, unless that edge is a distinct, and gets no new distinct until its claim is cleared`);
+  /** The provider answered after a wait: the next pass runs at once, not after an interval (re-embed's rule, SMD-2636 PR 2). */
+  let pollNow = false;
   let after = await followed();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
-      await sleepUnless(FOLLOW * 1000, onStop.signal);
+      if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
+      pollNow = false;
       if (stopping) break;
       // A follower sees a migration or a grant applied while it runs — 102's sentinel too (SMD-3117),
       // both read before either is said (review pass 3).
@@ -2526,7 +2565,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
-    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller` : ""}, in ${elapsed.toFixed(1)}s ` +
+    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed.toFixed(1)}s ` +
       `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
   );
   out(
@@ -2620,8 +2659,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (configError) {
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
-        `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
+        (refusedByTier
+          ? `  Check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md). Nothing was marked failed.`
+          : `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
+            `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`)
     );
     return 2;
   }
@@ -2633,6 +2674,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 if (import.meta.main) {
   const cli = commandLine("consolidate.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.

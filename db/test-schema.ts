@@ -17682,6 +17682,314 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[108]%'`);
 }
 
+console.log("\n[109] Migration 122: effective priority — the counted level, else one inherited from what an item serves (a parent ticket, a thought's ticket, an item's origin thought; less one a hop, two hops, only above unknown's 2), else unknown's 2; urgency in calendar days in UTC (+2 by the end of tomorrow, +1 by the end of the seventh day), overdue +3 in its place, none at level 0 or once settled; the due time stated, by reference one hop, or an open item's own; +0.5 or +1 for the open items it blocks, transitively to depth 3, never through a settled one; inferred statements passed over unless counted; each term named; weights by name, an unknown one refused; a re-apply a no-op (SMD-3667)");
+{
+  const file = files.find((f) => /^\d{3}_effective_priority\.sql$/.test(f)) ?? "no NNN_effective_priority.sql";
+  await reapply(file.slice(0, 4));
+  // The clock pinned: 2027-03-10 15:00 UTC. "Due 2027-03-11" is that day's end, 2027-03-12T00:00Z (119's reading).
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('eff-op', 'operator'), ('eff-bot', 'agent')`);
+  const OP = { name: "eff-op", scope: "write" }, BOT = { name: "eff-bot", scope: "write" };
+  type Term = { term: string; value: number; window?: string; count?: number; from?: { kind: string; key: string; level: number; hops: number }; due_from?: string };
+  type Row = { item_kind: string; item_key: string; effective: string; level: number | null; inherited_from: { kind: string; key: string; level: number; hops: number } | null;
+    due_at: string | null; due_from: string | null; urgency: string; overdue: boolean; unblocks: number; settled: boolean; not_before: string | null; waiting: boolean;
+    terms: Term[]; winner: { level: number; maker: { name: string } } | null; passed_over: { level: number; tier_name: string }[] };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "eff-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  // A ticket as board-sync writes it (053's source row and links), open unless a status type is given.
+  const ticket = async (issue: string, status_type = "backlog", links: [string, string][] = []) => {
+    const content = `[109] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: status_type, status_type, linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, o: { due?: string; notBefore?: string; ref?: [string, string]; inferred?: boolean; actor?: object } = {}) => {
+    const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7, NULL, $8, $9::jsonb) AS r`,
+      [kind, key, level, o.due ?? null, o.notBefore ?? null, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.inferred ?? false, JSON.stringify(o.actor ?? OP)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[109] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+  };
+  const eff = async (items: [string, string][], weights: object | null = null) =>
+    (await db.query<Row>(`SELECT * FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), weights === null ? null : JSON.stringify(weights), NOW])).rows;
+  const one = async (kind: string, key: string, weights: object | null = null) => (await eff([[kind, key]], weights))[0];
+  const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}${t.window ? `:${t.window}` : ""}=${t.value}`).join(" ");
+  const raisedCode = async (sql: string, params: unknown[]) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const rowOf = async (issue: string) => (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_sources WHERE system = 'linear' AND identity = $1`, [issue])).rows[0].id;
+
+  // The shape: ten functions, each STABLE and commented.
+  const fns = (await db.query<{ n: string; v: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('effective_priority', 'ob1_priority_counted', 'ob1_item_settled', 'ob1_node_settled', 'ob1_item_serves', 'ob1_item_unblocks', 'ob1_ticket_row_of', 'ob1_ticket_rows', 'ob1_priority_subject', 'ob1_priority_open') ORDER BY 1`)).rows;
+  assert(fns.length === 10 && fns.every((f) => f.v === "s" && /Migration 122 \/ SMD-3667/.test(f.c ?? "")),
+    `ten functions, each STABLE (one snapshot for the read) and commented (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // Urgency, the ticket's first Verify: a Medium due tomorrow passes a High with no date, and says why.
+  for (const t of ["SMD-9401", "SMD-9402", "SMD-9403", "SMD-9404", "SMD-9405", "SMD-9406", "SMD-9408", "SMD-9409"]) await ticket(t);
+  await ticket("SMD-9407", "completed");
+  await put("ticket", "SMD-9401", 2, { due: "2027-03-12T00:00:00Z" }); // Medium, due 2027-03-11: tomorrow
+  await put("ticket", "SMD-9402", 3);                                  // High, no date
+  await put("ticket", "SMD-9403", 1, { due: "2027-03-10T00:00:00Z" }); // Low, due 2027-03-09: overdue
+  await put("ticket", "SMD-9404", 2, { due: "2027-03-15T12:00:00Z" }); // Medium, five days off
+  await put("ticket", "SMD-9405", 2, { due: "2027-03-19T00:00:00Z" }); // Medium, due 2027-03-18: past the seventh day's end
+  await put("ticket", "SMD-9406", 0, { due: "2027-03-01T00:00:00Z" }); // none, overdue: no term
+  await put("ticket", "SMD-9407", 2, { due: "2027-03-01T00:00:00Z" }); // Medium, overdue, but completed
+  await put("ticket", "SMD-9408", 2, { due: "2027-03-18T00:00:00Z" }); // Medium, due 2027-03-17: the seventh day
+  await put("ticket", "SMD-9409", 2, { due: "2027-03-10T15:00:00Z" }); // Medium, due this instant: overdue
+  const u = await eff([["ticket", "SMD-9401"], ["ticket", "SMD-9402"], ["ticket", "SMD-9403"], ["ticket", "SMD-9404"], ["ticket", "SMD-9405"], ["ticket", "SMD-9406"], ["ticket", "SMD-9407"], ["ticket", "SMD-9408"], ["ticket", "SMD-9409"]]);
+  const e = (k: string) => Number(u.find((r) => r.item_key === k)?.effective);
+  const ur = (k: string) => u.find((r) => r.item_key === k);
+  assert(e("SMD-9401") === 4 && e("SMD-9402") === 3 && e("SMD-9401") > e("SMD-9402") && named(ur("SMD-9401")) === "level=2 urgency:soon=2" && ur("SMD-9401")?.due_from === "stated",
+    `a Medium due by the end of tomorrow (4) passes a High with no date (3), its terms naming urgency (${named(ur("SMD-9401"))} / ${named(ur("SMD-9402"))})`);
+  assert(e("SMD-9403") === 4 && ur("SMD-9403")?.overdue === true && named(ur("SMD-9403")) === "level=1 overdue=3" && e("SMD-9409") === 5 && ur("SMD-9409")?.overdue === true,
+    `an overdue Low reads 1 + 3 and overdue; due at this very instant is overdue too (${named(ur("SMD-9403"))}; ${named(ur("SMD-9409"))})`);
+  assert(e("SMD-9404") === 3 && named(ur("SMD-9404")) === "level=2 urgency:week=1" && e("SMD-9408") === 3 && e("SMD-9405") === 2 && named(ur("SMD-9405")) === "level=2",
+    `+1 by the end of the seventh day, that end included; the eighth day nothing (${named(ur("SMD-9404"))}; ${named(ur("SMD-9408"))}; ${named(ur("SMD-9405"))})`);
+  assert(e("SMD-9406") === 0 && ur("SMD-9406")?.overdue === false && e("SMD-9407") === 2 && ur("SMD-9407")?.settled === true && ur("SMD-9407")?.overdue === false && ur("SMD-9407")?.due_at !== null,
+    `a level-0 item takes no urgency, overdue or not; a completed item keeps its due time but takes no term (${named(ur("SMD-9406"))}; ${named(ur("SMD-9407"))}, settled ${ur("SMD-9407")?.settled})`);
+  // Just past each window's end, inside the same count of 24-hour spans (review pass 7: no row told calendar days from
+  // now + 48 h): due 2027-03-12 10:00 is the day after tomorrow, a week's +1; due 2027-03-18 10:00 is the eighth day, none.
+  await ticket("SMD-9720"); await ticket("SMD-9721");
+  await put("ticket", "SMD-9720", 2, { due: "2027-03-12T10:00:00Z" }); await put("ticket", "SMD-9721", 2, { due: "2027-03-18T10:00:00Z" });
+  const [past1, past7] = await eff([["ticket", "SMD-9720"], ["ticket", "SMD-9721"]]);
+  assert(Number(past1?.urgency) === 1 && Number(past7?.urgency) === 0,
+    `a due time past the end of tomorrow but within 48 hours is the week's; past the seventh day's end but within eight 24-hour spans, nothing (${past1?.urgency}, ${past7?.urgency})`);
+  // The window is calendar days, not hours: at 23:30 the day before, a due time 24.5 hours off is still "by the end of tomorrow".
+  const late = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-10T23:30:00Z')`)).rows[0];
+  const early = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9401"}]', NULL, '2027-03-09T00:30:00Z')`)).rows[0];
+  assert(Number(late?.urgency) === 2 && Number(early?.urgency) === 1,
+    `calendar days in UTC: due 2027-03-11 read at 2027-03-10 23:30 is soon (${late?.urgency}); read at 2027-03-09 00:30, 71.5 hours off, it is a day further and within the week (${early?.urgency})`);
+
+  // Unblocks, the second Verify: blocking three open items outranks blocking none; a Done blocker blocks nothing.
+  await ticket("SMD-9410", "backlog", [["blocks", "SMD-9411"], ["blocks", "SMD-9412"]]);
+  await ticket("SMD-9411"); await ticket("SMD-9412");
+  await ticket("SMD-9413", "backlog", [["blocked_by", "SMD-9410"]]); // stated on the blocked side
+  await ticket("SMD-9414", "completed", [["blocked_by", "SMD-9410"]]); // done: not counted
+  await ticket("SMD-9415");
+  await ticket("SMD-9416", "completed", [["blocks", "SMD-9411"]]);
+  for (const t of ["SMD-9410", "SMD-9415", "SMD-9416"]) await put("ticket", t, 2);
+  const b = await eff([["ticket", "SMD-9410"], ["ticket", "SMD-9415"], ["ticket", "SMD-9416"]]);
+  assert(b[0]?.unblocks === 3 && Number(b[0]?.effective) === 3 && named(b[0]) === "level=2 unblocks=1" && b[1]?.unblocks === 0 && Number(b[1]?.effective) === 2
+         && b[2]?.unblocks === 0 && b[2]?.settled === true && Number(b[2]?.effective) === 2,
+    `three open items blocked (both directions of link; a completed one not counted) add 1 and outrank blocking none; a completed blocker blocks nothing (${b.map((r) => `${r.item_key} ${r.unblocks} ${r.effective}`).join("; ")})`);
+  // Transitively to depth 3, never through a settled item, a cycle counted once; one blocked item is +0.5.
+  await ticket("SMD-9420", "backlog", [["blocks", "SMD-9421"]]); await ticket("SMD-9421", "backlog", [["blocks", "SMD-9422"]]);
+  await ticket("SMD-9422", "backlog", [["blocks", "SMD-9423"]]); await ticket("SMD-9423", "backlog", [["blocks", "SMD-9424"]]); await ticket("SMD-9424");
+  await ticket("SMD-9430", "backlog", [["blocks", "SMD-9431"]]); await ticket("SMD-9431", "completed", [["blocks", "SMD-9432"]]); await ticket("SMD-9432");
+  await ticket("SMD-9440", "backlog", [["blocks", "SMD-9441"]]); await ticket("SMD-9441", "backlog", [["blocks", "SMD-9440"]]);
+  const tr = await eff([["ticket", "SMD-9420"], ["ticket", "SMD-9430"], ["ticket", "SMD-9440"], ["ticket", "SMD-9423"]]);
+  const deep = await one("ticket", "SMD-9420", { depth: 1 });
+  assert(tr[0]?.unblocks === 3 && tr[1]?.unblocks === 0 && tr[2]?.unblocks === 1 && Number(tr[2]?.effective) === 2.5 && tr[3]?.unblocks === 1 && deep?.unblocks === 1,
+    `a chain counts to depth 3 and no further; a settled link stops the walk; a cycle counts its other end once, +0.5; depth 1 counts the first hop alone (${tr.map((r) => r.unblocks).join(", ")}, ${tr[2]?.effective}; depth 1: ${deep?.unblocks})`);
+  // A link in a system that states no status (it does not gate) counts for nothing; in a gating system other than
+  // Linear, a blocked item settled by its own status is not counted (ob1_node_settled through source_thought).
+  const sourced = async (system: string, identity: string, meta: object, links: [string, string][] = []) => {
+    const id = await thoughtAs(`[109] ${system} ${identity}`, meta);
+    await db.query(`SELECT record_thought_source($1::uuid, $2, $3, 'x', 'text/markdown')`, [id, system, identity]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, $2, $3::text::jsonb)`, [id, system, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+    return id;
+  };
+  const noteA = await sourced("notes108", "a", {}, [["blocks", "b"]]);
+  await sourced("notes108", "b", {});
+  const jiraA = await sourced("jira108", "J-1", { status_type: "backlog" }, [["blocks", "J-2"], ["blocks", "J-3"]]);
+  await sourced("jira108", "J-2", { status_type: "completed" }); await sourced("jira108", "J-3", { status_type: "backlog" });
+  const [na, ja] = await eff([["thought", noteA], ["thought", jiraA]]);
+  assert(na?.unblocks === 0 && ja?.unblocks === 1,
+    `a link in a system that states no status is not counted; in another gating system a completed blocked item is not counted, an open one is (${na?.unblocks}, ${ja?.unblocks})`);
+  // The ticket's own row, asked as a thought, blocks what its ticket blocks.
+  const rowOf9410 = await rowOf("SMD-9410");
+  const asThought = await one("thought", rowOf9410);
+  assert(asThought?.unblocks === 3, `a ticket's row asked as a thought blocks what its ticket blocks, its linear source row starting the walk (${asThought?.unblocks})`);
+  // A pre-053 row (no source row, metadata.issue alone) asked as a thought walks from its ticket: SMD-9741 is blocked by
+  // SMD-9740, stated on 9741's side, so the row blocks one.
+  const pre053 = await thoughtAs("[109] SMD-9740, a row from before 053", { source: "linear", issue: "SMD-9740", status: "backlog", status_type: "backlog" });
+  await ticket("SMD-9741", "backlog", [["blocked_by", "SMD-9740"]]);
+  const preRow = await one("thought", pre053);
+  assert(preRow?.unblocks === 1, `a ticket's row with no source row, asked as a thought, blocks what its ticket blocks (${preRow?.unblocks})`);
+  // Each blocked item counted once, however many paths reach it: SMD-9600 blocks 9601 and 9602, and 9601 blocks 9602 too.
+  await ticket("SMD-9600", "backlog", [["blocks", "SMD-9601"], ["blocks", "SMD-9602"]]); await ticket("SMD-9601", "backlog", [["blocks", "SMD-9602"]]); await ticket("SMD-9602");
+  const tri = await one("ticket", "SMD-9600");
+  let wholeDepth: Row | undefined;
+  try { wholeDepth = (await db.query<Row>(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9420"}]', '{"depth": 3.0}', $1::timestamptz)`, [NOW])).rows[0]; } catch { wholeDepth = undefined; }
+  const capped = await one("ticket", "SMD-9410", { cap: 2, unblocks_many_at: 2 });
+  const capLow = await raisedCode(`SELECT * FROM effective_priority('[]', '{"cap": 2}')`, []);
+  assert(capped?.unblocks === 2 && Number(capped?.effective) === 3 && capLow === "22023",
+    `cap 2 counts two of SMD-9410's three, the larger term reached at unblocks_many_at 2; a cap below unblocks_many_at refused 22023 (${capped?.unblocks}, ${capped?.effective}, ${capLow})`);
+  assert(tri?.unblocks === 2 && wholeDepth?.unblocks === 3,
+    `an item two paths reach is counted once (${tri?.unblocks}); a whole number written 3.0 reads as 3 (${wholeDepth?.unblocks})`);
+
+  // Inheritance, the third Verify: a child with no level of its own under an Urgent parent reads inherited, naming it.
+  await ticket("SMD-9450"); await ticket("SMD-9451", "backlog", [["child_of", "SMD-9450"]]); await ticket("SMD-9452", "backlog", [["child_of", "SMD-9451"]]);
+  await ticket("SMD-9453", "backlog", [["child_of", "SMD-9450"]]);
+  await ticket("SMD-9455"); await ticket("SMD-9456", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9457", "backlog", [["child_of", "SMD-9456"]]);
+  await ticket("SMD-9458", "backlog", [["child_of", "SMD-9459"]]); await ticket("SMD-9459");
+  await put("ticket", "SMD-9450", 4); await put("ticket", "SMD-9453", 1); await put("ticket", "SMD-9455", 5); await put("ticket", "SMD-9459", 1);
+  const about = await thoughtAs("[109] a note about SMD-9450", { ticket: "SMD-9450" });
+  const subjectOnly = await thoughtAs("[109] a note whose subject alone names SMD-9455");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [109]"}'::jsonb)`, [subjectOnly]);
+  const aboutCritical = await thoughtAs("[109] a note about SMD-9455", { ticket: "SMD-9455" });
+  const opened = async (text: string, o: { thought?: string; due?: string } = {}) =>
+    (await db.query<{ r: { outcome: string; item: { id: string } } }>(`SELECT open_item($1, NULL, $2, $3::uuid, NULL, false, $4::jsonb) AS r`, [text, o.due ?? null, o.thought ?? null, JSON.stringify(OP)])).rows[0].r.item.id;
+  const itemUnder = await opened("[109] a to-do from the note about SMD-9455", { thought: aboutCritical });
+  const itemUnderUrgent = await opened("[109] a to-do from the note about SMD-9450", { thought: about });
+  const inh = await eff([["ticket", "SMD-9451"], ["ticket", "SMD-9452"], ["ticket", "SMD-9453"], ["ticket", "SMD-9457"], ["thought", about], ["thought", subjectOnly], ["item", itemUnder], ["item", itemUnderUrgent], ["ticket", "SMD-9458"]]);
+  const from = (r: Row | undefined) => r?.inherited_from ? `${r.inherited_from.kind}:${r.inherited_from.key}/${r.inherited_from.level}-${r.inherited_from.hops}` : "none";
+  assert(Number(inh[0]?.effective) === 3 && inh[0]?.level === null && from(inh[0]) === "ticket:SMD-9450/4-1" && named(inh[0]) === "inherited=3",
+    `a child with no level under an Urgent parent inherits 3, naming the parent and one hop (${from(inh[0])}, ${named(inh[0])})`);
+  assert(Number(inh[1]?.effective) === 2 && from(inh[1]) === "none" && named(inh[1]) === "unknown=2" && Number(inh[2]?.effective) === 1 && inh[2]?.level === 1 && from(inh[2]) === "none"
+         && Number(inh[3]?.effective) === 3 && from(inh[3]) === "ticket:SMD-9455/5-2" && Number(inh[8]?.effective) === 2 && from(inh[8]) === "none",
+    `two hops from Urgent is 2, no higher than unknown, so unknown; a stated Low beats the inherited level; two hops from Critical is 3; a Low parent never lowers a child below unknown (${from(inh[1])}; ${inh[2]?.effective}; ${from(inh[3])}; ${from(inh[8])})`);
+  assert(from(inh[4]) === "ticket:SMD-9450/4-1" && from(inh[5]) === "ticket:SMD-9455/5-1" && from(inh[6]) === "ticket:SMD-9455/5-2" && from(inh[7]) === "none" && Number(inh[6]?.effective) === 3,
+    `a thought inherits from the ticket it is about, by metadata or by its standing subject; an open item from its origin thought's ticket, two hops (${from(inh[4])}; ${from(inh[5])}; ${from(inh[6])}; ${from(inh[7])})`);
+  // A closed link counts for nothing: a parent link and a blocks link, each withdrawn by the source.
+  const moved = await ticket("SMD-9750", "backlog", [["child_of", "SMD-9450"]]);
+  const freed = await ticket("SMD-9751", "backlog", [["blocks", "SMD-9752"]]); await ticket("SMD-9752");
+  const [movedBefore, freedBefore] = await eff([["ticket", "SMD-9750"], ["ticket", "SMD-9751"]]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[]'::jsonb)`, [moved]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', '[]'::jsonb)`, [freed]);
+  const [movedAfter, freedAfter] = await eff([["ticket", "SMD-9750"], ["ticket", "SMD-9751"]]);
+  assert(from(movedBefore) === "ticket:SMD-9450/4-1" && from(movedAfter) === "none" && freedBefore?.unblocks === 1 && freedAfter?.unblocks === 0,
+    `a withdrawn parent link passes nothing down, a withdrawn blocks link blocks nothing (${from(movedBefore)} → ${from(movedAfter)}; ${freedBefore?.unblocks} → ${freedAfter?.unblocks})`);
+  // A served item's own level is its effective one: a Low parent passes nothing of its Critical parent down. A settled
+  // parent passes nothing down, nor is walked through to its own parent.
+  await ticket("SMD-9492", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9493", "backlog", [["child_of", "SMD-9492"]]);
+  await ticket("SMD-9494", "completed"); await ticket("SMD-9495", "backlog", [["child_of", "SMD-9494"]]);
+  await ticket("SMD-9496", "completed", [["child_of", "SMD-9455"]]); await ticket("SMD-9497", "backlog", [["child_of", "SMD-9496"]]);
+  await put("ticket", "SMD-9492", 1); await put("ticket", "SMD-9494", 5);
+  const past = await eff([["ticket", "SMD-9493"], ["ticket", "SMD-9495"], ["ticket", "SMD-9497"]]);
+  assert(past.every((r) => from(r) === "none" && Number(r.effective) === 2),
+    `under a Low parent of a Critical, unknown; under a completed Critical, unknown; under a completed parent of a Critical, unknown (${past.map(from).join("; ")})`);
+  const noHops = await one("ticket", "SMD-9451", { hops: 0 });
+  assert(Number(noHops?.effective) === 2 && from(noHops) === "none", `hops 0 turns inheritance off (${from(noHops)})`);
+  // A stating ticket one hop off stops the walk there: its Critical parent is not a candidate.
+  await ticket("SMD-9490", "backlog", [["child_of", "SMD-9455"]]);
+  await put("ticket", "SMD-9490", 4);
+  const stopped = await one("thought", await thoughtAs("[109] a note about SMD-9490", { ticket: "SMD-9490" }));
+  assert(from(stopped) === "ticket:SMD-9490/4-1" && Number(stopped?.effective) === 3, `the stating ticket one hop off is read (${from(stopped)})`);
+  // A real tie between hops: SMD-9730's parents are SMD-9731 (no level, under SMD-9455's Critical: 3 at two hops), walked
+  // first, and SMD-9732 (Urgent: 3 at one hop); the nearer wins (review pass 7: the row above never reached a two-hop one).
+  await ticket("SMD-9731", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9732");
+  await ticket("SMD-9730", "backlog", [["child_of", "SMD-9731"], ["child_of", "SMD-9732"]]);
+  await put("ticket", "SMD-9732", 4);
+  const hopTie = await one("ticket", "SMD-9730");
+  assert(from(hopTie) === "ticket:SMD-9732/4-1", `a tie between one hop and two, the two-hop one walked first, goes to the nearer (${from(hopTie)})`);
+  // Two hops off: an open parent of no level under a completed Critical passes nothing; a tie among three Criticals
+  // two hops off (a ticket whose row states three parents, walked in key order) goes to the lowest key, which is
+  // neither the first walked (SMD-9623, through SMD-9621) nor the last (SMD-9625, through SMD-9624).
+  await ticket("SMD-9610", "completed"); await ticket("SMD-9611", "backlog", [["child_of", "SMD-9610"]]); await ticket("SMD-9612", "backlog", [["child_of", "SMD-9611"]]);
+  await ticket("SMD-9623"); await ticket("SMD-9625");
+  await ticket("SMD-9621", "backlog", [["child_of", "SMD-9623"]]); await ticket("SMD-9622", "backlog", [["child_of", "SMD-9455"]]); await ticket("SMD-9624", "backlog", [["child_of", "SMD-9625"]]);
+  await ticket("SMD-9620", "backlog", [["child_of", "SMD-9621"], ["child_of", "SMD-9622"], ["child_of", "SMD-9624"]]);
+  await put("ticket", "SMD-9610", 5); await put("ticket", "SMD-9623", 5); await put("ticket", "SMD-9625", 5);
+  const two = await eff([["ticket", "SMD-9612"], ["ticket", "SMD-9620"]]);
+  assert(from(two[0]) === "none" && Number(two[0]?.effective) === 2 && from(two[1]) === "ticket:SMD-9455/5-2",
+    `under an open parent of a completed Critical, unknown; three Criticals two hops off, the lowest key, neither the first walked nor the last (${from(two[0])}; ${from(two[1])})`);
+
+  // The due time by reference, one hop; an open item's own; a waiting item.
+  await ticket("SMD-9460"); await ticket("SMD-9461"); await ticket("SMD-9462"); await ticket("SMD-9480");
+  await put("ticket", "SMD-9461", 3, { due: "2027-03-12T00:00:00Z" });
+  await put("ticket", "SMD-9460", 3, { ref: ["ticket", "SMD-9461"] });
+  await put("ticket", "SMD-9462", 3, { ref: ["ticket", "SMD-9460"] });
+  await put("ticket", "SMD-9480", 2, { notBefore: "2027-03-20T00:00:00Z" });
+  const dueItem = await opened("[109] pay the water bill", { due: "2027-03-11" });
+  await ticket("SMD-9463");
+  await put("ticket", "SMD-9463", 2, { ref: ["item", dueItem] });
+  const refItem = await one("ticket", "SMD-9463");
+  assert(Number(refItem?.effective) === 4 && refItem?.due_from === "due_ref" && refItem?.due_at !== null,
+    `a reference to an open item no one dated by a statement takes the item's own due time (${refItem?.effective}, ${refItem?.due_from})`);
+  const d = await eff([["ticket", "SMD-9460"], ["ticket", "SMD-9462"], ["item", dueItem], ["ticket", "SMD-9480"]]);
+  assert(Number(d[0]?.effective) === 5 && d[0]?.due_from === "due_ref" && Number(d[1]?.effective) === 3 && d[1]?.due_at === null
+         && Number(d[2]?.effective) === 4 && d[2]?.due_from === "item" && d[2]?.level === null && d[3]?.waiting === true && d[3]?.not_before !== null,
+    `a High taking a release's due time (tomorrow) by reference reads 5; a reference to an item that itself only refers is not followed; an open item's own due tomorrow gives unknown 2 + 2; a not_before ahead is waiting (${d.map((r) => `${r.effective}/${r.due_from}`).join(" ")}, waiting ${d[3]?.waiting})`);
+
+  // A ticket's own row, asked as a thought, reads as its ticket, naming it; its own statement and the ticket's are one pool.
+  const [row9450, row9401, row9451, row9403] = [await rowOf("SMD-9450"), await rowOf("SMD-9401"), await rowOf("SMD-9451"), await rowOf("SMD-9403")];
+  await put("thought", row9403, 5);
+  const rows = await eff([["thought", row9450], ["thought", row9401], ["thought", row9451], ["thought", row9403]]);
+  const as = (r: Row | undefined) => String((r?.terms[0] as { as?: { key: string } } | undefined)?.as?.key ?? "-");
+  assert(Number(rows[0]?.effective) === 4 && rows[0]?.level === 4 && as(rows[0]) === "SMD-9450" && rows[0]?.item_kind === "thought"
+         && Number(rows[1]?.effective) === 4 && rows[1]?.due_from === "stated" && named(rows[1]) === "level=2 urgency:soon=2"
+         && Number(rows[2]?.effective) === 3 && from(rows[2]) === "ticket:SMD-9450/4-1" && as(rows[2]) === "SMD-9451"
+         && Number(rows[3]?.effective) === 5 && as(rows[3]) === "SMD-9403" && rows[3]?.overdue === false && rows[3]?.passed_over.length === 1,
+    `an Urgent ticket's row reads 4 as its ticket, naming it; a Medium-due-tomorrow ticket's row takes its urgency; a child ticket's row inherits as the child does; a row stating its own Critical, newer than the ticket's overdue Low at the same tier, wins the pool, without the Low's due time, the Low passed over (${rows.map((r) => `${r.effective}/${as(r)}`).join(" ")})`);
+  // The pool by 116's rule: a tier-4 statement on the row never outranks the operator's on the ticket, counted or not;
+  // a ticket with no statement of its own reads its row's. A served row and a referenced row are their ticket.
+  await ticket("SMD-9468"); await ticket("SMD-9469"); await ticket("SMD-9464"); await ticket("SMD-9466", "completed"); await ticket("SMD-9467");
+  const [row9468, row9469, row9455, row9456] = [await rowOf("SMD-9468"), await rowOf("SMD-9469"), await rowOf("SMD-9455"), await rowOf("SMD-9456")];
+  await put("ticket", "SMD-9468", 4); await put("thought", row9468, 1, { inferred: true, actor: BOT });
+  await put("thought", row9469, 2);
+  await put("ticket", "SMD-9464", 2, { ref: ["thought", row9401] });
+  await put("ticket", "SMD-9466", 2, { due: "2027-03-01T00:00:00Z" }); await put("ticket", "SMD-9467", 2, { ref: ["ticket", "SMD-9466"] });
+  const fromRow = await opened("[109] a to-do on the critical ticket's own row", { thought: row9455 });
+  const fromChildRow = await opened("[109] a to-do on a child ticket's own row", { thought: row9456 });
+  const pool = await eff([["thought", row9468], ["ticket", "SMD-9469"], ["item", fromRow], ["item", fromChildRow], ["ticket", "SMD-9464"], ["ticket", "SMD-9467"]], { count_inferred: true });
+  assert(pool[0]?.level === 4 && pool[0]?.passed_over.some((a) => a.level === 1) && pool[1]?.level === 2 && Number(pool[1]?.effective) === 2
+         && from(pool[2]) === "ticket:SMD-9455/5-1" && Number(pool[2]?.effective) === 4 && from(pool[3]) === "ticket:SMD-9455/5-2" && Number(pool[3]?.effective) === 3
+         && Number(pool[4]?.effective) === 4 && pool[4]?.due_from === "due_ref" && pool[5]?.overdue === true && Number(pool[5]?.effective) === 5,
+    `the operator's Urgent on a ticket beats an agent's inferred Low on its row, counted; a ticket reads its row's Medium; an item from a Critical ticket's row inherits 4 at one hop, from a child's row 3 at two; a reference to a ticket's row takes the ticket's due time; a reference to a completed release keeps its date, overdue (${pool.map((r) => `${r.effective}/${from(r)}/${r.due_from}`).join(" ")})`);
+  // A row is mapped only in 115's upper-case form, so it is always found in its ticket's pool: a lower-case one reads
+  // as itself, its statement kept. A linear source row whose identity is no ticket key falls through to metadata.issue.
+  const lower = await thoughtAs("[109] a hand-written row, lower-case", { source: "linear", issue: "smd-9700" });
+  await put("thought", lower, 4);
+  await ticket("SMD-9701");
+  const odd = await thoughtAs("[109] a linear row whose identity is no key", { source: "linear", issue: "SMD-9701" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'not-a-key', 'x', 'text/markdown')`, [odd]);
+  await put("ticket", "SMD-9701", 5);
+  const [lw, od] = await eff([["thought", lower], ["thought", odd]]);
+  assert(lw?.level === 4 && as(lw) === "-" && od?.level === 5 && as(od) === "SMD-9701",
+    `a lower-case row reads as itself, its own statement counted; a row whose linear identity is no key reads as the ticket its metadata names (${lw?.level}/${as(lw)}, ${od?.level}/${as(od)})`);
+  // A row of one ticket is never a row of another: a thought whose linear identity is SMD-9703 but whose metadata names
+  // SMD-9702 is SMD-9703's alone.
+  await ticket("SMD-9702");
+  const twoNames = await thoughtAs("[109] a row whose identity and metadata name two tickets", { source: "linear", issue: "SMD-9702" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9703', 'x', 'text/markdown')`, [twoNames]);
+  await put("thought", twoNames, 5);
+  const [t9702, tn] = await eff([["ticket", "SMD-9702"], ["thought", twoNames]]);
+  assert(t9702?.level === null && as(tn) === "SMD-9703" && tn?.level === 5,
+    `a statement on SMD-9703's row does not count for SMD-9702, which its metadata names (${t9702?.level}, ${as(tn)}/${tn?.level})`);
+  // Each maker's newest across the pool: the operator's Critical on SMD-9710's row, then its own inferred Medium on the
+  // ticket — its newest stance is the inferred one, not counted, so the ticket reads unknown, both listed; counted, 2.
+  await ticket("SMD-9710");
+  const row9710 = await rowOf("SMD-9710");
+  await put("thought", row9710, 5); await put("ticket", "SMD-9710", 2, { inferred: true });
+  const [newest, newestCounted] = [await one("ticket", "SMD-9710"), await one("ticket", "SMD-9710", { count_inferred: true })];
+  assert(newest?.level === null && newest?.passed_over.length === 2 && newestCounted?.level === 2,
+    `one maker's two statements across a ticket and its row: its newest is its stance (${newest?.level}, ${newest?.passed_over.length} passed over; counted ${newestCounted?.level})`);
+  // A malformed metadata.ticket hides neither a valid issue nor a standing subject.
+  const badTicket = await thoughtAs("[109] a note with a ticket field that is no key", { ticket: "not a key" });
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1, 'subject', '{"key": "ticket:SMD-9455", "by": "first_line", "judge_key": "test-schema [109]"}'::jsonb)`, [badTicket]);
+  const bad = await one("thought", badTicket);
+  assert(from(bad) === "ticket:SMD-9455/5-1", `a malformed metadata.ticket falls through to the standing subject (${from(bad)})`);
+
+  // Inferred statements pass over unless counted; every other open statement is listed.
+  await ticket("SMD-9470");
+  await put("ticket", "SMD-9470", 5, { inferred: true });
+  await put("ticket", "SMD-9402", 1, { actor: BOT });
+  const inf = await one("ticket", "SMD-9470"), infCounted = await one("ticket", "SMD-9470", { count_inferred: true }), passed = await one("ticket", "SMD-9402");
+  assert(inf?.level === null && Number(inf?.effective) === 2 && inf?.passed_over.length === 1 && inf?.passed_over[0]?.tier_name === "inferred" && infCounted?.level === 5
+         && passed?.winner?.maker.name === "eff-op" && passed?.passed_over.length === 1 && passed?.passed_over[0]?.level === 1,
+    `an inferred Critical alone is unknown, listed as passed over, and counted when the weights say so; an agent's Low beside the operator's High is listed, the operator's counted (${inf?.level}, ${infCounted?.level}, ${passed?.passed_over.map((p) => p.level)})`);
+
+  // Weights by name; an unknown name, a wrong type and an out-of-range value refused; items answered once, in order; a malformed one refused.
+  const tuned = await one("ticket", "SMD-9401", { soon: 3, unknown: 1 });
+  const unk = await one("ticket", "SMD-9440", { unknown: 1.5 });
+  const twice = await eff([["ticket", "smd-9402"], ["ticket", "SMD-9401"], ["ticket", "SMD-9402"]]);
+  const codes = [await raisedCode(`SELECT * FROM effective_priority('[]', '{"soonn": 1}')`, []), await raisedCode(`SELECT * FROM effective_priority('[]', '{"count_inferred": 1}')`, []),
+                 await raisedCode(`SELECT * FROM effective_priority('[]', '{"depth": 9}')`, []), await raisedCode(`SELECT * FROM effective_priority('[]', '{"hop": -1}')`, []),
+                 await raisedCode(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"not a key"}]')`, []), await raisedCode(`SELECT * FROM effective_priority('{}')`, [])];
+  assert(Number(tuned?.effective) === 5 && Number(unk?.effective) === 2 && twice.length === 2 && twice[0]?.item_key === "SMD-9402" && twice[1]?.item_key === "SMD-9401" && codes.every((c) => c === "22023"),
+    `a weight overridden by name (soon 3: 5); an unblocked item with no level reads the unknown weight given (1.5 + 0.5); an item asked twice answered once at its first place; a misspelt weight, a wrong type, an out-of-range value, a malformed item and a non-array each 22023 (${tuned?.effective}, ${unk?.effective}, ${twice.map((r) => r.item_key)}, ${codes})`);
+
+  await reapply(file.slice(0, 4));
+  assert(Number((await one("ticket", "SMD-9401"))?.effective) === 4, "a re-apply is a no-op");
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

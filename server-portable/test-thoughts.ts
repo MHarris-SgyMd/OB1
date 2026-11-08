@@ -864,6 +864,13 @@ console.log("\n[11] Hybrid decide (SMD-2321): identifiers carved by rule, the de
   const boom: DecideFn = async () => { throw new Error("decider down"); };
   const fb = await decideEntities(text, [E("Anita", "organization")], cfg, subj, boom);
   assert(fb.stats.deciderError === true && fb.entities.length === 1 && fb.entities[0].type === "organization", "a decider outage falls back to the model's entities, flagged");
+  // A stop is the caller's, not an outage: the call throws, no undecided entities for it, the signal handed on to the
+  // decide call (SMD-3379 PR 2b-1, review pass 6).
+  const stopped = new AbortController();
+  let handed: AbortSignal | undefined;
+  const halts: DecideFn = async (_c, _d, _s, opts) => { handed = opts?.signal; stopped.abort(new Error("the pass stopped")); throw new Error("aborted"); };
+  const halted = await decideEntities(text, [E("Anita", "organization")], cfg, subj, halts, stopped.signal).then(() => "decided", (e: Error) => `threw: ${e.message}`);
+  assert(handed === stopped.signal && halted === "threw: aborted", `a stopped decider's call throws rather than falling back as an outage, its signal handed on (${halted})`);
 }
 
 console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides without a call, the tier decides the rest, an abstain/outage/tier-unset fall back to other");
@@ -1995,6 +2002,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   let linkAnswer = JSON.stringify({ link: "D", via: "", reason: "the two share their own subject" });
   let writerStatus = 200, linkStatus = 200, writerCalls = 0, linkCalls = 0;
   let writerBody: { model?: string; response_format?: { type?: string }; messages?: { content: string }[] } = {}, linkBody: typeof writerBody = {};
+  let writerLocation = "";
   const writer = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -2008,7 +2016,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       }
       writerCalls++;
       writerBody = body;
-      if (writerStatus !== 200) return new Response("busy", { status: writerStatus });
+      // A 3xx points at writerLocation (SMD-2908).
+      if (writerStatus !== 200) return new Response("busy", { status: writerStatus, headers: writerStatus < 400 ? { location: writerLocation } : {} });
       return Response.json({ choices: [{ message: { content: writerAnswer } }] });
     },
   });
@@ -2040,6 +2049,18 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     writerStatus = 503;
     const e = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
+    // A writer that redirects: refused where it lands, the pair's text sent nowhere else (SMD-2908).
+    let farHits = 0;
+    const far = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { farHits++; await req.text(); return Response.json({ choices: [{ message: { content: writerAnswer } }] }); } });
+    try {
+      writerLocation = `http://127.0.0.1:${far.port}/v1/chat/completions`;
+      writerStatus = 307;
+      const r = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number; kind?: string }) => x);
+      assert(r?.status === 307 && r.kind === "http" && /Writer request .* answered 307 redirecting to .*never followed/.test(r.message) && farHits === 0,
+        `a writer's redirect throws as one never followed, and the origin it points at receives nothing (${r?.message}; ${farHits} request(s) there)`);
+    } finally {
+      far.stop(true);
+    }
     writerStatus = 200;
     tierStatus = 500;
     const f = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);

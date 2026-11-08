@@ -373,8 +373,10 @@
  *    re-pulled, a 402 cleared by topping up credit, a gateway's passing
  *    401/403/404;
  *  - the same at a pass's first start, or a refusal mid-pass (the provider
- *    refusing the request itself, a key refused on a real call), is the
- *    configuration's, as it is for a follower: it ends the scheduler with 2.
+ *    refusing the request itself, a key refused on a real call, or, since
+ *    SMD-2636 PR 2, extract's or consolidate's outage wait finding its probe
+ *    refused — a gateway's passing 404 among them), is the configuration's,
+ *    as it is for a follower: it ends the scheduler with 2.
  *    So the same 402 or 401 ends it when it lands mid-pass, and is retried
  *    when a period's start meets it first;
  *  - any other code a pass ends with ends the scheduler;
@@ -468,6 +470,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_HOLD_WHY, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type ReembedDown, type SleepAside, type SleepHeld, type SleepHold, type SleepHoldWhy } from "../server-portable/brain-info.ts";
@@ -3402,6 +3405,8 @@ if (import.meta.main) {
   // A command line from before v2.0.0 (SMD-3379 PR 1c-4b): refused with what replaced the flag, not as unknown.
   const cli = commandLine("sleep.ts", FLAGS, { hints: HINTS, removed: REMOVED_FLAGS });
   const url = databaseUrl(cli.value("url"));
+  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
   const capture = cli.int("capture", { absent: DEFAULT_CAPTURE_S, min: 1, max: 86_400 });
   const abortAfter = cli.int("abort-after", { absent: DEFAULT_ABORT_AFTER_S, min: STALL_FLOOR_MS / 1000, max: 86_400 });
   const rescan = cli.int("rescan", { absent: DEFAULT_RESCAN_S, min: 60, max: 86_400 });

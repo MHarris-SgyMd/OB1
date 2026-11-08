@@ -17,7 +17,7 @@ import { SqlStore } from "./store-sql.ts";
 import { createHash } from "node:crypto";
 import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { HUNG_MARK, MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
-import { createStore, ListCursorRefused, normaliseTicketStatusInputs } from "./store.ts";
+import { createStore, ListCursorRefused, normaliseTicketStatusInputs, PriorityRefused } from "./store.ts";
 import { SQL } from "bun";
 
 const URL_ = process.env.DATABASE_URL;
@@ -1884,6 +1884,10 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
     ["thought_changes", "thought_changes(timestamptz, uuid, text, text, text[], int)",
       async () => (await one.listChanges({ since: "2000-01-01T00:00:00Z", limit: 1 })).length,
       () => raw`SELECT * FROM thought_changes(${"2000-01-01T00:00:00Z"}::timestamptz, NULL, NULL, NULL, NULL, 1)`],
+    // SMD-3667: an item no one stated a priority on still answers one row (unknown).
+    ["effective_priority", "effective_priority(jsonb, jsonb, timestamptz)",
+      async () => (await one.effectivePriority([{ kind: "thought", key: older.id }])).length,
+      () => raw`SELECT * FROM effective_priority((${JSON.stringify([{ kind: "thought", key: older.id }])}::text)::jsonb, NULL, now())`],
   ];
   try {
     for (const [name, sig, read, star] of reads) {
@@ -1979,6 +1983,41 @@ console.log("\n[21] claimLease reads the lease a renewal starts from by its toke
     const noPiece = await lease({ name: "smd-3654-store" }, wholeToken);
     assert(renamed === true && away === true && otherId === false && otherName === false && doubled === true && blank === false && noPiece === true,
       `own on this work by agent id under a new name, by name with no id, not another id's or another name's; "PR  1" is PR 1; a blank piece is no whole ticket (${JSON.stringify([renamed, away, otherId, otherName, doubled, blank, noPiece])})`);
+  } finally {
+    await admin.close();
+  }
+}
+
+console.log("\n[22] effectivePriority reads migration 122's composed read (SMD-3667): the counted level and the urgency of a due time, each term named with what it read, the winner and its maker; weights overridden by name; the clock pinned or the database's; a misspelt weight refused as weight, a malformed item as key");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    await admin`INSERT INTO ob1_agents (label, kind) VALUES ('smd-3667-store', 'operator') ON CONFLICT DO NOTHING`;
+    const t = await store.captureThought({ content: "smd-3667 pay the water bill", payload: { metadata: {} }, embedding: unit(30) });
+    const said = await store.assertPriority({ kind: "thought", key: t.id, level: 2, dueAt: "2027-03-12T00:00:00Z", actor: { name: "smd-3667-store", via: "test-store-sql" }, scope: "write" });
+    const NOW = "2027-03-10T15:00:00Z";
+    const [r] = await store.effectivePriority([{ kind: "thought", key: t.id }], { now: NOW });
+    const [tuned] = await store.effectivePriority([{ kind: "THOUGHT", key: t.id.toUpperCase() }], { now: NOW, weights: { soon: 3 } });
+    const [today] = await store.effectivePriority([{ kind: "thought", key: t.id }], { now: "2027-01-01T00:00:00Z" });
+    assert(said.outcome === "asserted" && r?.item.kind === "thought" && r.item.key === t.id && r.effective === 4 && r.level === 2 && r.urgency === 2 && r.overdue === false
+        && r.dueAt === "2027-03-12T00:00:00.000Z" && r.dueFrom === "stated" && r.unblocks === 0 && r.settled === false && r.waiting === false && r.inheritedFrom === null
+        && JSON.stringify(r.terms.map((x) => [x.term, x.value])) === JSON.stringify([["level", 2], ["urgency", 2]]) && r.terms[1].detail.window === "soon" && r.terms[0].detail.maker === "smd-3667-store"
+        && r.winner?.maker.name === "smd-3667-store" && r.winner.tierName === "operator" && r.passedOver.length === 0,
+      `a Medium due by the end of tomorrow, on a pinned clock: effective 4, the level and the urgency named, the operator's statement the winner (${JSON.stringify(r)?.slice(0, 200)})`);
+    assert(tuned?.effective === 5 && tuned.item.key === t.id && today?.effective === 2 && today.urgency === 0,
+      `soon overridden to 3 reads 5, the item normalised as 116 keys it; on a clock ten weeks before, no urgency (${tuned?.effective}, ${today?.effective})`);
+    // The database's clock when none is pinned: a due time a minute past is overdue, never a pinned day's.
+    const soonItem = await store.captureThought({ content: "smd-3667 call back within the hour", payload: { metadata: {} }, embedding: unit(31) });
+    await store.assertPriority({ kind: "thought", key: soonItem.id, level: 2, dueAt: new Date(Date.now() - 60_000).toISOString(), actor: { name: "smd-3667-store", via: "test-store-sql" }, scope: "write" });
+    const [live] = await store.effectivePriority([{ kind: "thought", key: soonItem.id }]);
+    assert(live?.overdue === true && live.effective === 5, `with no clock pinned the database's is read: a due time a minute past is overdue (${live?.overdue}, ${live?.effective})`);
+    const refused = async (run: () => Promise<unknown>) => { try { await run(); return "none"; } catch (e) { return e instanceof PriorityRefused ? e.problem : `other: ${(e as Error).message}`; } };
+    const [weight, key, range, clock, endless] = [await refused(() => store.effectivePriority([], { weights: { soonn: 1 } as never })), await refused(() => store.effectivePriority([{ kind: "ticket", key: "not a key" }])),
+      await refused(() => store.effectivePriority([], { weights: { depth: 9 } })), await refused(() => store.effectivePriority([], { now: "not a time" })), await refused(() => store.effectivePriority([], { now: "infinity" }))];
+    let clockMessage = "";
+    try { await store.effectivePriority([], { now: "not a time" }); } catch (e) { clockMessage = (e as Error).message; }
+    assert(weight === "weight" && key === "key" && range === "weight" && clock === "time" && endless === "time" && /^now is no moment/.test(clockMessage),
+      `a misspelt weight and one out of range refused as weight, a malformed ticket key as key, a clock that is no moment as time, named as the clock (${weight}, ${key}, ${range}, ${clock}, ${endless}, ${clockMessage.slice(0, 40)})`);
   } finally {
     await admin.close();
   }
