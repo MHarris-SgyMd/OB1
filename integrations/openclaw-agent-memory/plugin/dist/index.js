@@ -4,8 +4,15 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { resolveConfiguredSecretInputString } from "openclaw/plugin-sdk/secret-input-runtime";
 
 // src/client.ts
-function requestInput(input) {
-  return input && typeof input === "object" ? input : {};
+var FIELDS = {
+  recall: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "task_type", "channel", "runtime", "model_intent", "query", "entities", "scope", "limits", "sensitivity"],
+  writeback: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "step_id", "idempotency_key", "content_hash", "trust", "channel", "runtime", "models_used", "source_refs", "memory_payload", "provenance", "retention", "visibility"],
+  record_usage: ["used_memory_ids", "ignored"],
+  review_memory: ["action", "actor_label", "notes", "content", "summary", "visibility", "related_memory_id"]
+};
+function only(input, fields) {
+  const given = input && typeof input === "object" ? input : {};
+  return Object.fromEntries(fields.filter((f) => given[f] !== void 0).map((f) => [f, given[f]]));
 }
 function projectIdFrom(input, configuredProjectId) {
   if (configuredProjectId) return configuredProjectId;
@@ -64,10 +71,14 @@ var AgentMemoryClient = class {
     });
     const text = await response.text();
     if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
-    return text ? JSON.parse(text) : {};
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not JSON): ${text}`, null);
+    }
   }
   recall(input) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.recall);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/recall", {
       method: "POST",
@@ -85,7 +96,7 @@ var AgentMemoryClient = class {
   }
   /** Answered {schema_version, memories}: each memory whole under a write key, its memory_id and thought_id alone under a capture-only key. */
   writeback(input) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.writeback);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/writeback", {
       method: "POST",
@@ -105,7 +116,7 @@ var AgentMemoryClient = class {
   }
   /** Answered {recorded: {used, ignored}}, the memories it marked. */
   reportUsage(requestId, input) {
-    return this.request(`/recalls/${segment(requestId)}/usage`, { method: "POST", body: input });
+    return this.request(`/recalls/${segment(requestId)}/usage`, { method: "POST", body: only(input, FIELDS.record_usage) });
   }
   /** Answered {memory, source_refs, models_used, relations}. */
   inspectMemory(memoryId) {
@@ -119,13 +130,59 @@ var AgentMemoryClient = class {
   }
   /** Answered {memory}, as the review left it. */
   reviewMemory(memoryId, input) {
-    return this.request(`/memories/${segment(memoryId)}/review`, { method: "PATCH", body: input });
+    return this.request(`/memories/${segment(memoryId)}/review`, { method: "PATCH", body: only(input, FIELDS.review_memory) });
   }
   /** Answered {trace, items}: a recall made under a write key. */
   getRecallTrace(requestId) {
     return this.request(`/recalls/${segment(requestId)}`);
   }
 };
+function provenanceLabel(m) {
+  const policy = m?.use_policy ?? {};
+  return policy?.can_use_as_instruction ? "instruction" : policy?.can_use_as_evidence ? "evidence" : void 0;
+}
+function updatedAtOf(m) {
+  const f = m?.freshness;
+  const at = f?.last_confirmed_at ?? f?.created_at;
+  return typeof at === "string" ? at : void 0;
+}
+function corpusHits(recall) {
+  const memories = Array.isArray(recall?.memories) ? recall.memories : [];
+  return memories.map((m, i) => {
+    const id = typeof m?.memory_id === "string" ? m.memory_id : void 0;
+    return {
+      corpus: "openbrain",
+      path: `openbrain://memory/${id ?? i}`,
+      title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : void 0,
+      kind: "memory",
+      score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
+      snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
+      id,
+      provenanceLabel: provenanceLabel(m),
+      source: "openbrain.agent_memory",
+      sourceType: "openbrain.agent_memory",
+      updatedAt: updatedAtOf(m)
+    };
+  });
+}
+function corpusDocument(answer, lookup, id) {
+  const memory = answer?.memory;
+  if (!memory || typeof memory !== "object") return null;
+  const content = String(memory.content ?? memory.summary ?? "");
+  return {
+    corpus: "openbrain",
+    path: lookup,
+    title: typeof memory.summary === "string" ? memory.summary.slice(0, 80) : void 0,
+    kind: "memory",
+    content,
+    fromLine: 1,
+    lineCount: content.split("\n").length,
+    id: typeof memory.memory_id === "string" ? memory.memory_id : id,
+    provenanceLabel: provenanceLabel(memory),
+    sourceType: "openbrain.agent_memory",
+    updatedAt: updatedAtOf(memory)
+  };
+}
 
 // src/tool-schemas.js
 import { Type } from "typebox";
@@ -281,11 +338,6 @@ function toolResult(value) {
     ],
     details: value
   };
-}
-function updatedAtOf(m) {
-  const f = m?.freshness;
-  const at = f?.last_confirmed_at ?? f?.created_at;
-  return typeof at === "string" ? at : void 0;
 }
 function registerTool(api, tool) {
   api.registerTool({
@@ -449,26 +501,7 @@ var index_default = definePluginEntry({
           } catch {
             return [];
           }
-          const memories = Array.isArray(response?.memories) ? response.memories : [];
-          return memories.map((m, i) => {
-            const policy = m?.use_policy ?? {};
-            const provenance = policy?.can_use_as_instruction ? "instruction" : policy?.can_use_as_evidence ? "evidence" : void 0;
-            const id = typeof m?.memory_id === "string" ? m.memory_id : void 0;
-            return {
-              corpus: "openbrain",
-              path: `openbrain://memory/${id ?? i}`,
-              title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : void 0,
-              kind: "memory",
-              // The plugin answers memories in rank order, with no score: the rank stands in for one.
-              score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
-              snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
-              id,
-              provenanceLabel: provenance,
-              source: "openbrain.agent_memory",
-              sourceType: "openbrain.agent_memory",
-              updatedAt: updatedAtOf(m)
-            };
-          });
+          return corpusHits(response);
         },
         async get(input) {
           if (!isConfigured()) return null;
@@ -480,29 +513,13 @@ var index_default = definePluginEntry({
           } catch {
             return null;
           }
-          let memory;
+          let answer;
           try {
-            memory = (await client.inspectMemory(id))?.memory;
+            answer = await client.inspectMemory(id);
           } catch {
             return null;
           }
-          if (!memory || typeof memory !== "object") return null;
-          const policy = memory?.use_policy ?? {};
-          const provenance = policy?.can_use_as_instruction ? "instruction" : policy?.can_use_as_evidence ? "evidence" : void 0;
-          const content = String(memory?.content ?? memory?.summary ?? "");
-          return {
-            corpus: "openbrain",
-            path: input.lookup,
-            title: typeof memory?.summary === "string" ? memory.summary.slice(0, 80) : void 0,
-            kind: "memory",
-            content,
-            fromLine: 1,
-            lineCount: content.split("\n").length,
-            id: typeof memory?.memory_id === "string" ? memory.memory_id : id,
-            provenanceLabel: provenance,
-            sourceType: "openbrain.agent_memory",
-            updatedAt: updatedAtOf(memory)
-          };
+          return corpusDocument(answer, input.lookup, id);
         }
       });
     }

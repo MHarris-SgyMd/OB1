@@ -39,7 +39,7 @@
             "required": ["status", "confidence", "created_by"],
             "additionalProperties": false,
             "properties": {
-              "status": { "type": "string", "enum": ["observed", "inferred", "user_confirmed", "imported", "generated"] },
+              "status": { "type": "string", "enum": ["observed", "inferred", "user_confirmed", "imported", "generated", "superseded", "disputed"] },
               "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
               "created_by": { "type": "string", "enum": ["user", "agent", "system", "import"] },
               "model": { "type": ["string", "null"] },

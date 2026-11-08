@@ -63,6 +63,28 @@ _PREFETCH_TTL_SECONDS = 90.0
 # (not OpenClaw). See plugins/agent-memory/index.ts.
 _RECALL_SCHEMA_VERSION = "openbrain.agent_memory.recall.v1"
 _WRITEBACK_SCHEMA_VERSION = "openbrain.agent_memory.writeback.v1"
+# The most memories one write-back may hold: the plugin refuses more (TOO_MANY_MEMORIES), each memory a capture
+# with its model calls in the one request. A longer payload is sent in parts.
+_WRITEBACK_MAX_MEMORIES = 50
+
+
+def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_MAX_MEMORIES) -> List[Dict[str, Any]]:
+    """A memory_payload as parts of at most ``limit`` memories each, in its own
+    order: every item of every list but ``entities`` is one memory. One part
+    when it fits; ``entities`` rides with the first part."""
+    parts: List[Dict[str, Any]] = [{}]
+    count = 0
+    for key, items in memory_payload.items():
+        if key == "entities" or not isinstance(items, list):
+            parts[0][key] = items
+            continue
+        for item in items:
+            if count == limit:
+                parts.append({})
+                count = 0
+            parts[-1].setdefault(key, []).append(item)
+            count += 1
+    return parts
 
 # Trivial messages we should not write back as memory turns.
 _TRIVIAL_RE = re.compile(
@@ -487,11 +509,16 @@ class _OB1Client:
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+                status = getattr(resp, "status", 200)
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
             retry_after = e.headers.get("Retry-After") if e.headers else None
             raise OB1RequestError(method, path, e.code, err_body, retry_after) from e
+        try:
+            return json.loads(raw) if raw else {}
+        except ValueError:
+            # A 2xx that is not JSON is no answer of the plugin's: an endpoint pointing at some other page.
+            raise OB1RequestError(method, path, status, f"not the plugin's answer (not JSON): {raw}") from None
 
     @staticmethod
     def _id(value: str) -> str:
@@ -570,9 +597,24 @@ class _OB1Client:
             body["flow_id"] = flow_id
         if step_id:
             body["step_id"] = step_id
-        if idempotency_key:
-            body["idempotency_key"] = idempotency_key
-        return self._request("POST", "/writeback", body=body)
+        parts = _split_payload(memory_payload)
+        if len(parts) == 1:
+            if idempotency_key:
+                body["idempotency_key"] = idempotency_key
+            return self._request("POST", "/writeback", body=body)
+        # More than the plugin takes at once: each part a write-back of its own, the answers' memories joined in
+        # order. A key given is each part's own (the plugin keys each memory by it and its index in the part).
+        # A part refused raises, the parts before it kept: the same write-back sent again answers them, writing
+        # nothing twice, and finishes.
+        answer: dict = {}
+        memories: List[Any] = []
+        for n, part in enumerate(parts):
+            body["memory_payload"] = part
+            if idempotency_key:
+                body["idempotency_key"] = f"{idempotency_key}:part{n}"
+            answer = self._request("POST", "/writeback", body=body)
+            memories.extend(answer.get("memories") or [])
+        return {**answer, "memories": memories}
 
     def report_usage(self, request_id: str, *, used: List[str],
                      ignored: List[str]) -> dict:

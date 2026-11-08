@@ -17,12 +17,17 @@ which replaces the standalone Agent Memory API server after the brain's 2.0.0
 - A refusal throws `AgentMemoryError`, whose message, `code` and `status` name
   the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`);
   a retryable 503 carries its `Retry-After`. A body that is not JSON (a
-  proxy's error page) no longer throws a parse error in its place.
+  proxy's error page, or a 2xx from an endpoint that is not the plugin's)
+  throws one too, never a bare parse error.
+- Each call passes on only the fields its route takes: the plugin refuses a
+  field it does not name, so one a model adds to a tool's arguments is
+  dropped rather than failing the call.
 - `openbrain_review_memory` no longer takes `actor_id`, which the plugin
   refuses, and its `visibility` is one of the plugin's five.
 - `openbrain_inspect_memory` answers the plugin's
   `{memory, source_refs, models_used, relations}`, and the memory corpus reads
-  the memory from it, its id from `memory_id` and its time from `freshness`.
+  the memory from it, its id from `memory_id` and its time from `freshness`
+  (the mapping is `corpusHits` and `corpusDocument` in `src/client.ts`).
 - `dist/index.js` ships the explicit tool schemas of 0.1.5
   (`src/tool-schemas.js`, the ones `schema:check` reads): `src/index.ts`
   declared its own copies beside the import, and the build kept those, so the

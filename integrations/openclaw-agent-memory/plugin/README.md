@@ -6,7 +6,7 @@ Built by Nate B. Jones / OB1. Follow Nate for practical AI systems, agent workfl
 
 ## Install
 
-Version 0.2.0 calls the brain's agent-memory plugin (`plugins/agent-memory`, after the brain's 2.0.0). Until 0.2.0 is published on ClawHub, the ClawHub package and the tarball below are 0.1.6, which calls the standalone Agent Memory API server's routes: on a brain with the agent-memory plugin, use the linked install below.
+Version 0.2.0 calls the brain's agent-memory plugin (`plugins/agent-memory`, after the brain's 2.0.0). Until 0.2.0 is published on ClawHub, the ClawHub package and the tarball below are 0.1.6, whose usage, trace and review-queue tools call routes the agent-memory plugin does not have (they were the standalone Agent Memory API server's): on a brain with the agent-memory plugin, use the linked install below.
 
 Recommended for OpenClaw `2026.5.7` and newer:
 

@@ -67,7 +67,7 @@ cd ../../..
 openclaw --profile ob1-agent-memory plugins install integrations/openclaw-agent-memory/plugin --link
 ```
 
-For public distribution, install the live ClawHub package once it is 0.2.0 or later. Until 0.2.0 is published there, the ClawHub package (0.1.6) calls the standalone server's routes, which the agent-memory plugin does not answer: use the linked install above.
+For public distribution, install the live ClawHub package once it is 0.2.0 or later. Until 0.2.0 is published there, the ClawHub package is 0.1.6, whose usage, trace and review-queue tools call routes the agent-memory plugin does not have (its recall, write-back, inspection and review still answer): use the linked install above.
 
 ```bash
 openclaw plugins install clawhub:@natebjones/ob1-agent-memory
@@ -101,7 +101,7 @@ Review [Safe Agent Memory and Provenance](../../docs/safe-agent-memory-provenanc
 Solution: Confirm the plugin config has the correct `endpoint` (ending `/api/v1/plugins/agent-memory`) and `accessKey`. Prefer an OpenClaw SecretRef backed by a file, env, or exec provider so the access key does not live in plaintext config. A `403 FORBIDDEN` is a key whose scope does not reach the tool: recall and the lists read, usage and review write.
 
 **Issue: A tool fails with a code such as `REFUSED_INPUT` or `NO_SUCH_MEMORY`**
-Solution: Each failure names the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`), which [its README's Troubleshooting](../../plugins/agent-memory/README.md#troubleshooting) explains. A `404` on every tool is an `endpoint` that is not the plugin's routes: a ClawHub 0.1.6 install, or the old server's URL.
+Solution: Each failure names the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`), which [its README's Troubleshooting](../../plugins/agent-memory/README.md#troubleshooting) explains. A `404` on every tool is an `endpoint` that is not the plugin's routes, such as the old server's URL. A `404` on usage and the trace and a `400 REFUSED_INPUT` on the review queue, the other tools answering, is ClawHub's 0.1.6: link 0.2.0 instead.
 
 **Issue: Plugin loads but lists no tools**
 Solution: Confirm [`plugin/openclaw.plugin.json`](./plugin/openclaw.plugin.json) declares `contracts.tools` for every registered tool. Current OpenClaw builds reject tool registration without that manifest contract.

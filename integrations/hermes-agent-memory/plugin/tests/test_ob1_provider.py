@@ -492,6 +492,51 @@ class TestOB1Client:
         assert caught.value.retry_after == "5"
         assert "embedding provider did not answer" in str(caught.value)
 
+    def test_writeback_over_fifty_is_sent_in_parts(self):
+        # The plugin refuses a write-back of more than 50 memories: 60 go as 50 then 10, in order, the
+        # answers' memories joined, a key given made each part's own, the entities on the first part.
+        bodies: List[Dict[str, Any]] = []
+
+        def fake(req, timeout=None):
+            body = json.loads(req.data.decode("utf-8"))
+            bodies.append(body)
+            n = sum(len(v) for k, v in body["memory_payload"].items() if k != "entities")
+            return _mock_urlopen_response({"schema_version": "v", "memories": [{"memory_id": f"m{len(bodies)}-{i}"} for i in range(n)]})
+
+        client = _OB1Client("http://x", "k", 5.0)
+        payload = {"decisions": [f"d{i}" for i in range(30)], "lessons": [f"l{i}" for i in range(30)], "entities": {"repos": ["r"]}}
+        with patch("urllib.request.urlopen", fake):
+            out = client.writeback(workspace_id="w", project_id=None, memory_payload=payload, idempotency_key="key")
+        assert [sum(len(v) for k, v in b["memory_payload"].items() if k != "entities") for b in bodies] == [50, 10]
+        assert bodies[0]["memory_payload"]["decisions"] == [f"d{i}" for i in range(30)]
+        assert bodies[0]["memory_payload"]["lessons"] == [f"l{i}" for i in range(20)]
+        assert bodies[1]["memory_payload"] == {"lessons": [f"l{i}" for i in range(20, 30)]}
+        assert bodies[0]["memory_payload"]["entities"] == {"repos": ["r"]}
+        assert [b["idempotency_key"] for b in bodies] == ["key:part0", "key:part1"]
+        assert len(out["memories"]) == 60 and out["memories"][50]["memory_id"] == "m2-0"
+
+    def test_writeback_of_fifty_is_one_call(self):
+        bodies: List[Dict[str, Any]] = []
+
+        def fake(req, timeout=None):
+            bodies.append(json.loads(req.data.decode("utf-8")))
+            return _mock_urlopen_response({"memories": []})
+
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"outputs": [f"o{i}" for i in range(50)]}, idempotency_key="key")
+        assert len(bodies) == 1 and bodies[0]["idempotency_key"] == "key"
+
+    def test_ok_answer_that_is_not_json_raises(self):
+        # A 200 that is not JSON is no answer of the plugin's (an endpoint pointing at some other page).
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=MagicMock(read=lambda: b"<html>login</html>", status=200))
+        cm.__exit__ = MagicMock(return_value=False)
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", return_value=cm):
+            with pytest.raises(ob1_module.OB1RequestError, match="HTTP 200 not the plugin's answer"):
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+
     def test_non_json_error_body_is_kept(self):
         import urllib.error
         client = _OB1Client("http://x", "k", 5.0)
@@ -808,6 +853,27 @@ class TestSessionEnd:
         payload = recorded[0]["memory_payload"]
         assert any("Bun" in d for d in payload.get("decisions", []))
         assert any("TODO" in n for n in payload.get("next_steps", []))
+
+    def test_long_session_is_written_back_whole(self, configured):
+        # Ten findings in each of six categories: 60 memories, past the plugin's 50 a write-back holds. The client
+        # sends them in two parts, so none is lost (the plugin would refuse the 60 whole).
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+
+        def fake(req, timeout=None):
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            return _mock_urlopen_response({"memories": []})
+
+        lines = []
+        for i in range(10):
+            lines += [f"We decided to use tool number {i} for the job.", f"Lesson learned: check item {i} before the release.",
+                      f"The deploy job is capped at {i} parallel runners.", f"TODO: write the migration script part {i} soon.",
+                      f"It is unclear whether option {i} still works.", f"The build failed because of module {i} again."]
+        with patch("urllib.request.urlopen", fake):
+            p.on_session_end([{"role": "assistant", "content": line} for line in lines])
+        assert sum(sent) == 60 and max(sent) <= 50, sent
 
     def test_skips_when_inactive(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)

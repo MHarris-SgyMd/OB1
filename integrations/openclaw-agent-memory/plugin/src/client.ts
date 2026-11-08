@@ -14,8 +14,22 @@ type RequestOptions = {
   query?: Record<string, string | undefined>;
 };
 
-function requestInput(input: Record<string, unknown>) {
-  return input && typeof input === "object" ? input : {};
+/**
+ * The fields each plugin route takes, top level, as plugins/agent-memory/index.ts declares them. The REST input is
+ * strict: a field it does not take is refused (REFUSED_INPUT), so a field a model adds to a tool's arguments is
+ * dropped here, not sent. test-plugin-ports.ts holds these to the plugin's own.
+ */
+export const FIELDS = {
+  recall: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "task_type", "channel", "runtime", "model_intent", "query", "entities", "scope", "limits", "sensitivity"],
+  writeback: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "step_id", "idempotency_key", "content_hash", "trust", "channel", "runtime", "models_used", "source_refs", "memory_payload", "provenance", "retention", "visibility"],
+  record_usage: ["used_memory_ids", "ignored"],
+  review_memory: ["action", "actor_label", "notes", "content", "summary", "visibility", "related_memory_id"],
+} as const;
+
+/** The input's fields the route takes; anything else left out. */
+function only(input: unknown, fields: readonly string[]): Record<string, unknown> {
+  const given = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  return Object.fromEntries(fields.filter((f) => given[f] !== undefined).map((f) => [f, given[f]]));
 }
 
 function projectIdFrom(input: Record<string, unknown>, configuredProjectId?: string) {
@@ -90,11 +104,16 @@ export class AgentMemoryClient {
     });
     const text = await response.text();
     if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
-    return text ? JSON.parse(text) : {};
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      // A 2xx that is not JSON is no answer of the plugin's: an endpoint pointing at some other page.
+      throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not JSON): ${text}`, null);
+    }
   }
 
   recall(input: Record<string, unknown>) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.recall);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/recall", {
       method: "POST",
@@ -113,7 +132,7 @@ export class AgentMemoryClient {
 
   /** Answered {schema_version, memories}: each memory whole under a write key, its memory_id and thought_id alone under a capture-only key. */
   writeback(input: Record<string, unknown>) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.writeback);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/writeback", {
       method: "POST",
@@ -134,7 +153,7 @@ export class AgentMemoryClient {
 
   /** Answered {recorded: {used, ignored}}, the memories it marked. */
   reportUsage(requestId: string, input: Record<string, unknown>) {
-    return this.request(`/recalls/${segment(requestId)}/usage`, { method: "POST", body: input });
+    return this.request(`/recalls/${segment(requestId)}/usage`, { method: "POST", body: only(input, FIELDS.record_usage) });
   }
 
   /** Answered {memory, source_refs, models_used, relations}. */
@@ -151,11 +170,68 @@ export class AgentMemoryClient {
 
   /** Answered {memory}, as the review left it. */
   reviewMemory(memoryId: string, input: Record<string, unknown>) {
-    return this.request(`/memories/${segment(memoryId)}/review`, { method: "PATCH", body: input });
+    return this.request(`/memories/${segment(memoryId)}/review`, { method: "PATCH", body: only(input, FIELDS.review_memory) });
   }
 
   /** Answered {trace, items}: a recall made under a write key. */
   getRecallTrace(requestId: string) {
     return this.request(`/recalls/${segment(requestId)}`);
   }
+}
+
+/** How a memory reads to an agent: an instruction it may follow, evidence alone, or neither. */
+function provenanceLabel(m: any): "instruction" | "evidence" | undefined {
+  const policy = m?.use_policy ?? {};
+  return policy?.can_use_as_instruction ? "instruction" : policy?.can_use_as_evidence ? "evidence" : undefined;
+}
+
+/** When a person last confirmed a memory, else when it was written: the plugin's memory carries its times under freshness. */
+function updatedAtOf(m: any): string | undefined {
+  const f = m?.freshness;
+  const at = f?.last_confirmed_at ?? f?.created_at;
+  return typeof at === "string" ? at : undefined;
+}
+
+/**
+ * A recall's memories as OpenClaw's memory corpus lists them. The plugin answers them in rank order with no score,
+ * so the rank stands in for one; a memory's id is its memory_id.
+ */
+export function corpusHits(recall: any) {
+  const memories: any[] = Array.isArray(recall?.memories) ? recall.memories : [];
+  return memories.map((m, i) => {
+    const id = typeof m?.memory_id === "string" ? m.memory_id : undefined;
+    return {
+      corpus: "openbrain",
+      path: `openbrain://memory/${id ?? i}`,
+      title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : undefined,
+      kind: "memory",
+      score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
+      snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
+      id,
+      provenanceLabel: provenanceLabel(m),
+      source: "openbrain.agent_memory",
+      sourceType: "openbrain.agent_memory",
+      updatedAt: updatedAtOf(m),
+    };
+  });
+}
+
+/** A memory as OpenClaw's memory corpus reads it, from get_memory's answer ({memory, source_refs, ...}); null for none. */
+export function corpusDocument(answer: any, lookup: string, id: string) {
+  const memory = answer?.memory;
+  if (!memory || typeof memory !== "object") return null;
+  const content = String(memory.content ?? memory.summary ?? "");
+  return {
+    corpus: "openbrain",
+    path: lookup,
+    title: typeof memory.summary === "string" ? memory.summary.slice(0, 80) : undefined,
+    kind: "memory",
+    content,
+    fromLine: 1,
+    lineCount: content.split("\n").length,
+    id: typeof memory.memory_id === "string" ? memory.memory_id : id,
+    provenanceLabel: provenanceLabel(memory),
+    sourceType: "openbrain.agent_memory",
+    updatedAt: updatedAtOf(memory),
+  };
 }

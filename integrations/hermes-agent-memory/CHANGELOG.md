@@ -8,7 +8,8 @@ The provider calls the brain's agent-memory plugin (`plugins/agent-memory`), whi
 
 - `endpoint` is the plugin's REST base, `https://<host>/api/v1/plugins/agent-memory`; the key is still sent as `x-brain-key`.
 - Routes: usage is `POST /recalls/{request_id}/usage`, a recall trace `GET /recalls/{request_id}`, the review queue `GET /review-queue`, and listing `GET /memories`, the reads' input in the query string. The review queue and listing were `POST /memories/review` and `POST /memories/list`, which no server answered.
-- A refusal raises `OB1RequestError`, whose message, `code` and `status` name the plugin's refusal code (`HTTP 400 REFUSED_INPUT`); a retryable 503 carries its `Retry-After`.
+- A refusal raises `OB1RequestError`, whose message, `code` and `status` name the plugin's refusal code (`HTTP 400 REFUSED_INPUT`); a retryable 503 carries its `Retry-After`. A 2xx that is not JSON (an endpoint pointing at some other page) raises one too.
+- A write-back of more than 50 memories is sent in parts of at most 50: the plugin refuses more in one request, and a long session's end extracts up to 70 findings. A key given is each part's own (`<key>:part<n>`); a part refused raises, the parts before it kept.
 - `ob1_review_memory` sends the reviewer as `actor_label`, the field the plugin takes (it refuses a field it does not know), and an `edit` takes `content` and `summary`; one with neither is refused before it is sent.
 - Recall context reads a memory's time from `freshness` (when a person last confirmed it, else when it was written), as the plugin answers it.
 

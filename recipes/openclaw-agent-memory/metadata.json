@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["OpenClaw", "Deno", "Node.js 20+"]
+    "tools": ["OpenClaw", "Node.js 20+"]
   },
   "requires_skills": ["openclaw-agent-memory"],
   "tags": ["openclaw", "agent-memory", "workflow", "provenance"],

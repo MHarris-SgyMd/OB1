@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { resolveConfiguredSecretInputString } from "openclaw/plugin-sdk/secret-input-runtime";
-import { AgentMemoryClient, type AgentMemoryConfig } from "./client.js";
+import { AgentMemoryClient, corpusDocument, corpusHits, type AgentMemoryConfig } from "./client.js";
 import { recallParameters, writebackParameters } from "./tool-schemas.js";
 
 async function clientFromApi(api: { pluginConfig?: unknown; config?: unknown }) {
@@ -47,13 +47,6 @@ function toolResult(value: unknown) {
     ],
     details: value,
   };
-}
-
-/** When a person last confirmed a memory, else when it was written: the plugin's memory carries its times under freshness. */
-function updatedAtOf(m: any): string | undefined {
-  const f = m?.freshness;
-  const at = f?.last_confirmed_at ?? f?.created_at;
-  return typeof at === "string" ? at : undefined;
 }
 
 function registerTool(api: any, tool: { name: string; label: string; description: string; parameters: unknown; run: (client: AgentMemoryClient, input: any) => Promise<unknown> }) {
@@ -251,30 +244,7 @@ export default definePluginEntry({
           } catch {
             return [];
           }
-          const memories: any[] = Array.isArray(response?.memories) ? response.memories : [];
-          return memories.map((m, i) => {
-            const policy = m?.use_policy ?? {};
-            const provenance = policy?.can_use_as_instruction
-              ? "instruction"
-              : policy?.can_use_as_evidence
-                ? "evidence"
-                : undefined;
-            const id = typeof m?.memory_id === "string" ? m.memory_id : undefined;
-            return {
-              corpus: "openbrain",
-              path: `openbrain://memory/${id ?? i}`,
-              title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : undefined,
-              kind: "memory",
-              // The plugin answers memories in rank order, with no score: the rank stands in for one.
-              score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
-              snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
-              id,
-              provenanceLabel: provenance,
-              source: "openbrain.agent_memory",
-              sourceType: "openbrain.agent_memory",
-              updatedAt: updatedAtOf(m),
-            };
-          });
+          return corpusHits(response);
         },
         async get(input: { lookup: string }) {
           if (!isConfigured()) return null;
@@ -286,33 +256,13 @@ export default definePluginEntry({
           } catch {
             return null;
           }
-          let memory: any;
+          let answer: any;
           try {
-            memory = (await client.inspectMemory(id))?.memory;
+            answer = await client.inspectMemory(id);
           } catch {
             return null;
           }
-          if (!memory || typeof memory !== "object") return null;
-          const policy = (memory as any)?.use_policy ?? {};
-          const provenance = policy?.can_use_as_instruction
-            ? "instruction"
-            : policy?.can_use_as_evidence
-              ? "evidence"
-              : undefined;
-          const content = String((memory as any)?.content ?? (memory as any)?.summary ?? "");
-          return {
-            corpus: "openbrain",
-            path: input.lookup,
-            title: typeof (memory as any)?.summary === "string" ? (memory as any).summary.slice(0, 80) : undefined,
-            kind: "memory",
-            content,
-            fromLine: 1,
-            lineCount: content.split("\n").length,
-            id: typeof (memory as any)?.memory_id === "string" ? (memory as any).memory_id : id,
-            provenanceLabel: provenance,
-            sourceType: "openbrain.agent_memory",
-            updatedAt: updatedAtOf(memory),
-          };
+          return corpusDocument(answer, input.lookup, id);
         },
       });
     }
