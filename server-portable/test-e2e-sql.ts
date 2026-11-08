@@ -4222,6 +4222,62 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     const loggedPlain = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
     assert(loggedAfter === loggedBefore && loggedPlain === loggedAfter + 1,
       `a priority-ranked search is not logged (the log has no column for it), a plain one is (${loggedBefore} → ${loggedAfter} → ${loggedPlain})`);
+    // PR 2, the label, read by the same ADR: each hit's own priority first (a ticket's row as its ticket, once), then
+    // the tickets it is filed under or names; a ranked search's label comes from its one window read.
+    type Pr = { kind: string; key: string; self: boolean; effective: number; level: number | null; inheritedFrom: { key: string } | null; settled: boolean; urgency: number };
+    const plainAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter });
+    const labelOf = (r: typeof plainAll, id: string) => (((r.sc?.hits ?? []) as { id: string; priority: Pr[] | null }[]).find((h) => h.id === id)?.priority ?? null);
+    const said = (r: typeof plainAll, id: string) => (labelOf(r, id) ?? []).map((p) => `${p.self ? "self:" : ""}${p.kind}:${p.kind === "thought" ? "-" : p.key}:${p.effective}${p.settled ? ":settled" : ""}`).join(" ");
+    const want: [string, string][] = [
+      [underUrgent, "self:thought:-:3 ticket:PWU-1:4"],
+      [urgentRow, "self:ticket:PWU-1:4"],
+      [doneRow, "self:ticket:PWD-1:4:settled"],
+      [underDone, "ticket:PWD-1:4:settled"],
+      [underHigh, `ticket:${last}:5`],
+      [statedNone, "self:thought:-:0 ticket:PWU-1:4"],
+      [mention, "ticket:PWU-1:4"],
+      [low, "self:thought:-:1"],
+    ];
+    const wrong = want.filter(([id, w]) => said(plainAll, id) !== w).map(([id, w]) => `${name.get(id)}: ${said(plainAll, id)} ≠ ${w}`);
+    assert(!plainAll.isError && wrong.length === 0,
+      `each hit's label: a note under an Urgent ticket itself High by inheritance, then the ticket; a ticket's row once, as its ticket; a finished one settled at its level; a note under it nothing of its own; a mention the ticket alone; a stated None and a Low their own (${wrong.join("; ") || "all as the ADR reads them"})`);
+    assert(plainAll.text.includes("Priority: this thought at 3 (inherited 3 from ticket PWU-1 (urgent (4), 1 hop)); ticket PWU-1 at 4 (urgent (4)).")
+        && plainAll.text.includes(`Priority: ticket ${last} at 5 (high (3); +2 due by the end of ${tomorrow} (UTC)).`),
+      `the text says each item's effective priority and its terms (${plainAll.text.match(/Priority: .*/)?.[0]})`);
+    const rankedAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, priority_weight: 0.5 });
+    assert(!rankedAll.isError && want.every(([id, w]) => said(rankedAll, id) === w),
+      `a ranked search's hits carry the same labels, from its page's label read (${want.filter(([id, w]) => said(rankedAll, id) !== w).map(([id]) => name.get(id)).join(", ")})`);
+    // With a floor too (review pass 2: untested): every kept hit's own priority is known, so it leads its label, and the
+    // labels are the plain search's.
+    const flooredAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, min_priority: 3 });
+    const floorIds = ids(flooredAll);
+    assert(!flooredAll.isError && floorIds.length === 7 && floorIds.every((id) => labelOf(flooredAll, id)?.[0]?.self === true)
+        && floorIds.filter((id) => want.some(([w]) => w === id)).every((id) => said(flooredAll, id) === said(plainAll, id)),
+      `under min_priority every kept hit leads with its own known priority, its label the plain search's (${floorIds.map((id) => `${name.get(id)}:${said(flooredAll, id)}`).join(" | ")})`);
+    const fetched = JSON.parse((await call("fetch", { id: underUrgent })) as string) as { title: string; priority: Pr[] };
+    assert(fetched.title.startsWith("[priority: this thought high (3), inherited from urgent (4) ticket PWU-1; ticket PWU-1 urgent (4)] ") && fetched.priority.length === 2,
+      `fetch's title starts with the prefix (${fetched.title.slice(0, 120)})`);
+    // Review pass 1: a ranked search reads twice, through a core over a store that records each effective_priority
+    // call: its window's own thoughts alone (which rank it, and fail it on a fault, as PR 1's read did), then only the
+    // tickets of the page it keeps, the window's answers reused. A ticket only a dropped row names is never read.
+    const { z } = await import("zod");
+    const { SPECS } = await import("./core/schemas.ts");
+    const env25: Record<string, string | undefined> = { ...process.env };
+    const real25 = await createStore(env25 as never);
+    const reads25: { kind: string; key: string }[][] = [];
+    const watched = new Proxy(real25, { get: (t, k) => {
+      if (k === "effectivePriority") return async (items: { kind: string; key: string }[], o?: never) => { reads25.push(items); return t.effectivePriority(items, o); };
+      const v = Reflect.get(t, k);
+      return typeof v === "function" ? v.bind(t) : v;
+    } });
+    const core25 = createCore({ env: () => env25 as never, store: async () => watched as never, door: "open-brain" });
+    const in25 = z.object(SPECS.search_thoughts.inputSchema).parse({ query, limit: 1, threshold: -1, filter, priority_weight: 1 });
+    const out25 = await core25.searchThoughts({ name: "MCP_ACCESS_KEY", scope: "write", keyHash: "e2e-25" } as never, in25 as never);
+    const kept25 = out25.ok ? out25.value.hits[0] : undefined;
+    const named25 = kept25 ? `${kept25.content} ${JSON.stringify(kept25.metadata)}` : "";
+    assert(out25.ok && kept25 !== undefined && reads25.length === 2 && reads25[0].length === 4 && reads25[0].every((i) => i.kind === "thought")
+        && reads25[1].length > 0 && reads25[1].every((i) => i.kind === "ticket" && named25.includes(i.key)) && (kept25.priority?.length ?? 0) > 0,
+      `a ranked search reads its window's 4 thoughts alone, then only the tickets its kept row names, and labels it (${JSON.stringify(reads25.map((r) => r.map((i) => i.kind === "ticket" ? i.key : "thought")))})`);
   } finally {
     // The key's kind first, on its own: a failed capture leaves `made` short a row, and the delete after must not stop it
     // (review pass 2). set_agent_kind takes no NULL: the kind the key had, put back by hand.

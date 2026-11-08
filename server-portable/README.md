@@ -436,11 +436,12 @@ under a finished ticket, a finished ticket looked up by its key).
 ### What matters, opt-in (SMD-3668)
 
 `search_thoughts` takes `priority_weight` (0–1, default 0) and `min_priority`
-(0 none to 5 critical). With neither, the search is exactly as before: no window
-and no read. With either, the server asks the hybrid (or, under `prefer_current`,
-`search_thoughts_current`) for the top min(100, 4 × limit), as `prefer_current`'s
-window is, and reads their effective priority once for the whole window
-(`effective_priority`, migration 122, SMD-3667):
+(0 none to 5 critical). With neither, the search ranks exactly as before, with no
+window; its page's one priority read is the label's, below. With either, the
+server asks the hybrid (or, under `prefer_current`, `search_thoughts_current`) for
+the top min(100, 4 × limit), as `prefer_current`'s window is, and reads the
+window's own thoughts' effective priority once (`effective_priority`, migration
+122, SMD-3667); the label's read of the kept page's tickets follows, below:
 
 - **A match's priority** is its own effective priority, as `docs/priority.md`
   decision 5 composes it:
@@ -483,10 +484,63 @@ log has no column for them, and a replay would run it without. A brain short of
 migration 122, or a server role granted before 116, fails a ranked search with a
 hint naming the fix.
 
-The read costs about 6.5 ms for a full window with no priorities stored (100
-thoughts, 5,000 in the brain). The ChatGPT `search` tool takes only its query,
-so it never ranks by priority. `evals/eval-priority.ts` (SMD-3662) measures the
-weight before any default changes.
+The ChatGPT `search` tool takes only its query, so it never ranks by priority.
+`evals/eval-priority.ts` (SMD-3662) measures the weight before any default
+changes.
+
+**Each result's priority, a label (SMD-3668 PR 2).** `search`, `search_thoughts`,
+`search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its
+`priority`: the known priorities of the result itself (a ticket's row as its
+ticket, once) and of the tickets it is filed under or names, the first 50 (the
+rest counted in `priorityNotRead`, with any past the read's reach). Known is a
+counted or inherited level (a thought's from the ticket it is about, a ticket's
+from its parent), as
+the floor reads it; an unknown is no label. Each item carries its kind and key,
+`self`, its effective priority, its `level` or `inheritedFrom`, its due time and
+the urgency it adds, `overdue`, `unblocks`, `settled` and `waiting`, and over
+REST its `terms`. The result itself comes first, then the rest by effective
+priority; ten are named and `priorityMore` counts the rest. A settled item is
+ordered by the level it keeps and said settled: whether work is finished is its
+own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
+can come before an open High. Over MCP the three text tools print
+`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+as the agenda says it, and their values keep the fields without the terms (a
+term names the stating key). `search` and `fetch` start the title
+`[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed
+prefix, and carry the fields only where an item is prioritised, so every other
+result keeps ChatGPT's shape. A mention is labelled though it never ranks: the
+label shows what the result names, the rank what it is.
+
+It is one read per call: the page's thoughts and tickets, 1000 items at most,
+best-effort as the claims read is, and none for an empty page. A ticket's own
+row is asked as its thought and by its key: whether 122 reads the thought as
+that ticket rests on the raw metadata and the row's source, which the server
+can't see, and the label shows the ticket once. A failed read
+gives `priority: null`, said once per reply (`[priority not read]` in the compat
+titles, beside a `priorityNote`). A ranked search makes two: its window read asks
+the window's own thoughts alone, as before, and fails the search as before; its
+label read then asks only the tickets of the page it keeps, reusing the window's
+answers, best-effort. So a ticket only a dropped row names is never read.
+
+**What it costs.** Every search, list and fetch pays the label read, and every
+caller: the dashboard and plugins read the same operations and drop the field.
+122 computes each item at read time, and a ticket with no stated level walks
+its parents, so the cost follows the board, not the page's own query (about 3 ms
+for 100 rows). With no priorities stored: about 3 ms for a 10-hit page, 14 ms
+for a 100-row list page. On a seeded board (20,400 thoughts; 400 tickets with
+parent and blocking links; 500 stated priorities, review pass 4): 20–30 ms for a
+10-hit page, 135–167 ms for a 100-row page, 32–49 ms for a ranked search's two
+reads. 122 left "a projection of unblocks and inheritance … only if the timing
+asks for one"; this timing asks, and that projection is SMD-4150.
+
+A `list_thoughts` page of 1,000 rows spends the read's reach of 1,000 items on
+its rows' own thoughts: each row's own priority is labelled, and the tickets
+the rows name are not read, counted in `priorityNotRead`.
+
+Over MCP the structured value is compact: `kind` and `effective` always, `level`
+whenever stated (None's 0 too), every other field only where it says something
+(no null, false, or zero urgency or unblocks), and no `key` on a result's own
+thought, which is its id. Over REST every field is there, with the terms.
 
 ### Tickets that moved since a hit was written (migration 095)
 
