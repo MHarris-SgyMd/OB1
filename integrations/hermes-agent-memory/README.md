@@ -91,7 +91,7 @@ cat > ~/.hermes/ob1.json <<'EOF'
 EOF
 ```
 
-`api_timeout` bounds a recall and the other reads (8 s; 1 to 30). `writeback_timeout` bounds each write-back request, and exit's wait for write-backs (60 s; 8 to 255): each memory written back is a capture with its model calls, one after another.
+`api_timeout` bounds a recall and the other reads (8 s; 1 to 30). `writeback_timeout` bounds each write-back request, a session end's wait for its findings, and exit's for background write-backs (60 s; 8 to 255): each memory written back is a capture with its model calls, one after another.
 
 **2. Set the access key in `~/.hermes/.env`:**
 
@@ -134,7 +134,7 @@ Once installed and configured:
 
 - **Every Hermes turn auto-recalls.** When the LLM is reasoning, recent and similar OB1 memories are silently injected as `<ob1-context>` in the system prompt.
 - **Every meaningful turn auto-writes.** The user's question + a summary of the assistant's response lands in the plugin's memories as a turn-summary `output`. Trivial messages (`ok`, `thanks`) and short replies are skipped.
-- **Session end produces structured findings.** When Hermes exits, conversation lines matching decision / lesson / constraint / next_step / question / failure patterns are extracted into OB1's structured payload categories, up to ten of each, and written back in parts of ten. Exit waits for them at most `writeback_timeout` (60 s), shared with any background write-back still running; findings not sent by then are dropped and logged at warning.
+- **Session end produces structured findings.** When a session ends (at exit, and mid-process on `/new` or a compression that rotates the session), conversation lines matching decision / lesson / constraint / next_step / question / failure patterns are extracted into OB1's structured payload categories, up to ten of each, and written back in parts of ten. The session end waits for them at most `writeback_timeout` (60 s); findings not sent by then are dropped and logged at warning. At exit, shutdown shares that deadline for any background write-back still running, so exit waits at most one `writeback_timeout` in all.
 - **Compression preserves findings.** When Hermes hits a context-compression boundary, structured findings from the about-to-be-compressed messages are extracted, written back to OB1, and folded into the compression summary.
 - **Seven tools are available** to the agent for explicit memory ops:
   - `ob1_recall` — task-scoped recall
@@ -200,4 +200,4 @@ integrations/hermes-agent-memory/
 pytest plugin/tests/
 ```
 
-Run them in Hermes' Python environment, which has the `agent` and `tools` modules the plugin imports. 105 tests cover pure helpers, schema shapes and routes on the wire, the plugin's refusal codes, a write-back sent in parts and exit's deadline, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.
+Run them in Hermes' Python environment, which has the `agent` and `tools` modules the plugin imports. 110 tests cover pure helpers, schema shapes and routes on the wire, the plugin's refusal codes, a write-back sent in parts and exit's deadline, lifecycle, prefetch + cache TTL, sync_turn, session-end, pre-compress, and the seven tool handlers. Network is mocked at `urllib.request.urlopen` — tests run offline.

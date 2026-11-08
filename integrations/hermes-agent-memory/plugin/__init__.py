@@ -667,7 +667,7 @@ class _OB1Client:
             wait = self._writeback_wait(deadline)
             if wait is None:
                 raise OB1WritebackCut([], sizes[0])
-            return self._request("POST", "/writeback", body=body, timeout=wait)
+            return self._send_part(body, wait, deadline, [], sizes[0])
         # More than a part: each part a write-back of its own, the parts' answers joined part after part (each in
         # the plugin's order of kinds). The plugin keys each memory by the write-back's key, or by one it makes of
         # the workspace, runtime, task, step and the memory's text, and the memory's index in the request: so each
@@ -687,9 +687,19 @@ class _OB1Client:
                 body["idempotency_key"] = _part_id(idempotency_key, n)
             else:
                 body["step_id"] = _part_id(step_id or "step", n)
-            answer = self._request("POST", "/writeback", body=body, timeout=wait)
+            answer = self._send_part(body, wait, deadline, memories, sum(sizes[n:]))
             memories.extend(answer.get("memories") or [])
         return {**answer, "memories": memories}
+
+    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any], unsent: int) -> dict:
+        """One write-back request. One that times out with its wait cut short by the deadline is the deadline's cut
+        (OB1WritebackCut, chained to the timeout): the memories kept before it, and this part's and the rest unsent."""
+        try:
+            return self._request("POST", "/writeback", body=body, timeout=wait)
+        except (TimeoutError, OSError) as e:
+            if isinstance(e, urllib.error.HTTPError) or wait >= self._writeback_timeout or self._writeback_wait(deadline) is not None:
+                raise
+            raise OB1WritebackCut(kept, unsent) from e
 
     def report_usage(self, request_id: str, *, used: List[str],
                      ignored: List[str]) -> dict:
@@ -856,8 +866,10 @@ class OB1MemoryProvider(MemoryProvider):
         self._sync_thread: Optional[threading.Thread] = None
         # Every background write-back still running (sync_turn's, on_pre_compress's): shutdown joins them all.
         self._writeback_threads: List[threading.Thread] = []
-        # Hermes's exit deadline (time.monotonic()), set by the first of on_session_end and shutdown.
-        self._exit_at: Optional[float] = None
+        # The last session end's deadline (time.monotonic()): shutdown right after it, at exit, shares it.
+        self._session_end_by: Optional[float] = None
+        # _start_writeback runs on Hermes's background worker (sync_turn) and on the compressing thread.
+        self._writeback_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_lock = threading.Lock()
         # (query, formatted_context, request_id, timestamp)
@@ -1022,36 +1034,49 @@ class OB1MemoryProvider(MemoryProvider):
                 self._active = False
                 self._client = None
 
-    def _exit_deadline(self) -> float:
-        """Hermes's exit deadline: one write-back timeout from the first of on_session_end and shutdown, shared by
-        both, so exit waits for write-backs at most that long. The client starts no write-back part after it."""
-        if self._exit_at is None:
-            self._exit_at = time.monotonic() + float(self._config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))
-            if self._client:
-                self._client.stop_by(self._exit_at)
-        return self._exit_at
+    def _session_end_deadline(self) -> float:
+        """A session end's deadline, fresh each time: one write-back timeout from now. Kept for a shutdown that
+        follows within it."""
+        self._session_end_by = time.monotonic() + self._writeback_budget()
+        return self._session_end_by
+
+    def _writeback_budget(self) -> float:
+        return float(self._config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))
 
     def _start_writeback(self, target, name: str) -> None:
         """A background write-back, kept so shutdown can wait for it. The previous one gets 2 s to finish first,
         as before, so turns' write-backs go roughly in order."""
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=2.0)
-        self._writeback_threads = [t for t in self._writeback_threads if t.is_alive()]
-        self._sync_thread = threading.Thread(target=target, daemon=True, name=name)
-        self._writeback_threads.append(self._sync_thread)
-        self._sync_thread.start()
+        previous = self._sync_thread
+        if previous and previous.is_alive():
+            previous.join(timeout=2.0)
+        thread = threading.Thread(target=target, daemon=True, name=name)
+        with self._writeback_lock:
+            self._writeback_threads = [t for t in self._writeback_threads if t.is_alive()]
+            self._writeback_threads.append(thread)
+            self._sync_thread = thread
+        thread.start()
 
     def shutdown(self) -> None:
-        # Every background write-back still running gets until the exit deadline, which it starts no new part past.
-        deadline = self._exit_deadline()
-        for t in self._writeback_threads:
+        # Exit waits for write-backs at most one write-back timeout: the session end's, when it came just before
+        # (Hermes ends the session, then shuts down), else one from now. Every background write-back still running
+        # gets until then, and the client starts no write-back part after it (it may serve no more, a gateway's
+        # process living on).
+        now = time.monotonic()
+        deadline = self._session_end_by if self._session_end_by is not None and self._session_end_by > now else now + self._writeback_budget()
+        if self._client:
+            self._client.stop_by(deadline)
+        with self._writeback_lock:
+            threads = list(self._writeback_threads)
+        for t in threads:
             if t.is_alive():
                 t.join(timeout=max(0.0, deadline - time.monotonic()))
-        cut = sum(1 for t in self._writeback_threads if t.is_alive())
+        cut = sum(1 for t in threads if t.is_alive())
         if cut:
             logger.warning("OB1: %d background write-back(s) still running at the exit deadline (writeback_timeout) were cut", cut)
-        self._writeback_threads = []
-        self._sync_thread = None
+        with self._writeback_lock:
+            self._writeback_threads = []
+            self._sync_thread = None
+        self._session_end_by = None
         t = self._prefetch_thread
         if t and t.is_alive():
             t.join(timeout=5.0)
@@ -1307,8 +1332,13 @@ class OB1MemoryProvider(MemoryProvider):
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Extract structured findings from the full session and write to OB1.
 
-        Runs synchronously (not threaded) since the agent is already exiting —
-        a daemon thread might be killed before completing.
+        Hermes calls it at every real session boundary: at exit, before
+        shutdown, and mid-process too (/new, a compression that rotates the
+        session), the provider serving on after. Runs synchronously (not
+        threaded), since at exit a daemon thread might be killed before
+        completing, and waits at most one write-back timeout; shutdown, if it
+        follows within it, shares that deadline. It stops nothing: later
+        write-backs go on as before.
         """
         if not self._active or not self._auto_capture or not self._write_enabled or not self._client:
             return
@@ -1351,8 +1381,8 @@ class OB1MemoryProvider(MemoryProvider):
                 provenance=provenance,
                 task_id=self._session_id or None,
                 flow_id=self._agent_identity,
-                # Exit waits for the session's findings at most one write-back timeout, shared with shutdown.
-                deadline=self._exit_deadline(),
+                # The session's findings get at most one write-back timeout, which shutdown shares if it follows.
+                deadline=self._session_end_deadline(),
             )
         except OB1WritebackCut as cut:
             logger.warning("OB1 session end: %d finding(s) not written back by the exit deadline (writeback_timeout); %d kept",

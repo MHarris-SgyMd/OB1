@@ -950,43 +950,119 @@ class TestSessionEnd:
             p.on_session_end([{"role": "assistant", "content": line} for line in lines])
         assert sent == [10] * 6, sent
 
-    def test_exit_waits_one_deadline_and_logs_what_was_cut(self, configured, monkeypatch, caplog):
-        # Session end and shutdown share one deadline (the write-back timeout from the first of them): a long
-        # session's parts stop at it, and what was not sent is logged at warning.
+    @staticmethod
+    def _timed(clock: List[float], needs: float, sent: List[int]):
+        """A fake urlopen on a fake clock that honours its timeout: a part needs ``needs`` seconds, and one given
+        less times out when its timeout runs out, as urllib's would."""
+        import socket
+
+        def fake(req, timeout=None):
+            if timeout is not None and timeout < needs:
+                clock[0] += timeout
+                raise socket.timeout("timed out")
+            clock[0] += needs
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            return _mock_urlopen_response({"memories": [{"memory_id": "m"}] * sent[-1]})
+
+        return fake
+
+    _LINES = [f"We decided to use tool number {i} for the job." for i in range(10)] + [f"Lesson learned: check item {i} before the release." for i in range(10)] \
+        + [f"The build failed because of module {i} again." for i in range(10)]
+
+    def test_session_end_waits_one_deadline_and_shutdown_shares_it(self, configured, monkeypatch, caplog):
+        # 30 findings at 15 s a part: three parts inside the 60 s deadline, nothing cut; shutdown right after it
+        # keeps the session end's deadline, so exit waits one write-back timeout in all.
         clock = [1000.0]
         monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
         p = OB1MemoryProvider()
         p.initialize(session_id="sess", hermes_home=str(configured))
         sent: List[int] = []
-
-        def slow(req, timeout=None):
-            clock[0] += 25
-            body = json.loads(req.data.decode("utf-8"))
-            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
-            return _mock_urlopen_response({"memories": [{"memory_id": "m"}] * sent[-1]})
-
-        lines = [f"We decided to use tool number {i} for the job." for i in range(10)] + [f"Lesson learned: check item {i} before the release." for i in range(10)] \
-            + [f"The build failed because of module {i} again." for i in range(10)]
-        with patch("urllib.request.urlopen", slow), caplog.at_level("WARNING"):
-            p.on_session_end([{"role": "assistant", "content": line} for line in lines])
-            deadline = p._exit_at
+        with patch("urllib.request.urlopen", self._timed(clock, 15, sent)), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES])
             p.shutdown()
-        assert deadline == 1060.0 and p._exit_at == deadline  # shutdown kept the session end's deadline
-        assert sent == [10, 10, 10]  # 25 s each: the third part started at 50 s, under the 60 s deadline
-        clock[0] = 1000.0
+        assert sent == [10, 10, 10]
+        assert clock[0] == 1045.0 and p._client._stop_at == 1060.0  # shutdown at 1045 kept the session end's deadline
         assert not any("not written back" in r.message for r in caplog.records)
-        p2 = OB1MemoryProvider()
-        p2.initialize(session_id="sess", hermes_home=str(configured))
-        sent.clear()
 
-        def slower(req, timeout=None):
-            clock[0] += 40
-            return slow(req, timeout)
+    def test_a_part_cut_by_the_deadline_is_logged(self, configured, monkeypatch, caplog):
+        # 40 s a part: the first at 1000-1040; the second is given the 20 s left, times out, and is the deadline's
+        # cut: logged at warning, its 10 and the third part's 10 not written back.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 40, sent)), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES])
+        assert sent == [10]
+        assert any("20 finding(s) not written back by the exit deadline (writeback_timeout); 10 kept" in r.message for r in caplog.records)
 
-        with patch("urllib.request.urlopen", slower), caplog.at_level("WARNING"):
-            p2.on_session_end([{"role": "assistant", "content": line} for line in lines])
-        assert sent == [10]  # 65 s each: the first part ends past the 60 s deadline, so no other starts
-        assert any("20 finding(s) not written back by the exit deadline" in r.message for r in caplog.records)
+    def test_a_timeout_not_cut_by_a_deadline_is_no_cut(self, monkeypatch):
+        # A part that times out on its own write-back timeout, no deadline near, is a failure, not the deadline's cut.
+        import socket
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", self._timed(clock, 90, [])):
+            with pytest.raises(socket.timeout):
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=2000.0)
+
+    def test_a_session_end_mid_process_stops_nothing(self, configured, monkeypatch):
+        # Hermes ends a session mid-process too (/new, a compression that rotates it) and serves on: the write-backs
+        # after it, long past its deadline, go as before.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            clock[0] += 300
+            p.sync_turn("Real user question with enough content", "Real assistant content with enough length here")
+            p._sync_thread.join(timeout=5)
+            out = p.handle_tool_call("ob1_writeback", {"summary": "a lesson after the session end", "content": "kept"})
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+        assert sent == [10, 1, 1, 10], sent
+        assert "deadline" not in out
+        # A shutdown long after the last session end gets a deadline of its own, not the one long passed.
+        clock[0] += 300
+        p.shutdown()
+        assert p._client._stop_at == clock[0] + 60.0
+
+    def test_after_shutdown_background_writebacks_are_cut_and_logged(self, configured, monkeypatch, caplog):
+        # Shutdown stops the client at its deadline (a gateway's process may live on): a later background write-back
+        # starts no part and says so at warning, sync_turn's and pre-compress's alike.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)), caplog.at_level("WARNING"):
+            p.shutdown()
+            clock[0] += 120
+            p.sync_turn("Real user question with enough content", "Real assistant content with enough length here")
+            p._sync_thread.join(timeout=5)
+            p.on_pre_compress([{"role": "assistant", "content": line} for line in self._LINES[:5]])
+            p._sync_thread.join(timeout=5)
+        assert sent == []
+        messages = [r.message for r in caplog.records]
+        assert any("sync_turn write-back cut at the exit deadline: 1 memories not written back" in m for m in messages)
+        assert any("pre-compress write-back cut at the exit deadline: 5 memories not written back" in m for m in messages)
+
+    def test_initialize_again_after_shutdown_writes_back(self, configured, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p.shutdown()
+            clock[0] += 300
+            p.initialize(session_id="sess-2", hermes_home=str(configured))
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+        assert sent == [10, 10]
 
     def test_shutdown_waits_for_every_background_writeback(self, configured, caplog):
         # Every background write-back is kept, not only the latest: shutdown joins each until the exit deadline,
@@ -997,7 +1073,7 @@ class TestSessionEnd:
         hold = threading.Event()
         p._start_writeback(lambda: (time.sleep(0.05), quick_done.set()), "w1")
         p._start_writeback(lambda: hold.wait(5), "w2")
-        p._exit_at = time.monotonic() + 0.3
+        p._session_end_by = time.monotonic() + 0.3
         with caplog.at_level("WARNING"):
             p.shutdown()
         hold.set()
@@ -1012,7 +1088,7 @@ class TestSessionEnd:
         earlier_done = threading.Event()
         p._start_writeback(lambda: (time.sleep(2.4), earlier_done.set()), "w1")
         p._start_writeback(lambda: None, "w2")  # waits 2 s for w1, which is still running after
-        p._exit_at = time.monotonic() + 2.0
+        p._session_end_by = time.monotonic() + 2.0
         p.shutdown()
         assert earlier_done.is_set()
 
