@@ -4756,7 +4756,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   // nothing does now.
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  assert(schemaFiles.length >= 13 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064; the set otherwise grows), the four with prerequisites among them`);
+  assert(schemaFiles.length >= 12 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064, 12 after SMD-2690 made agent-memory a plugin; the set otherwise grows), the four with prerequisites among them`);
 
   // The rule check-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,

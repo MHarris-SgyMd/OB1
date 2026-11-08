@@ -53,7 +53,7 @@ function jsonSchemaOf(schema: z.ZodType, io: "input" | "output"): Json {
   return js;
 }
 
-/** The answers a plugin operation may give besides its success: as a core operation's, but a plugin's own refusal codes at 400–422 and no 501. */
+/** The answers a plugin operation may give besides its success: as a core operation's, but a plugin's own refusal codes at 400–422 and 503 (its one retryable refusal), and no 501. */
 const PLUGIN_ANSWERS = {
   "400": refusal("The input does not fit the schema (REFUSED_INPUT), or the plugin's own refusal."),
   "401": KEYED_ANSWERS["401"],
@@ -63,7 +63,7 @@ const PLUGIN_ANSWERS = {
   "409": refusal("The plugin's own refusal: the state conflicts."),
   "422": refusal("The plugin's own refusal."),
   "500": KEYED_ANSWERS["500"],
-  "503": KEYED_ANSWERS["503"],
+  "503": { ...KEYED_ANSWERS["503"], description: `${KEYED_ANSWERS["503"].description} For a plugin's operation, also its own retryable refusal: a service it needs, such as the core's embedding provider, did not answer, and its code names it.` },
 };
 
 /**
