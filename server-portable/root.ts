@@ -75,8 +75,8 @@ export type Env = {
    * 16: compose hands the bundled Ollama the same as OLLAMA_NUM_PARALLEL, and
    * the background slots' defaults leave one of them for live calls (a server
    * of one leaves none, which preflight warns of). Unset, 4: a host Ollama's
-   * own OLLAMA_NUM_PARALLEL must match (1 unset in current releases), and two
-   * brains on one server each take their share of it.
+   * own OLLAMA_NUM_PARALLEL (1 unset in current releases) is raised to match,
+   * and two brains on one server each take their share of it.
    */
   OB1_MODEL_SLOTS?: string;
   /**

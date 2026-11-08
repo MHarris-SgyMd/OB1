@@ -373,11 +373,13 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   const renew = () => {
     if (inFlight || done) return;
     inFlight = true;
-    renewing = renewing.then(() =>
-      ctx.db
-        .tx((sql) => sql<{ claimed: string }>`UPDATE deliveries SET claimed_at = now() WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING claimed_at::text AS claimed`)
-        .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; }, () => undefined)
-        .finally(() => { inFlight = false; }));
+    // The catch and the reset on the chain itself, so a transaction that throws before it returns its promise neither
+    // leaves `inFlight` set nor the chain the release waits on rejected (review pass 2).
+    renewing = renewing
+      .then(() => ctx.db.tx((sql) => sql<{ claimed: string }>`UPDATE deliveries SET claimed_at = now() WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING claimed_at::text AS claimed`))
+      .then((rows) => { if (rows[0]) claimedAt = rows[0].claimed; })
+      .catch(() => undefined)
+      .finally(() => { inFlight = false; });
   };
   let waits = 0;
   let renewal: ReturnType<typeof setInterval> | undefined;

@@ -2104,8 +2104,11 @@ them with the rest: the coordinator is one of the stack's default services.
   `board-sync`'s among them, to `OB1_MODEL_SLOTS` less one per model (SMD-3379
   PR 2b-2b), so a capture finds a slot whatever the counts — where the server
   answers `OB1_MODEL_SLOTS` calls at once (a host Ollama's own
-  `OLLAMA_NUM_PARALLEL` is 1 unset in current releases: set it to match) and
-  no other brain shares it (two brains each take their share: set each lower);
+  `OLLAMA_NUM_PARALLEL` is 1 unset in current releases: raise it to
+  `OB1_MODEL_SLOTS`, 2 or more) and no other brain shares it (two brains each
+  take their share: per model, their chat and embed shares together below the
+  server's slots, `OB1_BACKGROUND_SLOTS=chat=1,embed=1` on each of two on a
+  server of 4);
   on a remote provider, set `OB1_BACKGROUND_SLOTS` to hold them. Digits only: anything else
   is refused naming the variable, and a number the CLI then refuses (`0`,
   more digits than it reads exactly) is refused naming its flag, `--follow`

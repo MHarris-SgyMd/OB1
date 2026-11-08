@@ -947,10 +947,12 @@ services:
       # A local model server's parallel calls per model, 1 to 16 (SMD-3379 PR
       # 2b-2b): the bundled Ollama answers this many at once (its
       # OLLAMA_NUM_PARALLEL, below), and the defaults above leave one for live
-      # calls. Unset, 4. An Ollama on the host answers what its own
-      # OLLAMA_NUM_PARALLEL says, 1 unset in current releases: set the two to
-      # match. Two brains on one model server each take their share of it: set
-      # each brain's lower, so the shares together leave live calls a slot.
+      # calls. Unset, 4; each slot holds the model's context in memory. An Ollama
+      # on the host answers what its own OLLAMA_NUM_PARALLEL says, 1 unset in
+      # current releases: raise it to this, 2 or more. Two brains on one model
+      # server each take their share: per model, their chat and their embed
+      # shares together below its slots — OB1_BACKGROUND_SLOTS=chat=1,embed=1 on
+      # each of two brains on a server of 4 (deploy/.env.example).
       OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a

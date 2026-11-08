@@ -5433,11 +5433,16 @@ if (want("9")) {
   const slotsOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "off" });
   const slotsBad = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=0" });
   const slotsTwo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "2", OB1_BACKGROUND_SLOTS: "" });
-  const slotsFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=4,decide=4" });
+  const slotsFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=4,decide=4" });
   const slotsOne = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
   const slotsTypo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_MODEL_SLOTS: "four", OB1_BACKGROUND_SLOTS: "" });
   // No endpoint local: OB1_MODEL_SLOTS speaks of none, so neither a chat share of 4 nor a server of one warns (review pass 1).
   const slotsRemote = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=4", OB1_MODEL_SLOTS: "1" });
+  // The defaults said only where their endpoint is local; one slot warned only where chat or embeddings is; a decide
+  // share warned only with a tier (review pass 2).
+  const slotsSplit = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k-split", OB1_EGRESS_POLICY: "off", OB1_BACKGROUND_SLOTS: "" });
+  const slotsJevOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsNoTier = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "decide=2" });
   const held = "background model calls held to these shares";
   // The shares as they stand: the decide tier's default left out with no tier configured, a type the value gives its
   // own (review pass 1).
@@ -5452,6 +5457,10 @@ if (want("9")) {
       && /✓\s+background slots\s+none by default: no endpoint is declared local \(OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL\); chat=4 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — /.test(slotsRemote.out)
       && /!\s+background slots\s+OB1_MODEL_SLOTS: "four" is no whole number of slots from 1 to 16 .*; 4 stays — in force: none by default: no endpoint is declared local/.test(slotsTypo.out),
          `the host rule: a chat share of every one of the local server's slots warns, a decide share above one does, a server of one slot does; neither where no endpoint is local; a slot count that does not read is said (${row(slotsFull.out, "background slots").slice(0, 160)} | ${row(slotsOne.out, "background slots").slice(0, 120)})`);
+  assert(/✓\s+background slots\s+embed=3 by default on the local embeddings endpoint\(s\) \(OB1_MODEL_SLOTS 4,/.test(slotsSplit.out)
+      && /✓\s+background slots\s+decide=1 by default on the local decide endpoint\(s\) \(OB1_MODEL_SLOTS 1, none left for live calls\)/.test(slotsJevOnly.out)
+      && /✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) .*; decide=2 set/.test(slotsNoTier.out),
+         `the defaults said only for a local endpoint, a remote chat's not; one slot no warning where only the decide tier is local; a decide share no warning with no tier (${row(slotsSplit.out, "background slots").slice(0, 120)} | ${row(slotsJevOnly.out, "background slots").slice(0, 120)} | ${row(slotsNoTier.out, "background slots").slice(0, 120)})`);
   // With the database up, the warning alone is no failure: exit 0, the server
   // starts — the restart loop SMD-2887 measured is gone.
   if (LIVE) {
