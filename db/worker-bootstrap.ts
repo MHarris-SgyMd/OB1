@@ -641,14 +641,15 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
 
 /**
  * Probe on outageWait's schedule until a probe `settles` (SMD-2599), and
- * return that probe — null when `wake` aborted first. An outage settles on anything
- * but out or missing (`isOut`): up, or refused, which the next real call
- * meets and turns into the run's refusal. The start's wait settles on
+ * return that probe — null when `wake` aborted first. An outage settles on
+ * anything but out or missing (`isOut`): up, or refused, which
+ * waitOutProvider's follower stops on (SMD-2636 PR 2; the subject sweep's own
+ * wait leaves it to the next real call). The start's wait settles on
  * anything but out, so a model the provider turns out not to serve, once it
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
 export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless, from = 0): Promise<Probe | null> {
-  // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (reembed.ts's, SMD-2679).
+  // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (waitOutProvider's, SMD-2679, SMD-2636 PR 2).
   for (let step = from; ; step++) {
     await sleep(outageWait(step), wake);
     if (wake.aborted) return null;
@@ -717,11 +718,11 @@ export class ProviderOutage {
     return "outage";
   }
 
-  /** Where the last outage's probe schedule ended, and the thoughts settled when it did: resumeFrom's. */
+  /** Where the last outage's probe schedule ended, and the caller's count of work that got past the provider when it did: resumeFrom's. */
   private reached = 0;
   private settledAtEnd = -1;
 
-  /** A probe answered — at step `reached` of its schedule, with `settled` thoughts recorded either way (resumeFrom's; extract passes neither). */
+  /** A probe answered — at step `reached` of its schedule, with the caller's count of work that got past the provider at `settled` (resumeFrom's; waitOutProvider passes both, the subject sweep neither). */
   end(reached = 0, settled = -1): void {
     this.reason = null;
     this.endedAt = this.now();
@@ -731,9 +732,10 @@ export class ProviderOutage {
 
   /**
    * The probe schedule's first step for an outage beginning now: where the
-   * last one's ended, when it ended within `windowMs` and no thought settled
-   * since — a limit the probe passes and no row gets past, whose waits then
-   * keep growing to the cap; else 0, the first wait (SMD-2679 PR 4a-2b).
+   * last one's ended, when it ended within `windowMs` and the count `settled`
+   * has not moved since — a limit the probe passes and no work gets past,
+   * whose waits then keep growing to the cap; else 0, the first wait
+   * (SMD-2679 PR 4a-2b).
    */
   resumeFrom(settled: number, windowMs: number): number {
     return this.settledAtEnd >= 0 && settled === this.settledAtEnd && this.now() - this.endedAt < windowMs ? this.reached : 0;
@@ -930,6 +932,76 @@ export async function followedPass<C>(o: {
       if (!o.follow || !databaseUnavailable(e)) throw e;
       if (!(await waitForDatabase(e, o))) return null;
     }
+  }
+}
+
+/** The parenthesis an outage's line adds when its schedule carries on from the last one's. */
+const CARRIED_NOTE = " (back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on)";
+/** The same for a follower that pauses before an outage (extract's, consolidate's): its window takes in the pauses. */
+const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on)";
+
+/**
+ * A follower's wait for its provider after a pass a worker halted on the provider's outage (SMD-2599; one copy for
+ * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, and stamped on the
+ * caller's row through `stamper.providerWait` while it lasts (SMD-2905), and probed on outageWait's schedule until a
+ * probe settles — anything but out or missing.
+ * - **The schedule carries** (ProviderOutage.resumeFrom): a wait beginning within a minute and a poll of the last
+ *   one's answer — and the pauses, for a follower that spends them before an outage begins (`pausesBefore`: extract's,
+ *   consolidate's; TRANSIENT_PAUSES_MS read as it runs) — `settled()` unmoved since (nothing got past the provider),
+ *   goes on from the last one's step, so a limit the probe passes and no work gets past waits longer each time, to the
+ *   cap. The window runs from the last answer to this wait's start, after the pass: a call another worker had in
+ *   flight, which the outage does not abort, or a wait at the admit gate can take it past, and such a call usually
+ *   answers and moves `settled()` anyway; an outage that begins with a timeout comes at least the call's timeout and
+ *   the probe's after the last answer, past the window unless --timeout is short or the poll long.
+ * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
+ *   again at once.
+ * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404, or a redirect (probeChat;
+ *   SMD-2908), the tier's any other 4xx or a redirect (probeTier), re-embed's any error neither down nor missing (embedProbe). A key revoked, credit run out,
+ *   the base URL gone while it was away, or a proxy answering 404 before its route is back — the request's, not the
+ *   provider back: said, in the tier's name when its probe met it, and returned with whether it did, for the
+ *   caller's follower to stop on, exit 2, nothing marked failed.
+ * - **Stopped:** null, a stop ending the wait.
+ */
+export async function waitOutProvider(o: {
+  /** The provider in the lines: "the provider", "the embedding provider". */
+  who: string;
+  /** What each probe calls, as the line says it: "m at b for one token". */
+  calls: string;
+  outage: ProviderOutage;
+  probe: (wake: AbortSignal) => Promise<Probe>;
+  /** The caller's count of work that got past the provider, counted only up (each worker's docblock says what it counts). */
+  settled: () => number;
+  /** The follower's poll, in seconds: the carry's window is a minute and one of these. */
+  pollS: number;
+  /** The follower spends TRANSIENT_PAUSES_MS before an outage begins: the window takes them in, and the line says so (CARRIED_NOTE_PAUSED). */
+  pausesBefore?: boolean;
+  wake: AbortSignal;
+  writer: FollowerWriter;
+  stamper?: { providerWait?: (on: boolean) => Promise<void> | void } | null;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<"answered" | { refused: string; tier?: true } | null> {
+  const down = Date.now();
+  const windowMs = 60_000 + o.pollS * 1000 + (o.pausesBefore ? TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0) : 0);
+  const from = o.outage.resumeFrom(o.settled(), windowMs);
+  const schedule = outageWait(from) >= OUTAGE_MS.max
+    ? `every ${OUTAGE_MS.max / 60_000} min`
+    : `after ${outageWait(from) / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`;
+  o.writer.err(`  ${o.who} is not answering (${(o.outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${o.calls} ${schedule}${from > 0 ? (o.pausesBefore ? CARRIED_NOTE_PAUSED : CARRIED_NOTE) : ""}`);
+  await o.stamper?.providerWait?.(true);
+  try {
+    let step = from;
+    const answered = await probeUntil(() => { step++; return o.probe(o.wake); }, o.wake, (p) => !isOut(p), o.sleep, from);
+    if (answered === null) return null;
+    if (answered.state === "refused") {
+      o.writer.err(`  ${answered.tier ? "the decision tier" : o.who} answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
+      return answered.tier ? { refused: answered.why, tier: true } : { refused: answered.why };
+    }
+    o.outage.end(step, o.settled());
+    o.writer.out(`  ${o.who} answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    return "answered";
+  } finally {
+    await o.stamper?.providerWait?.(false);
   }
 }
 

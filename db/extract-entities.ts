@@ -111,14 +111,18 @@
  *   - the model missing, as while Ollama pulls it;
  *   - a timeout after which a one-token probe gets no answer either.
  * In each case the thought in hand goes back to the pool, not failed, the
- * other workers stop after theirs, and the follower probes the model on the
- * same schedule until it answers. A thought that draws the error again right
- * after a probe answered is its own fault, and is recorded failed — unless
- * every error of its streak was the provider holding calls back (a 429, a 503,
- * the model not served), which makes no suspect (SMD-3311). Before it
- * writes anything, the worker key's registration included, a follower probes
- * once. A model the provider does not serve, a key it refuses or a wrong
- * base URL exits 2 there, and an unreachable provider is waited for.
+ * other workers stop after theirs, and the follower probes the model until it
+ * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
+ * back soon after the last one's answer, nothing got past the provider since,
+ * carries the probe's schedule on; a probe the provider refuses ends the
+ * follower, exit 2; an answer polls again at once. A thought that draws the
+ * error again right after a probe answered is its own fault, and is recorded
+ * failed — unless every error of its streak was the provider holding calls
+ * back (a 429, a 503, the model not served), which makes no suspect
+ * (SMD-3311). Before it writes anything, the worker key's registration
+ * included, a follower probes once. A model the provider does not serve, a
+ * key it refuses or a wrong base URL exits 2 there, and an unreachable
+ * provider is waited for.
  * OB1_EXTRACT_ESCALATE_MODEL is checked by GET /models, which loads nothing:
  * refused where the list plainly leaves it out, waited for by name if the
  * start saw it and it goes missing, and a refusal at its first 404 if the
@@ -193,7 +197,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeAtStart, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, probeAtStart, probeChat, probeRefusal, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -662,22 +666,33 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * this ticket (review pass 4: it stalled the follower for good).
    */
   let escalationSeen = false;
-  /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
+  /**
+   * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2): the outage's model by name, said on the row it
+   * stamps — the sleep scheduler's, or this follower's own — so preflight names the provider (SMD-2905). The schedule
+   * carries on from the last outage's when this one comes back within a minute, a poll and the pauses of its answer
+   * and nothing has got past the provider since (a thought settled, or a window answered and kept); an answer polls
+   * again at once; a refusal ends the follower, exit 2.
+   */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
-    const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    // Said on the row it stamps — the sleep scheduler's, or this follower's
-    // own — so preflight names the provider, not "running a pass"; a stop
-    // wakes the probes, so the end is said before the pass settles (SMD-2905).
-    await stamper?.providerWait?.(true);
-    try {
-      if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
-        outage.end();
-        outageModel = cfg.metadataModel;
-        out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
-      }
-    } finally {
-      await stamper?.providerWait?.(false);
+    const back = await waitOutProvider({
+      who: "the provider",
+      calls: `${outageModel} at ${cfg.chat.base} for one token`,
+      outage,
+      probe: (w) => probe(undefined, w, outageModel),
+      settled: () => done + failed + windowsAnswered,
+      pollS: FOLLOW,
+      pausesBefore: true,
+      wake,
+      writer: { out, err },
+      stamper,
+    });
+    if (back === "answered") {
+      outageModel = cfg.metadataModel;
+      pollNow = true;
+    } else if (back !== null) {
+      configError = back.refused;
+      if (outageModel !== cfg.metadataModel) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
+      stopping = true;
     }
   }
   /** The start's refusal of what a probe found — a model unserved, or the endpoint refusing — or null. */
@@ -1081,6 +1096,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let leftOut = 0;
   let leftOutWindows = 0;
   let failed = 0;
+  /** Windows of long thoughts answered and kept (a brain keeping them: migration 093 and its grant), run-wide: work that got past the provider short of a thought finishing (the outage wait's carry, SMD-2636 PR 2). */
+  let windowsAnswered = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
   let providerStops = 0;
   /** Whether the last pass found nothing to do: its stamp keeps the word before it. */
@@ -1239,7 +1256,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // — a window answered as the stop came was dropped).
         if (!keeping) return;
         try {
-          await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
+          const [saved] = (await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb) AS kept`) as { kept: boolean | null }[];
+          // A window answered and kept got past the provider for good: the outage wait's carry reads it (SMD-2636
+          // PR 2, review passes 1 to 3). One not kept — the claim no longer this worker's, false since migration 101
+          // (before it the function returns nothing to read) — is asked again, so it counts no more than the thought does.
+          if (saved?.kept !== false) windowsAnswered++;
         } catch (e) {
           keepingFailed(e, "keep");
         }
@@ -1518,6 +1539,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
+  /** The model setting the closing remedy names: the escalation model's, its probe refused in an outage wait (SMD-2636 PR 2, review pass 1). */
+  let refusedKnob = "OB1_METADATA_MODEL";
 
   /**
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
@@ -2143,6 +2166,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     writer: { out, err },
   });
 
+  /** The provider answered after a wait: the next pass runs at once, not after an interval (re-embed's rule, SMD-2636 PR 2). */
+  let pollNow = false;
   let after = await followed();
   if (FOLLOW) {
     // Only a block it will poll after: the last pass's — the limit reached, or
@@ -2157,7 +2182,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     await stamper?.stamp(passOutcome, lastBlock);
     // "This many thoughts, then stop" holds while following too.
     while (!stopping && !limitReached()) {
-      await sleepUnless(FOLLOW * 1000, onStop.signal);
+      if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
+      pollNow = false;
       if (stopping) break;
       after = await followed();
       say();
@@ -2245,7 +2271,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   if (configError) {
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+        `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and ${refusedKnob} against the provider; a 400 about a request field\n` +
         `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint. Nothing was marked failed.`
     );
     return 2;

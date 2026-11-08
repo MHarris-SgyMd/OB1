@@ -12297,7 +12297,7 @@ const DASHBOARD_RESOURCE_LABELS = ["job", "instance", "service_name", "service_i
 /** The labels each instrument's points carry beside the resource's (its histogram's `le` aside), by its name in Prometheus, held here and measured on a scratch stack: the request's are telemetry.ts's METRIC_KEYS, which checkDashboard holds this list to; the provider's, the store's and a job's are spans.ts's and jobs.ts's labels with `error.type` (and, for a store fault with a SQLSTATE, `db.response.status_code`), held by hand. */
 const DASHBOARD_INSTRUMENT_LABELS: Record<string, string[]> = {
   http_server_request_duration_seconds: ["http_request_method", "http_route", "http_response_status_code", "error_type", "mcp_method_name", "ob1_door", "ob1_rpc", "ob1_tool", "ob1_outcome"],
-  gen_ai_client_operation_duration_seconds: ["gen_ai_operation_name", "gen_ai_request_model", "server_address", "server_port", "error_type", "ob1_probe"],
+  gen_ai_client_operation_duration_seconds: ["gen_ai_operation_name", "gen_ai_request_model", "server_address", "server_port", "error_type", "ob1_probe", "ob1_call_class"],
   db_client_operation_duration_seconds: ["db_system_name", "db_operation_name", "ob1_store", "error_type", "db_response_status_code"],
   ob1_job_duration_seconds: ["ob1_job_kind", "error_type"],
 };

@@ -1411,6 +1411,47 @@ for a call that failed, its `error.type`: the provider's status (`503`;
 `_OTHER` outside 300–599, so a provider cannot mint a series per status),
 `timeout`, `invalid_body` (a 2xx that is no JSON), or the runtime's code
 (`ECONNREFUSED`). A call the egress gate refuses is never made, and has none.
+The decide tier's calls are client spans the same way, `decide <model>` with
+`gen_ai.operation.name` `decide` (SMD-3379 PR 2b-2a), the model `?` unless
+`OB1_JEV_MODEL` names it. They are the REST core's: its genre classifier asks
+the tier live on a capture where `OB1_JEV_BASE_URL` names one, while the
+workers' calls export nothing and preflight dials the tier after its telemetry
+is sent. Every one of these points also carries `ob1.call.class`, `live`
+inside a request and `background` outside one. The provider alert leaves the
+decide tier's out ("Alerts" below).
+
+Every model call through the seam, whatever makes it, is also one point on
+`ob1.model.call.duration` where telemetry runs (SMD-3379 PR 2b-2a): its own
+time from when its exchange starts, a wait for a slot not in it, in seconds on
+the same bounds, labelled `ob1.model.type` (`embed`, `chat`, `decide`), the
+model, the host and port, `ob1.call.class`, `ob1.call.purpose` (`capture`,
+`extraction`, `judge`, `writer`, `decision`, `probe` and the like), `ob1.pass`
+where a worker's pass made it, and how it failed, in the provider point's
+words (a status, `timeout`, `invalid_body`, the runtime's code). Extraction's,
+the judge's and the writer's calls throw their own errors, so theirs read
+`TimeoutError` for their own deadline and, for a body that is no JSON,
+`SyntaxError` (the judge's, the writer's) or `Error` (extraction's stream,
+read empty). In the servers the point stands beside the provider's own, adding
+the purpose; it also counts the calls no `gen_ai` point counts — extraction's,
+the judge's and the writer's — in any process that runs telemetry, which today
+none does, so theirs are on the pass stamps below.
+
+Each background call's ask for a slot under `OB1_BACKGROUND_SLOTS` is a point
+on `ob1.model.slot.wait.duration`, whether it waited or not: its time in
+seconds from a millisecond to five minutes, by type, model, host and port,
+pass, `ob1.slot.outcome` — `held` (a slot taken), `open` (the semaphore's
+database did not answer, so it ran without one) or `stopped` — and
+`ob1.slot.waited`, false for a slot taken at once. These points are recorded
+where telemetry runs: the servers, where a collector is named
+(`OTEL_EXPORTER_OTLP_ENDPOINT`). The claim engines under `--follow`, the sleep
+scheduler and board-sync under `--trigger` run none, so each one's pass stamp
+carries its tallies instead (`models` on `heartbeat:*`): its calls by pass and
+class, how many failed, their own time, and their asks for a slot by how each
+ended and how many waited, which `brain_info`'s Model calls row says. The
+servers' own background calls (the vector mender, the provider reprobe, a
+detached job) are in the metrics alone, and without a collector nowhere; a run
+that stamps nothing — a claim engine's one-shot run, the weekly digest, the
+evals — is measured nowhere.
 
 Each operation the core calls on the store is a client span named for the
 operation (`matchThoughts`, `captureThought`) — one span per operation, not
@@ -1615,7 +1656,8 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
 - **Metrics** in Prometheus, under this pin's OTLP names, underscored with
   their unit: `http_server_request_duration_seconds`,
   `gen_ai_client_operation_duration_seconds`,
-  `db_client_operation_duration_seconds` and `ob1_job_duration_seconds`, each
+  `db_client_operation_duration_seconds`, `ob1_job_duration_seconds`,
+  `ob1_model_call_duration_seconds` and `ob1_model_slot_wait_duration_seconds`, each
   a classic histogram (`_bucket`, `_count`, `_sum`), each label the attribute
   underscored (`ob1_tool`, `gen_ai_request_model`, `error_type`); `job` is the
   service's name, `instance` its `service.instance.id`, new at each start, and
@@ -1762,7 +1804,10 @@ folder, each evaluated every 30 s:
 - **The model provider failed calls**: about three or more of a server's
   failed provider calls of one operation and error type over 10 minutes, for 5
   minutes; `preflight.ts --deep`'s probes are not counted (it says how they
-  went itself).
+  went itself), nor the decide tier's calls, whose failure leaves a capture's
+  genre `other` (SMD-3379 PR 2b-2a) — though a tier that hangs holds each
+  capture its 30 s timeout first, which no rule here alerts on; the
+  dashboard's Provider latency p50 and p99 shows it.
 - **The exporter does not reach Postgres**: the collector reads pg-exporter
   `up` 0, or pg-exporter reads Postgres `pg_up` 0, or either series is gone,
   for a minute (measured: pg-exporter stopped, pending in 26 s and firing in
