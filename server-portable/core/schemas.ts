@@ -272,7 +272,7 @@ export const SPECS = {
   relations: {
     title: "Read a Thought's Judged Relations",
     description:
-      `Read one thought's standing judged relations, both sides of each pair, strongest first (the judge's confidence, then the newest recorded): ${RELATION_TEXT}; ${RELATION_TITLE_TEXT}. ` +
+      `Read one thought's standing judged relations, both sides of each pair, strongest first (the judge's confidence, then the latest judged): ${RELATION_TEXT}; ${RELATION_TITLE_TEXT}. ` +
       "`relation` keeps one word; `limit` relations a page; when more follow the reply carries a `cursor`, passed as `after` with the same `id` and `relation` for the next page. " +
       "The reply is `{id, relation, total, relations, cursor}`: `total` counts every relation standing under the word asked for (all four without one), `cursor` null at the end. " +
       "A work thread's edges (the thought captured before and after it on its subject) are not judged relations: fetch's `threads` and the `thread` tool read them. A stale relation stands until the judge reads the pair again. " +

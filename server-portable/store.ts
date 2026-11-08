@@ -1000,10 +1000,10 @@ export const RELATIONS_SHOWN = 5;
 export const RELATIONS_FETCHED = 20;
 /**
  * Where a page of one thought's relations ends, in their order — strongest first: the confidence rounded to six
- * places (absent as -1), then the newest recorded (the facet's created_at), then the relation's id, each descending.
- * `rank` is Postgres's text of that rounded numeric — a confidence 084 takes unrounded from a direct write keeps a
- * cursor short (review pass 1) — and `at` its text of the facet's created_at, so a cursor compares exactly what the
- * order read.
+ * places (absent as -1), then the latest judged (the `judgedAt` a reader sees: the lineage row's produced_at, else the
+ * facet's created_at — review pass 2), then the relation's id, each descending. `rank` is Postgres's text of that
+ * rounded numeric — a confidence 084 takes unrounded from a direct write keeps a cursor short (review pass 1) — and
+ * `at` its text of that time, so a cursor compares exactly what the order read.
  */
 export type RelationPosition = { rank: string; at: string; id: string };
 /**

@@ -176,8 +176,9 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
 /**
  * A result's judged relations as a typed field (SMD-2726; SMD-3306 PR 7a-2b): each relation's id, word, side, the
  * judge's confidence, when it was last judged and whether it is stale, and the other thought's id, trust, time and
- * superseding thought — its title, the thought's own words, rides fetch's and the relations read's text alone. Null
- * when they were not read, and from a REST core older than this MCP server.
+ * superseding thought — no title: a page's relations name none, and the relations read's title rides its text (fetch's
+ * value is its text's JSON, titles and all). Null when they were not read, and from a REST core older than this MCP
+ * server.
  */
 const relationsField = (relations: readonly RelationShown[] | null | undefined) =>
   Array.isArray(relations) ? relations.map((r) => ({ id: r.id, relation: r.relation, otherIs: r.otherIs, other: { id: r.other.id, trust: r.other.trust, created_at: r.other.created_at, supersededBy: r.other.supersededBy }, confidence: r.confidence, judgedAt: r.judgedAt, stale: r.stale })) : null;
@@ -845,11 +846,13 @@ const RELATION_SAID: Record<RelationWord, { older: string; newer: string }> = {
 };
 /**
  * A relation's marks: the judge's confidence, whether its texts moved since, and whether the other thought is
- * superseded — by the thought it is read on, said so (review pass 1).
+ * superseded — by the thought it is read on, said so (review pass 1), or by another result on the page, named by its
+ * place as the relation's other thought is (review pass 2).
  */
-const relationMarks = (r: RelationShown, self: string) =>
+const relationMarks = (r: RelationShown, self: string, onPage: ReadonlyMap<string, string> = new Map()) =>
   [r.confidence === null ? "no confidence given" : `confidence ${r.confidence.toFixed(2)}`, r.stale ? "edited since judged" : "",
-    r.other.supersededBy === null ? "" : r.other.supersededBy === self ? "the other superseded by this thought" : `the other superseded by ${r.other.supersededBy}`].filter(Boolean).join("; ");
+    r.other.supersededBy === null ? "" : r.other.supersededBy === self ? "the other superseded by this thought"
+      : `the other superseded by ${onPage.get(r.other.supersededBy) ?? r.other.supersededBy}`].filter(Boolean).join("; ");
 /**
  * A result's relations on one line, or null for none: each its words, the other thought by its place when it is
  * another result on the page, else by its id — never its title (review pass 1, the maintainer's call: titles crowded
@@ -858,7 +861,7 @@ const relationMarks = (r: RelationShown, self: string) =>
  */
 function relationsWords(relations: readonly RelationShown[] | null | undefined, more: number, self: string, onPage: ReadonlyMap<string, string>): string | null {
   if (!relations?.length) return null;
-  const one = (r: RelationShown) => `${RELATION_SAID[r.relation][r.otherIs]} ${onPage.get(r.other.id) ?? `ID ${r.other.id}`} (${relationMarks(r, self)})`;
+  const one = (r: RelationShown) => `${RELATION_SAID[r.relation][r.otherIs]} ${onPage.get(r.other.id) ?? `ID ${r.other.id}`} (${relationMarks(r, self, onPage)})`;
   return `${relations.map(one).join("; ")}${more > 0 ? `; and ${more} more, which the relations tool reads` : ""}.`;
 }
 /** Relations not read are said, not left to read as none (as the claims are). */
@@ -876,8 +879,8 @@ export function renderRelations(o: Outcome<RelationsResult>): Reply {
     const word = relation === null ? "" : ` ${relation}`;
     if (total === 0) return `Thought ${id} has no standing judged${word} relation.`;
     const head = `Thought ${id}: ${total} standing judged${word} relation${total === 1 ? "" : "s"}, strongest first${relations.length < total ? `, ${relations.length} on this page` : ""}:`;
-    // A page past the cursor emptied by a re-judge between pages, or a cursor from another thought's read.
-    if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a re-judge changed them since that page, or the cursor came from another read. Read them again from the start.)`;
+    // A page past the cursor emptied by a re-judge between pages (another thought's or word's cursor is refused: review pass 2).
+    if (relations.length === 0) return `${head}\n\n(None stands past the cursor now: a re-judge changed them since that page. Read them again from the start.)`;
     const rows = relations.map((r, i) => `${i + 1}. ${RELATION_SAID[r.relation][r.otherIs]} ${relatedTitle(r)}\n   ID: ${r.other.id}\n   ${relationMarks(r, id)}; last judged ${r.judgedAt ?? "at an unknown time"} (relation ${r.id})`);
     const stale = relations.some((r) => r.stale) ? `\n\n${STALE_KEY} It stands until the judge reads the pair again.` : "";
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\` with id ${id}${relation === null ? "" : ` and relation ${relation}`} for the next page.` : "";

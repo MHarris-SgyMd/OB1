@@ -854,7 +854,7 @@ lineage row at the two texts judged. The reads below show the judge's relations 
 thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads`.
 
 - **`relations`** (read scope; REST `GET /v1/relations`) reads one thought's standing judged relations, both sides of
-  each pair, strongest first: by confidence (rounded to six places), then the newest recorded, then by id.
+  each pair, strongest first: by confidence (rounded to six places), then the latest judged, then by id.
   - `relation` keeps one word. `limit` relations a page, 1–100, default 20; more carry a `cursor`, passed back as
     `after` with the same `id` and `relation` (a cursor made for another is refused). `total` counts every one under
     the word.
@@ -873,7 +873,8 @@ thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads
   any other thought by its id. Titles are fetch's and the `relations` read's, an outside text's marked `[ingested]`.
   The ChatGPT-shape `search` carries none, and `fetch` carries them only where a thought has some. `relations: null`
   says they couldn't be read, and the log says why; the read goes on.
-- **MCP's structured value** leaves the titles out.
+- **MCP's structured value** leaves the titles out of the pages and the `relations` read; fetch's value is its JSON,
+  titles included.
 
 The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds. A role without either
 gives `relations: null` on the reads, and faults the `relations` operation, the error naming the table.

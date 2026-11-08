@@ -1582,7 +1582,7 @@ export class SqlStore implements ThoughtStore {
     if (ids.length === 0) return {};
     const after = w.after ?? null;
     const cut = after === null ? this.sql`TRUE`
-      : this.sql`(rank, created_at, id) < (${after.rank}::numeric, ${after.at}::timestamptz, ${after.id}::uuid)`;
+      : this.sql`(rank, judged, id) < (${after.rank}::numeric, ${after.at}::timestamptz, ${after.id}::uuid)`;
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
@@ -1600,31 +1600,40 @@ export class SqlStore implements ThoughtStore {
             FROM ids JOIN thought_facets f ON f.payload->>'target' = ids.of::text
            WHERE f.kind = 'relation' AND f.payload->>'target' = ANY(${this.sql.array(ids, "TEXT")}::text[])
              AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'),
+        -- The lineage row (084: written with the relation, under its judge key; unique per artifact) gives when it was
+        -- last judged — a re-judge keeping the word moves it, not the facet — which the order reads (review pass 2: the
+        -- facet's time sorted against the judgedAt a reader sees) and the fingerprints its stale mark compares.
         w AS (
-          SELECT e.*, COALESCE(round(e.confidence::numeric, 6), -1) AS rank FROM e
+          SELECT e.*, COALESCE(round(e.confidence::numeric, 6), -1) AS rank, COALESCE(d.produced_at, e.created_at) AS judged,
+                 d.id IS NOT NULL AS lineage, d.input_fingerprints AS fingerprints
+            FROM e LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = e.id AND d.produced_by = e.judge_key
            WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
+        counted AS (SELECT of, count(*)::int AS total FROM w GROUP BY of),
         page AS (
           SELECT * FROM (
-            SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, created_at DESC, id DESC) AS n
+            SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, judged DESC, id DESC) AS n
               FROM w WHERE ${cut}) c
            WHERE n <= ${w.limit}::int),
+        -- Each thought's page aggregated once, and its count once, joined to the ids (review pass 2: a correlated read per
+        -- id scanned the whole set for each, 1.8 s for a list page of 1,000). A text's fingerprint is the stored one
+        -- where it has one, as 120's re-link reads it, its hash over the whole text only where not (review pass 2: 158 ms
+        -- for ten 115 KB texts); a raw UPDATE of content that leaves the column is the residue, as it is for 120.
         shown AS (
-          SELECT page.of, page.n, jsonb_build_object(
+          SELECT page.of, jsonb_agg(jsonb_build_object(
                    'id', page.id::text, 'relation', page.relation, 'other_is', page.other_is,
                    'other_id', page.other::text, 'other_created_at', o.created_at, 'other_content', left(o.content, ${THREAD_HEAD_CHARS}::int),
                    'other_trust', o.metadata->>'trust',
-                   'confidence', page.confidence, 'judged_at', COALESCE(d.produced_at, page.created_at), 'rank', page.rank::text, 'at', page.created_at::text,
-                   'stale', d.id IS NOT NULL AND (content_fingerprint_of(tol.content) IS DISTINCT FROM d.input_fingerprints[1]
-                                                  OR content_fingerprint_of(tn.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edge
+                   'confidence', page.confidence, 'judged_at', page.judged, 'rank', page.rank::text, 'at', page.judged::text,
+                   'stale', page.lineage AND (COALESCE(tol.content_fingerprint, content_fingerprint_of(tol.content)) IS DISTINCT FROM page.fingerprints[1]
+                                              OR COALESCE(tn.content_fingerprint, content_fingerprint_of(tn.content)) IS DISTINCT FROM page.fingerprints[2]))
+                   ORDER BY page.n) AS edges
             FROM page
             JOIN thoughts o ON o.id = page.other
             JOIN thoughts tn ON tn.id = page.newer
             JOIN thoughts tol ON tol.id = page.older
-            LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key)
-        SELECT ids.of::text AS of,
-               (SELECT count(*) FROM w WHERE w.of = ids.of)::int AS total,
-               COALESCE((SELECT jsonb_agg(shown.edge ORDER BY shown.n) FROM shown WHERE shown.of = ids.of), '[]'::jsonb) AS edges
-          FROM ids`;
+           GROUP BY page.of)
+        SELECT ids.of::text AS of, COALESCE(counted.total, 0) AS total, COALESCE(shown.edges, '[]'::jsonb) AS edges
+          FROM ids LEFT JOIN counted ON counted.of = ids.of LEFT JOIN shown ON shown.of = ids.of`;
     } catch (e) {
       // A cursor's time Postgres cannot read is the caller's, as the thread read's is.
       if (!after || !timeCastFailed(e)) throw e;
