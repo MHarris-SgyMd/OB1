@@ -5760,7 +5760,7 @@ async function tierRows(t: TierProbe): Promise<void> {
     const want = t.want;
     const knob = t.wantKnob;
     if (want && info.model.name !== want) {
-      add(TIER, t.wantFails ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${t.wantFails ? "" : " — db/consolidate.ts refuses to start; capture is unaffected"}`,
+      add(TIER, t.wantFails ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${t.wantFails ? "" : " — the consolidation pass decides nothing (jev/h2o/README.md, \"When the tier is down\"); capture is unaffected"}`,
           `Point ${t.baseKnob} at the tier serving ${want}, or set ${knob}=${info.model.name}${knob === "OB1_CONSOLIDATE_DECIDER" ? " (a new pass key)" : ""}`
           // The shared tier held to the decider: decide mode can have a tier of its own instead (review pass 2).
           + `${t.baseKnob !== "OB1_CONSOLIDATE_DECIDER_URL" && knob === "OB1_CONSOLIDATE_DECIDER" ? `, or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL` : ""}.`);

@@ -5921,7 +5921,7 @@ if (want("10")) {
       && /✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(decideUp.out, "jev tier")),
          `a tier serving the decider: decide mode's row names the pass key, and the tier row the knob that held it (${row(decideUp.out, "consolidate decide mode").trim().slice(0, 200)})`);
   const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
-  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(row(decideElse.out, "jev tier"))
+  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — the consolidation pass decides nothing \(jev\/h2o\/README\.md, "When the tier is down"\); capture is unaffected/.test(row(decideElse.out, "jev tier"))
       && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\), or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(decideElse.out, "jev tier"))
       // The skip names the row as it ended (review pass 2: it said "failed" after this warn).
       && /·\s+jev decision\s+not checked — the jev tier row warned/.test(decideElse.out),
@@ -5940,7 +5940,7 @@ if (want("10")) {
       && /^\s*·\s+jev tier\s+OB1_JEV_BASE_URL is unset/.test(row(ownUp.out, "jev tier")) && /✓\s+decide egress/.test(ownUp.out),
          `its own tier: decide mode's row says so, the decide tier row is held to the decider, the shared tier stays off (${row(ownUp.out, "decide tier").trim().slice(0, 160)})`);
   const ownElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
-  assert(/!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start/.test(row(ownElse.out, "decide tier"))
+  assert(/!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — the consolidation pass decides nothing/.test(row(ownElse.out, "decide tier"))
       && /→ Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(ownElse.out, "decide tier")),
          `its own tier serving another model than the decider warns, pointing at OB1_CONSOLIDATE_DECIDER_URL (${row(ownElse.out, "decide tier").trim().slice(0, 160)})`);
   const ownDead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
