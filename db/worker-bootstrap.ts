@@ -213,8 +213,9 @@ export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
  * retry the call); a 400 about the input's length (refusesLength, shared with
  * embed.ts) is the thought's; any other 4xx is fatal (stop the pass), and so is a
  * redirect, which no call follows (SMD-2908); a connection
- * error is transient; anything else is the thought's. Their followers read it
- * through `fault`, followClassify's split (SMD-3311, SMD-2636 PR 3a).
+ * error is transient; anything else is the thought's. Their followers read a
+ * provider error through `fault` instead, on followClassify's split alone
+ * (SMD-2636 PR 3a; `maxTokensFatal`'s rule there is EXTRACT_REQUEST_FIELDS).
  *
  * `maxTokensFatal` (extract only): a 400 naming the answer budget
  * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
@@ -331,7 +332,8 @@ function providerWords(e: unknown): string {
  * whose own words name a model as not found — Ollama's `model "x" not found,
  * try pulling it first`, OpenAI's and vLLM's `The model `x` does not exist`
  * or `model_not_found`. A 404 that names no model is a wrong base URL
- * (Ollama's `404 page not found`) and stays fatal. classifyError calls both
+ * (Ollama's `404 page not found`): fatal to classifyError, and under --follow
+ * probed first (`fault`, SMD-2636 PR 3a). classifyError calls both
  * fatal; a --follow worker that has seen the model answer at start reads
  * this one as the provider's state — Ollama pulling or swapping the model —
  * and waits it out.

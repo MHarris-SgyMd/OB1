@@ -109,7 +109,10 @@
  *   - a rate limit, a server error, a 408 or a lost connection still failing
  *     after the pauses;
  *   - the model missing, as while Ollama pulls it;
- *   - a timeout after which a one-token probe gets no answer either.
+ *   - a timeout, or a 4xx no rule reads (a 401, 402 or 403, a 404 naming no
+ *     model, a 400 not the request's shape), after which a one-token probe
+ *     gets no answer either — answered, it is the thought's, recorded failed;
+ *     refused, the request's, exit 2 (SMD-2636 PR 3a).
  * In each case the thought in hand goes back to the pool, not failed, the
  * other workers stop after theirs, and the follower probes the model until it
  * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
@@ -141,8 +144,9 @@
  * The model is asked for names and types; deciding whether two names are one
  * entity is the database's (`normalize_entity_name`, migration 016). A
  * malformed answer — not JSON, or not the shape — is a failure for that
- * thought, retryable with --retry-failed; so is a timeout, which the corpus run
- * showed is a property of the longest thoughts rather than of the moment.
+ * thought, retryable with --retry-failed; so is a timeout the probe answers
+ * past, which the corpus run showed is a property of the longest thoughts
+ * rather than of the moment.
  * A windowed thought's malformed window is not (SMD-2260): the windows that
  * parsed are written and the claim is released succeeded with a caveat naming
  * the windows left out, a second kind of partial row, counted and listed

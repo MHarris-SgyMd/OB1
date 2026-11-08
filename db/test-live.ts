@@ -7096,7 +7096,8 @@ if (want("10e")) {
       restorePauses();
     }
     const refusedRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${refusedNote}::uuid AND work_type LIKE 'extract:%'`)[0] as { status: string } | undefined)?.status;
-    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => new RegExp(`and ${c.knob} against the provider`).test(l)),
+    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => new RegExp(`and ${c.knob} against the provider`).test(l))
+           && lines.some((l) => /The provider refused the request itself: a one-token call was refused \(403 /.test(l)),
            `the ${c.who} model's call refused is probed on that model: refused, exit 2, the remedy naming ${c.knob}, the thought not failed (SMD-2636 PR 3a, review passes 1 and 2; exit ${code}, ${refusedRow}; ${lines.filter((l) => /refus|403/.test(l)).join(" | ").slice(0, 240)})`);
   }
 
@@ -15298,6 +15299,8 @@ if (want("16")) {
   let judge400TimedOut = 0;
   /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
   const judgeCallScript: number[] = [];
+  /** The statuses the next probes answer, one each, in order (SMD-2636 PR 3a, review pass 4). */
+  const judgeProbeScript: number[] = [];
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
@@ -15327,6 +15330,9 @@ if (want("16")) {
       // A follower's one-token probe, answered apart: no judge call counted.
       if (isProbe) {
         judgeProbes++;
+        // The statuses the next probes answer, in order (SMD-2636 PR 3a, review pass 4).
+        const probeStatus = judgeProbeScript.shift();
+        if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
         // A key revoked while the judge was away: the wait's probe refused (SMD-2636 PR 2).
         if (judgeProbeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -17036,6 +17042,63 @@ if (want("16")) {
            && (c.what !== "401" || lines.some((l) => /The provider refused the request itself: a one-token call was refused \(401 /.test(l))),
            `a consolidate follower's judge ${c.what} ${c.probed ? "is probed first, the probe refused: the request's" : "is the request's shape, unprobed"} — exit 2, its pair's thought not failed (SMD-2636 PR 3a; exit ${code}, ${newerRow}, ${probesAfter} probe(s) after; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of pairSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 3a, review pass 4: [10]'s twins for consolidate — a judge 403 the probe answers past is the thought's,
+  // recorded failed with the probe's note, the follower running on; a judge 401 whose probe meets a 503 is the
+  // provider's outage, waited out, the pair judged after. And a run without --follow keeps classifyError's rule: a
+  // judge 401 ends it, exit 2, nothing failed. Stopped at 30 s each if they run on.
+  for (const c of [
+    { status: 403, probes: [] as number[], want: "failed", follow: 1 },
+    { status: 401, probes: [503], want: "succeeded", follow: 1 },
+    { status: 401, probes: [] as number[], want: "pending", follow: 0 },
+  ]) {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 30_000);
+    const twinSeeds: string[] = [];
+    let code = -1;
+    let row: string | undefined;
+    let lastError = "";
+    try {
+      if (c.follow) {
+        const startJudgeProbes = judgeProbes;
+        const running = runConsolidate({ url: URL_!, env, workers: 1, follow: c.follow, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+        await Bun.sleep(500);
+        twinSeeds.push(await seed(`The twin log names the judge's ${c.status}, the first.`, 77 + c.follow, 3, ["twin-log"]));
+        judgeCallScript.push(c.status);
+        judgeProbeScript.push(...c.probes);
+        twinSeeds.push(await seed(`The twin log names the judge's ${c.status}, the second.`, 77 + c.follow, 0, ["twin-log"]));
+        await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${twinSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === c.want, 20_000);
+        await Bun.sleep(1_000);
+        ac.abort();
+        code = await running;
+      } else {
+        twinSeeds.push(await seed("The twin log names a one-shot run's 401, the first.", 79, 3, ["twin-log-once"]));
+        twinSeeds.push(await seed("The twin log names a one-shot run's 401, the second.", 79, 0, ["twin-log-once"]));
+        judgeCallScript.push(c.status);
+        code = await runConsolidate({ url: URL_!, env, workers: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      }
+      const claim = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${twinSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+      row = claim?.status;
+      lastError = claim?.last_error ?? "";
+    } finally {
+      clearTimeout(backstop);
+      judgeCallScript.length = 0;
+      judgeProbeScript.length = 0;
+      restoreOutage();
+      restorePauses();
+    }
+    const waited = lines.some((l) => new RegExp(`the provider is not answering \\(Judge request to [^)]*${c.status}`).test(l));
+    const ok = !c.follow
+      ? code === 2 && row !== "failed" && lines.some((l) => /refuses the request itself/.test(l))
+      : row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded")
+        && (c.want !== "failed" || /a one-token call right after answered, so this thought's; --retry-failed revisits it/.test(lastError));
+    assert(ok, `consolidate's judge ${c.status}${c.follow ? c.want === "failed" ? " probed first, answered: the thought's, recorded failed with the probe's note, the follower running on" : ", its probe meeting a 503: the provider's outage, waited out, the pair judged" : " without --follow: the request's, exit 2, nothing failed"} (SMD-2636 PR 3a, review pass 4; ${row}, exit ${code}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+    for (const id of twinSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-2636 PR 2, review pass 5: consolidate counts thoughts finished having asked the judge, not pairs. A thought put
