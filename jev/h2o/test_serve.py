@@ -149,21 +149,30 @@ async def main():
     check(s == 200 and gate.admitted == 0, f"once they leave, a request is admitted again ({s})")
 
     print("\n[4] admission by bytes")
+    # The bytes held by a request waiting or being read count against the next: a 503 with Retry-After, refused before
+    # the next body is read when its Content-Length shows it, else as soon as its bytes pass the bound.
+    R, gate = FakeReader(delay=0.3), serve.Gate(max_queued=8, max_bytes=len(body()) + 10)
+    held = asyncio.ensure_future(post(R, gate, body()))
+    await asyncio.sleep(0.05)
+    touched = []
+    s, b, h = await post(R, gate, body(), declare=True, touched=touched)
+    check(s == 503 and "JEV_MAX_QUEUED_BYTES" in b["error"] and "Retry-After" in h and not touched,
+          f"a Content-Length that, with the bytes held, passes JEV_MAX_QUEUED_BYTES is 503 before its body is read ({s}, read: {bool(touched)})")
+    s, b, h = await post(R, gate, body(), declare=False)
+    check(s == 503 and "JEV_MAX_QUEUED_BYTES" in b["error"], f"with no Content-Length, it is 503 once the bytes pass the bound ({s})")
+    check((await held)[0] == 200 and R.reads == 1 and gate.admitted == 0 and gate.bytes == 0,
+          f"the first still answers, nothing else was read, the gate empty ({R.reads}, {gate.admitted}, {gate.bytes})")
+    # A body over JEV_MAX_QUEUED_BYTES on its own is a 413: no wait would admit it, so a 503 would be retried for ever
+    # (review pass 1).
     R, gate = FakeReader(), serve.Gate(max_queued=8, max_bytes=500)
     big = body(context="x" * 600)
     touched = []
     s, b, h = await post(R, gate, big, declare=True, touched=touched)
-    check(s == 503 and "JEV_MAX_QUEUED_BYTES" in b["error"] and "Retry-After" in h and not touched,
-          f"a Content-Length past JEV_MAX_QUEUED_BYTES is 503 before its body is read ({s}, read: {bool(touched)})")
-    s, b, h = await post(R, gate, big, declare=False)
-    check(s == 503 and "JEV_MAX_QUEUED_BYTES" in b["error"], f"with no Content-Length, it is 503 once the bytes pass the bound ({s})")
+    check(s == 413 and "JEV_MAX_QUEUED_BYTES" in b["error"] and "Retry-After" not in h and not touched,
+          f"a Content-Length over JEV_MAX_QUEUED_BYTES on its own is 413, before its body is read ({s}, read: {bool(touched)})")
+    s, b, _ = await post(R, gate, big, declare=False)
+    check(s == 413 and "JEV_MAX_QUEUED_BYTES" in b["error"], f"with no Content-Length, 413 once its bytes alone pass the bound ({s})")
     check(R.reads == 0 and gate.admitted == 0 and gate.bytes == 0, f"nothing read, the gate empty ({R.reads}, {gate.admitted}, {gate.bytes})")
-    R, gate = FakeReader(delay=0.3), serve.Gate(max_queued=8, max_bytes=len(body()) + 10)
-    held = asyncio.ensure_future(post(R, gate, body()))
-    await asyncio.sleep(0.05)
-    s, _, _ = await post(R, gate, body())
-    check(s == 503, f"bytes held by a request waiting or being read count against the next ({s})")
-    check((await held)[0] == 200, "the first still answers")
 
     print("\n[5] a body over 8 MB")
     R, gate = FakeReader(), serve.Gate()
@@ -195,6 +204,27 @@ async def main():
     s, _, _ = await post(R, gate, body(), gone=gone_now)
     check(s == 499 and R.reads == 1, f"a caller already gone at its turn is not read either ({s}, {R.reads} read)")
 
+    # A check that raises is read as "still here" (review pass 1): the request is read and answered, not labelled
+    # "the model failed".
+    async def gone_broken():
+        raise RuntimeError("the transport is closed")
+
+    s, _, _ = await post(R, gate, body(), gone=gone_broken)
+    check(s == 200 and R.reads == 2, f"a caller check that raises does not skip the read or fail the answer ({s}, {R.reads} read)")
+
+    # A body whose stream breaks — Starlette's ClientDisconnect when the caller leaves mid-body — is a 499, nothing read,
+    # the gate empty (review pass 1: it escaped handle as the framework's 500).
+    async def breaks_mid_body():
+        yield body()[:40]
+        raise ConnectionResetError("the caller left mid-body")
+
+    try:
+        s, b, _ = await serve.handle(R, gate, MODEL, {"content-length": str(len(body()))}, breaks_mid_body(), None)
+    except Exception as e:  # escaping handle is the framework's 500: a failed assertion, not a crashed test
+        s, b = f"raised {type(e).__name__}", {}
+    check(s == 499 and R.reads == 2 and gate.admitted == 0 and gate.bytes == 0,
+          f"a body whose stream breaks is 499, nothing read, the gate empty ({s}, {b.get('error')}, {gate.admitted}, {gate.bytes})")
+
     print("\n[7] a context over max_state_tokens")
     R, gate = FakeReader(), serve.Gate()
     raw = json.dumps({"decisions": [
@@ -204,6 +234,14 @@ async def main():
     check(s == 422 and "decision 1" in b["error"] and "1500 tokens" in b["error"] and "1000" in b["error"],
           f"the whole request is 422, naming decision 1 and its token count ({s}, {b.get('error')})")
     check(R.reads == 0 and gate.admitted == 0, f"nothing was read ({R.reads})")
+    # Reader.state_tokens encodes every record: NFC can lengthen a text, so a record under the limit in UTF-8 bytes can
+    # be over it in tokens (review pass 1: 10,666 x U+FB2C, 31,998 bytes, 42,664 tokens). A tokenizer that reads three
+    # tokens a byte stands in for that here.
+    probe = object.__new__(serve.Reader)
+    probe.max_state_tokens = 1000
+    probe.encode = lambda text: list(range(len(text.encode("utf-8")) * 3))
+    check(probe.state_tokens("z" * 900) == 2700 and probe.state_tokens("z" * 300) is None,
+          f"a record under the limit in bytes and over it in tokens is counted by its tokens ({probe.state_tokens('z' * 900)}, {probe.state_tokens('z' * 300)})")
 
     print("\n[8] 400, 409, 500, and the gate after each")
     R, gate = FakeReader(), serve.Gate()

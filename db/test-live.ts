@@ -17771,6 +17771,8 @@ if (want("16")) {
         tierCalls++;
         const d = body.decisions[0];
         const both = thoughtsIn(d.context);
+        // A pair the tier cannot read faithfully (SMD-3326): the contract's 422, as jev/h2o answers a context past its tokens.
+        if (/unreadable/.test(both)) return Response.json({ error: "decision 0: its context is 40000 tokens, over the 32000 this model reads whole; a cut to its head and tail is not a faithful read, so it is refused" }, { status: 422 });
         const p: Record<string, number> = /tenancy/.test(both) ? { unrelated: 0.03, related: 0.1, evolves: 0.05, duplicate: 0.02, outdates: 0.8 }
           : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
           : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
@@ -17926,6 +17928,24 @@ if (want("16")) {
           && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
+      // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that thought's failure, recorded with the
+      // tier's words, and the pass goes on; it was read as a provider refusing every request, which stopped every worker,
+      // marked nothing failed, and met the same pair again on the next run (review pass 1).
+      await seed("[16d] The unreadable ledger lists every vendor.", 56, 3, ["ledger"]);
+      const unreadNew = await seed("[16d] The unreadable ledger now lists only active vendors.", 56, 0, ["ledger"]);
+      // …beside a pair the tier reads, in the same run: that one is settled, so the pass went on past the refusal.
+      await seed("[16d] The volunteer roster lists every member.", 57, 3, ["roster"]);
+      const rosterNew = await seed("[16d] The volunteer roster now lists only active members.", 57, 0, ["roster"]);
+      const unreadRun = await decide(denv);
+      const claimOf = async (t: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${t}::uuid`) as { status: string; last_error: string | null }[])[0];
+      const [unreadClaim, rosterClaim] = [await claimOf(unreadNew), await claimOf(rosterNew)];
+      // Exit 1 is a pass that left a failed row (consolidate.ts's `incomplete`); a refusal read as the provider's stops
+      // every worker and exits 2, "The provider refused the request itself", marking nothing failed.
+      assert(unreadRun.code === 1 && !/stopping every worker|refused the request itself/.test(unreadRun.out) && unreadClaim?.status === "failed" && /422/.test(unreadClaim.last_error ?? "") && /its context is 40000 tokens/.test(unreadClaim.last_error ?? "")
+          && rosterClaim?.status === "succeeded",
+        `a pair the tier refuses with 422 fails that thought, with the tier's words, and the pass goes on to settle the next (exit ${unreadRun.code}: ${JSON.stringify(unreadClaim ?? null)}, roster ${rosterClaim?.status}; ${last(unreadRun.out)})`);
+      const tierBeforeFollower = tierCalls;
+
       // A follower checks the tier at start as it checks the chat endpoint: a
       // tier serving another model is refused before anything is claimed.
       tierServes = "h2o-other";
@@ -17934,7 +17954,7 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 7,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === tierBeforeFollower,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
       // …its row, under the decide key, ended with the kind (SMD-3214).
       const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;

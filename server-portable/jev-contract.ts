@@ -16,11 +16,14 @@
  *   GET  {base}/info     JevInfo: the contract, the model and its pins, the limits
  *   POST {base}/decide   JevRequest → JevResponse, or { error } with
  *                        400 malformed (jevRequestProblem), 409 another model,
- *                        413 over JEV_MAX_BODY_BYTES, 422 a decision this model
- *                        cannot read faithfully (its own markers in the text,
- *                        labels past its token budget — the whole request is
- *                        refused, naming the decision), 499 the caller left
- *                        before its turn, 500 the model failed
+ *                        413 over JEV_MAX_BODY_BYTES (or over what the tier
+ *                        holds at once), 422 a decision this model cannot
+ *                        read faithfully (its own markers in the text, labels
+ *                        past its token budget, a context an adapter will not
+ *                        cut — the whole request is refused, naming the
+ *                        decision), 499 the caller left before its turn,
+ *                        500 the model failed, 503 the queue of a tier that
+ *                        bounds it is full (jev/h2o; Retry-After: seconds)
  *
  * Probabilities are conditional on the options supplied, and the tier always
  * adds one of its own — INSUFFICIENT_EVIDENCE — so a model can decline rather
@@ -111,7 +114,7 @@ export type JevInfo = {
   kinds: JevDecision["kind"][];
   max_options: number;
   max_batch: number;
-  /** Tokens the model reads; a longer context is truncated and its result says so, labels that do not fit are refused (422). */
+  /** Tokens the model reads. A longer context is cut and its result says so (`truncated`), or, by an adapter that reads no cut as faithful (jev/h2o), refused (422); labels that do not fit are refused (422). */
   max_tokens: number;
 };
 

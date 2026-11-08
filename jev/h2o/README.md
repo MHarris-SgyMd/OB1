@@ -59,9 +59,13 @@ Knobs:
   with `Retry-After`: the admitted requests times the recent read time, at
   least 1 s. A request is refused before its body is read when its
   Content-Length shows it would pass the bound, and otherwise as soon as the
-  bytes read pass it.
+  bytes read pass it. A body over `JEV_MAX_QUEUED_BYTES` on its own could never
+  be admitted, so it gets 413, as a body over `JEV_MAX_BODY_BYTES` does, not a
+  503 that asks for a retry.
 - **A caller that leaves while it waits** is dropped then (499), its admission
-  and bytes released, and its request is never read.
+  and bytes released, and its request is never read. A caller that leaves while
+  its body is still arriving gets 499 too. A failing check on whether the caller
+  has left counts as "still here": the request is read.
 - **A context over `max_state_tokens` is refused: 422** (decided 2026-11-08).
   H2O's own shim cuts such a record to its head and tail around a `...` line
   and answers. The contract lets an adapter answer a cut it reads faithfully,
@@ -69,7 +73,12 @@ Knobs:
   verdict on a record whose middle went unread could settle the wrong thing.
   So the whole request gets the contract's 422, naming the decision and its
   token count, before it queues. Every result it does answer says
-  `truncated: false`.
+  `truncated: false`. The consolidation pass fails that one thought with the
+  tier's words and goes on (`DecisionRefused` in `server-portable/jev.ts`). It
+  does not stop the pass, since another try would get the same answer.
+  - Every context is encoded to count its tokens. Its UTF-8 length is no bound,
+    because the tokenizer normalizes to NFC first, which can lengthen a text:
+    10,666 × U+FB2C is 31,998 bytes and 42,664 tokens.
   - The context cap of 20,000 characters keeps most text under the 32,000
     tokens. Only text past 1.6 tokens a character crosses it: a Yi syllable
     (U+A000) reads as 3 tokens, so 19,999 of them are 59,997 tokens.
@@ -77,10 +86,12 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Nine mutants, one per mechanism, each fail it: eight
+  server runs it in CI. Thirteen mutants, one per mechanism, each fail it: eight
   worker threads, the read on the event loop, no count bound, no byte bound, no
   refusal before the body, no drop while waiting, no check at its turn, no 422,
-  and bytes never released.
+  bytes never released, a body over the byte bound alone answered 503, a body
+  stream that breaks and escapes, a caller check that raises and escapes, and
+  tokens estimated from bytes.
 
 **Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
 model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):

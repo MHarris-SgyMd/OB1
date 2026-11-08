@@ -29,11 +29,13 @@ two reads and refuses to serve if they differ.
 
 Serving (SMD-3326). One request's read runs at a time, behind a lock, on one worker thread, so the event loop stays
 free: GET /health and GET /info answer while a decide runs, and two requests never interleave on the model. Admission
-is bounded (SMD-2082's knobs, which every ob1-jev/1 adapter honours): at most JEV_MAX_QUEUED requests admitted at once,
-the one being read included, and at most JEV_MAX_QUEUED_BYTES of their bodies held. Past either, a request is answered
-503 with Retry-After before its body is read when Content-Length shows it, or as soon as the bytes read pass it. A
-request whose caller leaves while it waits is dropped then (499), its bytes released, never read. The request path is
-`handle`, free of the web framework and the model, so test_serve.py holds it with the standard library alone.
+is bounded (the knobs SMD-2082 defines for the ob1-jev/1 adapters; jev/serve.ts's and decider's bounds are their own
+tickets): at most JEV_MAX_QUEUED requests admitted at once, the one being read included, and at most
+JEV_MAX_QUEUED_BYTES of their bodies held. Past either, a request is answered 503 with Retry-After before its body is
+read when Content-Length shows it, or as soon as the bytes read pass it; a body larger than JEV_MAX_QUEUED_BYTES on its
+own is a 413, since no wait would admit it. A request whose caller leaves while it waits, or mid-body, is dropped then
+(499), its bytes released, never read. The request path is `handle`, free of the web framework and the model, so
+test_serve.py holds it with the standard library alone.
 
 A record this model would read in part gets the contract's 422, naming the decision and its token count (SMD-3326,
 decided 2026-11-08): a context over max_state_tokens (32,000 in serve_config.json) is refused, not cut to its head and
@@ -143,11 +145,12 @@ class Reader:
         return ids
 
     def state_tokens(self, text):
-        """The record's token count when it is over max_state_tokens, else None. A record no longer in UTF-8 bytes than
-        the limit can't be longer in tokens, so only a longer one is encoded. Over the limit, the shim would keep its
+        """The record's token count when it is over max_state_tokens, else None. Every record is encoded: the
+        tokenizer normalizes to NFC first, which can lengthen a text, so its UTF-8 length is no bound on its tokens
+        (review pass 1: 10,666 x U+FB2C is 31,998 bytes and 42,664 tokens). Over the limit, the shim would keep its
         head and tail around a "..." line; this port refuses it instead (a 422), as `handle` says."""
         mx = self.max_state_tokens
-        if not mx or len(text.encode("utf-8", "ignore")) <= mx: return None
+        if not mx: return None
         n = len(self.encode(text))
         return n if n > mx else None
 
@@ -338,12 +341,23 @@ class Gate:
         self.admitted -= 1
         self.bytes -= held
 
+    @staticmethod
+    async def _left(gone):
+        """Whether the caller has left: gone()'s answer, and False when asking raises, so a failed check neither skips
+        a read nor turns a request's answer into "the model failed" (review pass 1)."""
+        if gone is None:
+            return False
+        try:
+            return bool(await gone())
+        except Exception:
+            return False
+
     async def run(self, fn, gone=None):
         """fn() on the worker thread at this request's turn, or GONE when `gone()` says its caller left first."""
         waiter = asyncio.ensure_future(self._lock.acquire())
         try:
             while not (await asyncio.wait({waiter}, timeout=self.poll_s))[0]:
-                if gone is not None and await gone():
+                if await self._left(gone):
                     waiter.cancel()
                     try:
                         await waiter
@@ -358,7 +372,7 @@ class Gate:
                 self._lock.release()
             raise
         try:
-            if gone is not None and await gone():
+            if await self._left(gone):
                 return GONE
             t = time.monotonic()
             try:
@@ -373,14 +387,23 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
     """POST /decide, free of the web framework: (status, JSON body, extra headers). `headers` lower-cased, `chunks` the
     body as an async iterator of bytes, `gone` an async callable saying whether the caller has left.
 
-    In order: 413 for a Content-Length over 8 MB; 503 when admission is full, or when the body (its Content-Length, or
-    the bytes as they arrive) would pass the held-bytes bound; 413 for a body that runs past 8 MB; 400 malformed; 409
-    another model; 422 for a context the model would read only in part; 499 for a caller gone before its turn; the
-    result, or 500 when the model fails."""
+    In order: 413 for a Content-Length over 8 MB, or over JEV_MAX_QUEUED_BYTES on its own; 503 when admission is full,
+    or when the body (its Content-Length, or the bytes as they arrive) would pass the held-bytes bound; 413 for a body
+    that runs past either limit; 499 for a caller gone mid-body; 400 malformed; 409 another model; 422 for a context
+    the model would read only in part; 499 for a caller gone before its turn; the result, or 500 when the model
+    fails."""
+    # A body no wait could admit is a 413, not a 503 a caller would retry for ever (review pass 1): over 8 MB, or over
+    # the held-bytes bound on its own (a JEV_MAX_QUEUED_BYTES set below a valid body).
+    def too_big(n):
+        if n > MAX_BODY:
+            return 413, {"error": f"the body is over {MAX_BODY} bytes"}, {}
+        if n > gate.max_bytes:
+            return 413, {"error": f"the body is over the {gate.max_bytes} bytes this tier holds at once (JEV_MAX_QUEUED_BYTES); no wait would admit it"}, {}
+        return None
     cl = headers.get("content-length")
     declared = int(cl) if cl is not None and cl.strip().isdigit() else None
-    if declared is not None and declared > MAX_BODY:
-        return 413, {"error": f"the body is over {MAX_BODY} bytes"}, {}
+    if declared is not None and too_big(declared):
+        return too_big(declared)
     try:
         gate.enter()
     except Busy as e:
@@ -394,14 +417,18 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
             parts, size = [], 0
             async for c in chunks:
                 size += len(c)
-                if size > MAX_BODY:
-                    return 413, {"error": f"the body is over {MAX_BODY} bytes"}, {}
+                if too_big(size):
+                    return too_big(size)
                 if size > held:  # no Content-Length, or a body longer than it said
                     gate.hold(size - held)
                     held = size
                 parts.append(c)
         except Busy as e:
             return 503, {"error": str(e)}, {"Retry-After": str(e.retry_after)}
+        except Exception:
+            # The body's stream broke: the caller left mid-body (Starlette's ClientDisconnect), or the connection did.
+            # Nothing was read, and the admission and bytes go back in the finally (review pass 1: it escaped as a 500).
+            return 499, {"error": "the caller left before its body was read; nothing was read"}, {}
         try:
             body = json.loads(b"".join(parts))
         except Exception:
