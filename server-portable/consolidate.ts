@@ -223,11 +223,16 @@ Who wrote each thought, when the header says, comes from the key that wrote it, 
 /**
  * A thought inside its delimiter with any literal occurrence of either tag
  * escaped, so a thought cannot forge a close tag and step out of the untrusted
- * section (entities.ts's rule). Cut to CONTENT_LIMIT_CHARS first.
+ * section (entities.ts's rule). Cut to CONTENT_LIMIT_CHARS first, never
+ * between a surrogate pair: a cut through an emoji left a lone high surrogate,
+ * which the decision tier's tokenizer cannot encode, so the pair was refused
+ * on every pass (SMD-3326 review pass 5).
  */
 export function wrapSide(tag: "thought_a" | "thought_b", content: string): string {
-  const escaped = content
-    .slice(0, CONTENT_LIMIT_CHARS)
+  let cut = content.slice(0, CONTENT_LIMIT_CHARS);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (cut.length < content.length && last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  const escaped = cut
     .replace(/<\/?thought_[ab]>/gi, (m) => m.replace(">", "_escaped>"));
   return `<${tag}>\n${escaped}\n</${tag}>`;
 }

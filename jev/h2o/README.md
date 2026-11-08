@@ -93,10 +93,11 @@ Knobs:
   - Every context is encoded to count its tokens. Its UTF-8 length is no bound,
     because the tokenizer normalizes to NFC first, which can lengthen a text:
     10,666 × U+FB2C is 31,998 bytes and 42,664 tokens.
-  - The count runs on a thread of its own, not the event loop: 64 contexts of
+  - The count runs on a thread of the default pool, not the event loop: 64 contexts of
     20,000 U+FB2C took 1.35 s, during which `/health` would not answer. A
     context the tokenizer cannot encode (a lone surrogate, which JSON allows)
-    is a 400 naming the decision.
+    is a 422 naming the decision, recorded against that pair like a context
+    too long.
   - The context cap of 20,000 characters keeps most text under the 32,000
     tokens. Only text past 1.6 tokens a character crosses it: a Yi syllable
     (U+A000) reads as 3 tokens, so 19,999 of them are 59,997 tokens.
@@ -104,7 +105,7 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Twenty-one mutants, one per mechanism, each fail it: eight
+  server runs it in CI. Twenty-two mutants, one per mechanism, each fail it: eight
   worker threads, the read on the event loop, no count bound, no byte bound, no
   refusal before the body, no drop while waiting, no check at its turn, no 422,
   bytes never released, a body over the byte bound alone answered 503, a body
@@ -112,7 +113,8 @@ Knobs:
   tokens estimated from bytes, a 409 for the model's own name, and a cancelled
   waiter's acquire left running, no body deadline, the token count on the
   event loop, an encode failure escaping, a per-chunk deadline, the prompt
-  built without the record, and an unset knob refused.
+  built without the record, an unset knob refused, and an unencodable context
+  answered 400.
 
 **Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
 model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):

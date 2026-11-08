@@ -21,7 +21,8 @@
  *                        holds at once), 422 a decision this model cannot
  *                        read faithfully (its own markers in the text, labels
  *                        past its token budget, a context an adapter will not
- *                        cut — the whole request is refused, naming the
+ *                        cut or cannot encode — the whole request is refused,
+ *                        naming the
  *                        decision), 499 the caller left before its turn,
  *                        500 the model failed, 503 the queue of a tier that
  *                        bounds it is full (jev/h2o; Retry-After: seconds)

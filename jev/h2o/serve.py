@@ -455,7 +455,9 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
         # Measured on a thread of the default pool, not the event loop, so /health and /info answer while a request's
         # contexts are tokenized (review pass 3: 64 contexts of 20,000 characters took 1.35 s on the loop), and not on
         # the read's worker, so a request measures while another is read. A context the tokenizer cannot encode (a lone
-        # surrogate, which JSON lets through) is that decision's 400, not the framework's bare 500.
+        # surrogate, which JSON lets through) is that decision's 422, as a context too long is: a fact about the text,
+        # which the client records against the pair (review pass 5: as a 400 it failed the claim, the thought's later
+        # pairs unjudged, on every pass), not the framework's bare 500.
         def first_unreadable():
             seen = {}
             for i, dd in enumerate(decs):
@@ -464,7 +466,7 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     try:
                         seen[ctx] = R.state_tokens(ctx)
                     except Exception as e:
-                        return 400, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__})"}, {}
+                        return 422, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
                 if seen[ctx] is not None:
                     return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
                                           f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}

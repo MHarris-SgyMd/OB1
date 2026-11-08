@@ -358,8 +358,8 @@ async def main():
         s, b, _ = await post(R, gate, body())
     except Exception as e:
         s, b = f"raised {type(e).__name__}", {}
-    check(s == 400 and "decision 0: its context cannot be encoded" in b.get("error", "") and R.reads == 0 and gate.admitted == 0,
-          f"a context the tokenizer cannot encode is that decision's 400, not an escape ({s}, {b.get('error')})")
+    check(s == 422 and "decision 0: its context cannot be encoded" in b.get("error", "") and R.reads == 0 and gate.admitted == 0,
+          f"a context the tokenizer cannot encode is that decision's 422, not an escape or a 400 ({s}, {b.get('error')})")
 
     # The deadline is the whole body's, not each chunk's (review pass 4: a caller sending a byte every 0.1 s would
     # hold its place for good under a per-chunk deadline).
