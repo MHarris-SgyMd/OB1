@@ -21,13 +21,15 @@
  *       loopback — and each measured read. Prints the per-prompt hits, the
  *       table, the shuffled-gold mutant beside chance, the bar a priority read
  *       must clear against this baseline, and each measured read's verdict.
- *       Exits 1 when the database does not hold the planted facts (a fact
- *       dropped, or a statement 122 would not count), when a baseline read
- *       errors, when a baseline read's scores differ from priority.ts's
+ *       Exits 1 when fewer rows are planted than items, when the database
+ *       does not hold the planted facts (a fact dropped, or a statement 122
+ *       would not count), when a baseline read errors or returns more than
+ *       READ_K hits, when a baseline read's scores differ from priority.ts's
  *       BASELINE, when the gold ceiling errors or cannot clear the bar, when a
- *       measured read reads the answer, when the dogfood rows are not sound,
- *       or when the mutant does not sit at chance for a baseline read or the
- *       ceiling. Keyless: no provider is called.
+ *       measured read reads the answer or the answer-moved check misses the
+ *       ceiling, when the dogfood rows are not sound, or when the mutant does
+ *       not sit at chance for a baseline read or the ceiling. Keyless: no
+ *       provider is called.
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
  * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
@@ -50,7 +52,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, DOGFOOD_READS, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -252,6 +254,7 @@ async function selfCheck(): Promise<void> {
   assert(noPick.some((p) => p.includes("pick is not")) && !noPick.some((p) => p.includes("pick itself")), "a row missing its pick says so, and not that its alternative is the pick itself");
   assert(dogfoodProblems([null, rows[0]]).some((p) => p.includes("not an object")), "a row that is not an object, before another, is reported, not thrown on");
   assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
+  assert([...READS, ...MEASURED].every((r) => DOGFOOD_READS.includes(r.name)), `every seeded read, baseline and measured, is a name a dogfood row may use (${DOGFOOD_READS.join(", ")})`);
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
   assert(dogfoodProblems([{ ...rows[0], date: 20261314 }]).some((p) => p.includes("date")), "a row's date must be a real YYYYMMDD day");
   assert(dogfoodProblems([{ ...rows[0], pick: "SMD-2888" as unknown as number }]).some((p) => p.includes("pick")), "a pick is the ticket's number, not its key (check 9 allows numbers and ids)");
@@ -284,13 +287,13 @@ async function seeded(): Promise<void> {
   let planted = 0;
   let facts: PlantedFacts = [];
   let today = "";
-  // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days;
-  // to_char, so the session's DateStyle never shapes it.
   const factStore = new SqlStore(url, { max: 1 });
   try {
     planted = await plantRows(sql, seeds);
     // Before the facts, whose writers would refuse a missing row first and hide the count (review pass 3).
     if (planted !== ITEMS.length) throw new Error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`);
+    // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days;
+    // to_char, so the session's DateStyle never shapes it.
     today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
     facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
   } finally {
@@ -454,7 +457,7 @@ async function seeded(): Promise<void> {
     for (const f of failures) console.error(f);
     process.exit(1);
   }
-  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every read.`);
+  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every baseline read and the ceiling.`);
 }
 
 if (import.meta.main) {

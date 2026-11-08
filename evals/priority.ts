@@ -2,8 +2,9 @@
  * priority.ts — the "what matters now" eval's rules, pure (Linear SMD-3662).
  *
  * Every rule here but registeredSource (which reads this file's text),
- * plantRows and plantFacts (which write the corpus and its facts) and the
- * measured reads (which read the database) is a function of its arguments, so
+ * plantRows and plantFacts (which write the corpus and its facts), readFacts
+ * and the measured reads (which read the database) is a function of its
+ * arguments, so
  * `eval-priority.ts --self-check` probes each with a hand-known answer and no
  * database:
  * the seeded corpus and its gold, the stub embedder, the score, the
@@ -849,13 +850,16 @@ export function isDay(n: unknown): boolean {
 }
 
 /**
- * The read names a dogfood row may use: the seeded set's reads (baseline and
- * measured), and
- * `ticket_rows` — search filtered to board-sync's ticket rows alone, the
- * 2026-10-14 session's second read. A new name is added here with what it
- * is, so rows stay comparable read by read.
+ * The read names a dogfood row may use, written out so a row stays sound when a
+ * read leaves READS or MEASURED (review pass 4: a row is never rewritten):
+ * the seeded set's reads, each by its procedure there — `agenda` is
+ * AGENDA_READ's (search's hits ordered by the agenda), not the agenda tool's
+ * own list, which would need a name of its own — and `ticket_rows`, search
+ * filtered to board-sync's ticket rows alone, the 2026-10-14 session's second
+ * read. A new name is added here with what it is, so rows stay comparable read
+ * by read; the self-check holds every seeded read's name among them.
  */
-export const DOGFOOD_READS: readonly string[] = [...READS.map((r) => r.name), ...MEASURED.map((r) => r.name), "ticket_rows"];
+export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "ticket_rows"];
 
 /** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
 export function dogfoodProblems(raw: unknown): string[] {
@@ -887,7 +891,7 @@ export function dogfoodProblems(raw: unknown): string[] {
 
 /**
  * What each baseline read scored at REGISTERED_CORPUS, recorded (main
- * 8aa855f1, 2026-11-02; the same at the second registration on main 601b0452,
+ * 8aa855f1, 2026-11-02; the same at the second registration, main 601b0452 with SMD-3669 PR 2,
  * 2026-11-08, the facts planted beside the rows moving no search): top-1 and
  * top-3 as prompt counts, mean tau to three places. `--seeded` fails when a run differs, so a change to search on main
  * that moves the baseline is seen, not absorbed.

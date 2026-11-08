@@ -4467,7 +4467,7 @@ path on every run, so the path is exercised whatever the measured reads do.
 so the read puts it to a question as a client would (the maintainer's choice, 2026-11-08). It searches the query as
 `plain` does (its default ten hits), then orders those hits by the agenda, with its default flags at its cap of 100:
 the hits the agenda lists first, in its order, then the rest in search's order. A hit is on the agenda when it is a
-ticket's row (any row whose metadata names the ticket, placed by its ticket alone), else the origin thought of an
+ticket's row (any row whose metadata names the ticket with source `linear`, placed by its ticket alone), else the origin thought of an
 open item. The agenda and those lookups are read
 through the store, since a measured read's `callTool` admits the search tools alone, so the `agenda` tool's own
 layer isn't exercised here. Priority orders what is relevant; it adds nothing search didn't find.
@@ -4493,12 +4493,13 @@ order-blind top-1 through the mutant and requires it to land far from chance.
 
 The seeded run exits 1 when any of these holds:
 * the corpus isn't the registered one;
+* fewer rows are planted than items;
 * the database doesn't hold the planted facts, or a planted statement is one `effective_priority` wouldn't count;
-* a baseline read errors, since a baseline that never ran would set the bar;
+* a baseline read errors, since a baseline that never ran would set the bar, or returns more than the 10 hits scored;
 * a baseline read's scores differ from `priority.ts`'s recorded `BASELINE`, so a change to search on main that
   moves the bar is seen and re-recorded, not absorbed;
 * the gold ceiling errors or can't clear the bar;
-* a measured read answers differently when the answer moves;
+* a measured read answers differently when the answer moves, or the check doesn't see the ceiling, which reads it;
 * the dogfood rows aren't sound;
 * the mutant sits more than 0.05 from chance for a baseline read or the ceiling.
 
@@ -4603,8 +4604,10 @@ never by a random id, so the scores can't differ.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
-A row names its reads from `DOGFOOD_READS`: the seeded set's reads, baseline and measured, and `ticket_rows` (search
-filtered to board-sync's ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
+A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
+reads, each meaning its procedure there, and `ticket_rows` (search filtered to board-sync's ticket rows, the 10-14
+session's second read). So a row's `agenda` is search's hits ordered by the agenda; the rank of the pick in the agenda
+tool's own list would need a name of its own. A new read is added there with what it is, so rows stay comparable.
 
 | date | pick | picked instead | read: rank of the pick |
 | --- | --- | --- | --- |
