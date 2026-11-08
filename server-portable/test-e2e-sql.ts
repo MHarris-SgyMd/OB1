@@ -4246,7 +4246,14 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
       `the text says each item's effective priority and its terms (${plainAll.text.match(/Priority: .*/)?.[0]})`);
     const rankedAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, priority_weight: 0.5 });
     assert(!rankedAll.isError && want.every(([id, w]) => said(rankedAll, id) === w),
-      `a ranked search's hits carry the same labels, from its one window read (${want.filter(([id, w]) => said(rankedAll, id) !== w).map(([id]) => name.get(id)).join(", ")})`);
+      `a ranked search's hits carry the same labels, from its page's label read (${want.filter(([id, w]) => said(rankedAll, id) !== w).map(([id]) => name.get(id)).join(", ")})`);
+    // With a floor too (review pass 2: untested): every kept hit's own priority is known, so it leads its label, and the
+    // labels are the plain search's.
+    const flooredAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, min_priority: 3 });
+    const floorIds = ids(flooredAll);
+    assert(!flooredAll.isError && floorIds.length === 7 && floorIds.every((id) => labelOf(flooredAll, id)?.[0]?.self === true)
+        && floorIds.filter((id) => want.some(([w]) => w === id)).every((id) => said(flooredAll, id) === said(plainAll, id)),
+      `under min_priority every kept hit leads with its own known priority, its label the plain search's (${floorIds.map((id) => `${name.get(id)}:${said(flooredAll, id)}`).join(" | ")})`);
     const fetched = JSON.parse((await call("fetch", { id: underUrgent })) as string) as { title: string; priority: Pr[] };
     assert(fetched.title.startsWith("[priority: this thought high (3), inherited from urgent (4) ticket PWU-1; ticket PWU-1 urgent (4)] ") && fetched.priority.length === 2,
       `fetch's title starts with the prefix (${fetched.title.slice(0, 120)})`);

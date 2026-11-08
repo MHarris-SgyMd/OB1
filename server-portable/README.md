@@ -439,9 +439,9 @@ under a finished ticket, a finished ticket looked up by its key).
 (0 none to 5 critical). With neither, the search ranks exactly as before, with no
 window; its page's one priority read is the label's, below. With either, the
 server asks the hybrid (or, under `prefer_current`, `search_thoughts_current`) for
-the top min(100, 4 × limit), as `prefer_current`'s window is, and reads their
-effective priority once for the whole window (`effective_priority`, migration
-122, SMD-3667), the tickets they name with it for the label:
+the top min(100, 4 × limit), as `prefer_current`'s window is, and reads the
+window's own thoughts' effective priority once (`effective_priority`, migration
+122, SMD-3667); the label's read of the kept page's tickets follows, below:
 
 - **A match's priority** is its own effective priority, as `docs/priority.md`
   decision 5 composes it:
@@ -492,12 +492,17 @@ changes.
 `search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its
 `priority`: the known priorities of the result itself (a ticket's row as its
 ticket, once) and of the tickets it is filed under or names, the first 50 (the
-rest counted in `priorityNotRead`). Known is a counted or inherited level, as
+rest counted in `priorityNotRead`, with any past the read's reach). Known is a
+counted or inherited level (a thought's from the ticket it is about, a ticket's
+from its parent), as
 the floor reads it; an unknown is no label. Each item carries its kind and key,
 `self`, its effective priority, its `level` or `inheritedFrom`, its due time and
 the urgency it adds, `overdue`, `unblocks`, `settled` and `waiting`, and over
-REST its `terms`. The result itself comes first, then the most pressing; ten are
-named and `priorityMore` counts the rest. Over MCP the three text tools print
+REST its `terms`. The result itself comes first, then the rest by effective
+priority; ten are named and `priorityMore` counts the rest. A settled item is
+ordered by the level it keeps and said settled: whether work is finished is its
+own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
+can come before an open High. Over MCP the three text tools print
 `Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
@@ -507,15 +512,17 @@ result keeps ChatGPT's shape. A mention is labelled though it never ranks: the
 label shows what the result names, the rank what it is.
 
 It is one read per call: the page's thoughts and tickets, 1000 items at most,
-best-effort as the claims read is, and none for an empty page. A failed read
+best-effort as the claims read is, and none for an empty page. A ticket's own
+row is asked once, as its thought, which 122 reads as its ticket. A failed read
 gives `priority: null`, said once per reply (`[priority not read]` in the compat
 titles, beside a `priorityNote`). A ranked search makes two: its window read asks
 the window's own thoughts alone, as before, and fails the search as before; its
 label read then asks only the tickets of the page it keeps, reusing the window's
 answers, best-effort. So a ticket only a dropped row names is never read. With no
 priorities stored the label read costs about 3 ms for a 10-hit page (10
-thoughts, 10 tickets) and 14 ms for a 100-row list page (40 tickets), 5,000
-thoughts in the brain.
+thoughts, 10 tickets), 14 ms for a 100-row list page (40 tickets) and 88 ms
+(p90 107 ms) for `list_thoughts`' largest page of 1,000 rows, 5,000 thoughts in
+the brain: every row is labelled, so a caller after a cheap walk pages smaller.
 
 ### Tickets that moved since a hit was written (migration 095)
 

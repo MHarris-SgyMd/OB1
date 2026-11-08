@@ -567,9 +567,12 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
   for (const r of rows) {
     if (keyed.has(r.id) || opts.tickets === false) continue;
     const { keys, notRead } = claimKeysOf(r);
+    // A ticket's own row (board-sync's: source linear, which no key may write) is asked as its thought, which 122 reads
+    // as its ticket: its key is not asked again (review pass 2: two of the reach's slots for one answer).
+    const own = r.metadata?.source === "linear" ? filedUnder(r.metadata?.issue) : null;
     const asked: string[] = [];
     let cut = notRead;
-    for (const k of keys.filter((k) => PRIORITY_TICKET.test(k))) {
+    for (const k of keys.filter((k) => PRIORITY_TICKET.test(k) && k !== own)) {
       if (!seen.has(k)) {
         if (ids.length + tickets.length >= PRIORITY_READ) { cut++; continue; }
         seen.add(k);
@@ -603,7 +606,8 @@ const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
 
 /**
  * Each row's label from the read (SMD-3668 PR 2): the known priorities of the row itself and of the tickets it names —
- * itself first, then the most pressing, a tie in the order named — the first PRIORITY_SHOWN and the rest counted, and
+ * itself first, then by effective priority, a tie in the order named; a settled item by the level it keeps, said
+ * settled, as finished-ness is its own fact (the maintainer, SMD-3668 PR 1's review pass 2) — the first PRIORITY_SHOWN and the rest counted, and
  * the tickets it names past the read's reach counted. A ticket's own row is shown once, as its ticket. An unknown
  * priority is no label: 122 reads it as 2, which says nothing of the item. It labels and never ranks.
  */

@@ -7088,9 +7088,9 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   ];
   const got = await priorityOf(store(), rows);
   const asked = calls[0];
-  assert(calls.length === 1 && asked.slice(0, 5).every((i, n) => i.kind === "thought" && i.key === "abcde"[n]) && asked.filter((i) => i.kind === "ticket").length === 3 + 1 + 50 + 12
-      && asked.some((i) => i.key === "SMD-7049") && !asked.some((i) => i.key === "SMD-7050"),
-    `one read: the rows' own thoughts first, then each ticket a row is filed under or names, once, a row's first 50 alone (${asked.length} items)`);
+  assert(calls.length === 1 && asked.slice(0, 5).every((i, n) => i.kind === "thought" && i.key === "abcde"[n]) && asked.filter((i) => i.kind === "ticket").length === 3 + 50 + 12
+      && asked.some((i) => i.key === "SMD-7049") && !asked.some((i) => i.key === "SMD-7050") && !asked.some((i) => i.key === "SMD-4"),
+    `one read: the rows' own thoughts first, then each ticket a row is filed under or names, once, a row's first 50 alone; a ticket's own row asked as its thought alone, its key not again (review pass 2) (${asked.length} items)`);
   const a = got!.a, b = got!.b;
   assert(JSON.stringify(a.priority.map((p) => [p.kind, p.key, p.self, p.effective])) === JSON.stringify([["thought", "a", true, 3], ["ticket", "SMD-2", false, 6], ["ticket", "SMD-1", false, 4]]) && a.priorityMore === 0 && a.priorityNotRead === 0,
     `itself first, then the tickets it names most pressing first; an unknown (SMD-3) unlabelled (${JSON.stringify(a.priority.map((p) => p.key))})`);
