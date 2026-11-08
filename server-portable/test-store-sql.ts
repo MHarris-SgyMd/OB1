@@ -2023,6 +2023,22 @@ console.log("\n[22] effectivePriority reads migration 122's composed read (SMD-3
   }
 }
 
+console.log("\n[23] logAgenda writes one agenda row (migration 123, SMD-3669): its scope in filter, its items in result_items in order, the limit as match_count, the tier");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    const before = Number((await admin`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)[0].n);
+    await store.logAgenda({ agentId: undefined, filter: { project: "P", include_blocked: false }, matchCount: 20, items: [{ kind: "ticket", key: "SMD-1", effective: 4 }, { kind: "item", key: "11111111-1111-4111-8111-111111111111", effective: 2.5 }], tier: "canary" });
+    const [row] = await admin`SELECT tool, match_count, filter, result_items, tier FROM query_log WHERE kind = 'agenda' ORDER BY logged_at DESC LIMIT 1`;
+    const after = Number((await admin`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)[0].n);
+    assert(after === before + 1 && row.tool === "agenda" && row.match_count === 20 && row.filter?.project === "P" && row.tier === "canary"
+        && Array.isArray(row.result_items) && row.result_items.map((i: { key: string }) => i.key).join(" ") === "SMD-1 11111111-1111-4111-8111-111111111111",
+      `one agenda row: the tool, the limit, the scope as an object, the items as an array in order, the tier (${JSON.stringify(row)?.slice(0, 160)})`);
+  } finally {
+    await admin.close();
+  }
+}
+
 await store.close();
 
 report();

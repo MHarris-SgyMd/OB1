@@ -3323,8 +3323,20 @@ else {
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON work_claims TO ob1_pf_capture");
-      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\)/.test(noSelect.out),
+      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\); agenda answers unfiltered by claims and refuses holder mine \(SMD-3669\)/.test(noSelect.out),
              `…and without SELECT on it, the claim calls and every read's claimed label are named (${noSelect.out.split("\n").find((l) => /ticket claims/.test(l))?.trim().slice(0, 200)})`);
+      // The agenda (SMD-3669 review pass 6): without SELECT on priority_assertions the priority row names it; without
+      // SELECT on open_items both the priority row and the items row do.
+      await claims.unsafe("REVOKE SELECT ON priority_assertions FROM ob1_pf_capture");
+      const noAssertions = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_assertions TO ob1_pf_capture");
+      await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
+      const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
+      assert(/, and so does agenda \(SMD-3669\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\)/.test(rowOf(noItems.out, "priority"))
+             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table/.test(rowOf(noItems.out, "open items")),
+        `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.

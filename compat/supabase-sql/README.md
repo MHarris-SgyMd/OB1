@@ -79,7 +79,7 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
+PORT=8787 bun --no-install integrations/consolidation-workers/bio/index.ts   # a recipe or integration
 ```
 
 The install lives in `integrations/node_modules` (in `extensions/` until
@@ -117,8 +117,8 @@ cd compat/supabase-sql && bun run test
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `integrations/test-writes.ts` then drives the servers
-that need the model provider stubbed (agent-memory-api's nine routes,
-the two consolidation workers, smart-ingest): the migrated
+that need the model provider stubbed (the two consolidation workers,
+smart-ingest): the migrated
 files this shim is judged by.
 
 ## What is supported

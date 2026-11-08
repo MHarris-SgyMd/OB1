@@ -224,6 +224,12 @@ jobs:
       # and a whole dry run on stubs that sends nothing but reads.
       - name: The agent runner's selection and dry run
         run: bun scripts/agent-runner/dry-run.ts --self-check
+      # SMD-4088 (SMD-4087 cut 2a): the runner sessions' profile on fixtures —
+      # the guard's decisions, the settings, environment and command line, the
+      # launcher's checks on a stand-in for Claude Code, and the probes' mock.
+      # The probes themselves need the pinned Claude Code and macOS's sandbox.
+      - name: The agent runner sessions' profile
+        run: bun scripts/agent-runner/probes.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -625,7 +631,8 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # extensions until SMD-2311 made the six plugins (change 64), and the
       # recipes' and integrations' HTTP APIs and workers (change 67; the
-      # webhook receiver until SMD-2690 made it a plugin) — through a
+      # webhook receiver and the agent-memory API until SMD-2690 made them
+      # plugins, and smart-ingest imports only listenOn and routable) — through a
       # _shared/auth.ts beside it, a byte copy. Their suites and install live
       # in integrations/ since SMD-3747. One MCP stack
       # across the tree's installs — the test fails if server-portable's or

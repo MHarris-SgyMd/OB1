@@ -111,7 +111,7 @@ Historical memories should continue pointing at the stable `canonical_agent_id`,
 
 This schema is optional. Single-user Open Brain deployments can keep using only `MCP_ACCESS_KEY`. Multi-agent deployments can layer per-agent identity on top of the existing deployment-level key without changing the base `thoughts` table.
 
-This schema also pairs naturally with `schemas/agent-memory/`, but it does not require that schema. Agent memory, recall traces, audit events, and private-agent lanes can adopt `canonical_agent_id` in a later integration step.
+This schema also pairs naturally with the [agent-memory plugin](../../plugins/agent-memory/) (`schemas/agent-memory` until SMD-2690), but it does not require it. Agent memory, recall traces, audit events, and private-agent lanes can adopt `canonical_agent_id` in a later integration step.
 
 ## Troubleshooting
 

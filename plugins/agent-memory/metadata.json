@@ -1,0 +1,20 @@
+{
+  "name": "Agent Memory Plugin",
+  "description": "An agent runtime's governed memory inside the brain: write back what a task decided, learnt and produced (each memory captured as a thought, waiting for review unless a person confirmed it), recall a workspace's memories by meaning ranked by provenance and review, record which were used, review them, and read a recall's trace. Ported from the Agent Memory API integration's standalone server and the Agent Memory schema (SMD-2690).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate Jones Team",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": ["plugin", "agent-memory", "recall", "writeback", "review", "openclaw"],
+  "difficulty": "advanced",
+  "estimated_time": "20 minutes",
+  "created": "2026-11-06",
+  "updated": "2026-11-06"
+}

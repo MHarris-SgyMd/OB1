@@ -2,7 +2,7 @@
 
 The agent runner takes one ticket the maintainer labelled, claims it on the stable brain, and works it with a headless Claude Code session. It leaves a draft PR for the maintainer. Its design is `docs/agent-runner.md`.
 
-It is built in cuts, and this directory holds cut 1: the selection rule and its dry run. Nothing here claims, pushes or writes.
+It is built in cuts. This directory holds cut 1, the selection rule and its dry run, and cut 2a, the sessions' profile and its probes (SMD-4088). Nothing here claims, pushes or writes to Linear.
 
 ## The dry run
 
@@ -147,8 +147,58 @@ A ticket the runner takes meets every criterion below. The runner checks the fir
 
 **What the label proves.** Linear records an add made through the maintainer's personal API key just as it records the maintainer's own click: the same user, and no bot. So "added by the maintainer" means added through the maintainer's account. Anything holding that account's write access can add the label, an agent session among them. To make the label the maintainer's own word, agent sessions hold only read access to Linear, or a key of their own.
 
+## The sessions' profile and its probes (SMD-4088)
+
+Each runner session, the worker's and the review's, runs inside the five layers of `docs/agent-runner.md`, "How the profile is enforced". The files:
+
+* **`profile.ts`:** each session's settings, a template per role with the session's paths substituted and nothing else; its environment, built from nothing; and its command line.
+* **`guard.ts`:** the `PreToolUse` hook. It denies, or says nothing, and logs each decision.
+* **`session.ts`:** the launcher. It checks the pinned binary's checksum, writes the settings into the run's record and reads them back, and starts the session in a process group of its own. It ends the session when:
+  * the init event isn't the session it started;
+  * a tool result answers a call the guard never logged;
+  * the time limit runs out.
+* **`probes.ts`:** the probes. **`mock-api.ts`** is their stand-in for the Messages API. **`probes-check.ts`** is the offline self-check.
+
+```bash
+shasum -a 256 ~/.local/share/claude/versions/2.1.319                                  # the version to pin's checksum (cut 2b runs a copy in the install)
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.319
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
+bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
+```
+
+**How a probe works.** Each probe starts one session on the pinned Claude Code, against a scripted stand-in for the Messages API on a loopback port. Each turn, the stand-in asks for the next call of the probe's script. So the probe makes exactly the call it tests, with no model and no spend; the only address the session is given is the loopback stand-in's. The session's key is a stand-in that `apiKeyHelper` prints. Each probe then checks the tool's result, the guard's log, the files on disk and the requests the session sent.
+
+A probe tests one layer alone where it can. With the sandbox alone, the guard only logs, Bash is allowed whole, and the permission settings' blocks are off, since those read a Bash command's paths too. With the rules alone, the guard only logs. A probe fails if a call in its script got no result, so no check passes on a call that never ran.
+
+`--state` defaults to `~/.local/share/open-brain/agent-runner`. Each run's records stay in `probes/<time>/` there: the settings, the guard's logs, the streams and each probe's outcome. Clones and temp directories are removed. When every probe passes, the run writes `probe-stamp.json` there, recording Claude Code's path, checksum and version, Bun's and git's checksums, the macOS build, each profile and probe file's hash, and the set of probes that passed; a failed run deletes any earlier stamp and writes none. Cut 2b starts a session only under a stamp that matches. Run the probes again after any change to the profile or probe files, and before moving to a new Claude Code, Bun, git or macOS version (the stamp pins each, so an unprobed change makes cut 2b refuse to start).
+
+**What they found on 2.1.319** (2026-11-07). All 35 pass; a first review pass then hardened the self-check and added probes. The design took these from them:
+
+* **The temp directory is short.** Claude Code keeps child commands in `<CLAUDE_CODE_TMPDIR>/claude-<uid>` only while that path is at most 44 bytes (the binary's own constant). Otherwise it falls back to the shared `/tmp/claude-<uid>`, which the profile denies, and every command exits 1. So a session's temp directory is `/private/tmp/obr-<8 hex>`, not a directory in the run's record.
+* **The temp directory is also Claude Code's own staging** (`bash-edit-diff`, `tasks/`, `plugin-tool-staging`). The Edit and Write tools run outside the sandbox, so the profile lets them write the clone alone, never the temp directory; the shell still writes the bundle and its scratch there, inside the sandbox. So the agent can't use a tool to plant a file Claude Code later reads and acts on.
+* **`--tools` gives a session exactly the role's tools,** so the init check can require them exactly.
+* **Exit 0 is a pass,** whatever a hook prints. A hook that prints nonsense and exits 0 lets the call on to the permission rules; a crash, a timeout, or an exit other than 0 blocks it (exit 2 is the guard's own deny). So the guard prints nothing on stdout, exits 0 only to pass, and denies with exit 2.
+* **The guard names a command's binary, not what it does.** `bun` runs a script the agent wrote in its clone, and git can write a file (`git log --output`) or run a pager program; all of it runs sandboxed. So the sandbox is Bash's real boundary; the refused paths are a guard rule for the Edit and Write tools, and for a change a Bash command makes in the clone it is the gate's diff and GitHub CI that catch it.
+* **With the guard off,** the permission settings still refuse a write to `.claude/settings.json`, and Claude Code refuses an Edit of `.git/config`. An Edit of `CLAUDE.md` goes through. So for the refused paths, the guard is the only layer for the Edit and Write tools, and the gate checks the diff again.
+* **`/usr/bin/git` is Apple's xcrun shim.** It writes a cache into the maintainer's per-user temp directory, so in the sandbox every git command printed that failure twice. The session's PATH puts git's own binary first (`xcode-select -p`, then `usr/bin/git`). The sandboxed shell is no login shell, so the PATH stays as set. The XDG directories sit inside the temp directory, so git looks for no file in `~/.config`.
+* **The sandbox holds alone:**
+  * reads of `~/.config/open-brain`, `~/.ssh`, the main checkout, `/private/tmp/claude-<uid>` and the maintainer's `$TMPDIR` are refused;
+  * writes outside the clone and temp directory are refused;
+  * the network is refused, through the proxy (403) and around it;
+  * Unix sockets are refused: podman's, the SSH agent's, and the session's own messaging socket;
+  * a `bun -e` that spawns podman (or curl) runs, but the spawned process is still sandboxed: it is refused the container host or the network;
+  * a call asking for `dangerouslyDisableSandbox` still runs sandboxed.
+* **The login keychain is out of reach.** A sandboxed `security find-generic-password` finds nothing (exit 44) where the same search outside finds the item (exit 0). The sessions stay in the maintainer's account.
+* **Grep and Glob don't follow a link out of the clone.**
+* **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
+
+One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
+
 ## Cuts still to come
 
-2. One run, local: the sandbox probes first, then the claim, the clone, the sessions, the gate and the record, with no push.
+2. One run, local, in three PRs:
+   * **2a (here):** the sessions' profile and its probes, SMD-4088.
+   * **2b:** the run's local steps on the profile: the record, the clone, the brief, the worker and review sessions, the bundle and its import, and the gate. It is tested against the stand-in Messages API, and needs no key.
+   * **2c:** the outward steps, over the runner's own keys (SMD-4089). These are the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
 3. Publishing and reconciliation, and the launchd schedule.
 4. The pilot and its report (SMD-4091).

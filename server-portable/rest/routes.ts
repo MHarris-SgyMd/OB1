@@ -69,6 +69,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   PROPOSAL_DECIDED: 409,
   PROPOSAL_YOURS: 403,
   CONFIRM_NOT_YOURS: 403,
+  CLAIMS_UNREADABLE: 503,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -139,6 +140,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },
+  // The agenda (SMD-3669, migration 123): the scope and flags in the query string.
+  agenda: { method: "GET", path: "/v1/agenda", ok: 200, call: CALLS.agenda },
   open_item: { method: "POST", path: "/v1/items", ok: 200, call: CALLS.open_item },
   item_history: { method: "GET", path: "/v1/items/{id}", ok: 200, call: CALLS.item_history },
   update_item: { method: "PATCH", path: "/v1/items/{id}", ok: 200, call: CALLS.update_item },

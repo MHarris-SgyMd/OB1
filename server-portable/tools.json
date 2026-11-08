@@ -78,6 +78,10 @@
       "scope": "read"
     },
     {
+      "name": "agenda",
+      "scope": "read"
+    },
+    {
       "name": "thread",
       "scope": "read"
     },
