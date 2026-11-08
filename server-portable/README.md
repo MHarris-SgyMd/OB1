@@ -520,11 +520,27 @@ gives `priority: null`, said once per reply (`[priority not read]` in the compat
 titles, beside a `priorityNote`). A ranked search makes two: its window read asks
 the window's own thoughts alone, as before, and fails the search as before; its
 label read then asks only the tickets of the page it keeps, reusing the window's
-answers, best-effort. So a ticket only a dropped row names is never read. With no
-priorities stored the label read costs about 3 ms for a 10-hit page (10
-thoughts, 10 tickets), 14 ms for a 100-row list page (40 tickets) and 88 ms
-(p90 107 ms) for `list_thoughts`' largest page of 1,000 rows, 5,000 thoughts in
-the brain: every row is labelled, so a caller after a cheap walk pages smaller.
+answers, best-effort. So a ticket only a dropped row names is never read.
+
+**What it costs.** Every search, list and fetch pays the label read, and every
+caller: the dashboard and plugins read the same operations and drop the field.
+122 computes each item at read time, and a ticket with no stated level walks
+its parents, so the cost follows the board, not the page's own query (about 3 ms
+for 100 rows). With no priorities stored: about 3 ms for a 10-hit page, 14 ms
+for a 100-row list page. On a seeded board (20,400 thoughts; 400 tickets with
+parent and blocking links; 500 stated priorities, review pass 4): 20–30 ms for a
+10-hit page, 135–167 ms for a 100-row page, 32–49 ms for a ranked search's two
+reads. 122 left "a projection of unblocks and inheritance … only if the timing
+asks for one"; this timing asks, and that projection is SMD-4150.
+
+A `list_thoughts` page of 1,000 rows spends the read's reach of 1,000 items on
+its rows' own thoughts: each row's own priority is labelled, and the tickets
+the rows name are not read, counted in `priorityNotRead`.
+
+Over MCP the structured value is compact: `kind` and `effective` always, `level`
+whenever stated (None's 0 too), every other field only where it says something
+(no null, false, or zero urgency or unblocks), and no `key` on a result's own
+thought, which is its id. Over REST every field is there, with the terms.
 
 ### Tickets that moved since a hit was written (migration 095)
 

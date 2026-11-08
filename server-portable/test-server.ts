@@ -7129,7 +7129,9 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   const stText = st.content[0].text, stHit = (st.structuredContent.hits as Record<string, unknown>[])[0];
   const line = "Priority: this thought at 3 (inherited 3 from ticket SMD-1 (urgent (4), 1 hop)); ticket SMD-2 at 6 (high (3); +3 overdue, due by the end of 2026-11-04 (UTC)); ticket SMD-1 at 4 (urgent (4)) (+4 more tickets it names not read).";
   assert(stText.includes(`\n${line}\n`) && !stText.includes("operator-key")
-      && JSON.stringify((stHit.priority as Record<string, unknown>[])[1]) === JSON.stringify({ kind: "ticket", key: "SMD-2", self: false, effective: 6, level: 3, inheritedFrom: null, dueAt: "2026-11-05T00:00:00.000Z", urgency: 3, overdue: true, unblocks: 0, settled: false, notBefore: null, waiting: false })
+      // Compact (review pass 4): only fields that say something; no key on the result's own thought.
+      && JSON.stringify((stHit.priority as Record<string, unknown>[])[1]) === JSON.stringify({ kind: "ticket", key: "SMD-2", effective: 6, level: 3, dueAt: "2026-11-05T00:00:00.000Z", urgency: 3, overdue: true })
+      && JSON.stringify((stHit.priority as Record<string, unknown>[])[0]) === JSON.stringify({ kind: "thought", self: true, effective: 3, inheritedFrom: { kind: "ticket", key: "SMD-1", level: 4, hops: 1 } })
       && stHit.priorityNotRead === 4 && !("terms" in (stHit.priority as Record<string, unknown>[])[0]),
     `a hit's line: each item's effective priority and its terms as the agenda says them, no maker's name; the value keeps kinds, keys, levels, times and flags, no terms (${stText.match(/Priority: .*/)?.[0]})`);
   const compat = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "11/1/2026 - x", url: "u", trust: "agent", ...priorityResult(got, "a") }, { id: "x", title: "11/1/2026 - y", url: "u", trust: "agent", ...priorityResult(got, "b") }, { id: "y", title: "11/1/2026 - z", url: "u", trust: "agent" }] } } as never).content[0].text);
@@ -7158,6 +7160,13 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   const noneLine = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, priority: [noneStated], priorityMore: 0, priorityNotRead: 0 }], facts, window: null, priority: null } } as never, false).content[0].text;
   assert(orderTitle === "[priority: ticket SMD-21 high (3), unblocks 6; ticket SMD-22 stated none (0)] t" && noneLine.includes("\nPriority: ticket SMD-22 at 0 (stated none (0)).\n"),
     `a title names what an item unblocks; a stated None reads as stated in the title and the line (${orderTitle} | ${noneLine.match(/Priority: .*/)?.[0]})`);
+  // Review pass 4: a waiting item's not_before survives the value's guard (it nulled any time not named …At), and a
+  // stated None keeps its level 0 in the compact value.
+  const waitingOn = { ...noneStated, key: "SMD-23", effective: 3, level: 3, waiting: true, notBefore: "2026-12-01T00:00:00.000Z", terms: [lvl(3)] };
+  const waitHit = (say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, priority: [waitingOn, noneStated], priorityMore: 0, priorityNotRead: 0 }], facts, window: null, priority: null } } as never, false).structuredContent.hits as Record<string, unknown>[])[0];
+  const waitVal = waitHit.priority as Record<string, unknown>[];
+  assert(waitVal[0].waiting === true && waitVal[0].notBefore === "2026-12-01T00:00:00.000Z" && waitVal[1].level === 0 && !("waiting" in waitVal[1]),
+    `the value keeps a waiting item's not_before and a stated None's 0 (${JSON.stringify(waitVal)})`);
   const kwLine = say.renderSearchThoughtsKeyword({ ok: true, value: { query: "x", offset: 0, total: 1, hits: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, occurrences: 1, claimed: [], claimedMore: 0, claimedNotRead: 0, ...b }] } } as never).content[0].text;
   const listLine = say.renderListThoughts({ ok: true, value: { thoughts: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, supersededBy: null, claimed: [], claimedMore: 0, claimedNotRead: 0, ...got!.c }], sort: "newest", cursor: null } } as never).content[0].text;
   assert(kwLine.includes("\nPriority: this ticket's row (SMD-4) at 5 (critical (5)), settled.\n") && listLine.includes("\n   Priority: none known on the items read; 10 more tickets it names not read."),

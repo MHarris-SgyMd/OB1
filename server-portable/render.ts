@@ -69,7 +69,7 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
-const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
+const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
 
 /**
@@ -177,11 +177,21 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
  * effective priority, its stated level or the item it inherits from, its due time and the urgency it adds, overdue,
  * unblocks, settled and waiting. The terms ride the text, as a term's maker is another key's name. Null when the
  * priorities were not read, and from a REST core older than this MCP server.
+ *
+ * Compact (review pass 4: a 100-row list's structured value grew from 35 KB to 103 KB, which Claude Code hands the
+ * model beside the text): `kind` and `effective` always; `level` whenever stated, None's 0 included; every other field
+ * only where it says something — no null, no false, no zero urgency or unblocks — and no `key` on a result's own
+ * thought, which is the result's id. Over REST the core's value keeps every field.
  */
 const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
-  Array.isArray(priority) ? priority.map((p) => ({ kind: p.kind, key: p.key, self: p.self, effective: p.effective, level: p.level,
-    inheritedFrom: p.inheritedFrom ? { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops } : null,
-    dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled, notBefore: p.notBefore, waiting: p.waiting })) : null;
+  Array.isArray(priority) ? priority.map((p) => ({
+    kind: p.kind, ...(p.self && p.kind === "thought" ? {} : { key: p.key }), ...(p.self ? { self: true } : {}), effective: p.effective,
+    ...(p.level !== null ? { level: p.level } : {}),
+    ...(p.inheritedFrom ? { inheritedFrom: { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops } } : {}),
+    ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
+    ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
+    ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
+  })) : null;
 const priorityFields = (h: { priority?: readonly PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number }) =>
   ({ priority: priorityField(h.priority), priorityMore: h.priorityMore ?? 0, priorityNotRead: h.priorityNotRead ?? 0 });
 /** The compat pair's priority fields (search, fetch): only where an item is prioritised, or a failed read's null; every other result keeps ChatGPT's shape. */
