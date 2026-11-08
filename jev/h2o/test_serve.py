@@ -303,6 +303,56 @@ async def main():
     check(s1 == 200 and s3 == 200 and R.reads == 2 and gate.admitted == 0,
           f"a request cancelled while it waits is never read, and the next request is read after the first ({s1}, {s3}, {R.reads} read, {gate.admitted} admitted)")
 
+    print("\n[11] a body that stalls, and the token count off the loop")
+    # Review pass 3, under real uvicorn: a caller that declared a body and sent none held its slot and bytes until its
+    # connection closed — eight held the tier at 503 — and the token count ran on the event loop.
+    async def stalls():
+        yield body()[:40]
+        await asyncio.sleep(3600)
+
+    R, gate = FakeReader(), serve.Gate(body_s=0.2)
+    try:
+        s, b, _ = await asyncio.wait_for(serve.handle(R, gate, MODEL, {"content-length": str(len(body()))}, stalls(), None), timeout=5)
+    except asyncio.TimeoutError:
+        s, b = "still waiting after 5 s", {}
+    check(s == 408 and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
+          f"a body that stalls past the body deadline is a 408, nothing read, its slot and bytes released ({s}, {b.get('error')}, {gate.admitted}, {gate.bytes})")
+
+    class SlowCount(FakeReader):
+        threads = []
+
+        def state_tokens(self, text):
+            SlowCount.threads.append(threading.current_thread().name)
+            time.sleep(0.3)
+            return None
+
+    R, gate = SlowCount(), serve.Gate()
+    turns = 0
+
+    async def ticker():
+        nonlocal turns
+        while True:
+            await asyncio.sleep(0.01)
+            turns += 1
+
+    tick = asyncio.ensure_future(ticker())
+    s, _, _ = await post(R, gate, body())
+    tick.cancel()
+    check(s == 200 and SlowCount.threads and threading.main_thread().name not in SlowCount.threads and turns >= 10,
+          f"a request's contexts are counted off the event loop, which turns meanwhile ({s}, {SlowCount.threads}, {turns} turns)")
+
+    class Unencodable(FakeReader):
+        def state_tokens(self, text):
+            raise UnicodeEncodeError("utf-8", text, 0, 1, "surrogates not allowed")
+
+    R, gate = Unencodable(), serve.Gate()
+    try:
+        s, b, _ = await post(R, gate, body())
+    except Exception as e:
+        s, b = f"raised {type(e).__name__}", {}
+    check(s == 400 and "decision 0: its context cannot be encoded" in b.get("error", "") and R.reads == 0 and gate.admitted == 0,
+          f"a context the tokenizer cannot encode is that decision's 400, not an escape ({s}, {b.get('error')})")
+
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

@@ -15,7 +15,8 @@
  *   GET  {base}/health   "ok" once the model is loaded (HEAD too)
  *   GET  {base}/info     JevInfo: the contract, the model and its pins, the limits
  *   POST {base}/decide   JevRequest → JevResponse, or { error } with
- *                        400 malformed (jevRequestProblem), 409 another model,
+ *                        400 malformed (jevRequestProblem), 408 a body that
+ *                        did not arrive in time (jev/h2o), 409 another model,
  *                        413 over JEV_MAX_BODY_BYTES (or over what the tier
  *                        holds at once), 422 a decision this model cannot
  *                        read faithfully (its own markers in the text, labels

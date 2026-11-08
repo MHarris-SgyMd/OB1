@@ -66,6 +66,10 @@ Knobs:
   and bytes released, and its request is never read. A caller that leaves while
   its body is still arriving gets 499 too. A failing check on whether the caller
   has left counts as "still here": the request is read.
+- **A body that does not arrive in 30 s** is a 408, its admission and bytes
+  released. Otherwise a caller that declared a body and stalled would hold its
+  place until its connection closed, and eight such callers would keep the tier
+  answering 503.
 - **A context over `max_state_tokens` is refused: 422** (decided 2026-11-08).
   H2O's own shim cuts such a record to its head and tail around a `...` line
   and answers. The contract lets an adapter answer a cut it reads faithfully,
@@ -83,6 +87,10 @@ Knobs:
   - Every context is encoded to count its tokens. Its UTF-8 length is no bound,
     because the tokenizer normalizes to NFC first, which can lengthen a text:
     10,666 × U+FB2C is 31,998 bytes and 42,664 tokens.
+  - The count runs on a thread of its own, not the event loop: 64 contexts of
+    20,000 U+FB2C took 1.35 s, during which `/health` would not answer. A
+    context the tokenizer cannot encode (a lone surrogate, which JSON allows)
+    is a 400 naming the decision.
   - The context cap of 20,000 characters keeps most text under the 32,000
     tokens. Only text past 1.6 tokens a character crosses it: a Yi syllable
     (U+A000) reads as 3 tokens, so 19,999 of them are 59,997 tokens.
@@ -90,13 +98,14 @@ Knobs:
     H2O's published reads were made with it. Serving never uses it.
 - **Held** by `test_serve.py`, with the standard library alone: no model and no
   web framework, since `serve.handle` is the whole of `POST /decide`. Portable
-  server runs it in CI. Fifteen mutants, one per mechanism, each fail it: eight
+  server runs it in CI. Eighteen mutants, one per mechanism, each fail it: eight
   worker threads, the read on the event loop, no count bound, no byte bound, no
   refusal before the body, no drop while waiting, no check at its turn, no 422,
   bytes never released, a body over the byte bound alone answered 503, a body
   stream that breaks and escapes, a caller check that raises and escapes,
   tokens estimated from bytes, a 409 for the model's own name, and a cancelled
-  waiter's acquire left running.
+  waiter's acquire left running, no body deadline, the token count on the
+  event loop, and an encode failure escaping.
 
 **Measured on the dogfood Mac** (2026-11-08, MPS float16, the real
 model, the hardened adapter on a spare port with `JEV_MAX_QUEUED=4`):

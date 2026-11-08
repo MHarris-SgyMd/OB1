@@ -58,6 +58,10 @@ INSUFFICIENT = "__insufficient_evidence__"
 NO_ABSTAIN_LOGIT = -10_000.0
 MAX_OPTIONS, MAX_BATCH, MAX_TEXT, MAX_BODY = 24, 64, 20_000, 8 * 2 ** 20
 DEFAULT_MAX_QUEUED, DEFAULT_MAX_QUEUED_BYTES = 8, 32 * 2 ** 20
+# A body's whole arrival, once admitted: a caller that declares a body and stalls holds a slot and its bytes until then,
+# not until its connection closes (review pass 3: eight such held the tier at 503 for good). 8 MB from a local caller
+# takes well under a second.
+BODY_TIMEOUT_S = 30.0
 MODEL_NAME = "h2o-lightning-4b"
 REPO = os.environ.get("H2O_MODEL", "h2oai/h2o-lightning-4b")
 REVISION = os.environ.get("H2O_REVISION", "v1.2.3")
@@ -314,8 +318,8 @@ class Gate:
     worker thread, so the event loop (and /health, /info) stays free. The thread is the hard guarantee: the model is
     never entered by two reads at once, even when a request's caller leaves mid-read and the lock passes on."""
 
-    def __init__(self, max_queued=DEFAULT_MAX_QUEUED, max_bytes=DEFAULT_MAX_QUEUED_BYTES, poll_s=0.25):
-        self.max_queued, self.max_bytes, self.poll_s = max_queued, max_bytes, poll_s
+    def __init__(self, max_queued=DEFAULT_MAX_QUEUED, max_bytes=DEFAULT_MAX_QUEUED_BYTES, poll_s=0.25, body_s=BODY_TIMEOUT_S):
+        self.max_queued, self.max_bytes, self.poll_s, self.body_s = max_queued, max_bytes, poll_s, body_s
         self.admitted = 0
         self.bytes = 0
         self.mean_s = 1.0  # a read's seconds, smoothed; Retry-After is the admitted requests' expected wait
@@ -415,7 +419,12 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                 gate.hold(declared)
                 held = declared
             parts, size = [], 0
-            async for c in chunks:
+            stream, deadline = chunks.__aiter__(), time.monotonic() + gate.body_s
+            while True:
+                try:
+                    c = await asyncio.wait_for(stream.__anext__(), timeout=max(deadline - time.monotonic(), 0))
+                except StopAsyncIteration:
+                    break
                 size += len(c)
                 if too_big(size):
                     return too_big(size)
@@ -425,6 +434,8 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                 parts.append(c)
         except Busy as e:
             return 503, {"error": str(e)}, {"Retry-After": str(e.retry_after)}
+        except asyncio.TimeoutError:
+            return 408, {"error": f"the body did not arrive within {gate.body_s:g} s; nothing was read"}, {}
         except Exception:
             # The body's stream broke: the caller left mid-body (Starlette's ClientDisconnect), or the connection did.
             # Nothing was read, and the admission and bytes go back in the finally (review pass 1: it escaped as a 500).
@@ -441,14 +452,26 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
         decs = body["decisions"]
         # The whole request is refused, naming the first decision the model would read only in part (the contract's
         # 422): each distinct context measured once, before the request queues for the model.
-        seen = {}
-        for i, dd in enumerate(decs):
-            ctx = dd["context"]
-            if ctx not in seen:
-                seen[ctx] = R.state_tokens(ctx)
-            if seen[ctx] is not None:
-                return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
-                                      f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
+        # Measured on a thread of the default pool, not the event loop, so /health and /info answer while a request's
+        # contexts are tokenized (review pass 3: 64 contexts of 20,000 characters took 1.35 s on the loop), and not on
+        # the read's worker, so a request measures while another is read. A context the tokenizer cannot encode (a lone
+        # surrogate, which JSON lets through) is that decision's 400, not the framework's bare 500.
+        def first_unreadable():
+            seen = {}
+            for i, dd in enumerate(decs):
+                ctx = dd["context"]
+                if ctx not in seen:
+                    try:
+                        seen[ctx] = R.state_tokens(ctx)
+                    except Exception as e:
+                        return 400, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__})"}, {}
+                if seen[ctx] is not None:
+                    return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
+                                          f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
+            return None
+        refused = await asyncio.to_thread(first_unreadable)
+        if refused:
+            return refused
         t = time.time()
         try:
             results = await gate.run(lambda: decide_all(R, decs), gone)
