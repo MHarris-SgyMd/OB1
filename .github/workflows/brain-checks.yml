@@ -230,6 +230,13 @@ jobs:
       # The probes themselves need the pinned Claude Code and macOS's sandbox.
       - name: The agent runner sessions' profile
         run: bun scripts/agent-runner/probes.ts --self-check
+      # SMD-4087 cut 2b-1: the run record and the gate on fixtures — the record's
+      # round-trip and its no-follow I/O, the gate's pure parsers, and the whole
+      # gate on a real bare repo and branch (a clean branch, and each kind of bad
+      # branch, diff, secret and work), with stubbed commitlint and secret
+      # scanners. The run orchestration that makes a real branch is cut 2b-2.
+      - name: The agent runner's record and gate
+        run: bun scripts/agent-runner/gate-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -426,6 +433,14 @@ jobs:
       - name: Decision tier — contract, service and client
         working-directory: jev
         run: bun test-jev.ts
+
+      # H2O's adapter (SMD-3326): serve.handle, the whole of its POST /decide —
+      # one read at a time, SMD-2082's bounded queue, the 422 for a context it
+      # would read in part — with a fake reader and the standard library alone,
+      # so no model, no web framework and no install. ci-parity.sh runs bun
+      # scripts only (check 35), so a local run is `python3 jev/h2o/test_serve.py`.
+      - name: H2O adapter — one read at a time, the bounded queue, the 422
+        run: python3 jev/h2o/test_serve.py
 
       # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
       # with mutants, and the committed fixture held to them. Ids and closed

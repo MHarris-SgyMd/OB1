@@ -186,10 +186,17 @@ export type Env = {
    */
   OB1_CONSOLIDATE_DECIDER?: string;
   /**
+   * Decide mode's own tier (a tier per caller, SMD-3326): where it is served, and 1/on when that endpoint is on this
+   * box. Unset, decide mode asks the shared tier at OB1_JEV_BASE_URL. Preflight reads them to check that tier.
+   */
+  OB1_CONSOLIDATE_DECIDER_URL?: string;
+  OB1_CONSOLIDATE_DECIDER_LOCAL?: string;
+  /**
    * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
    * the caller expects, and 1/on when that endpoint is on this box (declared,
-   * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in
-   * this container, checks the tier when OB1_JEV_BASE_URL is set.
+   * as OB1_LLM_LOCAL is). The REST core's capture asks it for a thought's genre
+   * (SMD-2323); preflight, which runs in this container, checks the tier when
+   * OB1_JEV_BASE_URL is set.
    */
   OB1_JEV_BASE_URL?: string;
   OB1_JEV_MODEL?: string;

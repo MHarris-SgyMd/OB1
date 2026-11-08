@@ -4447,8 +4447,9 @@ tier gives each pair's verdict, not the judge:
   and each evolves it would store, and the writer for each outdates at the
   floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
   about 3.8 s a pair.
-- **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
-  `OB1_JEV_MODEL` naming another model.
+- **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
+  nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming
+  another model (SMD-3326).
 - **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
   so a tier serving another model is refused at start and an outage of either
   is waited out.
