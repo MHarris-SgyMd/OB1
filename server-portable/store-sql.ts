@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1580,6 +1580,119 @@ export class SqlStore implements ThoughtStore {
        WHERE me.id = ${id}::uuid
        ORDER BY me.key`;
     return rows.map((r: Record<string, unknown>) => normaliseThreadPlace(r));
+  }
+
+  async relationsAmong(ids: string[], shown: number, heads = true): Promise<Record<string, RelationsOf>> {
+    return this.relationRows(idList(ids), { limit: shown, heads });
+  }
+
+  async relationsPage(id: string, w: RelationsWindow): Promise<RelationsOf> {
+    const valid = idList([id]);
+    return (await this.relationRows(valid, w))[valid[0] ?? ""] ?? { total: 0, edges: [] };
+  }
+
+  /**
+   * SMD-2726 (SMD-3306 PR 7a-2b): each thought's standing judged relations, from both sides — the facets on it
+   * (thought_facets' thought_id index; it the newer) and those naming it (084's target index; it the older) — under
+   * the window's word, strongest first, the first `limit` after its position, and how many stand under the word. The
+   * naming side is held to the ids as text too: joined on the expression alone, the planner misread its rows and
+   * scanned every facet from a page of ten (review pass 1: 100 ms at 400k relations, 3 ms bounded).
+   * `stale` reads the relation's lineage row (084: written with it, under its judge key) against the two texts now —
+   * the answer consolidate.ts --list relations gives, read from a text's stored fingerprint where that is the one
+   * judged. A thought with none is absent.
+   */
+  private async relationRows(ids: string[], w: RelationsWindow): Promise<Record<string, RelationsOf>> {
+    if (ids.length === 0) return {};
+    const after = w.after ?? null;
+    const cut = after === null ? this.sql`TRUE`
+      : this.sql`(rank, created_at, id) < (${after.rank}::numeric, ${after.at}::timestamptz, ${after.id}::uuid)`;
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        WITH ids AS (SELECT DISTINCT unnest(${this.sql.array(ids, "TEXT")}::uuid[]) AS of),
+        e AS (
+          SELECT ids.of, f.id, f.payload->>'relation' AS relation, 'older' AS other_is, (f.payload->>'target')::uuid AS other,
+                 f.thought_id AS newer, (f.payload->>'target')::uuid AS older, f.payload->>'judge_key' AS judge_key,
+                 f.payload->>'confidence' AS confidence, f.created_at
+            FROM ids JOIN thought_facets f ON f.thought_id = ids.of
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'
+          UNION ALL
+          SELECT ids.of, f.id, f.payload->>'relation', 'newer', f.thought_id,
+                 f.thought_id, ids.of, f.payload->>'judge_key',
+                 f.payload->>'confidence', f.created_at
+            FROM ids JOIN thought_facets f ON f.payload->>'target' = ids.of::text
+           WHERE f.kind = 'relation' AND f.payload->>'target' = ANY(${this.sql.array(ids, "TEXT")}::text[])
+             AND f.valid_until IS NULL AND f.payload->>'origin' = 'judged'),
+        w AS (
+          SELECT e.*, COALESCE(round(e.confidence::numeric, 6), -1) AS rank FROM e
+           WHERE ${w.relation ?? null}::text IS NULL OR e.relation = ${w.relation ?? null}::text),
+        counted AS (SELECT of, count(*)::int AS total FROM w GROUP BY of),
+        -- Ties go by when the relation was first recorded (the facet's created_at), which nothing moves: ordered by
+        -- when it was last judged (pass 2), a kept re-judge between two pages moved a relation to before the cursor,
+        -- never read (review pass 3: 16 in 75 walks), and every relation of a thought joined its lineage row (a hub of
+        -- 50,000's fetch tripled). judgedAt is shown, from the lineage row, for the page alone.
+        page AS (
+          SELECT * FROM (
+            SELECT w.*, row_number() OVER (PARTITION BY w.of ORDER BY rank DESC, created_at DESC, id DESC) AS n
+              FROM w WHERE ${cut}) c
+           WHERE n <= ${w.limit}::int),
+        -- The page's relations with their lineage rows (084: written with each, under its judge key; unique per
+        -- artifact).
+        lined AS (
+          SELECT page.*, d.id AS lineage, d.produced_at, d.input_fingerprints AS judged
+            FROM page LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = page.id AND d.produced_by = page.judge_key),
+        -- A side is stale when its text's fingerprint is not the one judged. The stored fingerprint, where it is the
+        -- one judged, settles it without hashing the text (review pass 2: 158 ms for ten 115 KB texts); where it is
+        -- not, or is NULL, the text's hash decides, as the judge recorded it (review pass 3: a stored key out of step
+        -- with its text read stale for good). Each thought needing its hash is hashed once a statement, however many
+        -- relations on the page it stands in (review pass 4: an edited 200 KB hub's page of 101 hashed it 101 times,
+        -- 2.9 ms each). A raw UPDATE of content that leaves the column at the judged key is the residue, as it is for
+        -- 120's re-link.
+        hashing AS (
+          SELECT l.older AS id FROM lined l JOIN thoughts t ON t.id = l.older WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[1]
+          UNION
+          SELECT l.newer FROM lined l JOIN thoughts t ON t.id = l.newer WHERE l.lineage IS NOT NULL AND t.content_fingerprint IS DISTINCT FROM l.judged[2]),
+        hashed AS MATERIALIZED (SELECT t.id, content_fingerprint_of(t.content) AS fingerprint FROM hashing JOIN thoughts t ON t.id = hashing.id),
+        -- Each thought's page aggregated once, and its count once, joined to the ids (review pass 2: a correlated read
+        -- per id scanned the whole set for each, 1.8 s for a list page of 1,000). The other thought's head is sent only
+        -- to a read that shows its title (review pass 4: a list page's would be thousands of heads dropped). The other
+        -- thought is the older or the newer of the pair, as other_is says, so it is read from their joins.
+        shown AS (
+          SELECT lined.of, jsonb_agg(jsonb_build_object(
+                   'id', lined.id::text, 'relation', lined.relation, 'other_is', lined.other_is,
+                   'other_id', lined.other::text,
+                   'other_created_at', CASE lined.other_is WHEN 'older' THEN tol.created_at ELSE tn.created_at END,
+                   'other_content', CASE WHEN ${w.heads ?? true}::boolean THEN left(CASE lined.other_is WHEN 'older' THEN tol.content ELSE tn.content END, ${THREAD_HEAD_CHARS}::int) ELSE '' END,
+                   'other_trust', CASE lined.other_is WHEN 'older' THEN tol.metadata ELSE tn.metadata END->>'trust',
+                   'confidence', lined.confidence, 'judged_at', COALESCE(lined.produced_at, lined.created_at), 'rank', lined.rank::text, 'at', lined.created_at::text,
+                   'stale', lined.lineage IS NOT NULL AND (
+                     (tol.content_fingerprint IS DISTINCT FROM lined.judged[1] AND ho.fingerprint IS DISTINCT FROM lined.judged[1])
+                     OR (tn.content_fingerprint IS DISTINCT FROM lined.judged[2] AND hn.fingerprint IS DISTINCT FROM lined.judged[2])))
+                   ORDER BY lined.n) AS edges
+            FROM lined
+            JOIN thoughts tn ON tn.id = lined.newer
+            JOIN thoughts tol ON tol.id = lined.older
+            LEFT JOIN hashed ho ON ho.id = lined.older
+            LEFT JOIN hashed hn ON hn.id = lined.newer
+           GROUP BY lined.of)
+        SELECT ids.of::text AS of, COALESCE(counted.total, 0) AS total, COALESCE(shown.edges, '[]'::jsonb) AS edges
+          FROM ids LEFT JOIN counted ON counted.of = ids.of LEFT JOIN shown ON shown.of = ids.of`;
+    } catch (e) {
+      // A cursor's time Postgres cannot read is the caller's, as the thread read's is.
+      if (!after || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    const out: Record<string, RelationsOf> = {};
+    for (const r of rows) {
+      const total = Number(r.total ?? 0);
+      if (total === 0) continue;
+      const raw = typeof r.edges === "string" ? JSON.parse(r.edges) : r.edges;
+      const edges = (Array.isArray(raw) ? raw : []).map((x: Record<string, unknown>) => normaliseRelationEdge(x)).filter((x: RelationEdge | null): x is RelationEdge => x !== null);
+      out[String(r.of)] = { total, edges };
+    }
+    return out;
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {

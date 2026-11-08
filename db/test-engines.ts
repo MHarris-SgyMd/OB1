@@ -48,6 +48,8 @@ const CONTROL: Partial<Record<(typeof ENGINES)[number], string>> = { "rebuild.ts
 const BASE_ENV: Record<string, string> = {};
 for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "DATABASE_URL" && !k.startsWith("OB1_") && !k.startsWith("PG")) BASE_ENV[k] = v;
 BASE_ENV.OB1_ENV_FILES = "off";
+// But the suite's background slots, off in CI and ci-parity.sh, as its PATH (SMD-3379 PR 2b-2b).
+if (process.env.OB1_BACKGROUND_SLOTS !== undefined) BASE_ENV.OB1_BACKGROUND_SLOTS = process.env.OB1_BACKGROUND_SLOTS;
 
 // A loopback listener that counts connections and closes each on arrival.
 let seen = 0;

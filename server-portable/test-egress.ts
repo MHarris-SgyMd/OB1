@@ -487,6 +487,8 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296).
   const providerPort = quietPort();
   const childEnv = () => ({
+    // The suite's background slots, off in CI and ci-parity.sh (SMD-3379 PR 2b-2b), as its PATH.
+    ...(process.env.OB1_BACKGROUND_SLOTS !== undefined ? { OB1_BACKGROUND_SLOTS: process.env.OB1_BACKGROUND_SLOTS } : {}),
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_STORE: "sql", DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
     MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "1",
@@ -599,6 +601,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
   const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: {
+      ...(process.env.OB1_BACKGROUND_SLOTS !== undefined ? { OB1_BACKGROUND_SLOTS: process.env.OB1_BACKGROUND_SLOTS } : {}),
       PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_STORE: "sql", DATABASE_URL: URL_,
       OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
       MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",

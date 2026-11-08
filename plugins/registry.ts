@@ -5,6 +5,7 @@
 // plugin adds its import and its entry here.
 
 import type { PluginManifest } from "../server-portable/plugin-sdk.ts";
+import agentMemory from "./agent-memory/index.ts";
 import example from "./example/index.ts";
 import familyCalendar from "./family-calendar/index.ts";
 import homeMaintenance from "./home-maintenance/index.ts";
@@ -14,4 +15,4 @@ import mealPlanning from "./meal-planning/index.ts";
 import professionalCrm from "./professional-crm/index.ts";
 import readwise from "./readwise/index.ts";
 
-export const PLUGINS: readonly PluginManifest[] = [example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm, readwise];
+export const PLUGINS: readonly PluginManifest[] = [agentMemory, example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm, readwise];

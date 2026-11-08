@@ -775,7 +775,7 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
   }
   // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it: the request, a retry without
   // logprobs, and the answer's read, as one call.
-  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, purpose: "judge", ...(signal ? { signal } : {}) },
+  return modelCall({ type: "chat", model: cfg.judgeModel, base: cfg.chat.base, local: cfg.chat.local, purpose: "judge", ...(signal ? { signal } : {}) },
     () => judgeExchange(older, newer, cfg, signal, opts));
 }
 

@@ -6,7 +6,6 @@ Webhook receivers, capture sources and other clients of the brain beyond your AI
 
 | Integration | What It Does |
 | ----------- | ------------ |
-| [Agent Memory API](agent-memory-api/) | Runtime-neutral recall, write-back, review, inspector, and recall-trace API for OB1 Agent Memory |
 | [OpenClaw Agent Memory](openclaw-agent-memory/) | OpenClaw plugin and publishing package for using OB1 Agent Memory from OpenClaw workflows |
 | [Hermes Agent Memory](hermes-agent-memory/) | Native Hermes Agent `MemoryProvider` for OB1 Agent Memory — auto-recall, auto-writeback, governance parity with the OpenClaw plugin |
 | [Slack Capture](slack-capture/) | Type thoughts in a Slack channel, automatically embedded and stored |

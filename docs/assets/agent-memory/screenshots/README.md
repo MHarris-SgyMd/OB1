@@ -1,6 +1,6 @@
 # Agent Memory Dashboard Screenshots
 
-These captures show the OB1 Agent Memory dashboard design pass inspired by the Content Master Pro graphite workspace aesthetic, with added Nate B. Jones / OB1 micro-branding and the beanie/glasses OB1 mark. They are intended as baseline visual assets for Linear updates, tutorial planning, and Nate-facing walkthroughs. They were captured from the Next.js dashboard's Agent Memory pages, which retired with that dashboard (SMD-3309); agent-memory-api's own pages come as a plugin's (SMD-2690). The full-dashboard walkthrough taken from that dashboard (its screenshots, PDF, video and scripts) retired with it.
+These captures show the OB1 Agent Memory dashboard design pass inspired by the Content Master Pro graphite workspace aesthetic, with added Nate B. Jones / OB1 micro-branding and the beanie/glasses OB1 mark. They are intended as baseline visual assets for Linear updates, tutorial planning, and Nate-facing walkthroughs. They were captured from the Next.js dashboard's Agent Memory pages, which retired with that dashboard (SMD-3309); agent-memory-api is the `agent-memory` plugin since SMD-2690, and its own pages would come as the plugin's. The full-dashboard walkthrough taken from that dashboard (its screenshots, PDF, video and scripts) retired with it.
 
 | File | Surface | Capture Notes |
 | --- | --- | --- |
@@ -25,4 +25,4 @@ Capture source:
 
 The original smoke memories were created with the live smoke harness and then cleaned from the personal OB1 Supabase project after capture. The Nate continuity demo memories are intentionally seeded reference/demo data for visual docs and should be removed or reseeded before public launch captures if the data story changes.
 
-Use `integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs` to recreate the Nate continuity project.
+The seed script that recreated the Nate continuity project, `integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs`, left with that server (SMD-2690).
