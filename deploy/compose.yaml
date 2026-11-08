@@ -2159,7 +2159,7 @@ services:
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
       ob1.grafana-dashboard: "sha256:d880b6e3f23c9942485493efab94f930e546195ed947744db0eaa64ebfd56e99"
-      ob1.grafana-alert-rules: "sha256:871041b31a0bf25f93a873f03238eac309683a37f7ed7b0b3a2c12d0802824ef"
+      ob1.grafana-alert-rules: "sha256:ff31383605e19b20dadd7cfb3876824c8f773cb3ca3faa9f77e9b3d889e79cdc"
       ob1.grafana-dashboard-provider: "sha256:386d684e6960c7b6d164558b23fcb7deda92aa548d557fa48c33922820976a5d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
@@ -3217,7 +3217,7 @@ configs:
                   model:
                     refId: A
                     instant: true
-                    expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))
+                    expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe="", gen_ai_operation_name!="decide"}[10m]))
                 - refId: B
                   datasourceUid: __expr__
                   model:

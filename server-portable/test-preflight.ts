@@ -5424,6 +5424,15 @@ if (want("9")) {
   assert(/!\s+provider re-probe\s+OB1_PROVIDER_REPROBE_INTERVAL="5m" is not a whole number of seconds from 1 to 3600, or "off"; a provider that does not answer is re-probed every 15 s/.test(reprobeBad.out) && /→ Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15\./.test(fix(reprobeBad.out, "provider re-probe")),
          "…a value that does not read warns, with the default it falls back to");
   assert(row(refused.out, "provider re-probe") === "", "…and unset, the knob has no row");
+  // The background slots in force (SMD-3379 PR 2b-2a): their shares, off, and a value that does not read; unset, no row.
+  const slotsSet = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=1,embed=2,decide=1" });
+  const slotsOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "off" });
+  const slotsBad = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=0" });
+  assert(/✓\s+background slots\s+chat=1, embed=2, decide=1 \(OB1_BACKGROUND_SLOTS\) — background model calls held to these shares/.test(slotsSet.out)
+      && /✓\s+background slots\s+off \(OB1_BACKGROUND_SLOTS\) — background model calls are not held/.test(slotsOff.out)
+      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
+      && row(refused.out, "background slots") === "",
+         `OB1_BACKGROUND_SLOTS has a row of its shares in force, off, or why it does not read; unset, none (${row(slotsSet.out, "background slots").slice(0, 160)})`);
   // With the database up, the warning alone is no failure: exit 0, the server
   // starts — the restart loop SMD-2887 measured is gone.
   if (LIVE) {

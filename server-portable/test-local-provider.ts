@@ -2605,6 +2605,146 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     `every fetch call passes redirect "manual" or "error", and none is aliased, those that dial no brain text aside (${guarded} do; ${unread.join(", ") || "none unread"}; allowed ${JSON.stringify([...allowed])})`);
 }
 
+console.log("\n[14] Model calls measured: every call's own time at the seam and its class on the provider's point, a span for the decide tier, a slot wait by how it ended, and each pass's tallies on its stamp, where no telemetry runs (SMD-3379 PR 2b-2a)");
+{
+  const { asLive, asPass, currentCallClass, modelCall, modelCallTallies } = await import("./model-call.ts");
+  const { currentTracing, useTracing, NO_SPAN } = await import("./spans.ts");
+  const { resolveEmbedConfig, providerCall } = await import("./embed.ts");
+  const { resolveJevConfig, jevInfo } = await import("./jev.ts");
+  const { installBackgroundSlots } = await import("./slots.ts");
+  const { passStamper, stampKey } = await import("../db/pass-stamp.ts");
+  const { parseHeartbeats, modelCallsWords } = await import("./brain-info.ts");
+  type Labels = Record<string, string | number | boolean | undefined>;
+  const points: { name: string; value: number; labels: Labels }[] = [];
+  const spans: { name: string; attributes: Labels }[] = [];
+  const before = currentTracing();
+  useTracing({
+    run: async (name, request, fn) => { spans.push({ name, attributes: { ...request.attributes } }); return fn(NO_SPAN); },
+    record: (name, _spec, value, labels) => { points.push({ name, value, labels: { ...labels } }); },
+  });
+  const pass = "measured";
+  const tally = () => modelCallTallies()[pass];
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: PROVIDER, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_METADATA_MODEL: META_MODEL });
+    const embBody = { model: EMB_MODEL, input: ["measured"] };
+    // A background embedding and a live one under one pass: each call's own time a point, labelled with its class,
+    // purpose and pass; the provider's point labelled with its class; the pass's tally counting both.
+    await asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" }));
+    await asLive(() => asPass(pass, () => providerCall(cfg, "/embeddings", embBody, { kind: "capture" })));
+    const seam = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.pass"] === pass);
+    const provider = spans.filter((sp) => sp.name === `embeddings ${EMB_MODEL}`);
+    const t1 = tally();
+    assert(seam.length === 2 && seam.map((p) => p.labels["ob1.call.class"]).join() === "background,live"
+        && seam.every((p) => p.labels["ob1.model.type"] === "embed" && p.labels["gen_ai.request.model"] === EMB_MODEL && p.labels["ob1.call.purpose"] === "capture" && p.labels["server.address"] === "127.0.0.1" && p.value >= 0 && p.labels["error.type"] === undefined)
+        && provider.slice(-2).map((sp) => sp.attributes["ob1.call.class"]).join() === "background,live"
+        && t1?.calls.background === 1 && t1.calls.live === 1 && t1.callMs >= 0,
+      `each call's own time is a point at the seam labelled with its class, purpose and pass, the provider's span carries the class, and the pass's tally counts both (${JSON.stringify({ seam: seam.map((p) => p.labels["ob1.call.class"]), tally: t1 })})`);
+    // A call that names its class, unlike its context's, runs under it: its provider span reads the class its point has
+    // (review pass 1).
+    const named = await asPass(pass, () => modelCall({ type: "embed", model: EMB_MODEL, base: PROVIDER, purpose: "named", cls: "live" }, async () => currentCallClass()));
+    const namedPoint = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "named").at(-1);
+    assert(named === "live" && namedPoint?.labels["ob1.call.class"] === "live",
+      `a call naming its class runs under it, the provider's span and the seam's point one class (${named}, ${namedPoint?.labels["ob1.call.class"]})`);
+    // The decide tier's exchange under a client span of its own, `decide <model>`.
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: PROVIDER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "stub-decider" })!;
+    await asPass(pass, () => jevInfo(jev));
+    const decide = spans.find((sp) => sp.name === "decide stub-decider");
+    const decidePoint = points.find((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.model.type"] === "decide" && p.labels["ob1.call.purpose"] === "info");
+    // Preflight's probe of the tier marked as one, as its embedding and chat probes are: the provider alert leaves it out.
+    await jevInfo(jev, { probe: "preflight" });
+    const probeSpan = spans.filter((sp) => sp.name === "decide stub-decider").at(-1);
+    assert(decide?.attributes["gen_ai.operation.name"] === "decide" && decide.attributes["ob1.call.class"] === "background" && decide.attributes["ob1.probe"] === undefined && decidePoint !== undefined
+        && probeSpan?.attributes["ob1.probe"] === "preflight",
+      `the decide tier's call runs under a client span of its own, a probe's marked as one, and its time is a point at the seam (${JSON.stringify(decide?.attributes)})`);
+    // A call that throws: its point names how it failed, and it is counted, as a failure too.
+    const callsBefore = tally()!.calls.background;
+    const failuresBefore = tally()!.failed;
+    await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw new TypeError("measured to fail"); })).catch(() => undefined);
+    const failed = points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1);
+    // An overload, a timeout and a body are told apart, in the provider point's words (review pass 1).
+    const failWith = async (e: unknown) => {
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => { throw e; })).catch(() => undefined);
+      return points.filter((p) => p.name === "ob1.model.call.duration" && p.labels["ob1.call.purpose"] === "test").at(-1)?.labels["error.type"];
+    };
+    const { ProviderError } = await import("./embed.ts");
+    const kinds = [
+      await failWith(new ProviderError("overloaded", "http", 503)),
+      await failWith(new ProviderError("too slow", "timeout")),
+      // A body that is no JSON carries its 2xx, as embed.ts's and jev.ts's do (review pass 2: it read `_OTHER`).
+      await failWith(new ProviderError("no JSON", "body", 200)),
+      await failWith(new ProviderError("an http error with no status", "http")),
+      await failWith(new ProviderError("refused by the gate", "egress")),
+      await failWith(Object.assign(new Error("the judge's call answered 429"), { status: 429 })),
+      await failWith(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })),
+      // Another throw's `kind` is no label: its name is (review pass 2).
+      await failWith(Object.assign(new RangeError("a kind of its own"), { kind: "some_arbitrary_kind" })),
+    ];
+    assert(failed?.labels["error.type"] === "TypeError" && tally()!.calls.background === callsBefore + 9 && tally()!.failed === failuresBefore + 9 && kinds.join() === "503,timeout,invalid_body,http,egress,429,ECONNREFUSED,RangeError",
+      `a call that throws is a point naming how it failed — a status, a timeout, a body, the runtime's code, else the throw's name — and counted a failure (${JSON.stringify(kinds)})`);
+    // Waits for a slot, by how each ended: held — the second of two under chat=1 waiting for the first — then stopped,
+    // then run without one where the semaphore's database does not answer.
+    const held = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+    try {
+      const work = () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, () => Bun.sleep(150));
+      await asPass(pass, () => Promise.all([work(), work()]));
+      const stop = new AbortController();
+      stop.abort(new Error("stopped before it waited"));
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test", signal: stop.signal }, async () => "ran")).catch(() => undefined);
+    } finally {
+      await held.uninstall();
+    }
+    const dead = installBackgroundSlots({ url: "postgres://postgres:x@127.0.0.1:1/none", raw: "chat=1", log: () => {}, connectS: 1 });
+    try {
+      await asPass(pass, () => modelCall({ type: "chat", model: META_MODEL, base: PROVIDER, purpose: "test" }, async () => "ran"));
+    } finally {
+      await dead.uninstall();
+    }
+    const waits = points.filter((p) => p.name === "ob1.model.slot.wait.duration" && p.labels["ob1.pass"] === pass);
+    const ends = waits.map((p) => p.labels["ob1.slot.outcome"]);
+    const w = tally()!.slotWaits;
+    const longest = Math.max(...waits.filter((p) => p.labels["ob1.slot.outcome"] === "held").map((p) => p.value));
+    assert(ends.filter((e) => e === "held").length === 2 && ends.includes("stopped") && ends.includes("open")
+        && waits.every((p) => p.labels["ob1.model.type"] === "chat" && p.labels["gen_ai.request.model"] === META_MODEL)
+        && longest >= 0.1 && w.held === 2 && w.stopped === 1 && w.open === 1 && w.waited === 1 && w.maxMs >= 100 && w.totalMs >= w.maxMs
+        && waits.filter((p) => p.labels["ob1.slot.waited"] === true).length === 1,
+      `an ask for a slot is a point by how it ended — two held, the second waiting ${Math.round(longest * 1000)} ms, one stopped, one run without a slot — only the one that waited marked so, and the pass's tally counts each (${JSON.stringify(w)})`);
+    // The pass stamp carries the process's tallies; brain_info reads them back and says them.
+    let written = "";
+    const fakeSql = ((_strings: TemplateStringsArray, ...values: unknown[]) => { written = String(values[1]); return Promise.resolve([]); }) as unknown as import("bun").SQL;
+    const stamper = passStamper({ sql: fakeSql, worker: "extract", job: "extract:measured", intervalS: 60 });
+    await stamper.stamp("ok");
+    const stamped = JSON.parse(written) as { models?: Record<string, unknown> };
+    // The row as the database hands it back: its key, and its value as text.
+    const beats = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: written, at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    const words = modelCallsWords(beats.heartbeats) ?? "";
+    assert(JSON.stringify(stamped.models?.[pass]) === JSON.stringify(modelCallTallies()[pass]) && beats.heartbeats[0]?.models?.[pass]?.slotWaits.held === 2
+        && /extract:measured measured: \d+ background, 2 live call\(s\), [\d.]+ m?s each, \d+ failed — 4 asked for a slot, [\d.]+ m?s in all, the longest [\d.]+ m?s; 1 waited, 1 ran without one, 1 stopped/.test(words),
+      `the pass stamp carries the process's tallies, and brain_info reads them back and says them (${words.slice(Math.max(0, words.indexOf("extract:measured measured:")), 400)})`);
+    // A stamp whose tallies are not of the shape is left off whole.
+    const bad = parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 0 }, failed: 0, callMs: -1, slotWaits: { held: 0, open: 0, stopped: 0, waited: 0, totalMs: 0, maxMs: 0 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]);
+    assert(bad.heartbeats[0] !== undefined && bad.heartbeats[0].models === undefined && modelCallsWords(bad.heartbeats) === null,
+      "a stamp whose tallies are not of the shape has them left off, the row read and nothing said of them");
+    // Nor figures one process cannot write: more waits than asks, a longest wait past all of them (review pass 2).
+    const forged = (slotWaits: Record<string, number>, failed = 0) => parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 1 }, failed, callMs: 5, slotWaits } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]).heartbeats[0]?.models;
+    const fine = { held: 2, open: 0, stopped: 0, waited: 1, totalMs: 10, maxMs: 9 };
+    assert(forged({ held: 1, open: 0, stopped: 0, waited: 2, totalMs: 9, maxMs: 9 }) === undefined && forged({ held: 2, open: 0, stopped: 0, waited: 1, totalMs: 9, maxMs: 10 }) === undefined
+        && forged(fine, 2) === undefined && forged(fine, 1)?.measured?.failed === 1
+        && forged(fine)?.measured?.slotWaits.waited === 1,
+      "tallies no process writes — more waits than asks, a longest wait past them all, more failures than calls — are left off; consistent ones read");
+    // The row's times on figures it is handed: under a second in whole milliseconds, else seconds to a tenth (review
+    // pass 1's "0.0 s"); the row above matches either unit, so a loaded runner's second does not fail it (review pass 2).
+    const wordsOf = (callMs: number, failed: number) => modelCallsWords(parseHeartbeats([{ key: stampKey("extract", "extract:measured"), value: JSON.stringify({ ...stamped, models: { measured: { calls: { live: 0, background: 2 }, failed, callMs, slotWaits: { held: 2, open: 0, stopped: 0, waited: 1, totalMs: 1500, maxMs: 999 } } } }), at: "2026-11-06T12:00:00.000Z", age_s: 5 }]).heartbeats) ?? "";
+    const knownWords = wordsOf(61, 0);
+    // 999.5 ms a call is "1.0 s", compared once rounded (review pass 3); the failures said beside the time (pass 3).
+    const roundedWords = wordsOf(1999, 1);
+    assert(knownWords === "since each worker started, as last stamped: extract:measured measured: 2 background call(s), 31 ms each — 2 asked for a slot, 1.5 s in all, the longest 999 ms; 1 waited"
+        && roundedWords.includes("2 background call(s), 1.0 s each, 1 failed — 2 asked"),
+      `the row says a time under a second in milliseconds, a longer one in seconds, and its failures (${knownWords} | ${roundedWords})`);
+  } finally {
+    useTracing(before);
+  }
+}
+
 server.stop();
 provider.stop();
 

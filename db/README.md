@@ -5196,6 +5196,15 @@ work, not something to finish by hand, unless the record names another model
 read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
 
+Since SMD-3379 PR 2b-2a it carries `models`, as a follower's stamp does once
+its process has made a model call: its calls by pass (`extract`,
+`consolidate`, `reembed`, `subjects`, `-` for none) since the process began —
+by class, how many failed, their own time, and their asks for a slot by how
+each ended (`held`, `open`, `stopped`), how many waited at all, their time in
+all and the longest. No telemetry runs in a worker, so the stamp carries what
+the servers' `ob1.model.call.duration` and `ob1.model.slot.wait.duration`
+points do; `brain_info`'s Model calls row says it.
+
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 its stops (a hard stop counted on them, 093: a paused period's abort): how
 many, and the three most stalled, then most stopped, with their

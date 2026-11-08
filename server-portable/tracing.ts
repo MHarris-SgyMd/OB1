@@ -52,6 +52,9 @@ const defined = (attributes: SpanAttributes | undefined): otel.Attributes => {
 
 /** spans.ts's withSpan, on the OpenTelemetry API: what telemetry.ts installs. */
 export const OTEL_TRACING: Tracing = {
+  record(name, spec, value, labels) {
+    histogram(name, spec).record(value, defined(labels));
+  },
   async run<T>(name: string, request: SpanRequest, fn: (span: WorkSpan) => Promise<T>): Promise<T> {
     const active = otel.context.active();
     const caller = request.root ? otel.trace.getSpanContext(active) : undefined;

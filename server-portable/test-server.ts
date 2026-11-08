@@ -5781,10 +5781,10 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
       `each provider call a client span, a child of the tool call that made it (${calls.map((s) => s.name).join(", ")})`);
     const embed = named("embeddings embed-model");
     const answered = named("chat chat-model");
-    assert(JSON.stringify(attrs(embed)) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port, "gen_ai.usage.input_tokens": 7, "ob1.outcome": "ok" })
+    assert(JSON.stringify(attrs(embed)) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port, "ob1.call.class": "background", "gen_ai.usage.input_tokens": 7, "ob1.outcome": "ok" })
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(embed?.resource.attributes["service.instance.id"]))
       && attrs(answered)["gen_ai.usage.input_tokens"] === 11 && attrs(answered)["gen_ai.usage.output_tokens"] === 3 && answered?.status.code === SpanStatusCode.UNSET,
-      `a call's span: the GenAI conventions' name and operation, its model, the endpoint's host and port, the answer's token counts; the process's own instance id on the resource (${JSON.stringify([attrs(embed), attrs(answered)])})`);
+      `a call's span: the GenAI conventions' name and operation, its model, the endpoint's host and port, its class (SMD-3379 PR 2b-2a), the answer's token counts; the process's own instance id on the resource (${JSON.stringify([attrs(embed), attrs(answered)])})`);
     const failedAs = (name: string) => { const s = named(name); return s?.status.code === SpanStatusCode.ERROR ? attrs(s)["error.type"] : "not an error"; };
     assert(ends.slice(0, 3).join() === "ProviderError,ProviderError,ProviderError" && failedAs("chat refused-model") === "503" && failedAs("chat garbled-model") === "invalid_body" && failedAs("chat slow-model") === "timeout"
       && named("chat ?") !== undefined && named(`chat bad model ${PLANTED}`) === undefined
@@ -5795,11 +5795,11 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
       `a connection refused: the runtime's own error, by its code or kind (${JSON.stringify(attrs(refusedConnection))})`);
     const providerPoints = await pointsOf("gen_ai.client.operation.duration");
     const pointOf = (model: string) => providerPoints.find((p) => p.attributes["gen_ai.request.model"] === model && p.attributes["server.port"] === provider.port);
-    assert(providerPoints.length === 7 && JSON.stringify(pointOf("embed-model")?.attributes) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port })
+    assert(providerPoints.length === 7 && JSON.stringify(pointOf("embed-model")?.attributes) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port, "ob1.call.class": "background" })
       && pointOf("refused-model")?.attributes["error.type"] === "503" && (pointOf("slow-model")?.value.sum ?? 0) >= 0.25 && (pointOf("slow-model")?.value.sum ?? 99) < 5
       && providerPoints.every((p) => p.value.count === 1) && pointOf("embed-model")?.value.buckets.boundaries.at(-1) === 327.68
       && !("gen_ai.usage.input_tokens" in (pointOf("embed-model")?.attributes ?? {})),
-      `each call a point on gen_ai.client.operation.duration: its operation, model, host and port, and how it failed; no token count as a label (${JSON.stringify(providerPoints.map((p) => [p.attributes, p.value.sum]))})`);
+      `each call a point on gen_ai.client.operation.duration: its operation, model, host and port, its class, and how it failed; no token count as a label (${JSON.stringify(providerPoints.map((p) => [p.attributes, p.value.sum]))})`);
     assert(!said().includes(PLANTED) && !said().includes("user:"), "no text sent, no answer's words, no base's userinfo in a span or a point");
     // An IPv6 host as the conventions spell an address, without the brackets a URL keeps it in (review pass 1).
     await chat("chat-model", resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://[::1]:1/v1" })).catch(() => {});
