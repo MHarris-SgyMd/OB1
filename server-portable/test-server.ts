@@ -7186,15 +7186,29 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   answers["thought:n2"] = ans("thought", "n2", { effective: 4, dueAt: "2026-11-02T00:00:00.000Z", dueFrom: "from_items", urgency: 2,
     terms: [term("unknown", 2), term("urgency", 2, { window: "soon", due_at: "2026-11-02T00:00:00.000Z", due_from: "from_items", item: ITEM })] });
   answers["thought:n3"] = ans("thought", "n3", { effective: 0, terms: [term("from_items", 0, { level: 0, tier: 1, maker: "operator-key", item: ITEM })] });
+  // The store reads 125's row: a from_items term and due_from (a server without them refused every ranked search).
+  const { normaliseEffectivePriority } = await import("./store.ts");
+  const row125 = { item_kind: "thought", item_key: "n1", effective: "6", level: null, inherited_from: null, due_at: "2026-11-02T00:00:00Z", due_from: "from_items",
+    urgency: "2", overdue: false, unblocks: 0, settled: false, not_before: null, waiting: false, winner: null, passed_over: [],
+    terms: [{ term: "from_items", value: 4, level: 4, tier: 1, maker: "k", item: ITEM }, { term: "urgency", value: 2, window: "soon", due_from: "from_items", item: ITEM }] };
+  let read125: ReturnType<typeof normaliseEffectivePriority> | null = null;
+  try { read125 = normaliseEffectivePriority(row125, "effective_priority"); } catch { read125 = null; }
+  let refusedTerm = "";
+  try { normaliseEffectivePriority({ ...row125, terms: [{ term: "from_elsewhere", value: 4 }] }, "effective_priority"); } catch (e) { refusedTerm = (e as Error).message; }
+  assert(read125?.dueFrom === "from_items" && read125.terms[0].term === "from_items" && read125.terms[0].detail.item === ITEM && read125.level === null
+      && refusedTerm === "effective_priority answered a row this server cannot read",
+    `the store reads a from_items term and due_from, the item in the term's detail; a term it doesn't know is still refused (${read125?.terms.map((t) => t.term).join(" ") ?? "refused"}; ${refusedTerm})`);
   const noteRows = [{ id: "n1", content: "the bill", metadata: {} }, { id: "n2", content: "the gutters", metadata: {} }, { id: "n3", content: "the coffee", metadata: {} }];
   const noteGot = await priorityOf(store(), noteRows);
   const n1 = noteGot!.n1.priority[0];
   const noteHit = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, ...noteGot!.n1 }], facts, window: null, priority: null } } as never, false);
   const noteVal = (noteHit.structuredContent.hits as Record<string, unknown>[])[0].priority as Record<string, unknown>[];
+  const noneFromItem = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, ...noteGot!.n3 }], facts, window: null, priority: null } } as never, false).content[0].text;
   const noteTitle = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n1") }, { id: "z", title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n3") }] } } as never).content[0].text).results as { title: string }[];
   assert(n1?.self && n1.level === null && JSON.stringify(n1.fromItem) === JSON.stringify({ key: ITEM, level: 4 }) && noteGot!.n2.priority.length === 0 && noteGot!.n3.priority[0]?.fromItem?.level === 0
       && noteHit.content[0].text.includes(`\nPriority: this thought at 6 (urgent (4) from open item ${ITEM}; +2 due by the end of 2026-11-01 (UTC) (open item ${ITEM})).\n`)
       && JSON.stringify(noteVal[0]) === JSON.stringify({ kind: "thought", self: true, effective: 6, fromItem: { key: ITEM, level: 4 }, dueAt: "2026-11-02T00:00:00.000Z", urgency: 2 })
+      && noneFromItem.includes(`\nPriority: this thought at 0 (stated none (0) from open item ${ITEM}).\n`)
       && noteTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM}, due by the end of 2026-11-01 (UTC)] t` && noteTitle[1].title === `[priority: this thought stated none (0) from open item ${ITEM}] t`,
     `a note's level from its open item is known, the item named in the value, the line and the title, a None from it said as stated; a due time alone from an item is no label (${noteHit.content[0].text.match(/Priority: .*/)?.[0]} | ${noteTitle.map((r) => r.title).join(" | ")})`);
 }
