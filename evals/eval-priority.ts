@@ -14,23 +14,38 @@
  *       DATABASE_URL (test-support's guards: refuseHeldDatabase refuses a
  *       database holding thoughts unless OB1_FIXTURE_RESET=1, and resetSchema
  *       a non-loopback one unless OB1_ALLOW_REMOTE_DB=1), plants the seeded
- *       corpus (priority.ts's plantRows), and runs every prompt through each
+ *       corpus (priority.ts's plantRows) and the facts beside it (plantFacts,
+ *       read back against the plan), and runs every prompt through each
  *       baseline read — a search tool called through the server's own core,
  *       the query embedded by its embedder through a stub provider on
  *       loopback — and each measured read. Prints the per-prompt hits, the
  *       table, the shuffled-gold mutant beside chance, the bar a priority read
  *       must clear against this baseline, and each measured read's verdict.
- *       Exits 1 when a baseline read errors, when a baseline read's scores
- *       differ from priority.ts's BASELINE, when the gold ceiling errors or
- *       cannot clear the bar, when a measured read reads the answer, when the
- *       dogfood rows are not sound, or when the mutant does not sit at chance
- *       for a baseline read or the ceiling. Keyless: no provider is called.
+ *       Exits 1 when fewer rows are planted than items, when the database
+ *       does not hold the planted facts (a fact dropped, or a statement 122
+ *       would not count), when a baseline read errors or returns more than
+ *       READ_K hits, when a baseline read's scores differ from priority.ts's
+ *       BASELINE, when the gold ceiling errors or cannot clear the bar, when a
+ *       measured read reads the answer or the answer-moved check misses the
+ *       ceiling, when the dogfood rows are not sound, or when the mutant does
+ *       not sit at chance for a baseline read or the ceiling. Keyless: no
+ *       provider is called.
+ *
+ *   ../db/with-postgres.sh bun eval-priority.ts --seeded --priority-weight 0.7,0.9
+ *       The same run, with SMD-3668's priority_weight also measured at each
+ *       weight listed (0 to 1, comma-separated), each as an exploratory read
+ *       named priority_weight@<weight>. The pre-registered read still runs and
+ *       gives the verdict. An exploratory read is scored, checked for reading
+ *       the answer and printed against the bar, but its line says it is no
+ *       verdict: a sweep over these prompts picks nothing (BAR's rule).
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: a later read joins there (SMD-3668's
- * priority_weight, SMD-3669's agenda), and the run prints its verdict against
- * the baselines of the same run. A measured read's verdict does not fail the
- * run; the gold ceiling's, which runs the same path, does.
+ * current, filter), and its MEASURED: SMD-3669's agenda and SMD-3668's
+ * priority_weight at its pre-registered 0.5 (which sees the tickets' levels
+ * and none of the notes' facts: priority.ts's Facts), and the run prints each
+ * one's verdict against the baselines of the
+ * same run. A measured read's verdict does not fail the run; the gold
+ * ceiling's, which runs the same path, does.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
@@ -46,11 +61,13 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
-  type DogfoodRow, type Item, type MeasureInput, type MeasuredRead, type PromptScore, type SearchTool,
+  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** The read key's name: the key the eval's reads run under, never the claimant or the operator. */
+const READ_KEY = "priority-eval";
 const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
 
 /**
@@ -101,6 +118,38 @@ async function selfCheck(): Promise<void> {
   const zq = seedRow(ITEMS.find((i) => i.key === "zq-urgent")!, 0);
   assert(zq.metadata.source === "linear" && zq.metadata.issue === "ZQ-101" && zq.metadata.status_type === "unstarted" && zq.metadata.priority === "Urgent" && zq.metadata.genre !== undefined && zq.content.startsWith("ZQ-101 — "), "a board row is planted as board-sync writes it: issueFacets' metadata (source, issue, status, priority, genre) and renderIssue's text");
   assert(Object.keys(seedRow(ITEMS[0], 0).metadata).length === 0, "a personal row carries no tracker facets");
+  // The facts planted beside the rows (SMD-3669 PR 2): every board item recorded as board-sync records it, the
+  // claimed one another agent's; every personal note an open item, its day, done and level from its facts.
+  const plan = factPlan(ITEMS, "2026-02-27");
+  const at = (key: string) => plan.items.find((p) => ITEMS[p.index].key === key);
+  assert(plan.board.length === ITEMS.filter((i) => i.issue).length && plan.items.length === ITEMS.filter((i) => !i.issue).length && JSON.stringify(plan.claims) === JSON.stringify(["ZQ-103"]),
+    `the plan records every board item, opens every personal note as an item (chatter too), and claims the claimed ticket alone (${plan.board.length}, ${plan.items.length}, ${plan.claims})`);
+  assert(at("bill")?.due === "2026-02-28" && at("gutters")?.due === "2026-02-13" && at("renewal")?.due === "2026-03-29" && at("cat")?.due === null && at("claim-done")?.done === true && at("bill")?.done === false
+      && at("passport")?.level === 4 && at("coffee")?.level === 0 && at("cat")?.level === null && at("commitment")?.actor === "priority-eval-meeting-notes" && at("bill")?.actor === "priority-eval-operator",
+    "an item's day is the run's day moved by its facts, in calendar days across a month's end; done and the level are its facts'; its writer opens it");
+  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && dueInstant("2026-02-28") === "2026-03-01T00:00:00Z",
+    "a day moves across a leap day and back across a month; a bare due day is held as the next day's start in UTC");
+  const facts = plannedFacts(ITEMS, "2026-02-27");
+  const named = [
+    "source linear ZQ-101 on zq-urgent", "statement on ticket:ZQ-101 level 4 tier 2 by board-sync due none not_before none due_ref none",
+    "statement on ticket:ZQ-102 level 3 tier 2 by board-sync due none not_before none due_ref none", "statement on ticket:ZQ-106 level 1 tier 2 by board-sync due none not_before none due_ref none",
+    "link zq-urgent linear blocks ZQ-104", "link zq-blocked linear blocked_by ZQ-101", "claim ZQ-103 piece none by priority-eval-other-agent",
+    "item from bill open due 2026-03-01T00:00:00Z by priority-eval-operator", "item from gutters open due 2026-02-14T00:00:00Z by priority-eval-operator",
+    "item from claim-done done due none by priority-eval-operator", "item from commitment open due 2026-03-03T00:00:00Z by priority-eval-meeting-notes",
+    "statement on item:passport level 4 tier 1 by priority-eval-operator due none not_before none due_ref none",
+    "statement on item:coffee level 0 tier 1 by priority-eval-operator due none not_before none due_ref none",
+  ];
+  assert(facts.length === 31 && named.every((l) => facts.includes(l)) && !facts.some((l) => l.startsWith("statement on ticket:ZQ-108")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
+    `the facts a seeded database must hold, each by its value: eight sources, seven ticket levels from the items' facts (No priority states none), the blocks link from both sides, one claim, ten items with their due instants (a bare day's end, the next day's start), three item levels (${facts.length}: ${facts.slice(0, 2).join("; ")}…)`);
+  const zqLevels = ITEMS.filter((it) => it.issue && it.facts.level !== undefined).map((it) => `${it.issue!.identifier} ${it.facts.level}`);
+  assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.replace(" ", " level ")} `))),
+    `every ticket's planned level is its facts', so a mapping change in board-sync's writer is a difference, not a shared move (${zqLevels})`);
+  // The facts, not the label: a High whose facts state 0, and one whose facts state none, plan 0 and no statement
+  // (review pass 3: every fixture ticket's facts equal its label's mapping, so the row above could not tell).
+  const relabelled = ITEMS.map((it) => (it.key === "zq-high" ? { ...it, facts: { ...it.facts, level: 0 } } : it.key === "zq-medium" ? { ...it, facts: { ...it.facts, level: undefined } } : it));
+  const off = plannedFacts(relabelled, "2026-02-27");
+  assert(off.includes("statement on ticket:ZQ-102 level 0 tier 2 by board-sync due none not_before none due_ref none") && !off.some((l) => l.startsWith("statement on ticket:ZQ-105")),
+    "a ticket's planned level follows its facts against its Linear label: a High stated 0 plans 0, a Medium with no level plans none");
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -203,6 +252,19 @@ async function selfCheck(): Promise<void> {
   assert(READ_K === 10, `the score reads ${READ_K} hits; --seeded fails when a baseline read returns more, which the score would not read`);
   assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
+  const sent: { tool: SearchTool; args: Record<string, unknown> }[] = [];
+  const pwIds = await PRIORITY_WEIGHT_READ.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (tool, args) => { sent.push({ tool, args }); return ["a", "b"]; } });
+  assert(PRIORITY_WEIGHT === 0.5 && sent.length === 1 && sent[0].tool === "search_thoughts" && JSON.stringify(sent[0].args) === JSON.stringify({ query: "q", priority_weight: 0.5 }) && JSON.stringify(pwIds) === '["a","b"]',
+    "priority_weight is search_thoughts at the weight pre-registered on SMD-3668 (0.5), its other arguments the tool's defaults, its hits as the tool returns them: a changed weight is a new pre-registration, never a re-run");
+  const sentAt: Record<string, unknown>[] = [];
+  const at7 = priorityWeightRead(0.7, "priority_weight@0.7");
+  await at7.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (_tool, args) => { sentAt.push(args); return []; } });
+  assert(at7.name === "priority_weight@0.7" && at7.ticket === "SMD-3668" && JSON.stringify(sentAt) === JSON.stringify([{ query: "q", priority_weight: 0.7 }]), "an exploratory read sends its own weight under its own name; the pre-registered read keeps 0.5 (above)");
+  const ew = (raw: string | undefined) => exploratoryWeights(raw);
+  const weightsOf = (raw: string) => { const r = ew(raw); return "weights" in r ? JSON.stringify(r.weights) : `error: ${r.error}`; };
+  assert(weightsOf("0.7,0.9") === "[0.7,0.9]" && weightsOf(" 0 , 1 ") === "[0,1]", "--priority-weight reads weights from 0 to 1, comma-separated, in the order given");
+  assert(["", "1.2", "-0.1", "x", "0.7,", "NaN", "Infinity"].every((raw) => "error" in ew(raw)) && "error" in ew(undefined), "--priority-weight refuses no value, a value outside 0 to 1, and one that is no number");
+  assert(weightsOf("0.7,0.7").includes("twice") && weightsOf("0.9,0.5").includes("pre-registered"), "--priority-weight refuses a weight listed twice, and the pre-registered one, which always runs");
 
   console.log("[7] The dogfood rows");
   const raw = loadDogfood();
@@ -214,6 +276,7 @@ async function selfCheck(): Promise<void> {
   assert(noPick.some((p) => p.includes("pick is not")) && !noPick.some((p) => p.includes("pick itself")), "a row missing its pick says so, and not that its alternative is the pick itself");
   assert(dogfoodProblems([null, rows[0]]).some((p) => p.includes("not an object")), "a row that is not an object, before another, is reported, not thrown on");
   assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
+  assert([...READS, ...MEASURED].every((r) => DOGFOOD_READS.includes(r.name)), `every seeded read, baseline and measured, is a name a dogfood row may use (${DOGFOOD_READS.join(", ")})`);
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
   assert(dogfoodProblems([{ ...rows[0], date: 20261314 }]).some((p) => p.includes("date")), "a row's date must be a real YYYYMMDD day");
   assert(dogfoodProblems([{ ...rows[0], pick: "SMD-2888" as unknown as number }]).some((p) => p.includes("pick")), "a pick is the ticket's number, not its key (check 9 allows numbers and ids)");
@@ -227,7 +290,38 @@ async function selfCheck(): Promise<void> {
   report();
 }
 
-async function seeded(): Promise<void> {
+/**
+ * --priority-weight's value: the weights to measure SMD-3668's read at beside the pre-registered one, each once, in the
+ * order given. Refused: no value, a value that is not a number from 0 to 1, a weight listed twice, and the
+ * pre-registered weight, which always runs.
+ */
+export function exploratoryWeights(raw: string | undefined): { weights: number[] } | { error: string } {
+  if (raw === undefined || raw.trim() === "") return { error: "--priority-weight takes weights from 0 to 1, comma-separated (e.g. 0.7,0.9)" };
+  const weights: number[] = [];
+  for (const part of raw.split(",")) {
+    const w = Number(part.trim());
+    if (part.trim() === "" || !Number.isFinite(w) || w < 0 || w > 1) return { error: `--priority-weight: ${JSON.stringify(part.trim())} is not a weight from 0 to 1` };
+    if (w === PRIORITY_WEIGHT) return { error: `--priority-weight: ${w} is the pre-registered weight, which always runs` };
+    if (weights.includes(w)) return { error: `--priority-weight: ${w} is listed twice` };
+    weights.push(w);
+  }
+  return { weights };
+}
+
+/** The value after --priority-weight, or after --priority-weight=; undefined when the flag is absent, "" when it has none. */
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  const eq = args.find((a) => a.startsWith(`${flag}=`));
+  if (eq !== undefined) return eq.slice(flag.length + 1);
+  const i = args.indexOf(flag);
+  if (i < 0) return undefined;
+  const next = args[i + 1];
+  return next === undefined || next.startsWith("--") ? "" : next;
+}
+
+async function seeded(explore: readonly number[] = []): Promise<void> {
+  // SMD-3668's read at each weight asked for, exploratory: measured as the others are, never the verdict.
+  const exploratory = explore.map((w) => priorityWeightRead(w, `priority_weight@${w}`));
+  const measured = [...MEASURED, ...exploratory];
   const url = process.env.DATABASE_URL;
   if (!url) { console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun eval-priority.ts --seeded"); process.exit(2); }
   const problems = corpusProblems();
@@ -244,12 +338,26 @@ async function seeded(): Promise<void> {
   const seeds = ITEMS.map((it, i) => seedRow(it, i));
   const keyOf = new Map(seeds.map((row, i) => [row.id, ITEMS[i].key] as const));
   let planted = 0;
+  let facts: PlantedFacts = [];
+  let today = "";
+  const factStore = new SqlStore(url, { max: 1 });
   try {
     planted = await plantRows(sql, seeds);
+    // Before the facts, whose writers would refuse a missing row first and hide the count (review pass 3).
+    if (planted !== ITEMS.length) throw new Error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`);
+    // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days;
+    // to_char, so the session's DateStyle never shapes it.
+    today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
+    facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
   } finally {
+    await factStore.close();
     await sql.close();
   }
-  if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
+  const want = plannedFacts(ITEMS, today);
+  // As sorted arrays, so a fact planted twice is a difference too; the message names each side's lines the other lacks.
+  const less = (a: readonly string[], b: readonly string[]) => { const left = [...b]; return a.filter((l) => { const i = left.indexOf(l); if (i < 0) return true; left.splice(i, 1); return false; }); };
+  const missing = less(want, facts), extra = less(facts, want);
+  if (JSON.stringify(facts) !== JSON.stringify(want)) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
 
   // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
   // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.
@@ -269,12 +377,12 @@ async function seeded(): Promise<void> {
   Object.assign(process.env, {
     DATABASE_URL: url, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_LOCAL: "1",
     OB1_EMBEDDING_MODEL: STUB_MODEL, OB1_EMBEDDING_DIM: String(STUB_DIM), OB1_LLM_TIMEOUT: "10",
-    MCP_ACCESS_KEYS: `priority-eval:read:${hashKey(KEY_RAW)}`,
+    MCP_ACCESS_KEYS: `${READ_KEY}:read:${hashKey(KEY_RAW)}`,
   });
   const worker = await mcpUnderTest();
   if (!servedByMcpServer()) { console.error("the server under test is not the MCP server (mcp-server/stack.ts)"); process.exit(1); }
-  // The server's request lines (one per tool call, timestamped) out of the eval's output, which two runs must print
-  // alike. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
+  // The server's request lines (one per tool call, timestamped) out of the eval's output: their times differ from run
+  // to run. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
   // which only the stack's own install carries (test-server's rule on db/ and evals/ imports).
   const telemetry = "../server-portable/telemetry.ts";
   ((await import(telemetry)) as { useRequestLog: (next: (line: string) => void) => unknown }).useRequestLog(() => {});
@@ -329,14 +437,14 @@ async function seeded(): Promise<void> {
       results.set(r.name, { hits, scores: hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
     }
     // The reads measured against the bar, the gold ceiling last: one that errors on a prompt scores it false, false, 0.
-    for (const r of [...MEASURED, CEILING]) {
+    for (const r of [...measured, CEILING]) {
       const first = await runMeasured(r, "");
       errors.push(...first.errors);
       results.set(r.name, { hits: first.hits, scores: first.hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
     }
     // Each measured read again with the answer moved: one whose ids move with it reads the answer. The ceiling is the control.
     // A pass that errors is reported as an error, not compared: an error is not a sign of reading the answer.
-    for (const r of [...MEASURED, CEILING]) {
+    for (const r of [...measured, CEILING]) {
       const again = await withAnswerMoved(() => runMeasured(r, " (answer moved)"));
       if (again.errors.length) { errors.push(...again.errors); continue; }
       if (JSON.stringify(again.hits) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
@@ -351,14 +459,14 @@ async function seeded(): Promise<void> {
   console.log(`priority eval, seeded: ${ITEMS.length} items, ${PROMPTS.length} prompts, corpus ${corpusHash()}, stub ${STUB_MODEL} @ ${STUB_DIM}\n`);
   for (const [i, p] of PROMPTS.entries()) {
     console.log(`${p.key}: "${p.query}"\n  gold     ${p.gold.join(" > ")}`);
-    for (const r of [...READS, ...MEASURED]) {
+    for (const r of [...READS, ...measured]) {
       const { hits, scores } = results.get(r.name)!;
       const sc = scores[i];
       console.log(`  ${r.name.padEnd(8)} ${hits[i].join(", ") || "(nothing)"}  [top-1 ${sc.top1 ? "yes" : "no"}, top-3 ${sc.top3 ? "yes" : "no"}, tau ${sc.tau === null ? "–" : sc.tau.toFixed(3)}]`);
     }
   }
 
-  const table = [...READS, ...MEASURED, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
+  const table = [...READS, ...measured, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
     read: r.name,
     score: meanScore(r.scores, golds),
     mutant: meanTriple(mutantTriples(r.hits, golds), golds),
@@ -373,9 +481,10 @@ async function seeded(): Promise<void> {
   const t = barOn(bases, golds);
   const kept = t.keepTop3.map((i) => PROMPTS[i].key);
   console.log(`The bar a priority read must clear on this corpus (priority.ts's BAR, pre-registered): top-1 on at least ${t.top1Need} of ${t.prompts} (at least ${t.top1Floor}, and the best baseline's ${t.bestTop1} + ${BAR.top1Gain}); mean tau at least ${t.tauNeed.toFixed(3)} (the best baseline's ${t.bestTau.toFixed(3)} + ${BAR.tauGain}); top-3 kept on ${kept.length ? kept.join(", ") : "no prompt (no baseline read had any)"}.`);
-  for (const r of MEASURED) {
+  for (const r of measured) {
     const v = verdict(results.get(r.name)!.scores, bases, golds);
-    console.log(`Measured read ${r.name} (${r.ticket}) against the baselines: ${v.helped ? "HELPS: it clears the pre-registered bar" : `does not clear the bar: ${v.failed.join("; ")}`}.`);
+    if (exploratory.includes(r)) console.log(`Exploratory read ${r.name} (${r.ticket}; not the pre-registered ${PRIORITY_WEIGHT}, so no verdict: a sweep over these prompts picks nothing) against the baselines: ${v.helped ? "would clear the bar" : `would not clear the bar: ${v.failed.join("; ")}`}.`);
+    else console.log(`Measured read ${r.name} (${r.ticket}) against the baselines: ${v.helped ? "HELPS: it clears the pre-registered bar" : `does not clear the bar: ${v.failed.join("; ")}`}.`);
   }
   const ceiling = verdict(results.get(CEILING.name)!.scores, bases, golds);
   console.log(`The gold ceiling against the baselines: ${ceiling.helped ? "helps (the bar is reachable)" : `fails: ${ceiling.failed.join("; ")}`}.`);
@@ -402,13 +511,21 @@ async function seeded(): Promise<void> {
     for (const f of failures) console.error(f);
     process.exit(1);
   }
-  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every read.`);
+  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every baseline read and the ceiling.`);
 }
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes("--self-check")) await selfCheck();
   // The server's own pools stay open after the run; the verdict is the exit code.
-  else if (args.includes("--seeded")) { await seeded(); process.exit(0); }
-  else { console.error("usage: bun eval-priority.ts --self-check | --seeded"); process.exit(2); }
+  else if (args.includes("--seeded")) {
+    const unknown = args.filter((a) => a.startsWith("--") && a !== "--seeded" && a !== "--priority-weight" && !a.startsWith("--priority-weight="));
+    if (unknown.length) { console.error(`--seeded does not take ${unknown.join(", ")}: its one option is --priority-weight w,...`); process.exit(2); }
+    const raw = flagValue(args, "--priority-weight");
+    const explore = raw === undefined ? { weights: [] } : exploratoryWeights(raw);
+    if ("error" in explore) { console.error(explore.error); process.exit(2); }
+    await seeded(explore.weights);
+    process.exit(0);
+  }
+  else { console.error("usage: bun eval-priority.ts --self-check | --seeded [--priority-weight w,...]"); process.exit(2); }
 }
