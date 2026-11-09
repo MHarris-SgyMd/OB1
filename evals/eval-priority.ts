@@ -32,9 +32,10 @@
  *       provider is called.
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
- * priority_weight needs the notes' facts where it reads them: priority.ts's
- * Facts), and the run prints each one's verdict against the baselines of the
+ * current, filter), and its MEASURED: SMD-3669's agenda and SMD-3668's
+ * priority_weight at its pre-registered 0.5 (which sees the tickets' levels
+ * and none of the notes' facts: priority.ts's Facts), and the run prints each
+ * one's verdict against the baselines of the
  * same run. A measured read's verdict does not fail the run; the gold
  * ceiling's, which runs the same path, does.
  *
@@ -52,7 +53,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, DOGFOOD_READS, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -243,6 +244,10 @@ async function selfCheck(): Promise<void> {
   assert(READ_K === 10, `the score reads ${READ_K} hits; --seeded fails when a baseline read returns more, which the score would not read`);
   assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
+  const sent: { tool: SearchTool; args: Record<string, unknown> }[] = [];
+  const pwIds = await PRIORITY_WEIGHT_READ.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (tool, args) => { sent.push({ tool, args }); return ["a", "b"]; } });
+  assert(PRIORITY_WEIGHT === 0.5 && sent.length === 1 && sent[0].tool === "search_thoughts" && JSON.stringify(sent[0].args) === JSON.stringify({ query: "q", priority_weight: 0.5 }) && JSON.stringify(pwIds) === '["a","b"]',
+    "priority_weight is search_thoughts at the weight pre-registered on SMD-3668 (0.5), its other arguments the tool's defaults, its hits as the tool returns them: a changed weight is a new pre-registration, never a re-run");
 
   console.log("[7] The dogfood rows");
   const raw = loadDogfood();

@@ -490,7 +490,10 @@ hint naming the fix.
 
 The ChatGPT `search` tool takes only its query, so it never ranks by priority.
 `evals/eval-priority.ts` (SMD-3662) measures the weight before any default
-changes.
+changes. At its pre-registered 0.5 it doesn't clear the bar (2026-11-09,
+`evals/README.md`): a note's due time and level sit on its open item, which
+`effective_priority` doesn't read yet (SMD-4149, which re-measures it). The
+default stays 0.
 
 **Each result's priority, a label (SMD-3668 PR 2).** `search`, `search_thoughts`,
 `search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its
