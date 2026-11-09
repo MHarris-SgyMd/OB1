@@ -61,7 +61,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, plannedNoteReads, readNoteReads, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -150,6 +150,18 @@ async function selfCheck(): Promise<void> {
   const off = plannedFacts(relabelled, "2026-02-27");
   assert(off.includes("statement on ticket:ZQ-102 level 0 tier 2 by board-sync due none not_before none due_ref none") && !off.some((l) => l.startsWith("statement on ticket:ZQ-105")),
     "a ticket's planned level follows its facts against its Linear label: a High stated 0 plans 0, a Medium with no level plans none");
+  // What each note reads as a thought once 125 reads its open items (SMD-4149's first Verify, held at every seeded run).
+  const notes = plannedNoteReads(ITEMS, "2026-02-27");
+  const noteNamed = [
+    "bill 4: unknown 2; urgency soon 2 item:bill", "gutters 5: unknown 2; overdue 3 item:gutters", "passport 4: from_items 4 item:passport",
+    "commitment 3: unknown 2; urgency week 1 item:commitment", "renewal 2: unknown 2", "claim-done 2: unknown 2", "coffee 0: from_items 0 item:coffee", "cat 2: unknown 2",
+  ];
+  assert(notes.length === 10 && noteNamed.every((l) => notes.includes(l)) && JSON.stringify([...notes].sort()) === JSON.stringify(notes),
+    `each note as a thought: the bill due tomorrow +2, the gutters overdue +3, the passport its item's level 4, the commitment +1 within the week, the renewal a month off nothing, a done item nothing, a level 0 its 0 (${notes.join("; ")})`);
+  // A level 0 takes no urgency, and a done item passes its level and due time nowhere (no corpus note has either alone).
+  const edge = plannedNoteReads([{ ...ITEMS[0], key: "zero-due", facts: { level: 0, dueInDays: -2 } }, { ...ITEMS[0], key: "done-high", facts: { level: 4, dueInDays: 0, done: true } }], "2026-02-27");
+  assert(JSON.stringify(edge) === JSON.stringify(["done-high 2: unknown 2", "zero-due 0: from_items 0 item:zero-due"]),
+    `a note whose item is at level 0 and overdue reads 0, no overdue; a done item at level 4 due today gives nothing (${edge.join("; ")})`);
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -339,6 +351,7 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   const keyOf = new Map(seeds.map((row, i) => [row.id, ITEMS[i].key] as const));
   let planted = 0;
   let facts: PlantedFacts = [];
+  let noteReads: string[] = [];
   let today = "";
   const factStore = new SqlStore(url, { max: 1 });
   try {
@@ -349,6 +362,8 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
     // to_char, so the session's DateStyle never shapes it.
     today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
     facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
+    // SMD-4149's first Verify: each note asked as a thought reads its open item's level and due time.
+    noteReads = await readNoteReads(sql, ITEMS, seeds);
   } finally {
     await factStore.close();
     await sql.close();
@@ -358,6 +373,11 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   const less = (a: readonly string[], b: readonly string[]) => { const left = [...b]; return a.filter((l) => { const i = left.indexOf(l); if (i < 0) return true; left.splice(i, 1); return false; }); };
   const missing = less(want, facts), extra = less(facts, want);
   if (JSON.stringify(facts) !== JSON.stringify(want)) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
+  const wantNotes = plannedNoteReads(ITEMS, today);
+  if (JSON.stringify(noteReads) !== JSON.stringify(wantNotes)) {
+    console.error(`effective_priority reads the notes otherwise than SMD-4149's rule: missing ${JSON.stringify(less(wantNotes, noteReads))}; not planned ${JSON.stringify(less(noteReads, wantNotes))}`);
+    process.exit(1);
+  }
 
   // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
   // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.
@@ -457,6 +477,8 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
 
   const golds = PROMPTS.map((p) => p.gold);
   console.log(`priority eval, seeded: ${ITEMS.length} items, ${PROMPTS.length} prompts, corpus ${corpusHash()}, stub ${STUB_MODEL} @ ${STUB_DIM}\n`);
+  // The days are the run's own; the effective values hold on any day (SMD-4149).
+  console.log(`Each note asked as a thought (effective_priority, SMD-4149: its open item's level and due time, as planned):\n${noteReads.map((l) => `  ${l}`).join("\n")}\n`);
   for (const [i, p] of PROMPTS.entries()) {
     console.log(`${p.key}: "${p.query}"\n  gold     ${p.gold.join(" > ")}`);
     for (const r of [...READS, ...measured]) {

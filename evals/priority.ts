@@ -65,9 +65,9 @@ export type BoardMeta = { issue: string; status: string; status_type: "backlog" 
  * claim in work_claims, board-sync's links), with the baseline re-run on each
  * and BAR held by its own pin, so the bar a read is judged by never moves with
  * it. A personal note's facts sit on its open item, not on the note: a read
- * that scores thoughts (SMD-3668's priority_weight) sees the tickets' levels
- * and none of the notes', until effective_priority reads a thought's open
- * items (SMD-4149, the maintainer's call, 2026-11-08).
+ * that scores thoughts (SMD-3668's priority_weight) reads them through
+ * effective_priority's from_items terms (migration 125, SMD-4149, the
+ * maintainer's call, 2026-11-08), as plannedNoteReads says.
  * A read never reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
@@ -799,8 +799,8 @@ export const PRIORITY_WEIGHT = 0.5;
  * SMD-3668's priority_weight at `weight`, as a client would send it: `search_thoughts` with `priority_weight` at that
  * weight and every other argument at its default, called over MCP as the baseline reads are. The tool re-ranks its
  * top min(100, 4 × limit) matches by its place among them and 122's effective priority, each match read as a
- * thought: a ticket's row reads its ticket's level, and a note what is stated on it or inherited from a ticket it is
- * about, which on this set is nothing, since a note's facts sit on its open item (Facts; SMD-4149).
+ * thought: a ticket's row reads its ticket's level, and a note what is stated on it, else its open items' level and
+ * soonest due time (migration 125, SMD-4149; plannedNoteReads), else what it inherits from a ticket it is about.
  */
 export function priorityWeightRead(weight: number, name = "priority_weight"): MeasuredRead {
   return { name, ticket: "SMD-3668", run: ({ query, callTool }) => callTool("search_thoughts", { query, priority_weight: weight }) };
@@ -837,6 +837,51 @@ export async function withAnswerMoved<T>(run: () => Promise<T>, prompts: readonl
   }
 }
 
+// ── What a note reads from its open items (SMD-4149) ────────────────────────
+
+/**
+ * What effective_priority should answer for each personal note asked as a thought, once migration 125 reads a
+ * thought's open items (SMD-4149, the rule the maintainer decided on 2026-11-09): the level counted on its open item
+ * (`from_items`), else unknown's 2 (a note states nothing on itself, and is about no ticket); its open item's due time,
+ * in calendar days from the run's day, +2 by the end of tomorrow, +1 by the end of the seventh day, +3 once past; none
+ * at level 0; a done item gives nothing. One line a note, `key effective: terms`, each term naming the note whose item
+ * it came from. Pure, so --self-check reads it; outside the registered section, as it plants nothing.
+ */
+export function plannedNoteReads(items: readonly Item[], today: string): string[] {
+  return factPlan(items, today).items.map((p) => {
+    const key = items[p.index].key;
+    const days = items[p.index].facts.dueInDays;
+    const open = !p.done;
+    const level = open ? p.level : null;
+    const terms = [level !== null ? `from_items ${level} item:${key}` : "unknown 2"];
+    let urgency = 0;
+    if (open && days !== undefined && level !== 0) {
+      urgency = days < 0 ? 3 : days <= 1 ? 2 : days <= 7 ? 1 : 0;
+      if (urgency > 0) terms.push(`${days < 0 ? "overdue" : urgency === 2 ? "urgency soon" : "urgency week"} ${urgency} item:${key}`);
+    }
+    return `${key} ${(level ?? 2) + urgency}: ${terms.join("; ")}`;
+  }).sort();
+}
+
+/**
+ * What effective_priority answers for each personal note asked as a thought, at the database's own clock, as
+ * plannedNoteReads' lines: an open item a term names written as the note it was opened from.
+ */
+export async function readNoteReads(sql: SQL, items: readonly Item[], rows: readonly SeedRow[]): Promise<string[]> {
+  const keyOf = new Map(rows.map((r, i) => [r.id, items[i].key] as const));
+  const itemOf = new Map(((await sql`SELECT item_id::text AS id, origin_thought_id::text AS origin FROM open_items`) as { id: string; origin: string | null }[])
+    .map((r) => [r.id, `item:${r.origin === null ? "none" : keyOf.get(r.origin) ?? `?${r.origin}`}`] as const));
+  const notes = items.flatMap((it, i) => (it.issue ? [] : [{ kind: "thought", key: rows[i].id }]));
+  const read = (await sql`SELECT item_key, effective::text AS effective, terms FROM effective_priority(${JSON.stringify(notes)}::text::jsonb, NULL, now())`) as
+    { item_key: string; effective: string; terms: { term: string; value: number; window?: string; item?: string }[] }[];
+  return read.map((r) => {
+    const terms = r.terms.map((t) => {
+      const name = t.term === "urgency" ? `urgency ${t.window}` : t.term;
+      return `${name} ${t.value}${t.item ? ` ${itemOf.get(t.item) ?? `item:?${t.item}`}` : ""}`;
+    });
+    return `${keyOf.get(r.item_key) ?? `?${r.item_key}`} ${Number(r.effective)}: ${terms.join("; ")}`;
+  }).sort();
+}
 
 // ── The dogfood rows ────────────────────────────────────────────────────────
 
