@@ -357,11 +357,13 @@ export function missingModelIs(e: unknown, model: string): boolean {
 }
 
 /**
- * Whose one thought's error is, for a --follow worker with no pauses before
- * an outage (db/reembed.ts's, SMD-2679 PR 4a-2b review pass 4): an error is
- * the thought's only when it names the thought, or when the provider answers
- * a probe's constant text right after it (`probe-decides`, the caller's
- * probe); anything else is the database's state or the provider's.
+ * Whose one thought's error is, for a --follow worker (db/reembed.ts's first,
+ * SMD-2679 PR 4a-2b review pass 4; a provider error is read through `fault`
+ * on this split, extract's and consolidate's since SMD-2636 PR 3a, re-embed's
+ * since PR 3b, re-embed's database error here directly): an error is the thought's only when it names the
+ * thought, or when the provider answers a probe's constant text right after
+ * it (`probe-decides`, the caller's probe); anything else is the database's
+ * state, the provider's, or, a probe refused, the request's.
  * - `db-wait`: the database not answering — the worker stops, recording
  *   nothing, and the follower waits it out (databaseUnavailable).
  * - `db-end`: a privilege or a function gone, a feature the server lacks

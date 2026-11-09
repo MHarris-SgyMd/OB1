@@ -2319,12 +2319,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 /**
                  * The request refused itself: every row would fail the same way. Stop every worker, mark nothing, and
                  * say what to fix (extract-entities.ts's configError). A refusal the probe found says the probe's words
-                 * first, as extract's does (SMD-2636 PR 3a, review pass 2): a deadline's own words name no refusal.
+                 * first, as extract's does (SMD-2636 PR 3a, review pass 2): a deadline's own words name no refusal,
+                 * here or in the closing line (review pass 1). Not named `refuse`: test-engines reads every call of
+                 * that name in this file as one of run()'s refusals, which it returns.
                  */
-                const refuse = (probeWhy?: string): void => {
+                const stopRefused = (probeWhy?: string): void => {
                   configError = probeWhy === undefined ? msg : `a probe's embedding call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
                   drainEnds.abort();
-                  err(`  ${workerId}: the embedding provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
+                  // Cut words are marked, so a number cut short does not read whole (review pass 1: "…up to 81").
+                  const words = configError.length > 200 ? `${configError.slice(0, 200)}…` : configError;
+                  err(`  ${workerId}: the embedding provider refuses the request itself (${words}) — stopping every worker; nothing is marked failed`);
                 };
                 if (verdict === "db-end") throw e;
                 // Re-embed has no pauses: a fault to pause for is an outage at once, as before.
@@ -2340,7 +2344,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   else err(`  ${workerId}: the write met the database's moment (${msg.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
                   return;
                 } else if (read.act === "fatal") {
-                  refuse();
+                  stopRefused();
                   return;
                 } else if (read.act === "pause" || read.act === "outage" || outage.reason !== null) {
                   // Another worker's outage is joined unprobed, as extract's is (SMD-2636 PR 3a, review pass 1).
@@ -2351,11 +2355,17 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 } else {
                   // `probe`: a deadline with no answer, or a 4xx no rule reads. The probe's answer decides
                   // (probedFault). Answered: the thought's, such as a content filter's. Refused: the request's.
-                  // No answer: the provider's outage, the thought a suspect.
-                  const probe = await embedProbe(onStop.signal, probeGate.allowed ? probeSubject : rowSubject);
+                  // No answer: the provider's outage, the thought a suspect. The probe is part of the call in hand:
+                  // the pass's caller aborting it (abortInHand) sets the thought back, as an aborted call does, where
+                  // a probe deaf to it held the pass up to the call's timeout after a deadline (review pass 1).
+                  const call = inCall.get(workerId);
+                  const probe = await embedProbe(call ? AbortSignal.any([onStop.signal, call.abort.signal]) : onStop.signal, probeGate.allowed ? probeSubject : rowSubject);
                   const act = probedFault(probe);
-                  if (act === "thought") {
-                    outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's)` };
+                  if (call?.aborted) {
+                    outcome = { outcome: "setBack" };
+                  } else if (act === "thought") {
+                    // Said so, and that a retry revisits it, as extract's does (review pass 1).
+                    outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's; --retry-failed revisits it)` };
                   } else if (stopping) {
                     return;
                   } else if (act === "outage") {
@@ -2363,7 +2373,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                     if (sendBack(isOut(probe) ? probe.why : msg, true) === "outage") return;
                     outcome = { outcome: "failed", error: again };
                   } else {
-                    refuse(probe.state === "refused" ? probe.why : undefined);
+                    stopRefused(probe.state === "refused" ? probe.why : undefined);
                     return;
                   }
                 }
