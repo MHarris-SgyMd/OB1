@@ -2433,7 +2433,10 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 (60–86400, unset 60: how long a model call in hand may have run, counted from
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
-`OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
+`OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: in a share of a model server's slots
+consolidation's calls go before the other passes', and a call that has waited
+this long goes first whatever its pass; the order, never the share — SMD-3379
+PR 2c-2), `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep
 runs one),
