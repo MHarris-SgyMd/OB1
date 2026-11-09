@@ -30,7 +30,7 @@ import { listCursor, parseRelationsCursor, relationsCursor, threadCursor } from 
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
-import { dayOf, INFER_PROMPT, resolveDue } from "./priority-infer.ts";
+import { INFER_PROMPT } from "./priority-infer.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { checkerOver, subjectHash, tokenSettings } from "./oauth-token.ts";
 
@@ -2798,11 +2798,15 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
 {
   type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; inferred: boolean; maker: { name: string; scope: string | null }; tierName: string; closedAt: string | null };
   const hist = async (kind: string, key: string) => (await rest("GET", `/v1/priorities/${kind}/${key}`)).body as { level: number | null; winner: A | null; history: A[] };
-  const friday = resolveDue("by Friday", dayOf(new Date()));
-  const reason = `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`;
-  const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
-    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === reason && a.inferred === true && a.tierName === "inferred"
-    && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null;
+  // The next Friday after a UTC day (a week on from a Friday), counted here rather than by the rules under test
+  // (review pass 1); either the day the section starts or the day it is checked, so a run across midnight holds.
+  const fridayAfter = (day: string) => { const t = Date.parse(`${day}T00:00:00Z`); const dow = new Date(t).getUTCDay(); return new Date(t + (((5 - dow + 7) % 7) || 7) * 86_400_000).toISOString().slice(0, 10); };
+  const startDay = new Date().toISOString().slice(0, 10);
+  const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => [startDay, new Date().toISOString().slice(0, 10)].map(fridayAfter).some((friday) =>
+    a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
+    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`
+    && a.inferred === true && a.tierName === "inferred" && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null);
+  const friday = fridayAfter(startDay);
   await sql`SELECT set_agent_kind('rival', 'operator')`;
   try {
     // The ticket's Verify 1: High, due Friday, quoting the phrase, inferred, by the capturing key, on the thought (it proposed no item).
@@ -2825,9 +2829,11 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
     const [counted] = await sql`SELECT level FROM effective_priority((${items}::text)::jsonb, '{"count_inferred": true}'::jsonb)`;
     assert(plain?.level === null && plain?.passed === 1 && counted?.level === 3,
       `effective_priority passes the inferred statement over by default (level unknown, one passed over) and counts it with count_inferred (${JSON.stringify(plain)} | ${JSON.stringify(counted)})`);
-    // A re-capture of the same text states nothing again.
+    // A re-capture of the same text asks nothing and states nothing again (review pass 1: it asked, for nothing).
+    const callsBeforeAgain = inferCalls;
     const again = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the plumber needs a date by Friday" });
-    assert(String(again.body.id) === t2 && (await hist("thought", t2)).history.length === 1, "a re-capture states nothing again");
+    assert(String(again.body.id) === t2 && inferCalls === callsBeforeAgain && (await hist("thought", t2)).history.length === 1,
+      `a re-capture makes no inference call and states nothing again (${inferCalls - callsBeforeAgain} calls)`);
     // A capture that proposed items: the statement on each item, none on the thought.
     const withItems = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: rho: remind me to call the dentist and book the vet by Friday" });
     const wid = String(withItems.body.id);

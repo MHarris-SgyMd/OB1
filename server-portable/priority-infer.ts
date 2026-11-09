@@ -7,15 +7,17 @@
  * the tags' call is.
  *
  * What the answer is held to, so a model's guess never passes for the text's:
- * - A level or a due time stands only on a phrase the text holds (compared
- *   case-folded, white space collapsed). A phrase the model made up drops its
- *   half of the answer.
+ * - A level or a due time stands only on a phrase the text holds as whole
+ *   words (case-folded, white space collapsed). A phrase the model made up
+ *   drops its half of the answer, and so does a level word the text negates
+ *   ("not urgent" read as urgent).
  * - An inferred level is at most High (3): "urgent" costs nothing to write in
  *   a note, and the maintainer's own example reads "Urgent: …" as High.
  * - A due phrase is resolved by the rules below from the capture's UTC day
  *   ("by Friday" captured on Tuesday 2026-11-03 is 2026-11-06). Only a phrase
  *   the rules can't read takes the model's date, and only a real day from the
- *   capture's to a year after it.
+ *   capture's to a year after it, on a phrase that names a time, on the weekday
+ *   it names if it names one.
  *
  * What the capture does with it (core/writes.ts): a statement at tier 4,
  * flagged inferred (docs/priority.md, decisions 4 and 6), under the capturing
@@ -56,12 +58,37 @@ export type Inferred = {
 /** A text as a phrase is looked for in it: case-folded, curly quotes made straight, white space collapsed. */
 const folded = (s: string) => s.toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/gu, " ").trim();
 
-/** The phrase, trimmed, when the text holds it and it is 1 to 200 characters; else null. */
+/** Where a phrase stands in a text as whole words: the start of each match of its folded form, bounded by no letter or digit. */
+function wholeWordAt(phrase: string, text: string): number[] {
+  const p = folded(phrase), t = folded(text), at: number[] = [];
+  const edge = (c: string | undefined) => c === undefined || !/[\p{L}\p{N}]/u.test(c);
+  for (let i = t.indexOf(p); i !== -1; i = t.indexOf(p, i + 1)) if (edge(t[i - 1]) && edge(t[i + p.length])) at.push(i);
+  return at;
+}
+
+/**
+ * The phrase, trimmed, when the text holds it as whole words ("rush" is not in "brush") and it is 1 to 200
+ * characters with a letter or a digit in it; else null.
+ */
 export function quotedIn(phrase: unknown, text: string): string | null {
   if (typeof phrase !== "string") return null;
   const p = phrase.replace(/\s+/gu, " ").trim();
-  if (p === "" || p.length > 200) return null;
-  return folded(text).includes(folded(p)) ? p : null;
+  if (p.length > 200 || !/[\p{L}\p{N}]/u.test(p)) return null;
+  return wholeWordAt(p, text).length > 0 ? p : null;
+}
+
+/** The words that negate what follows them. */
+const NEGATOR = /\b(not|no|never|hardly|isn't|aren't|wasn't|don't|doesn't|nothing)\s+$/;
+
+/**
+ * Whether every place the text holds the phrase follows a negating word ("urgent" in "this is not urgent"): the
+ * model read the word, not what the text says of it. A phrase that carries its own negation ("not urgent") is read
+ * as written.
+ */
+export function negatedIn(phrase: string, text: string): boolean {
+  const t = folded(text);
+  const at = wholeWordAt(phrase, text);
+  return at.length > 0 && at.every((i) => NEGATOR.test(t.slice(Math.max(0, i - 12), i)));
 }
 
 // ── Due days ─────────────────────────────────────────────────────────────────
@@ -70,6 +97,21 @@ const DAY_MS = 86_400_000;
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const NUMBER_WORDS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+/** A month's name or its first three letters. */
+const MONTH_NAMES = MONTHS.map((m) => `${m.slice(0, 3)}${m.length > 3 ? `(?:${m.slice(3)})?` : ""}`).join("|");
+/** A month as a whole word, captured, an abbreviation's full stop allowed. */
+const MONTH = `(${MONTH_NAMES})\\b\\.?`;
+const WEEKDAY_NAMES = WEEKDAYS.join("|");
+const WEEKDAY = `(${WEEKDAY_NAMES})`;
+const COUNT = "(\\d{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten)";
+/** A phrase that says when something may start, not when it is due: no due time. */
+const NOT_A_DEADLINE = /\b(not before|not until|not till|no earlier than|no sooner than|starting|once)\b|\bafter\b(?!\s+(next|tomorrow)\b)/;
+/** A time of day in the phrase: "before 5pm Friday" is due on Friday. */
+const TIME_OF_DAY = /\b\d{1,2}(:\d{2})?\s*(am|pm)\b|\b\d{1,2}:\d{2}\b|\b(noon|midnight|eod|cob|close of business)\b|\bend of (the )?day\b/;
+/** Words that move a weekday on ("Friday next week", "the Friday after next", "a week from Friday"): the model's to read. */
+const WEEKDAY_MOVED = /\b(next|after|following|week|weeks|from|fortnight)\b/;
+/** What a due phrase must hold for the model's date to stand on it: a digit, or a word that names a time. */
+const DATE_WORDS = new RegExp(`\\d|\\b(today|tonight|tomorrow|week|weeks|weekend|fortnight|month|months|year|day|days|noon|midnight|eod|${WEEKDAY_NAMES}|${MONTH_NAMES})\\b`);
 
 /** A calendar day as YYYY-MM-DD when it is one (2026-02-30 is not), else null. */
 export function realDay(y: number, m: number, d: number): string | null {
@@ -78,74 +120,90 @@ export function realDay(y: number, m: number, d: number): string | null {
   return y >= 1000 && y <= 9999 && s === `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` ? s : null;
 }
 const plusDays = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+const weekdayOf = (day: string) => WEEKDAYS[new Date(`${day}T00:00:00Z`).getUTCDay()];
 
 /** The capture's UTC day, YYYY-MM-DD. */
 export const dayOf = (at: Date) => at.toISOString().slice(0, 10);
 
 /**
  * The day a due phrase names, counted from the capture day, or null when the rules can't read it (the model's date
- * is then asked for). Read, in this order:
- * - a date written out: 2026-11-06; "November 6", "Nov 6th", "6 November" (the next such day on or after the
- *   capture day);
- * - "today", "tonight", "end of (the) day"; "day after tomorrow"; "tomorrow";
- * - "in N days" or "within N days", "in N weeks" (a number up to 366, or a word up to ten, "a" and "an" one);
+ * is then asked for). The most specific reading first:
+ * - a date written out: 2026-11-06; "November 6", "Nov 6th, 2027", "6 November" (with no year, the next such day on
+ *   or after the capture day); "the 12th" (this month's, else next month's);
+ * - "day after tomorrow"; "tomorrow";
+ * - "in N days", "within N weeks", "N days from today" (a number up to 366 days, or a word up to ten, "a" one);
  * - "end of (the) month";
- * - a weekday ("by Friday", "on Friday", "this Friday"): the next one after the capture day, a week on when it is
- *   the capture's own weekday. "next Friday" is left to the model: people read it two ways.
- * "before" a day is due the day ahead of it.
+ * - a weekday ("by Friday", "this Friday", "EOD Friday"): the next one after the capture day, a week on when it is
+ *   the capture's own weekday. A weekday moved on ("next Friday", "Friday next week", "a week from Friday") is left
+ *   to the model, its date held to that weekday;
+ * - last, "today", "tonight", "end of (the) day", "EOD".
+ * "before" is due the day ahead ("before Friday", "before the trip on Friday": Thursday), unless a time of day is
+ * named ("before 5pm Friday": Friday). A phrase that says when something may start ("not before", "not until",
+ * "starting", "once", "after" but for "after next" and "after tomorrow") is no due time. Neither is a day before the capture's: the text
+ * is telling of the past.
  */
 export function resolveDue(phrase: string, captureDay: string): string | null {
   const p = folded(phrase);
-  const day = namedDay(p, captureDay);
-  if (day === null) return null;
-  return /\bbefore\b/.test(p) ? plusDays(day, -1) : day;
+  if (NOT_A_DEADLINE.test(p)) return null;
+  const named = namedDay(p, captureDay);
+  if (named === null) return null;
+  const due = /\bbefore\b/.test(p) && !TIME_OF_DAY.test(p) ? plusDays(named, -1) : named;
+  return due >= captureDay ? due : null;
 }
 
 function namedDay(p: string, today: string): string | null {
   const [cy, cm, cd] = today.split("-").map(Number);
   const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/.exec(p);
   if (iso) return realDay(Number(iso[1]), Number(iso[2]), Number(iso[3]));
-  const month = `(${MONTHS.map((m) => `${m.slice(0, 3)}${m.length > 3 ? `(?:${m.slice(3)})?` : ""}`).join("|")})\\.?`;
-  const md = new RegExp(`\\b${month}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`).exec(p);
-  const dm = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?${month}`).exec(p);
+  const md = new RegExp(`\\b${MONTH}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4})\\b)?`).exec(p);
+  const dm = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?${MONTH}(?:,?\\s+(\\d{4})\\b)?`).exec(p);
   if (md || dm) {
-    const [mWord, dText] = md ? [md[1], md[2]] : [dm![2], dm![1]];
+    const [mWord, dText, yText] = md ? [md[1], md[2], md[3]] : [dm![2], dm![1], dm![3]];
     const m = MONTHS.findIndex((name) => name.startsWith(mWord.slice(0, 3))) + 1;
     const d = Number(dText);
+    if (yText !== undefined) return realDay(Number(yText), m, d);
     const thisYear = realDay(cy, m, d);
-    if (thisYear !== null && thisYear >= today) return thisYear;
-    return realDay(cy + 1, m, d);
+    return thisYear !== null && thisYear >= today ? thisYear : realDay(cy + 1, m, d);
   }
-  if (/\b(today|tonight)\b|\bend of (the )?day\b/.test(p)) return today;
+  const ordinal = /\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/.exec(p);
+  if (ordinal) {
+    const d = Number(ordinal[1]);
+    const thisMonth = d >= cd ? realDay(cy, cm, d) : null;
+    return thisMonth ?? realDay(cm === 12 ? cy + 1 : cy, cm === 12 ? 1 : cm + 1, d);
+  }
   if (/\bday after tomorrow\b/.test(p)) return plusDays(today, 2);
   if (/\btomorrow\b/.test(p)) return plusDays(today, 1);
-  const within = /\b(?:in|within)\s+(\d{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(day|week)s?\b/.exec(p);
+  const within = new RegExp(`\\b(?:in|within)\\s+${COUNT}\\s+(day|week)s?\\b|\\b${COUNT}\\s+(day|week)s?\\s+from\\s+(?:today|now)\\b`).exec(p);
   if (within) {
-    const n = /^\d+$/.test(within[1]) ? Number(within[1]) : NUMBER_WORDS[within[1]];
-    const days = within[2] === "week" ? 7 * n : n;
+    const [count, unit] = within[1] !== undefined ? [within[1], within[2]] : [within[3], within[4]];
+    const n = /^\d+$/.test(count) ? Number(count) : NUMBER_WORDS[count];
+    const days = unit === "week" ? 7 * n : n;
     return days >= 1 && days <= 366 ? plusDays(today, days) : null;
   }
   if (/\bend of (the )?month\b/.test(p)) return plusDays(realDay(cm === 12 ? cy + 1 : cy, cm === 12 ? 1 : cm + 1, 1)!, -1);
-  const weekday = new RegExp(`\\b(next\\s+)?(${WEEKDAYS.join("|")})\\b`).exec(p);
+  const weekday = new RegExp(`\\b${WEEKDAY}\\b`).exec(p);
   if (weekday) {
-    if (weekday[1]) return null;
-    const ahead = (WEEKDAYS.indexOf(weekday[2]) - new Date(`${today}T00:00:00Z`).getUTCDay() + 7) % 7 || 7;
+    if (WEEKDAY_MOVED.test(p)) return null;
+    const ahead = (WEEKDAYS.indexOf(weekday[1]) - new Date(`${today}T00:00:00Z`).getUTCDay() + 7) % 7 || 7;
     return plusDays(today, ahead);
   }
+  if (/\b(today|tonight|eod|cob)\b|\bend of (the )?day\b|\bclose of business\b/.test(p)) return today;
   return null;
 }
 
 /**
- * The model's date, when it is a real day from the capture day to a year after it, and on the weekday the phrase
- * names when it names one (the local 7B gave "next Friday", captured on a Tuesday, as the next Tuesday); else null.
+ * The model's date, when the phrase it stands on names a time at all (a digit, or a word such as "week" or a
+ * weekday: a phrase of "by" names none), when it is a real day from the capture day to a year after it, and when it
+ * falls on the weekday the phrase names, if it names one (the local 7B gave "next Friday", captured on a Tuesday, as
+ * the next Tuesday). Else null.
  */
-export function modelDay(raw: unknown, captureDay: string, phrase = ""): string | null {
-  if (typeof raw !== "string") return null;
+export function modelDay(raw: unknown, captureDay: string, phrase: string): string | null {
+  if (typeof raw !== "string" || !DATE_WORDS.test(folded(phrase)) || NOT_A_DEADLINE.test(folded(phrase))) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
   const day = m ? realDay(Number(m[1]), Number(m[2]), Number(m[3])) : null;
   if (day === null || day < captureDay || day > plusDays(captureDay, 366)) return null;
   const named = WEEKDAYS.filter((w) => new RegExp(`\\b${w}\\b`).test(folded(phrase)));
-  return named.length === 0 || named.includes(WEEKDAYS[new Date(`${day}T00:00:00Z`).getUTCDay()]) ? day : null;
+  return named.length === 0 || named.includes(weekdayOf(day)) ? day : null;
 }
 
 // ── The answer ───────────────────────────────────────────────────────────────
@@ -160,7 +218,7 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
   let level: Inferred["level"] = null;
   const word = typeof a.level === "string" ? a.level.trim().toLowerCase() : "";
   const levelPhrase = quotedIn(a.level_phrase, text);
-  if (Object.hasOwn(LEVEL_WORDS, word) && levelPhrase !== null) {
+  if (Object.hasOwn(LEVEL_WORDS, word) && levelPhrase !== null && !negatedIn(levelPhrase, text)) {
     level = { value: Math.min(LEVEL_WORDS[word], INFERRED_CEILING) as PriorityLevel, word, phrase: levelPhrase };
   }
   let due: Inferred["due"] = null;
@@ -223,7 +281,7 @@ export async function inferPriority(text: string, capturedAt: Date, subject: Egr
 export function inferredStatement(inf: Inferred | null): { level: PriorityLevel; dueAt?: string; reason: string } | null {
   if (inf === null || (inf.level === null && inf.due === null)) return null;
   const parts = [
-    inf.level ? `${inf.level.word} from "${inf.level.phrase}"` : `no level stated (medium, the default)`,
+    inf.level ? `${inf.level.word} from "${inf.level.phrase}"` : `no level read (medium, the default)`,
     ...(inf.due ? [`due ${inf.due.day} from "${inf.due.phrase}"${inf.due.by === "model" ? " (the model's date)" : ""}`] : []),
   ];
   return {
