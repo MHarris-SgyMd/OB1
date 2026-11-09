@@ -21,6 +21,7 @@ export const OPERATIONS = {
   list_thought_ids: { method: "GET", path: "/v1/thought-ids" },
   list_thoughts: { method: "GET", path: "/v1/thoughts" },
   open_item: { method: "POST", path: "/v1/items" },
+  plan_context: { method: "POST", path: "/v1/plan-context" },
   plugins: { method: "GET", path: "/v1/plugins" },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}" },
   propose_item_close: { method: "POST", path: "/v1/items/{id}/proposals" },
