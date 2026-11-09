@@ -48,7 +48,7 @@
     "entities": {
       "people": ["Jonathan Edwards"],
       "repos": ["NateBJones-Projects/OB1"],
-      "files": ["integrations/agent-memory-api/index.ts"],
+      "files": ["plugins/agent-memory/index.ts"],
       "customers": [],
       "topics": ["agent memory", "write-back"]
     }

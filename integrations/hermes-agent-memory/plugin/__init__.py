@@ -1,15 +1,16 @@
 """OB1 (OpenBrain) memory provider for Hermes Agent.
 
 Connects Hermes agents to Nate Jones' OpenBrain governed memory system.
-The backend is a Supabase Edge Function ("agent-memory-api") that exposes
-the OB1 v1 memory contract: recall, writeback, review queue, recall traces,
-usage reporting, inspection.
+The backend is the brain's agent-memory plugin (plugins/agent-memory), whose
+REST routes under /api/v1/plugins/agent-memory serve the OB1 v1 memory
+contract: recall, writeback, review queue, recall traces, usage reporting,
+listing. A refusal is answered as its code (`code` in the JSON body).
 
 Provides:
 - Auto-recall before every LLM turn (via `prefetch`)
 - Auto-writeback after every turn (via `sync_turn`)
 - Token / model / agent tracking via `on_turn_start` kwargs
-- Six explicit tools for direct memory ops (search, store, recall_trace, ...)
+- Seven explicit tools for direct memory ops (search, store, recall_trace, ...)
 - Setup-wizard support via get_config_schema / save_config
 
 Config:
@@ -25,6 +26,7 @@ Install:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +34,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,17 +53,63 @@ _DEFAULT_WORKSPACE_ID = "default"
 _DEFAULT_PROJECT_ID: Optional[str] = None  # null in payloads when unset
 _DEFAULT_MAX_RECALL_RESULTS = 10
 _DEFAULT_API_TIMEOUT = 8.0
+# A write-back's own timeout: each memory is a capture with its model calls (an embedding and a metadata call), run
+# one after another in the request, so a part of ten can take tens of seconds against a cloud model. At most 255 s,
+# the brain's own idle timeout.
+_DEFAULT_WRITEBACK_TIMEOUT = 60.0
 _MIN_CAPTURE_LENGTH = 10
 _DEFAULT_CONFIDENCE = 0.7
 # How long a queue_prefetch result is considered fresh before prefetch()
 # falls back to a sync recall. Hermes turns are typically <60s.
 _PREFETCH_TTL_SECONDS = 90.0
 
-# OB1 Edge Function accepts two schema_version literals per endpoint —
+# The plugin accepts two schema_version literals per route —
 # we use the generic "agent_memory" variants since this is a Hermes runtime
-# (not OpenClaw). See integrations/agent-memory-api/index.ts.
+# (not OpenClaw). See plugins/agent-memory/index.ts.
 _RECALL_SCHEMA_VERSION = "openbrain.agent_memory.recall.v1"
 _WRITEBACK_SCHEMA_VERSION = "openbrain.agent_memory.writeback.v1"
+# The most memories one write-back request carries. The plugin takes at most 50 (TOO_MANY_MEMORIES), but a longer
+# payload is sent in parts of ten: each part's request stays well inside the write-back timeout (above), and a part
+# that fails costs that part alone.
+_WRITEBACK_PART_MEMORIES = 10
+# The plugin's bound on an id: an idempotency key or a step id, a part's suffix included.
+_ID_MAX = 200
+
+
+def _within_bound(value: str) -> str:
+    """An id as the plugin takes it: the value, or its sha256 where it would
+    pass the plugin's 200 characters. The same value always gives the same id."""
+    return value if len(value) <= _ID_MAX else hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _part_id(value: str, n: int) -> str:
+    """A part's own idempotency key or step id: ``value`` with ``:part<n>``,
+    the value's sha256 standing for it where that would pass 200 characters."""
+    part = f"{value}:part{n}"
+    if len(part) <= _ID_MAX:
+        return part
+    return f"{hashlib.sha256(value.encode('utf-8')).hexdigest()}:part{n}"
+
+
+def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_PART_MEMORIES) -> List[Dict[str, Any]]:
+    """A memory_payload as parts of at most ``limit`` memories each, in its own
+    order: every item of every list but ``entities`` is one memory. One part
+    when it fits; ``entities``, and any value that is no list, ride with the
+    first part."""
+    parts: List[Dict[str, Any]] = [{}]
+    count = 0
+    for key, items in memory_payload.items():
+        if key == "entities" or not isinstance(items, list):
+            parts[0][key] = items
+            continue
+        for item in items:
+            if count == limit:
+                parts.append({})
+                count = 0
+            parts[-1].setdefault(key, []).append(item)
+            count += 1
+    return parts
+
 
 # Trivial messages we should not write back as memory turns.
 _TRIVIAL_RE = re.compile(
@@ -88,11 +137,12 @@ def _default_config() -> dict:
         "auto_capture": True,
         "max_recall_results": _DEFAULT_MAX_RECALL_RESULTS,
         "api_timeout": _DEFAULT_API_TIMEOUT,
+        "writeback_timeout": _DEFAULT_WRITEBACK_TIMEOUT,
         "default_confidence": _DEFAULT_CONFIDENCE,
         # Default-on: an agent's own writes land as review_status="pending" by
         # default (governance); recall must include unconfirmed or the agent
         # never sees its own prior memories. Pending memories are still ranked
-        # lower than confirmed ones via the Edge Function's scoring.
+        # lower than confirmed ones by the plugin's ranking.
         "include_unconfirmed_recall": True,
         "require_review_by_default": True,
         # Multi-tenant per-agent workspace (mirrors the OpenClaw plugin's
@@ -171,6 +221,11 @@ def _load_ob1_config(hermes_home: str) -> dict:
         config["api_timeout"] = max(1.0, min(30.0, float(config.get("api_timeout", _DEFAULT_API_TIMEOUT))))
     except Exception:
         config["api_timeout"] = _DEFAULT_API_TIMEOUT
+
+    try:
+        config["writeback_timeout"] = max(8.0, min(255.0, float(config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))))
+    except Exception:
+        config["writeback_timeout"] = _DEFAULT_WRITEBACK_TIMEOUT
 
     try:
         config["default_confidence"] = max(0.0, min(1.0, float(config.get("default_confidence", _DEFAULT_CONFIDENCE))))
@@ -398,7 +453,10 @@ def _format_recall_context(memories: List[Dict[str, Any]], max_results: int) -> 
         if not summary:
             continue
         bits: List[str] = []
-        rel = _format_relative_time(item.get("updated_at") or item.get("created_at") or "")
+        # The plugin's memory carries its times under freshness: when a person
+        # last confirmed it, else when it was written.
+        freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+        rel = _format_relative_time(freshness.get("last_confirmed_at") or freshness.get("created_at") or "")
         if rel:
             bits.append(f"[{rel}]")
         policy = item.get("use_policy") or {}
@@ -426,42 +484,117 @@ def _format_recall_context(memories: List[Dict[str, Any]], max_results: int) -> 
 # HTTP client (sync, urllib, no extra deps)
 # ---------------------------------------------------------------------------
 
-class _OB1Client:
-    """Thin sync HTTP client for the OB1 Agent Memory API.
+class OB1RequestError(RuntimeError):
+    """A route that answered other than 2xx, or a 2xx that is no JSON object: its HTTP status, and the plugin's
+    refusal code when the body names one (``NO_SUCH_MEMORY``,
+    ``UNSAFE_WRITEBACK``, ``PROVIDER_UNAVAILABLE``, ...). ``retry_after`` is
+    the Retry-After a 503 the caller may retry carries, in seconds."""
 
-    Uses x-brain-key header (NOT Authorization Bearer) per the OB1 contract.
-    All methods raise on transport errors; callers wrap appropriately.
+    def __init__(self, method: str, path: str, status: int, body: str,
+                 retry_after: Optional[str] = None):
+        self.status = status
+        self.body = body
+        self.retry_after = retry_after
+        self.code: Optional[str] = None
+        detail = ""
+        try:
+            parsed = json.loads(body) if body else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            code = parsed.get("code")
+            if isinstance(code, str):
+                self.code = code
+            message = parsed.get("message")
+            detail = f": {message}" if isinstance(message, str) and message else ""
+        what = self.code or body[:300]
+        super().__init__(f"OB1 {method} {path} failed: HTTP {status} {what}{detail}".rstrip())
+
+
+class OB1WritebackCut(RuntimeError):
+    """A write-back stopped at its deadline: the parts answered before it were
+    kept (``memories``, as the plugin answered them); ``unsent`` memories were
+    in parts never started; ``unconfirmed`` were in the part in flight, whose
+    wait the deadline cut. The plugin finishes a write-back its caller stops
+    waiting for, so those may well have been kept: sent again, the write-back
+    answers them, writing nothing twice."""
+
+    def __init__(self, memories: List[Any], unsent: int, unconfirmed: int = 0):
+        self.memories = memories
+        self.unsent = unsent
+        self.unconfirmed = unconfirmed
+        super().__init__(f"OB1 write-back stopped at its deadline: {len(memories)} memories kept, "
+                         f"{unconfirmed} sent but unconfirmed, {unsent} not sent")
+
+
+class _OB1Client:
+    """Thin sync HTTP client for the brain's agent-memory plugin.
+
+    ``endpoint`` is the plugin's REST base, ``https://<host>/api/v1/plugins/agent-memory``
+    (the stack's proxy publishes /api with deploy/compose.api-public.yaml).
+    Uses the x-brain-key header, which the REST core reads; it reads no
+    ``?key=``. All methods raise on transport errors and on a refusal
+    (``OB1RequestError``, its ``code`` the plugin's); callers wrap
+    appropriately.
     """
 
-    def __init__(self, endpoint: str, access_key: str, timeout: float):
+    def __init__(self, endpoint: str, access_key: str, timeout: float,
+                 writeback_timeout: float = _DEFAULT_WRITEBACK_TIMEOUT):
         self._endpoint = endpoint.rstrip("/")
         self._access_key = access_key
         self._timeout = timeout
+        self._writeback_timeout = writeback_timeout
+        # Set by stop_by at shutdown (time.monotonic()): no write-back part starts after it.
+        self._stop_at: Optional[float] = None
 
-    def _request(self, method: str, path: str, *, body: Optional[dict] = None) -> dict:
+    def stop_by(self, deadline: float) -> None:
+        """No write-back part starts after ``deadline`` (time.monotonic()); a part already in flight keeps the
+        wait it started with."""
+        self._stop_at = deadline if self._stop_at is None else min(self._stop_at, deadline)
+
+    def _writeback_wait(self, deadline: Optional[float]) -> Optional[float]:
+        """How long the next write-back part may wait: the write-back timeout, or less where a deadline is nearer;
+        None once the deadline has passed."""
+        ends = [d for d in (deadline, self._stop_at) if d is not None]
+        if not ends:
+            return self._writeback_timeout
+        left = min(ends) - time.monotonic()
+        return min(self._writeback_timeout, left) if left > 0 else None
+
+    def _request(self, method: str, path: str, *, body: Optional[dict] = None,
+                 query: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> dict:
         url = f"{self._endpoint}{path}"
+        if query:
+            url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(
-            url,
-            data=data,
-            method=method,
-            headers={
-                "Content-Type": "application/json",
-                "x-brain-key": self._access_key,
-            },
-        )
+        headers = {"x-brain-key": self._access_key}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+            with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                status = getattr(resp, "status", 200)
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-            raise RuntimeError(f"OB1 {method} {path} failed: HTTP {e.code} {err_body[:300]}") from e
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            raise OB1RequestError(method, path, e.code, err_body, retry_after) from e
+        try:
+            answer = json.loads(raw) if raw else None
+        except ValueError:
+            answer = None
+        if not isinstance(answer, dict):
+            # A 2xx that is not a JSON object, an empty one among them, is no answer of the plugin's: an endpoint
+            # pointing at some other page.
+            raise OB1RequestError(method, path, status, f"not the plugin's answer (not a JSON object): {raw}")
+        return answer
+
+    @staticmethod
+    def _id(value: str) -> str:
+        # A path segment: an id with a slash or a ? in it must not become another route.
+        return urllib.parse.quote(str(value), safe="")
 
     # ---- API contract methods ------------------------------------------
-
-    def health(self) -> dict:
-        return self._request("GET", "/health")
 
     def recall(self, *, workspace_id: str, project_id: Optional[str], task_type: str,
                query: str, scope: Optional[dict] = None,
@@ -470,12 +603,10 @@ class _OB1Client:
                task_id: Optional[str] = None,
                flow_id: Optional[str] = None,
                model_intent: Optional[dict] = None) -> dict:
-        # The Edge Function's writeback path stores memories with
-        # visibility="personal" by default, and its scopeMatches() filter at
-        # /recall drops personal memories unless scope.visibility="personal" is
-        # passed. So we always set scope.visibility="personal" to match what
-        # we wrote — without this, recall returns zero results despite
-        # match_thoughts finding the thought correctly.
+        # A memory written back with no project is personal, and the plugin's
+        # recall leaves personal memories out unless scope.visibility is
+        # "personal". So we always set it, to find what we wrote — without it a
+        # recall with no project configured answers nothing.
         body: dict = {
             "schema_version": _RECALL_SCHEMA_VERSION,
             "workspace_id": workspace_id,
@@ -493,7 +624,7 @@ class _OB1Client:
         if task_type:
             body["task_type"] = task_type
         if runtime:
-            body["runtime"] = runtime  # {name, version?} only — no other fields allowed
+            body["runtime"] = runtime  # {name, version?}
         if model_intent:
             body["model_intent"] = model_intent
         if task_id:
@@ -511,7 +642,10 @@ class _OB1Client:
                   task_id: Optional[str] = None,
                   flow_id: Optional[str] = None,
                   step_id: Optional[str] = None,
-                  idempotency_key: Optional[str] = None) -> dict:
+                  idempotency_key: Optional[str] = None,
+                  deadline: Optional[float] = None) -> dict:
+        # Answered {schema_version, memories}: each memory whole under a write
+        # key, its memory_id and thought_id alone under a capture-only key.
         body: dict = {
             "schema_version": _WRITEBACK_SCHEMA_VERSION,
             "workspace_id": workspace_id,
@@ -520,7 +654,7 @@ class _OB1Client:
         if project_id:
             body["project_id"] = project_id
         if runtime:
-            body["runtime"] = runtime  # {name, version?} only
+            body["runtime"] = runtime  # {name, version?}
         if models_used:
             body["models_used"] = models_used  # [{provider, model, role}]
         if source_refs:
@@ -533,44 +667,91 @@ class _OB1Client:
             body["flow_id"] = flow_id
         if step_id:
             body["step_id"] = step_id
-        if idempotency_key:
-            body["idempotency_key"] = idempotency_key
-        return self._request("POST", "/writeback", body=body)
+        parts = _split_payload(memory_payload)
+        sizes = [sum(len(v) for k, v in part.items() if k != "entities" and isinstance(v, list)) for part in parts]
+        if len(parts) == 1:
+            if idempotency_key:
+                body["idempotency_key"] = _within_bound(idempotency_key)
+            wait = self._writeback_wait(deadline)
+            if wait is None:
+                raise OB1WritebackCut([], sizes[0])
+            return self._send_part(body, wait, deadline, [], sizes[0], 0)
+        # More than a part: each part a write-back of its own, the parts' answers joined part after part (each in
+        # the plugin's order of kinds). The plugin keys each memory by the write-back's key, or by one it makes of
+        # the workspace, runtime, task, step and the memory's text, and the memory's index in the request: so each
+        # part has a key, or a step, of its own (`:part<n>`), and the same text at the same index of two parts is
+        # two memories, as it is in one write-back. A part refused or timed out raises, the parts before it kept
+        # and the ones after it not sent: the same write-back sent again answers the kept ones, writing nothing
+        # twice, and sends the rest (a refusal that holds, an unsafe memory, refuses it again). No part starts
+        # after the deadline, and a part's wait never runs past the deadline it started under: OB1WritebackCut says
+        # what was kept.
+        answer: dict = {}
+        memories: List[Any] = []
+        for n, part in enumerate(parts):
+            wait = self._writeback_wait(deadline)
+            if wait is None:
+                raise OB1WritebackCut(memories, sum(sizes[n:]))
+            body["memory_payload"] = part
+            if idempotency_key:
+                body["idempotency_key"] = _part_id(idempotency_key, n)
+            else:
+                body["step_id"] = _part_id(step_id or "step", n)
+            answer = self._send_part(body, wait, deadline, memories, sizes[n], sum(sizes[n + 1:]))
+            memories.extend(answer.get("memories") or [])
+        return {**answer, "memories": memories}
+
+    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any],
+                   in_flight: int, later: int) -> dict:
+        """One write-back request. One that times out with its wait cut short by the deadline is the deadline's cut
+        (OB1WritebackCut, chained to the timeout): the memories kept before it, this part's unconfirmed (the
+        plugin finishes it all the same), and the later parts' unsent. A refusal (OB1RequestError) is never a cut."""
+        try:
+            return self._request("POST", "/writeback", body=body, timeout=wait)
+        except OSError as e:  # a read timeout (TimeoutError) or a connect one (URLError)
+            if wait >= self._writeback_timeout or self._writeback_wait(deadline) is not None:
+                raise
+            raise OB1WritebackCut(kept, later, in_flight) from e
 
     def report_usage(self, request_id: str, *, used: List[str],
                      ignored: List[str]) -> dict:
-        # API expects used_memory_ids: [] and ignored: [{memory_id, reason?}].
+        # Takes used_memory_ids: [] and ignored: [{memory_id, reason?}]; answers
+        # {recorded: {used, ignored}}, the memories it marked.
         body = {
             "used_memory_ids": used,
             "ignored": [{"memory_id": mid} for mid in ignored],
         }
-        return self._request("POST", f"/recall/{request_id}/usage", body=body)
+        return self._request("POST", f"/recalls/{self._id(request_id)}/usage", body=body)
 
     def list_memories(self, *, workspace_id: str, project_id: Optional[str] = None,
                       review_status: Optional[str] = None, limit: int = 20) -> dict:
-        # Encoded as POST body to avoid URL-encoding issues with workspace ids.
-        body: dict = {"workspace_id": workspace_id, "limit": limit}
-        if project_id:
-            body["project_id"] = project_id
-        if review_status:
-            body["review_status"] = review_status
-        return self._request("POST", "/memories/list", body=body)
+        # Answers {memories, count}, newest first.
+        return self._request("GET", "/memories", query={
+            "workspace_id": workspace_id, "project_id": project_id,
+            "review_status": review_status, "limit": limit,
+        })
 
     def get_review_queue(self, *, workspace_id: str, project_id: Optional[str] = None) -> dict:
-        body: dict = {"workspace_id": workspace_id}
-        if project_id:
-            body["project_id"] = project_id
-        return self._request("POST", "/memories/review", body=body)
+        # Answers {memories}: those still waiting for a person's confirmation.
+        return self._request("GET", "/review-queue", query={
+            "workspace_id": workspace_id, "project_id": project_id,
+        })
 
     def review_memory(self, memory_id: str, *, action: str, notes: Optional[str] = None,
-                      reviewer: str = "ob1-plugin") -> dict:
-        body: dict = {"action": action, "reviewer": reviewer}
+                      actor_label: str = "ob1-plugin", content: Optional[str] = None,
+                      summary: Optional[str] = None) -> dict:
+        # Answers {memory}. An edit gives content, summary or both.
+        body: dict = {"action": action, "actor_label": actor_label}
         if notes:
             body["notes"] = notes
-        return self._request("PATCH", f"/memories/{memory_id}/review", body=body)
+        if content:
+            body["content"] = content
+        if summary:
+            body["summary"] = summary
+        return self._request("PATCH", f"/memories/{self._id(memory_id)}/review", body=body)
 
     def get_recall_trace(self, request_id: str) -> dict:
-        return self._request("GET", f"/recall-traces/{request_id}")
+        # Answers {trace, items}: a recall made under a write key.
+        return self._request("GET", f"/recalls/{self._id(request_id)}")
 
 
 # ---------------------------------------------------------------------------
@@ -646,13 +827,15 @@ LIST_REVIEW_SCHEMA = {
 
 REVIEW_MEMORY_SCHEMA = {
     "name": "ob1_review_memory",
-    "description": "Confirm, reject, or annotate a memory in the review queue.",
+    "description": "Confirm, reject, edit, or mark evidence-only a memory in the review queue. An edit gives content, summary or both.",
     "parameters": {
         "type": "object",
         "properties": {
             "memory_id": {"type": "string"},
             "action": {"type": "string", "enum": ["confirm", "reject", "edit", "evidence_only"]},
             "notes": {"type": "string"},
+            "content": {"type": "string", "description": "edit: the memory's new text."},
+            "summary": {"type": "string", "description": "edit: the memory's new summary."},
         },
         "required": ["memory_id", "action"],
     },
@@ -691,7 +874,19 @@ class OB1MemoryProvider(MemoryProvider):
         self._client: Optional[_OB1Client] = None
         self._session_id: str = ""
         self._turn_count: int = 0
+        # The latest background write-back, of any kind: the next one gives it 2 s to finish first.
         self._sync_thread: Optional[threading.Thread] = None
+        # Every background write-back still running (sync_turn's, on_session_end's, on_pre_compress's): shutdown
+        # joins them all.
+        self._writeback_threads: List[threading.Thread] = []
+        # The last session end's deadline (time.monotonic()): shutdown right after it, at exit, shares it.
+        self._session_end_by: Optional[float] = None
+        # The last session end's write-back, by its session and findings: Hermes's TUI ends a session twice with
+        # the same transcript (finalize, then close), and a second identical write-back would race the first.
+        self._last_session_end: Optional[str] = None
+        # _start_writeback runs on Hermes's background worker (sync_turn, and on_session_end on /new), on the
+        # compressing thread, and wherever else Hermes ends a session.
+        self._writeback_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_lock = threading.Lock()
         # (query, formatted_context, request_id, timestamp)
@@ -740,7 +935,7 @@ class OB1MemoryProvider(MemoryProvider):
         return [
             {
                 "key": "endpoint",
-                "description": "OB1 Agent Memory API URL (e.g. http://127.0.0.1:8787/agent-memory-api)",
+                "description": "The brain's agent-memory plugin routes (e.g. https://<host>/api/v1/plugins/agent-memory)",
                 "secret": False,
                 "required": True,
             },
@@ -847,24 +1042,70 @@ class OB1MemoryProvider(MemoryProvider):
                     endpoint=self._endpoint,
                     access_key=self._access_key,
                     timeout=self._api_timeout,
+                    writeback_timeout=self._config["writeback_timeout"],
                 )
-                # Optional health probe — log warning if unreachable but keep
-                # provider active so the agent can still operate.
-                try:
-                    self._client.health()
-                except Exception:
-                    logger.warning("OB1 endpoint health check failed (continuing)", exc_info=True)
+                # No health probe: the plugin has no keyless route to ask, and
+                # a first recall or write-back that fails is logged as it fails.
             except Exception:
                 logger.warning("OB1 client initialization failed", exc_info=True)
                 self._active = False
                 self._client = None
 
+    def _session_end_deadline(self) -> float:
+        """A session end's deadline, fresh each time: one write-back timeout from now. Kept for a shutdown that
+        follows within it."""
+        self._session_end_by = time.monotonic() + self._writeback_budget()
+        return self._session_end_by
+
+    def _writeback_budget(self) -> float:
+        return float(self._config.get("writeback_timeout", _DEFAULT_WRITEBACK_TIMEOUT))
+
+    def _start_writeback(self, target, name: str) -> None:
+        """A background write-back, kept so shutdown can wait for it. The previous one gets 2 s to finish first,
+        so turns' write-backs go roughly in order."""
+        previous = self._sync_thread
+        if previous and previous.is_alive():
+            previous.join(timeout=2.0)
+        thread = threading.Thread(target=target, daemon=True, name=name)
+        with self._writeback_lock:
+            self._writeback_threads = [t for t in self._writeback_threads if t.is_alive()]
+            self._writeback_threads.append(thread)
+            self._sync_thread = thread
+        thread.start()
+
     def shutdown(self) -> None:
-        for attr in ("_sync_thread", "_prefetch_thread"):
-            t = getattr(self, attr, None)
-            if t and t.is_alive():
-                t.join(timeout=5.0)
-            setattr(self, attr, None)
+        # Exit waits for write-backs at most one write-back timeout: the session end's, when it came just before
+        # (Hermes ends the session, then shuts down), else one from now. Every background write-back still running
+        # gets until then, and the client starts no write-back part after it (it may serve no more, a gateway's
+        # process living on).
+        now = time.monotonic()
+        deadline = (self._session_end_by if self._session_end_by is not None and self._session_end_by > now
+                    else now + self._writeback_budget())
+        if self._client:
+            self._client.stop_by(deadline)
+        with self._writeback_lock:
+            threads = list(self._writeback_threads)
+        running = sum(1 for t in threads if t.is_alive())
+        if running:
+            # Said before the wait, so a process killed during it (Hermes's CLI exit watchdog, HERMES_EXIT_WATCHDOG_S,
+            # 30 s by default) still leaves a record of what was outstanding.
+            logger.warning("OB1: waiting up to %.0f s for %d background write-back(s) at exit (writeback_timeout)",
+                           max(0.0, deadline - now), running)
+        for t in threads:
+            if t.is_alive():
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
+        cut = sum(1 for t in threads if t.is_alive())
+        if cut:
+            logger.warning("OB1: %d background write-back(s) still running at the exit deadline (writeback_timeout): "
+                           "exit does not wait for them, and they start no further part", cut)
+        with self._writeback_lock:
+            self._writeback_threads = []
+            self._sync_thread = None
+        self._session_end_by = None
+        t = self._prefetch_thread
+        if t and t.is_alive():
+            t.join(timeout=5.0)
+        self._prefetch_thread = None
         with self._prefetch_lock:
             self._prefetch_cache = None
 
@@ -936,8 +1177,8 @@ class OB1MemoryProvider(MemoryProvider):
         if not q:
             return "", None
         try:
-            # visibility="personal" matches the Edge Function writeback default —
-            # without it, recall drops every personal-visibility memory we wrote.
+            # visibility="personal": a memory written back with no project is
+            # personal, and without it recall drops every one of those we wrote.
             scope: Dict[str, Any] = {
                 "visibility": "personal",
                 "project_only": bool(self._project_id),
@@ -1104,24 +1345,34 @@ class OB1MemoryProvider(MemoryProvider):
                     task_id=task_id,
                     flow_id=flow_id,
                 )
+            except OB1WritebackCut as cut:
+                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back, "
+                               "%d unconfirmed", cut.unsent, cut.unconfirmed)
             except Exception:
                 logger.debug("OB1 sync_turn writeback failed", exc_info=True)
 
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=2.0)
-        self._sync_thread = threading.Thread(target=_run, daemon=True, name="ob1-sync")
-        self._sync_thread.start()
+        self._start_writeback(_run, "ob1-sync")
 
     # ---- Session-end + pre-compress hooks ----------------------------
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Extract structured findings from the full session and write to OB1.
 
-        Runs synchronously (not threaded) since the agent is already exiting —
-        a daemon thread might be killed before completing.
+        Hermes calls it at every real session boundary: at exit, before
+        shutdown, and mid-process too (/new, and a compression, in place or
+        not, called inside the turn), the provider serving on after. So it
+        writes back in the background, as sync_turn does, holding its caller
+        at most the 2 s it gives the write-back before it: the write-back gets
+        at most one write-back timeout, and a shutdown that follows within it
+        (at exit) shares that deadline and waits for it. It stops nothing:
+        later write-backs go on as before. The same session's same findings
+        again (the TUI ends a session twice) are not written back twice.
         """
         if not self._active or not self._auto_capture or not self._write_enabled or not self._client:
             return
+        # First, so a shutdown just after a session end with nothing to write gets a deadline of its own, not one
+        # left by an earlier, mid-process session end.
+        deadline = self._session_end_deadline()
         if not messages:
             return
 
@@ -1137,6 +1388,14 @@ class OB1MemoryProvider(MemoryProvider):
                 "findings extracted by heuristics."
             ]}
 
+        # The same session's same findings again (Hermes's TUI ends a session at finalize and again at close, with one
+        # transcript): written back once. The plugin would answer a resend by its keys, but two at once would race.
+        same = hashlib.sha256(json.dumps([self._session_id, findings], sort_keys=True).encode("utf-8")).hexdigest()
+        if same == self._last_session_end:
+            logger.debug("OB1 session end: the same findings as the last session end, not written back again")
+            return
+        self._last_session_end = same
+
         mp = self._resolve_model_provider()
         models_used: List[Dict[str, Any]] = []
         if mp.get("model"):
@@ -1151,19 +1410,31 @@ class OB1MemoryProvider(MemoryProvider):
             "requires_review": self._config["require_review_by_default"],
         }
 
-        try:
-            self._client.writeback(
-                workspace_id=self._workspace_id,
-                project_id=self._project_id,
-                memory_payload=findings,
-                runtime={"name": self._runtime_name, "version": self._runtime_version or None},
-                models_used=models_used or None,
-                provenance=provenance,
-                task_id=self._session_id or None,
-                flow_id=self._agent_identity,
-            )
-        except Exception:
-            logger.debug("OB1 on_session_end writeback failed", exc_info=True)
+        client = self._client
+        kwargs = dict(
+            workspace_id=self._workspace_id,
+            project_id=self._project_id,
+            memory_payload=findings,
+            runtime={"name": self._runtime_name, "version": self._runtime_version or None},
+            models_used=models_used or None,
+            provenance=provenance,
+            task_id=self._session_id or None,
+            flow_id=self._agent_identity,
+            deadline=deadline,
+        )
+
+        def _run() -> None:
+            try:
+                client.writeback(**kwargs)
+            except OB1WritebackCut as cut:
+                logger.warning("OB1 session end: %d finding(s) not written back by the deadline (writeback_timeout), "
+                               "%d more sent but unconfirmed (the plugin may have kept them); %d kept",
+                               cut.unsent, cut.unconfirmed, len(cut.memories))
+            except Exception:
+                # Once a session: a refusal or a key gone wrong is worth seeing.
+                logger.warning("OB1 session end write-back failed", exc_info=True)
+
+        self._start_writeback(_run, "ob1-session-end")
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Extract findings from messages about to be compressed and return
@@ -1216,13 +1487,13 @@ class OB1MemoryProvider(MemoryProvider):
                         flow_id=flow_id,
                         idempotency_key=f"precompress:{task_id or 'no-task'}:{len(messages)}",
                     )
+                except OB1WritebackCut as cut:
+                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written "
+                                   "back, %d unconfirmed", cut.unsent, cut.unconfirmed)
                 except Exception:
                     logger.debug("OB1 on_pre_compress writeback failed", exc_info=True)
 
-            if self._sync_thread and self._sync_thread.is_alive():
-                self._sync_thread.join(timeout=2.0)
-            self._sync_thread = threading.Thread(target=_run, daemon=True, name="ob1-precompress")
-            self._sync_thread.start()
+            self._start_writeback(_run, "ob1-precompress")
 
         # Build a concise summary for the compression prompt. Compression
         # itself is text-based, so we hand back a structured-but-readable
@@ -1402,8 +1673,13 @@ class OB1MemoryProvider(MemoryProvider):
             return tool_error("memory_id and action are required")
         if action not in ("confirm", "reject", "edit", "evidence_only"):
             return tool_error(f"Invalid action: {action}")
+        content = str(args.get("content") or "").strip() or None
+        summary = str(args.get("summary") or "").strip() or None
+        if action == "edit" and not content and not summary:
+            return tool_error("an edit gives content, summary or both")
         response = self._client.review_memory(
-            memory_id, action=action, notes=args.get("notes"), reviewer=f"hermes:{self._agent_identity}"
+            memory_id, action=action, notes=args.get("notes"),
+            actor_label=f"hermes:{self._agent_identity}", content=content, summary=summary,
         )
         return json.dumps(response)
 

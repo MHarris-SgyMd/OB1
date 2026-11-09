@@ -3606,6 +3606,230 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
+  // The repository's two clients of the plugin (SMD-2690 PR 2b), each client method answered on its routes, not refused:
+  // the REST input is strict, so a field a client sends that the plugin does not take, or a route it no longer has, fails here.
+  console.log("\n[agent-memory's clients] the OpenClaw and Hermes clients on the plugin's routes: each client method, answered");
+  {
+    const ENDPOINT = `${API}/v1/plugins/agent-memory`;
+    const { AgentMemoryClient, AgentMemoryError, FIELDS, corpusDocument, corpusHits } = await import("../integrations/openclaw-agent-memory/plugin/src/client.ts");
+    // The fields the OpenClaw client passes on are each operation's own: the REST input is strict, so the client drops the rest.
+    for (const [op, fields] of Object.entries(FIELDS)) {
+      const own = Object.keys(opOf("agent-memory", op).input).filter((f) => f !== "memory_id" && f !== "request_id").sort();
+      assert([...fields].sort().join() === own.join(), `the OpenClaw client passes on exactly ${op}'s fields (${[...fields].sort().join()} | ${own.join()})`);
+    }
+    const oc = new AgentMemoryClient({ endpoint: `${ENDPOINT}/`, accessKey: KEYS.writer, workspaceId: "ws-clients", projectId: "p-openclaw", includeUnconfirmedRecall: true });
+    // A call the plugin refuses throws: caught, so it fails one row here rather than ending the suite.
+    try {
+      const written = await oc.writeback({ memory_payload: { lessons: ["ocxmem_route the OpenClaw client writes back through the plugin."] }, runtime: { name: "openclaw", version: "0.2.0" }, task_id: "t-oc", step_id: "s1" });
+      const mem = written.memories?.[0];
+      assert(written.schema_version === "openbrain.openclaw.writeback_response.v1" && UUID.test(mem?.memory_id ?? "") && mem?.scope?.project_id === "p-openclaw" && mem?.review_status === "pending",
+        `OpenClaw writeback: the memory written whole under a write key, pending review, in the configured project (${JSON.stringify(written).slice(0, 200)})`);
+      const recalled = await oc.recall({ query: "ocxmem_route", runtime: { name: "openclaw" }, limits: { max_items: 5, max_tokens: 4000 } });
+      const requestId: string = recalled.request_id;
+      assert(recalled.schema_version === "openbrain.openclaw.recall_response.v1" && UUID.test(requestId ?? "") && recalled.memories?.some((m: Body) => m.memory_id === mem?.memory_id),
+        `OpenClaw recall: traced, and finds what it wrote, unconfirmed as configured (${JSON.stringify(recalled).slice(0, 200)})`);
+      const usage = await oc.reportUsage(requestId, { used_memory_ids: [mem.memory_id], ignored: [] });
+      const trace = await oc.getRecallTrace(requestId);
+      assert(usage.recorded?.used === 1 && usage.recorded?.ignored === 0 && trace.trace?.request_id === requestId
+        && trace.items?.some((i: Body) => i.memory?.memory_id === mem.memory_id && i.used === true),
+        `OpenClaw usage on /recalls/{id}/usage, then its trace on /recalls/{id}: the memory marked used (${JSON.stringify(usage)}; ${JSON.stringify(trace).slice(0, 200)})`);
+      const otherProject = new AgentMemoryClient({ endpoint: ENDPOINT, accessKey: KEYS.writer, workspaceId: "ws-clients", projectId: "p-elsewhere" });
+      const elsewhereId = (await otherProject.writeback({ memory_payload: { lessons: ["ocxmem_elsewhere another project's pending lesson."] } })).memories?.[0]?.memory_id;
+      const queue = await oc.listReviewQueue();
+      const reviewed = await oc.reviewMemory(mem.memory_id, { action: "edit", actor_label: "openclaw:test", content: "ocxmem_route edited by the OpenClaw client.", notes: "client contract" });
+      const restricted = await oc.reviewMemory(mem.memory_id, { action: "restrict_scope", visibility: "personal" });
+      const inspected = await oc.inspectMemory(mem.memory_id);
+      assert(queue.memories?.some((m: Body) => m.memory_id === mem.memory_id) && typeof elsewhereId === "string"
+        && !queue.memories?.some((m: Body) => m.memory_id === elsewhereId) && queue.memories?.every((m: Body) => m.scope?.project_id === "p-openclaw")
+        && reviewed.memory?.content === "ocxmem_route edited by the OpenClaw client."
+        && restricted.memory?.scope?.visibility === "personal" && inspected.memory?.memory_id === mem.memory_id && Array.isArray(inspected.source_refs),
+        `OpenClaw review queue on /review-queue, the configured project's alone, an edit and a restriction on /memories/{id}/review, the memory on /memories/{id} (${JSON.stringify(queue).slice(0, 120)}; ${JSON.stringify(inspected).slice(0, 120)})`);
+      const thrown = async (f: () => Promise<unknown>) => {
+        try {
+          await f();
+          return null;
+        } catch (e) {
+          return e;
+        }
+      };
+      const refused = await thrown(() => oc.inspectMemory(NO_ROW));
+      assert(refused instanceof AgentMemoryError && refused.status === 404 && refused.code === "NO_SUCH_MEMORY" && refused.message.includes("404 NO_SUCH_MEMORY"),
+        `OpenClaw: a refusal thrown with its status and the plugin's code (${String(refused)})`);
+      const capturer = new AgentMemoryClient({ endpoint: `${ENDPOINT}//`, accessKey: KEYS.capture, workspaceId: "ws-clients", projectId: "p-openclaw" });
+      const ids = await capturer.writeback({ memory_payload: { decisions: ["ocxmem_capture a capture key's write-back."] }, provenance: { default_status: "user_confirmed", requires_review: false } });
+      assert(ids.memories?.length === 1 && Object.keys(ids.memories[0]).sort().join() === "memory_id,thought_id",
+        `OpenClaw under a capture-only key: each memory answered by its ids alone (${JSON.stringify(ids)})`);
+      // A field a model adds to a tool's arguments is dropped, not sent: the plugin would refuse it.
+      const extra = await oc.recall({ query: "ocxmem_route", workspace_hint: "x", limits: { max_items: 5 } });
+      const extraReview = await oc.reviewMemory(mem.memory_id, { action: "evidence_only", actor_id: "an old field", actor_label: "openclaw:test" });
+      const extraWrite = await oc.writeback({ memory_payload: { lessons: ["ocxmem_stray a write-back with a stray field."] }, stray: 1 });
+      const extraUsage = await oc.reportUsage(requestId, { used_memory_ids: [], ignored: [], stray: 1 });
+      assert(Array.isArray(extra.memories) && extraReview.memory?.review_status === "evidence_only" && extraWrite.memories?.length === 1 && extraUsage.recorded?.used === 0,
+        `OpenClaw drops a field the route does not take (a recall's, a write-back's and usage's stray field, a review's actor_id) rather than be refused (${JSON.stringify(extraReview).slice(0, 120)}; ${JSON.stringify(extraUsage)})`);
+      // An id that is not a UUID stays one path segment, encoded: refused as input, not routed elsewhere.
+      const notUuid = await thrown(() => oc.inspectMemory("not/a-uuid"));
+      assert(notUuid instanceof AgentMemoryError && notUuid.status === 400 && notUuid.code === "REFUSED_INPUT",
+        `OpenClaw: an id with a slash stays one segment, refused 400 REFUSED_INPUT rather than reaching another route (${String(notUuid)})`);
+      // A retryable 503 carries its Retry-After to the caller.
+      embedDown = true;
+      const down = await thrown(() => oc.recall({ query: "ocxmem_route while the provider is away" }));
+      embedDown = false;
+      assert(down instanceof AgentMemoryError && down.status === 503 && down.code === "PROVIDER_UNAVAILABLE" && Number(down.retryAfter) > 0
+        && down.message.includes("the brain's embedding provider did not answer"),
+        `OpenClaw: a 503 PROVIDER_UNAVAILABLE thrown with its Retry-After (${String(down)}; retryAfter ${(down as { retryAfter?: unknown })?.retryAfter})`);
+      // The memory corpus OpenClaw searches, from the plugin's real answers.
+      const hits = corpusHits(recalled);
+      const hit = hits.find((h: Body) => h.id === mem.memory_id);
+      const doc = corpusDocument(inspected, `openbrain://memory/${mem.memory_id}`, mem.memory_id);
+      assert(hit?.path === `openbrain://memory/${mem.memory_id}` && hit?.updatedAt === mem.freshness.created_at && hit?.provenanceLabel === "evidence"
+        && doc?.id === mem.memory_id && doc?.content === inspected.memory.content && doc?.updatedAt === inspected.memory.freshness.created_at
+        && corpusDocument({}, "openbrain://memory/x", "x") === null,
+        `OpenClaw's memory corpus: a recall's hit by its memory_id and freshness, and get_memory's {memory} read as the document (${JSON.stringify(hit)}; ${JSON.stringify(doc)})`);
+      const ranked = corpusHits({ memories: [
+        { memory_id: "m-first", summary: "First summary", content: "First content", use_policy: { can_use_as_instruction: true } },
+        { memory_id: "m-second", summary: "Second summary", content: "Second content", use_policy: { can_use_as_evidence: true } },
+      ] });
+      const whole = corpusDocument({ memory: { memory_id: "m-doc", summary: "Short summary", content: "line one\nline two", use_policy: {} } }, "openbrain://memory/m-doc", "m-doc");
+      assert(ranked.length === 2 && ranked[0].score > ranked[1].score && ranked[0].title === "First summary" && ranked[0].snippet === "First summary"
+        && ranked[0].provenanceLabel === "instruction" && ranked[1].provenanceLabel === "evidence"
+        && whole?.content === "line one\nline two" && whole?.title === "Short summary" && whole?.lineCount === 2 && whole?.provenanceLabel === undefined,
+        `OpenClaw's memory corpus: hits scored by rank, titled and excerpted by summary; a document is the memory's whole content (${JSON.stringify(ranked)}; ${JSON.stringify(whole)})`);
+      // Its time is when a person last confirmed the memory, before when it was written.
+      const confirmedNow = await oc.reviewMemory(mem.memory_id, { action: "confirm", actor_label: "openclaw:test" });
+      const confirmedDoc = corpusDocument(await oc.inspectMemory(mem.memory_id), `openbrain://memory/${mem.memory_id}`, mem.memory_id);
+      const lastConfirmed = confirmedNow.memory?.freshness?.last_confirmed_at;
+      assert(typeof lastConfirmed === "string" && lastConfirmed !== mem.freshness.created_at && confirmedDoc?.updatedAt === lastConfirmed && confirmedDoc?.provenanceLabel === "instruction",
+        `OpenClaw's memory corpus dates a confirmed memory by its confirmation, not its writing (${lastConfirmed} | ${confirmedDoc?.updatedAt})`);
+      // An answer that is not the plugin's (a sign-in page, a JSON array, a gateway's error page): a coded error, its text kept.
+      const page = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (r) => {
+          const at = new URL(r.url).pathname;
+          if (at.endsWith("/recall")) return new Response("<html>sign in</html>", { status: 200, headers: { "content-type": "text/html" } });
+          if (at.endsWith("/review-queue")) return Response.json([1, 2]);
+          if (at.endsWith("/recalls/r-1")) return new Response(null, { status: 204 });
+          return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+        },
+      });
+      const elsewhere = new AgentMemoryClient({ endpoint: `http://127.0.0.1:${page.port}/x`, accessKey: "k", workspaceId: "w" });
+      const html = await thrown(() => elsewhere.recall({ query: "q" }));
+      const array = await thrown(() => elsewhere.listReviewQueue());
+      const gateway = await thrown(() => elsewhere.inspectMemory("m"));
+      const empty = await thrown(() => elsewhere.getRecallTrace("r-1"));
+      page.stop(true);
+      assert(html instanceof AgentMemoryError && html.status === 200 && html.code === null && html.message.includes("not the plugin's answer")
+        && array instanceof AgentMemoryError && array.status === 200 && array.message.includes("not the plugin's answer")
+        && empty instanceof AgentMemoryError && empty.status === 204 && empty.message.includes("not the plugin's answer")
+        && gateway instanceof AgentMemoryError && gateway.status === 502 && gateway.body === "<html>bad gateway</html>" && gateway.message.includes("502 <html>bad gateway</html>"),
+        `OpenClaw: a 200 that is no JSON object, an empty 204 and a 502 page each thrown as AgentMemoryError, the page's text kept (${String(html)}; ${String(array)}; ${String(empty)}; ${String(gateway)})`);
+
+      // The recipes' example payloads and the recall answer's contract (recipes/openclaw-agent-memory/contracts), held to the plugin:
+      // each example as a runtime would send it, and every field a recalled memory carries one the contract names (it allows no other).
+      const recipe = (path: string) => JSON.parse(readFileSync(join(import.meta.dir, "../recipes", path), "utf8")) as Body;
+      const examples: Body[] = [];
+      for (const [path, route] of [["openclaw-agent-memory/examples/writeback-request.json", "/writeback"], ["openclaw-code-review-memory/examples/writeback.json", "/writeback"],
+        ["openclaw-taskflow-work-log/examples/writeback.json", "/writeback"],
+        ["openclaw-agent-memory/examples/recall-request.json", "/recall"], ["openclaw-code-review-memory/examples/recall.json", "/recall"], ["openclaw-taskflow-work-log/examples/recall.json", "/recall"]] as const) {
+        const sent = await rest("POST", `/v1/plugins/agent-memory${route}`, recipe(path), KEYS.writer);
+        examples.push(sent.body);
+        assert(sent.status === 200, `the recipe's ${path} is taken on ${route} (${sent.status} ${JSON.stringify(sent.body).slice(0, 200)})`);
+      }
+      const usageExample = recipe("openclaw-agent-memory/examples/usage-report.json");
+      const usageSent = await rest("POST", `/v1/plugins/agent-memory/recalls/${requestId}/usage`, usageExample, KEYS.writer);
+      assert(usageSent.status === 200 && usageSent.body.recorded?.used === 0,
+        `the recipe's usage-report.json is taken on /recalls/{id}/usage (ids the recall did not return change nothing) (${usageSent.status} ${JSON.stringify(usageSent.body).slice(0, 200)})`);
+      const contract = recipe("openclaw-agent-memory/contracts/recall-response.schema.json");
+      const named = (o: Body | undefined) => new Set(Object.keys(o?.properties ?? {}));
+      const memoryContract = contract.properties?.memories?.items as Body;
+      const stray: string[] = [];
+      const listed = (schema: Body | undefined, v: unknown, at: string) => { if (Array.isArray(schema?.enum) && !schema.enum.includes(v)) stray.push(`${at}=${String(v)}`); };
+      // The recall's memories, and the example write-back's, whose artifact reference carries related_artifacts: one memory shape.
+      // And one a review disputed, whose provenance is then `disputed`, a value the old contract did not list.
+      const disputedId = (examples[0]?.memories as Body[] | undefined)?.[0]?.memory_id;
+      const disputed = await rest("PATCH", `/v1/plugins/agent-memory/memories/${disputedId}/review`, { action: "dispute", notes: "contract values" }, KEYS.writer);
+      const shown = [...(recalled.memories as Body[]), ...((examples[0]?.memories ?? []) as Body[]), ...(disputed.body.memory ? [disputed.body.memory as Body] : [])];
+      for (const m of shown) {
+        for (const k of Object.keys(m)) if (!named(memoryContract).has(k)) stray.push(k);
+        for (const part of ["source", "provenance", "scope", "use_policy", "freshness"]) for (const k of Object.keys(m[part] ?? {})) if (!named(memoryContract.properties?.[part]).has(k)) stray.push(`${part}.${k}`);
+        for (const a of m.related_artifacts ?? []) for (const k of Object.keys(a)) if (!named(memoryContract.properties?.related_artifacts?.items).has(k)) stray.push(`related_artifacts.${k}`);
+        for (const k of memoryContract.required ?? []) if (!(k in m)) stray.push(`missing ${k}`);
+        for (const [k, v] of Object.entries(m)) listed(memoryContract.properties?.[k], v, k);
+        for (const part of ["provenance", "scope"]) for (const [k, v] of Object.entries(m[part] ?? {})) listed(memoryContract.properties?.[part]?.properties?.[k], v, `${part}.${k}`);
+      }
+      for (const k of Object.keys(recalled)) if (!named(contract).has(k)) stray.push(k);
+      assert(shown.some((m) => m.related_artifacts?.length > 0) && shown.some((m) => m.provenance?.status === "disputed") && recalled.memories.length > 0 && stray.length === 0,
+        `every field of the recall's answer is one recall-response.schema.json names, with a value it lists where it lists them, and each it requires is there (${[...new Set(stray)].join(", ") || "none stray"})`);
+    } catch (e) {
+      assert(false, `the OpenClaw client's calls ran (${String(e).slice(0, 400)})`);
+    }
+
+    // Hermes' client is Python, run as the provider runs it: its two hermes-agent imports stubbed, the module loaded from its file.
+    const driver = `
+import importlib.util, json, sys, types
+for name in ("agent", "agent.memory_provider", "tools", "tools.registry"):
+    sys.modules[name] = types.ModuleType(name)
+sys.modules["agent.memory_provider"].MemoryProvider = object
+sys.modules["tools.registry"].tool_error = lambda msg: json.dumps({"error": msg})
+spec = importlib.util.spec_from_file_location("ob1_hermes", sys.argv[1])
+ob1 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ob1)
+c = ob1._OB1Client(sys.argv[2], sys.argv[3], 30.0)
+out = {}
+runtime = {"name": "hermes", "version": "0.2.0"}
+w = c.writeback(workspace_id="ws-clients", project_id="p-hermes", memory_payload={"lessons": ["hermesxmem_route the Hermes client writes back through the plugin."]},
+                runtime=runtime, models_used=[{"provider": "stub", "model": "m", "role": "primary"}],
+                provenance={"default_status": "generated", "confidence": 0.7, "requires_review": True}, task_id="t-hermes", flow_id="default")
+mid = w["memories"][0]["memory_id"]
+out["writeback"] = w
+r = c.recall(workspace_id="ws-clients", project_id="p-hermes", task_type="general", query="hermesxmem_route",
+             scope={"visibility": "personal", "project_only": True, "include_unconfirmed": True, "include_stale": False},
+             limits={"max_items": 5, "max_tokens": 4000}, runtime=runtime, model_intent={"model": "m"}, task_id="t-hermes", flow_id="default")
+out["recall"] = r
+out["usage"] = c.report_usage(r["request_id"], used=[mid], ignored=[])
+out["trace"] = c.get_recall_trace(r["request_id"])
+out["queue"] = c.get_review_queue(workspace_id="ws-clients", project_id="p-hermes")
+out["list"] = c.list_memories(workspace_id="ws-clients", project_id="p-hermes", review_status="pending", limit=5)
+out["review"] = c.review_memory(mid, action="edit", notes="client contract", actor_label="hermes:default", content="hermesxmem_route edited by the Hermes client.")
+out["confirm"] = c.review_memory(mid, action="confirm", actor_label="hermes:default")
+try:
+    c.review_memory("${NO_ROW}", action="confirm")
+    out["refused"] = None
+except ob1.OB1RequestError as e:
+    out["refused"] = {"status": e.status, "code": e.code, "message": str(e)}
+try:
+    out["many"] = c.writeback(workspace_id="ws-clients-many", project_id="p-hermes", memory_payload={"lessons": [f"hermes plain lesson {i}." for i in range(60)]}, runtime=runtime)
+except ob1.OB1RequestError as e:
+    out["many"] = {"refused": str(e)}
+out["mid"] = mid
+print(json.dumps(out))
+`;
+    const py = Bun.spawn(["python3", "-I", "-c", driver, join(import.meta.dir, "../integrations/hermes-agent-memory/plugin/__init__.py"), `${ENDPOINT}/`, KEYS.writer], { stdout: "pipe", stderr: "pipe" });
+    const [pyOut, pyErr, pyCode] = await Promise.all([new Response(py.stdout).text(), new Response(py.stderr).text(), py.exited]);
+    let h: Body = {};
+    try {
+      h = JSON.parse(pyOut);
+    } catch {
+      // Reported by the first row below.
+    }
+    assert(pyCode === 0 && typeof h.mid === "string", `the Hermes client's calls ran (exit ${pyCode}: ${pyErr.slice(-400)})`);
+    if (pyCode === 0 && typeof h.mid === "string") {
+      const hm = h.writeback.memories[0];
+      assert(h.writeback.schema_version === "openbrain.agent_memory.writeback_response.v1" && hm.provenance?.runtime === "hermes" && hm.provenance?.model === "m" && hm.scope?.project_id === "p-hermes",
+        `Hermes writeback: its runtime and model kept on the memory (${JSON.stringify(hm).slice(0, 200)})`);
+      assert(h.recall.memories?.some((m: Body) => m.memory_id === h.mid) && h.usage.recorded?.used === 1 && h.trace.items?.some((i: Body) => i.memory?.memory_id === h.mid && i.used === true),
+        `Hermes recall finds it; usage on /recalls/{id}/usage and the trace on /recalls/{id} mark it used (${JSON.stringify(h.usage)}; ${JSON.stringify(h.trace).slice(0, 160)})`);
+      assert(h.queue.memories?.some((m: Body) => m.memory_id === h.mid) && h.list.count >= 1 && h.list.memories?.some((m: Body) => m.memory_id === h.mid),
+        `Hermes review queue on GET /review-queue and listing on GET /memories, their input in the query string (${JSON.stringify(h.queue).slice(0, 120)}; ${JSON.stringify(h.list).slice(0, 120)})`);
+      assert(h.review.memory?.content === "hermesxmem_route edited by the Hermes client." && h.confirm.memory?.review_status === "confirmed" && h.confirm.memory?.use_policy?.can_use_as_instruction === true,
+        `Hermes review: an edit with its content, then a confirm, each taken, so neither sent the old reviewer field the plugin refuses (${JSON.stringify(h.confirm).slice(0, 160)})`);
+      assert(h.refused?.status === 404 && h.refused?.code === "NO_SUCH_MEMORY" && String(h.refused?.message).includes("HTTP 404 NO_SUCH_MEMORY"),
+        `Hermes: a refusal raised with its status and the plugin's code (${JSON.stringify(h.refused)})`);
+      const many = (h.many?.memories ?? []) as Body[];
+      assert(many.length === 60 && new Set(many.map((m) => m.memory_id)).size === 60 && many[59]?.content === "hermes plain lesson 59.",
+        `Hermes: a write-back of 60 memories, past the plugin's 50, sent in parts and every memory kept, in order (${many.length} ${h.many?.refused ?? ""})`);
+    }
+  }
   // Last, so its 50 thoughts (all one vector under the stub) crowd no recall above.
   const fifty = await am("writeback", { ...base, workspace_id: "ws-fifty", memory_payload: { decisions: Array.from({ length: 30 }, (_, i) => `fifty plain decision ${i}.`), lessons: Array.from({ length: 20 }, (_, i) => `fifty plain lesson ${i}.`) } });
   assert(fifty.status === 200 && mems(fifty).length === 50, `a write-back of exactly 50 memories is taken (${fifty.status}, ${mems(fifty).length})`);
