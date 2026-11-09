@@ -694,9 +694,9 @@ standing subjects and thread edges in key order, a key the bound cuts left out; 
 `ticket:` and `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the
 keys before the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key,
 counts those that differ and names the first ten. It names no key here, since a phrase key is the judge model's words.
-`not counted` before migration 120, and when the first key in key order alone passes the bound, so that no key was read
-(preflight warns then). Preflight's `threads` row reads the same census and warns, never fails, on a
-key that differs.
+`not counted` before migration 120, and past the bound when no key was read (the first key in key order alone passes
+it) or no thread was (each key read held by one thought); preflight warns then. Preflight's `threads` row reads the
+same census and warns, never fails, on a key that differs.
 `Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
 pass's findings show without a query. `Proposals` is the queue a reviewer works:
 how many are pending, how long ago the oldest was judged (a pass that re-judges

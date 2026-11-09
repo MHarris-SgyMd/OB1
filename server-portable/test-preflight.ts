@@ -3359,7 +3359,7 @@ else {
       await claims.unsafe("REVOKE SELECT ON thought_facets FROM ob1_pf_capture");
       const noFacets = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON thought_facets TO ob1_pf_capture");
-      const threadsRowOut = noFacets.out.split("\n").find((l) => /\s threads\s/.test(l)) ?? "";
+      const threadsRowOut = row(noFacets.out, "threads");
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";

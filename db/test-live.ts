@@ -46,7 +46,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -29637,8 +29637,8 @@ if (want("47b")) {
       `with no bound the census reads every key: P2 unlinked, OB and OD orphaned, named in key order, as --status says (${JSON.stringify(whole)})`);
     // A bound of 2 cuts P1, the first key, so no key is read: not complete, all zero — and the line and the row say
     // so, never "linked" (review pass 1).
-    const { first: _f2, ...c2fact } = c2;
-    const c2line = threadsLine({ threads: c2fact, unread: {}, highestMigration: 121 } as never), c2row = threadsRow(c2fact, undefined);
+    const c2fact = threadsFact(c2);
+    const c2line = threadsLine({ threads: c2fact, unread: {} }), c2row = threadsRow(c2fact, undefined);
     assert(!c2.complete && c2.keys === 0 && c2.threads === 0 && c2.standing === 0 && c2.unlinked === 0 && c2.orphaned === 0
         && /^not counted — the first key in key order alone passes the census's bound/.test(c2line) && c2row.status === "warn" && /^could not verify: /.test(c2row.detail),
       `a bound of 2 cuts the first key: nothing read, not complete, and said so — not counted, a warning (${JSON.stringify(c2)} | ${c2line} | ${c2row.status})`);

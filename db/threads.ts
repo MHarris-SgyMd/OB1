@@ -173,12 +173,11 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       out(c.unlinked === 0 && c.orphaned === 0
         ? "  linked:    every thread — nothing to do"
         : `  linked:    ${c.unlinked} key(s) whose edges differ from their thread's${c.orphaned ? `, ${c.orphaned} key(s) no thought holds still carrying edges` : ""} — threads.ts without --status links them`);
-      const named = c.first;
       // Each key on a line of its own, quoted as the shell takes it: a phrase key may hold an apostrophe, a comma or a
       // space, so a list joined with commas read as other keys and a pasted '<key>' broke (review pass 3).
-      if (named.length) {
-        const more = c.unlinked + c.orphaned - named.length;
-        named.forEach((k, i) => out(`  ${i === 0 ? "keys:     " : "          "} ${shellWord(k)}`));
+      if (c.first.length) {
+        const more = c.unlinked + c.orphaned - c.first.length;
+        c.first.forEach((k, i) => out(`  ${i === 0 ? "keys:     " : "          "} ${shellWord(k)}`));
         out(`             ${more > 0 ? `and ${more} more; ` : ""}--key <a key as printed above> re-links one`);
       }
       return 0;

@@ -2600,11 +2600,11 @@ and a thread's `evolves` stand side by side on one pair.
 `record_thought_relation` reads, keeps, replaces and closes the judge's edge
 alone, and `brain_info`'s Relations row, board-sync's findings and
 `consolidate.ts --status` count the judge's alone (its Threads row counts the
-threads' edges apart, PR 7a-2c). The upgrade writes no edge: run `threads.ts` once after
-it, which links every thread, a batch of at most 200 keys a transaction, a key
-that writes ending its batch and the next batch taking the page's rest (on the
-compose stack, from a checkout, reaching its Postgres through deploy/README's
-host-ports file):
+threads' edges apart, PR 7a-2c). The upgrade writes no edge: run `threads.ts`
+once after it, which links every thread, a batch of at most 200 keys a
+transaction, a key that writes ending its batch and the next batch taking the
+page's rest (on the compose stack, from a checkout, reaching its Postgres
+through deploy/README's host-ports file):
 
 ```bash
 bun threads.ts --url … --status                # the threads, and the keys whose edges differ (the first ten, one a line, quoted as --key takes them)

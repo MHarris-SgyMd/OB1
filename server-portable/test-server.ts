@@ -1665,8 +1665,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       none: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false })),
       orphansOnly: r(f({ threads: 0, thoughts: 0, standing: 3, whole: 0, keys: 0, orphaned: 1, complete: false })),
       noThread: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 9999, complete: false })),
-      ok: r(f()), okPartial: r(f({ complete: false, keys: 4 })), oneKey: r(f({ threads: 1, thoughts: 2, standing: 1, whole: 1, keys: 1, complete: false })), empty: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 3 })),
-      differ: r(f({ standing: 12, whole: 5, unlinked: 1, orphaned: 2 })), differPartial: r(f({ standing: 3, whole: 4, unlinked: 1, complete: false, keys: 4 })),
+      ok: r(f()), okPartial: r(f({ complete: false, keys: 6 })), oneKey: r(f({ threads: 1, thoughts: 2, standing: 1, whole: 1, keys: 1, complete: false })), empty: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 3 })),
+      differ: r(f({ standing: 12, unlinked: 1, orphaned: 2 })), differPartial: r(f({ threads: 2, thoughts: 6, standing: 3, whole: 4, unlinked: 1, complete: false, keys: 4 })),
     };
     assert(rows.pre.status === "skip" && /^no thread_relink — migration 120 \(SMD-3306\) is not applied/.test(rows.pre.detail)
         && rows.refused.status === "warn" && rows.refused.detail === "could not verify: permission denied for table thought_facets" && rows.refused.fix === "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role)."
@@ -1678,32 +1678,32 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
         && rows.noThread.status === "warn" && rows.noThread.detail === "could not verify: the first 9999 subject key(s) read are each held by one thought, so no thread was read before the census's bound (10000 rows)" && /^Read every key: /.test(rows.noThread.fix ?? "")
         && rows.orphansOnly.status === "warn" && rows.orphansOnly.detail === "no subject key before the census's cut; 3 edge(s) standing, 0 once every thread read is linked; 1 key(s) no thought holds still carrying edges; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
         && rows.ok.status === "ok" && rows.ok.detail === "5 thread(s), 12 thought(s) in them, 7 edge(s) standing — every thread linked" && rows.ok.fix === undefined
-        && rows.okPartial.status === "ok" && rows.okPartial.detail === "5 thread(s) among the first 4 subject key(s) read, 12 thought(s) in them, 7 edge(s) standing — each read linked; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
-        && rows.differ.status === "warn" && rows.differ.detail === "5 thread(s); 12 edge(s) standing, 5 once every thread read is linked; 1 key(s) whose edges differ from their thread's, 2 key(s) no thought holds still carrying edges"
+        && rows.okPartial.status === "ok" && rows.okPartial.detail === "5 thread(s) among the first 6 subject key(s) read, 12 thought(s) in them, 7 edge(s) standing — each read linked; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
+        && rows.differ.status === "warn" && rows.differ.detail === "5 thread(s); 12 edge(s) standing, 7 once every thread read is linked; 1 key(s) whose edges differ from their thread's, 2 key(s) no thought holds still carrying edges"
         && /^Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names the first 10 keys, each as --key takes it\)\. .* a gap after that is a delete that could not re-link \(a role without the writes, above READ COMMITTED, or beside a held key\), or a raw write \(120's NOT HERE\)\. Every read works meanwhile, the thread's own included: it reads the subjects, not the edges\.$/.test(rows.differ.fix ?? "")
         && rows.empty.status === "ok" && rows.empty.detail === "none — no subject key two thoughts hold, and no edge standing to close"
-        && rows.differPartial.detail === "5 thread(s) among the first 4 subject key(s) read; 3 edge(s) standing, 4 once every thread read is linked; 1 key(s) whose edges differ from their thread's; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)",
+        && rows.differPartial.detail === "2 thread(s) among the first 4 subject key(s) read; 3 edge(s) standing, 4 once every thread read is linked; 1 key(s) whose edges differ from their thread's; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)",
       `preflight's threads row, from the fact alone: skipped before 120; each unread reason its remedy; nothing read a warning, no thread read a warning, orphans alone said as no subject key; linked ok, past the bound saying so, none as the Threads row says it; keys differing warned in --status's shape (${JSON.stringify(Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, v.status])))})`);
   }
   // The Threads row (SMD-3306 PR 7a-2c): linked, read past the bound, keys differing, before 120, and not read.
   const census = (over: Partial<NonNullable<Facts["threads"]>> = {}) => ({ threads: 719, thoughts: 2218, standing: 1499, whole: 1499, unlinked: 0, orphaned: 0, keys: 3948, complete: true, ...over });
   const thrLinked = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census() }), 1000));
-  const thrPartial = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ complete: false, keys: 1 }) }), 1000));
+  const thrPartial = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 1, thoughts: 3, standing: 2, whole: 2, keys: 1, complete: false }) }), 1000));
   const thrDiffer = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ unlinked: 1, orphaned: 2, complete: false, keys: 2500 }) }), 1000));
-  const thrOne = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 1, thoughts: 1, unlinked: 2 }) }), 1000));
-  const thrOrphans = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ orphaned: 3 }) }), 1000));
+  const thrOne = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 1, thoughts: 2, standing: 1, whole: 1, unlinked: 2 }) }), 1000));
+  const thrOrphans = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ orphaned: 3, standing: 1502 }) }), 1000));
   const thrNone = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false }) }), 1000));
   const thrOrphOnly = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 3, whole: 0, keys: 0, orphaned: 1, complete: false }) }), 1000));
-  const thrNoThread = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 1 , complete: false }) }), 1000));
+  const thrNoThread = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 1, complete: false }) }), 1000));
   const thrJoin = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "error", message: "the thread census found 0 edge(s) wanted for 2 thread(s) of 5 thought(s): its join to thoughts lost members — a thoughts table earlier on this role's search_path than the brain's?" } } }), 1000));
   const thrEmpty = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 4 }) }), 1000));
   const thrPre = renderBrainInfo(await brainInfo(server, async () => planted(119, { threads: null }), 1000));
   const thrLost = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "refused", message: "permission denied for table thoughts" } } }), 1000));
   assert(/^Threads: +719 \(2,218 thoughts in them\), every one linked$/m.test(thrLinked)
-      && /^Threads: +719 among the first 1 subject key read \(2,218 thoughts in them\), each read linked — the census stops at 10,000 rows: cd db && bun threads\.ts --url <the owner's connection string> --status reads every key$/m.test(thrPartial)
+      && /^Threads: +1 among the first 1 subject key read \(3 thoughts in them\), each read linked — the census stops at 10,000 rows: cd db && bun threads\.ts --url <the owner's connection string> --status reads every key$/m.test(thrPartial)
       && /^Threads: +719 among the first 2,500 subject keys read \(2,218 thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\) — the census stops at 10,000 rows: cd db && bun threads\.ts --url <the owner's connection string> --status reads every key$/m.test(thrDiffer)
       && /^Threads: +not counted — the first key in key order alone passes the census's bound \(10,000 rows\): cd db && bun threads\.ts --url <the owner's connection string> --status reads every key$/m.test(thrNone)
-      && /^Threads: +1 \(1 thought in them\); 2 keys whose edges differ from their thread's — /m.test(thrOne)
+      && /^Threads: +1 \(2 thoughts in them\); 2 keys whose edges differ from their thread's — /m.test(thrOne)
       && /^Threads: +719 \(2,218 thoughts in them\); 3 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\)$/m.test(thrOrphans)
       && /^Threads: +no subject key before the census's cut; 1 key no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\) — the census stops at 10,000 rows: /m.test(thrOrphOnly)
       && /^Threads: +none$/m.test(thrEmpty)
