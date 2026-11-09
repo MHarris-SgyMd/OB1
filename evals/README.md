@@ -4739,6 +4739,29 @@ mean tau. It passes (d). It fails (a) and (b), with top-1 on 2 of 7 (`highest-va
 * **The agenda is unchanged,** as the rule says it must be: it scores tickets and open items, never thoughts, and an
   open item still inherits only the level stated on its note. Its scores are the 2026-11-08 record's.
 
+**Exploratory: 0.7 and 0.9 again, with a note reading its open items, 2026-11-09** (the maintainer asked for them
+after the verdict; the same tree and registration, `--priority-weight 0.7,0.9`; the 0.5 row is the verdict's, hit for
+hit). Not a verdict: a weight chosen from these rows would be fitted to the prompts that judge it. The program's
+output, verbatim, its other rows as above:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| priority_weight | 0.286 | 0.286 | 0.327 | 0.084 / 0.168 / -0.003 | 0.085 / 0.169 / 0.000 |
+| priority_weight@0.7 | 0.286 | 0.571 | 0.603 | 0.111 / 0.340 / -0.002 | 0.113 / 0.341 / 0.000 |
+| priority_weight@0.9 | 0.286 | 0.714 | 0.723 | 0.113 / 0.390 / -0.001 | 0.113 / 0.390 / 0.000 |
+
+Neither would clear the bar. Each would pass (c) and (d), and fail (a) and (b), with top-1 on 2 of 7.
+* **The order improves; the first place doesn't.** At 0.9 mean tau is 0.723 and top-3 holds on 5 of 7, both above the
+  agenda's (0.607, 4 of 7). Before migration 125 the same weights failed (d), since the gutters left `due-soon`'s top
+  3 (0.7: 0.429 / 0.429 / 0.520; 0.9: 0.571 / 0.571 / 0.559, above).
+* **The gutters lead now, as on the agenda.** Two weeks overdue with no stated level, the note reads unknown 2 plus
+  overdue 3, which is 5. The Urgent ticket that blocks another reads 4 plus 0.5. At 0.9 the gutters come first on six
+  of seven prompts, and the Urgent ticket keeps first place on `highest-value` alone: top-1 on 2, `highest-value` and
+  `due-soon`. Before 125 the gutters read 2, so at 0.9 the Urgent ticket led every prompt and reached 4 of 7.
+* **So what caps first place at a high weight is docs/priority.md's weights, not what the read sees.** The agenda's
+  verdict (2026-11-08, above) found the same: overdue +3 on an unknown 2 outranks an Urgent ticket that unblocks
+  another, against the gold. Retuning the weights is a decision of its own, outside SMD-4149.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
 A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
