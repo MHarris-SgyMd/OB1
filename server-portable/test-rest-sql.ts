@@ -2794,7 +2794,7 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
 }
 
-console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");
+console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture makes no call and states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");
 {
   type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; inferred: boolean; maker: { name: string; scope: string | null }; tierName: string; closedAt: string | null };
   const hist = async (kind: string, key: string) => (await rest("GET", `/v1/priorities/${kind}/${key}`)).body as { level: number | null; winner: A | null; history: A[] };

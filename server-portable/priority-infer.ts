@@ -60,7 +60,7 @@ export type Inferred = {
 // ── Phrases ──────────────────────────────────────────────────────────────────
 
 /** A text as a phrase is looked for in it: case-folded, curly quotes made straight, white space collapsed. */
-const folded = (s: string) => s.toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/gu, " ").trim();
+const folded = (s: string) => s.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/gu, " ").trim();
 
 /** Where a phrase stands in a text as whole words: the start of each match of its folded form, bounded by no letter or digit. */
 function wholeWordAt(phrase: string, text: string): number[] {
@@ -87,7 +87,7 @@ const NEGATORS = "not|no|never|hardly|isn't|aren't|wasn't|don't|doesn't|nothing|
 const EMPHASIS = "more|only|ever";
 /** A negating word, up to two words before the phrase ("not urgent", "not very urgent", "not all that important"), or "non-" on it; never across an emphasis word. */
 const NEGATED_BEFORE = new RegExp(`(\\b(${NEGATORS})(\\s+(?!(?:${EMPHASIS})\\b)[\\p{L}']+){0,2}\\s+|\\bnon-?\\s*)$`, "u");
-/** The words a phrase about how much something matters carries. A level phrase with none of them that is the deadline's own words says nothing of the level. */
+/** The words a phrase about how much something matters carries. A level phrase with none of them that names a time or is the deadline's own words says nothing of the level. */
 const LEVEL_CUES = /\b(urgent|urgently|urgency|asap|important|importance|unimportant|critical|crucial|priority|emergency|immediately|pressing|vital|essential|rush|hurry|whenever|someday|trivial|minor|optional|idea|low|medium|high|top)\b/;
 /** A phrase that negates its own cue ("not urgent", "no rush", "non-critical"), not across an emphasis word: it never says a level of High or more. */
 const SELF_NEGATED = new RegExp(`\\b(${NEGATORS}|non)\\b-?(\\s*(?!(?:${EMPHASIS})\\b)[\\p{L}']+){0,2}?\\s*\\b(urgent|urgently|important|critical|crucial|priority|pressing|vital|essential|rush|hurry|emergency)\\b`, "u");
@@ -113,12 +113,15 @@ const NUMBER_WORDS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, tw
 const MONTH_NAMES = MONTHS.map((m) => `${m.slice(0, 3)}${m.length > 3 ? `(?:${m.slice(3)})?` : ""}`).join("|");
 /** A month as a whole word, captured, an abbreviation's full stop allowed. */
 const MONTH = `(${MONTH_NAMES})\\b\\.?`;
+const MONTH_WORD = new RegExp(`\\b${MONTH}`);
 /**
  * A weekday's name, or an abbreviation that is no ordinary word ("Tue", "Tues", "Thu", "Thurs", "Fri"; not "sun",
  * "sat", "wed" or "mon": "before the sun goes down" names no day); its day read from its first three letters.
  */
 const WEEKDAY_NAMES = "sunday|monday|tue(?:s(?:day)?)?|wednesday|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|saturday";
 const WEEKDAY = `(${WEEKDAY_NAMES})`;
+/** A weekday as a whole word: the first (`exec`) or every one (`matchAll`, which copies the pattern, so no state is shared). */
+const WEEKDAY_WORD = new RegExp(`\\b${WEEKDAY}\\b`, "g");
 const weekdayIndex = (word: string) => WEEKDAYS.findIndex((w) => w.startsWith(word.slice(0, 3)));
 const COUNT = "(\\d{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten)";
 /** A phrase that says when something may start, not when it is due: no due time. */
@@ -129,6 +132,8 @@ const TIME_OF_DAY = /\b\d{1,2}(:\d{2})?\s*(am|pm)\b|\b\d{1,2}:\d{2}\b|\b(noon|mi
 const END_OF = /\bend of (the )?(day|week|month|year)\b/;
 /** A count of days before a day ("2 days before the 20th"): the rules don't subtract counts; the model's to read. */
 const COUNTED_BEFORE = new RegExp(`\\b${COUNT}\\s+(day|week)s?\\s+before\\b`);
+/** The month's end, a day the rules read and an anchor of its own. */
+const END_OF_MONTH = /\bend of (the )?month\b/;
 /** "in N days", "within N weeks", "N days from today": a count of days or weeks from the capture day. */
 const COUNTED = new RegExp(`\\b(?:in|within)\\s+${COUNT}\\s+(day|week)s?\\b|\\b${COUNT}\\s+(day|week)s?\\s+from\\s+(?:today|now)\\b`);
 
@@ -141,14 +146,14 @@ const COUNTED = new RegExp(`\\b(?:in|within)\\s+${COUNT}\\s+(day|week)s?\\b|\\b$
  * other, beating the model's right date).
  */
 export function oneAnchor(p: string): boolean {
-  const weekdays = [...p.matchAll(new RegExp(`\\b${WEEKDAY}\\b`, "g"))].length;
+  const weekdays = [...p.matchAll(WEEKDAY_WORD)].length;
   const counted = COUNTED.test(p);
   const kinds = [
     weekdays > 0,
-    /\b\d{4}-\d{2}-\d{2}\b/.test(p) || new RegExp(`\\b${MONTH}`).test(p) || /\b\d{1,2}(st|nd|rd|th)\b/.test(p),
+    /\b\d{4}-\d{2}-\d{2}\b/.test(p) || MONTH_WORD.test(p) || /\b\d{1,2}(st|nd|rd|th)\b/.test(p),
     counted,
     /\btomorrow\b/.test(p),
-    /\bend of (the )?month\b/.test(p),
+    END_OF_MONTH.test(p),
     /\b(today|tonight)\b/.test(p) && !counted,
   ].filter(Boolean).length;
   if (weekdays > 1 || kinds > 1) return false;
@@ -230,11 +235,11 @@ function namedDay(p: string, today: string): string | null {
     const days = unit === "week" ? 7 * n : n;
     return days >= 1 && days <= 366 ? plusDays(today, days) : null;
   }
-  if (/\bend of (the )?month\b/.test(p)) return plusDays(realDay(cm === 12 ? cy + 1 : cy, cm === 12 ? 1 : cm + 1, 1)!, -1);
-  const weekday = new RegExp(`\\b${WEEKDAY}\\b`).exec(p);
+  if (END_OF_MONTH.test(p)) return plusDays(realDay(cm === 12 ? cy + 1 : cy, cm === 12 ? 1 : cm + 1, 1)!, -1);
+  const [weekday] = p.matchAll(WEEKDAY_WORD);
   if (weekday) {
     if (WEEKDAY_MOVED.test(p)) return null;
-    const ahead = (weekdayIndex(weekday[1]) - new Date(`${today}T00:00:00Z`).getUTCDay() + 7) % 7 || 7;
+    const ahead = (weekdayIndex(weekday[1]) - WEEKDAYS.indexOf(weekdayOf(today)) + 7) % 7 || 7;
     return plusDays(today, ahead);
   }
   if (/\b(today|tonight|eod|cob)\b|\bend of (the )?day\b|\bclose of business\b/.test(p)) return today;
@@ -248,11 +253,12 @@ function namedDay(p: string, today: string): string | null {
  * the next Tuesday). Else null.
  */
 export function modelDay(raw: unknown, captureDay: string, phrase: string): string | null {
-  if (typeof raw !== "string" || !DATE_WORDS.test(folded(phrase)) || NOT_A_DEADLINE.test(folded(phrase))) return null;
+  const p = folded(phrase);
+  if (typeof raw !== "string" || !DATE_WORDS.test(p) || NOT_A_DEADLINE.test(p)) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
   const day = m ? realDay(Number(m[1]), Number(m[2]), Number(m[3])) : null;
   if (day === null || day < captureDay || day > plusDays(captureDay, 366)) return null;
-  const named = [...folded(phrase).matchAll(new RegExp(`\\b${WEEKDAY}\\b`, "g"))].map((w) => WEEKDAYS[weekdayIndex(w[1])]);
+  const named = [...p.matchAll(WEEKDAY_WORD)].map((w) => WEEKDAYS[weekdayIndex(w[1])]);
   return named.length === 0 || named.includes(weekdayOf(day)) ? day : null;
 }
 
@@ -270,10 +276,9 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
   const levelPhrase = quotedIn(a.level_phrase, text);
   const duePhrase = quotedIn(a.due_phrase, text);
   // The deadline quoted as the level ("I need the slides by Friday" read High): a phrase with no word about how much
-  // it matters, naming a time or holding the due phrase or held by it, says nothing of the level (review pass 2: the local 7B did this
-  // on two of four plain deadlines, which made them High, not the due phrase's Medium).
-  // Review pass 3: also with no due phrase quoted, or one quoted otherwise: a level phrase with no such word that names
-  // a time is a deadline's.
+  // it matters that names a time, or holds the due phrase or is held by it, says nothing of the level, whether or not
+  // a due phrase was quoted. Review pass 2: the local 7B did this on two of four plain deadlines, which made them
+  // High, not the due phrase's Medium; pass 3: with no due phrase quoted, the guard had held nothing.
   const deadlineAsLevel = levelPhrase !== null && !LEVEL_CUES.test(folded(levelPhrase)) && (DATE_WORDS.test(folded(levelPhrase))
     || (duePhrase !== null && (folded(levelPhrase).includes(folded(duePhrase)) || folded(duePhrase).includes(folded(levelPhrase)))));
   const negatedHigh = levelPhrase !== null && (LEVEL_WORDS[word] ?? 0) >= 3 && SELF_NEGATED.test(folded(levelPhrase));
@@ -292,7 +297,7 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
 
 /** The user message: the capture day and its weekday on the first line, then the text. */
 export const inferMessage = (text: string, captureDay: string) =>
-  `Captured: ${captureDay} (${WEEKDAYS[new Date(`${captureDay}T00:00:00Z`).getUTCDay()].replace(/^./, (c) => c.toUpperCase())})\n\n${text}`;
+  `Captured: ${captureDay} (${weekdayOf(captureDay).replace(/^./, (c) => c.toUpperCase())})\n\n${text}`;
 
 /**
  * The text's level and due day, read by the metadata model. Null when the call failed in any way the provider

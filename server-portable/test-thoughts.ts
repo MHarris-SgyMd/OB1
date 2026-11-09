@@ -2901,7 +2901,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   }
 }
 
-console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved from the capture day by the rules, the most specific reading first, the model's date only where they can't read it and only a real day within the year ahead on the weekday named; each half kept only on a phrase the text holds as whole words, a negated level word dropped; a level at most High; the statement's level, due time and quoting reason; the call through the gate, a failure stating nothing");
+console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved from the capture day by the rules when it names its day one way, the most specific reading first, the model's date only where they can't read it and only a real day within the year ahead on the weekday named; each half kept only on a phrase the text holds as whole words, a negated level word, a self-negating High and the deadline quoted as the level dropped; a level at most High; the statement's level, due time and quoting reason; the call through the gate, a failure stating nothing");
 {
   // Captured on Tuesday 2026-11-03, the ticket's own example.
   const TUE = "2026-11-03";
