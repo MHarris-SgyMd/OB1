@@ -788,8 +788,29 @@ export const AGENDA_READ: MeasuredRead = {
   },
 };
 
+/**
+ * The weight SMD-3668's read is measured at: pre-registered on SMD-3668 on 2026-11-08, before any run, as the value it
+ * would ship with (the bar's rule for a read with a knob: measured once, no sweep reported as the verdict). The
+ * maintainer's choice: meaning and priority counted alike.
+ */
+export const PRIORITY_WEIGHT = 0.5;
+
+/**
+ * SMD-3668's priority_weight at `weight`, as a client would send it: `search_thoughts` with `priority_weight` at that
+ * weight and every other argument at its default, called over MCP as the baseline reads are. The tool re-ranks its
+ * top min(100, 4 × limit) matches by its place among them and 122's effective priority, each match read as a
+ * thought: a ticket's row reads its ticket's level, and a note what is stated on it or inherited from a ticket it is
+ * about, which on this set is nothing, since a note's facts sit on its open item (Facts; SMD-4149).
+ */
+export function priorityWeightRead(weight: number, name = "priority_weight"): MeasuredRead {
+  return { name, ticket: "SMD-3668", run: ({ query, callTool }) => callTool("search_thoughts", { query, priority_weight: weight }) };
+}
+
+/** The read at the pre-registered weight: the one whose verdict counts. eval-priority.ts's --priority-weight adds others, each exploratory. */
+export const PRIORITY_WEIGHT_READ: MeasuredRead = priorityWeightRead(PRIORITY_WEIGHT);
+
 /** The reads under measurement, each with its ticket. */
-export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ];
+export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ, PRIORITY_WEIGHT_READ];
 
 /** A measured read's ids as scored: each once, first occurrence kept, the top READ_K. */
 export function measuredIds(ids: readonly string[]): string[] {
@@ -854,12 +875,13 @@ export function isDay(n: unknown): boolean {
  * read leaves READS or MEASURED (review pass 4: a row is never rewritten):
  * the seeded set's reads, each by its procedure there — `agenda` is
  * AGENDA_READ's (search's hits ordered by the agenda), not the agenda tool's
- * own list, which would need a name of its own — and `ticket_rows`, search
+ * own list, which would need a name of its own; `priority_weight` is
+ * PRIORITY_WEIGHT_READ's (search_thoughts at the pre-registered weight) — and `ticket_rows`, search
  * filtered to board-sync's ticket rows alone, the 2026-10-14 session's second
  * read. A new name is added here with what it is, so rows stay comparable read
  * by read; the self-check holds every seeded read's name among them.
  */
-export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "ticket_rows"];
+export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "priority_weight", "ticket_rows"];
 
 /** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
 export function dogfoodProblems(raw: unknown): string[] {
