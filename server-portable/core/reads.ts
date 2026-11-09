@@ -488,11 +488,11 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
 // ── priority_weight and min_priority (SMD-3668) ─────────────────────────────
 
 /**
- * The largest effective priority under the default weights (docs/priority.md, migration 122): a critical level (5),
- * overdue (3) and unblocking many (1). A priority-ranked search reads a match's priority as its effective over this,
- * capped at 1, so the blend's two halves share a 0–1 scale.
+ * The largest effective priority under the default weights (docs/priority.md, migration 127, SMD-4177): a critical
+ * level (5), overdue (0.6) and unblocking many (0.2). A priority-ranked search reads a match's priority as its
+ * effective over this, capped at 1, so the blend's two halves share a 0–1 scale. 9 under 122's weights.
  */
-export const PRIORITY_SPAN = 9;
+export const PRIORITY_SPAN = 5.8;
 /** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
 export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
 

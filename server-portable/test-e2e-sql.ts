@@ -4168,19 +4168,21 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     const none = await result("search_thoughts", { query, limit: 10, threshold: -1, filter, min_priority: 5 });
     assert(!none.isError && ids(none).length === 0 && none.text.includes("kept 0 at critical (5) or above") && (none.sc?.priority as { kept?: number } | undefined)?.kept === 0,
       `a floor no match reaches answers none and says so (${none.text.slice(0, 200)})`);
-    // The one the search ranks last by meaning is made due tomorrow: High plus urgency (+2) over the others' High.
+    // The one the search ranks last by meaning is made due tomorrow: High plus urgency (+0.4 since migration 127,
+    // SMD-4177) over the others' High.
     const last = KEYS.find((k) => rowOf[k] === ids(base)[3])!;
     const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
     const due = await result("set_priority", { kind: "ticket", key: last, level: 3, due_at: tomorrow });
     assert(!due.isError, `${last}, last by meaning, made due tomorrow (${due.text.slice(0, 120)})`);
     const loggedBefore = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
-    // By place in a window of four, the last weighs 1/4 to the first's 1: past a weight of about 0.55 its urgency lifts it.
-    const mid = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.6 });
+    // By place in a window of four, the last weighs 1/4 to the third's 1/2: its urgency, 0.4 of a level within its level
+    // (127), lifts it past the third from a weight of about 0.78 (0.55 under 122's +2).
+    const mid = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.9 });
     const full = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 1 });
     const p = full.sc?.priority as { weight: number; min: number | null; window: number; read: number; kept: number; known: number } | undefined;
     assert(!full.isError && ids(full)[0] === rowOf[last] && JSON.stringify(ids(full).slice(1)) === JSON.stringify(ids(base).filter((id) => id !== rowOf[last]))
         && ids(mid).indexOf(rowOf[last]) >= 0 && ids(mid).indexOf(rowOf[last]) < 3,
-      `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order, and is no longer last at 0.6 (${ids(mid).indexOf(rowOf[last])})`);
+      `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order, and is no longer last at 0.9 (${ids(mid).indexOf(rowOf[last])})`);
     // The filter holds the window to this section's four thoughts: 4 read of a window of 16, every one a known High.
     assert(p?.weight === 1 && p.min === null && p.window === 16 && p.read === 4 && p.kept === 4 && p.known === 4
         && full.text.includes("Ranked by priority (priority_weight 1): the top 4 matches ordered by") && full.text.includes("4 of them carry a known priority.")
@@ -4212,11 +4214,12 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
       `at High: the four Highs, the Urgent ticket's row and the note under it (inheriting 3), the finished Urgent's row (its own level); not the note under a High (2, unknown), under the finished ticket (nothing), stated None, a mention or a Low (${kept(at3)})`);
     assert(kept(at1) === [kept(at3), "low"].join(",").split(",").sort().join(",") && kept(at0) === [kept(at1), "statedNone"].join(",").split(",").sort().join(","),
       `at Low the Low too; at None the thought stated None too, its own level beating what it would inherit; the mention and the two inheriting nothing never (${kept(at1)} | ${kept(at0)})`);
-    // Urgency counts toward the floor (decision 5's composition): the High due tomorrow (3 + 2) passes at critical; the
-    // Urgent ticket (4, no date) and what inherits from it do not.
-    const urgent = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, min_priority: 5 });
-    assert(!urgent.isError && kept(urgent) === last,
-      `urgency counts: at 5 the High due tomorrow alone passes (${kept(urgent)})`);
+    // A level decides the floor since migration 127 (SMD-4177, level first): the High due tomorrow (3.4) passes at High
+    // and not at Urgent, where the Urgent ticket's row and the finished Urgent's row (4) do; at critical none does.
+    const urgent = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, min_priority: 4 });
+    const critical = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, min_priority: 5 });
+    assert(!urgent.isError && kept(urgent) === "PWD-1,PWU-1" && !critical.isError && ids(critical).length === 0,
+      `a level decides the floor: at 4 the two Urgent rows and not the High due tomorrow; at 5 none (${kept(urgent)} | ${ids(critical).length})`);
     const loggedAfter = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
     await result("search_thoughts", { query, limit: 4, threshold: -1, filter });
     const loggedPlain = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;

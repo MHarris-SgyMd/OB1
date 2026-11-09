@@ -7097,11 +7097,11 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
   const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n).map((r) => r.id).join("");
   // 11-02's case in miniature: four Highs, the one with urgency last by meaning.
-  assert(order(0) === "abcd" && order(1) === "dabc" && order(0.6) === "abdc",
+  assert(order(0) === "abcd" && order(1) === "dabc" && order(0.6) === "adbc",
     `four of one level: at 0 the window's order, at 1 the higher priority first and the rest in theirs, at 0.6 the urgent one no longer last (${order(0)}, ${order(1)}, ${order(0.6)})`);
-  // (1 − w) × relevance + w × priority, relevance by place (n − i) / n: d's 0.2 × 1/4 + 0.8 × 5/9 = 0.494 over a's
-  // 0.2 × 1 + 0.8 × 3/9 = 0.467; at 0.1, a's 0.933 over d's 0.281.
-  assert(PRIORITY_SPAN === 9 && order(0.8) === "dabc" && order(0.1) === "abcd",
+  // (1 − w) × relevance + w × priority, relevance by place (n − i) / n, priority over 5.8 (127's largest, SMD-4177):
+  // d's 0.2 × 1/4 + 0.8 × 5/5.8 = 0.740 over a's 0.2 × 1 + 0.8 × 3/5.8 = 0.614; at 0.1, a's 0.952 over d's 0.311.
+  assert(PRIORITY_SPAN === 5.8 && order(0.8) === "dabc" && order(0.1) === "abcd",
     `the blend weighs relevance by place and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
   // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
   // score 0, ordered by newness or similarity, and a score over the top's left them to priority alone at any weight.

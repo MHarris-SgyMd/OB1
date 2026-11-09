@@ -4762,6 +4762,44 @@ Neither would clear the bar. Each would pass (c) and (d), and fail (a) and (b), 
   verdict (2026-11-08, above) found the same: overdue +3 on an unknown 2 outranks an Urgent ticket that unblocks
   another, against the gold. Retuning the weights is a decision of its own, outside SMD-4149.
 
+**Level first, 2026-11-09** (SMD-4177: the maintainer chose option C, posted on the ticket before the build. Migration
+127 scales the terms after the level by 0.2, so they order items of one level and never lift one past the next, and
+search's blend divides by 5.8, the new largest. Registration `acb196be7ec50868`, unchanged; measured once, at the
+pre-registered 0.5). Each note asked as a thought now reads its level plus tenths:
+
+```
+  bill 2.4: unknown 2; urgency soon 0.4 item:bill
+  commitment 2.2: unknown 2; urgency week 0.2 item:commitment
+  gutters 2.6: unknown 2; overdue 0.6 item:gutters
+  passport 4: from_items 4 item:passport
+```
+
+The program's output, verbatim:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.429 | 0.429 | 0.525 | 0.222 / 0.345 / -0.001 | 0.220 / 0.347 / 0.000 |
+| priority_weight | 0.143 | 0.571 | 0.414 | 0.085 / 0.310 / -0.002 | 0.085 / 0.312 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: neither read clears the bar.**
+* **The agenda** passes (b) and (c) and fails (a) and (d). The Urgent ticket now leads `next-ticket`,
+  `highest-value` and `blocking`, so top-1 goes from 1 of 7 to 3 (from 0.143 to 0.429). The cost is `due-soon`: the
+  Urgent ticket and the passport (4) now come before the overdue gutters (2.6), which leave the top 3 that a baseline
+  kept, so (d) fails. Mean tau falls from 0.607 to 0.525, still above the 0.502 needed. On `matters-most` the Urgent
+  ticket is outside search's ten hits, so the passport leads.
+* **`priority_weight`** fails (a), (b) and (c). Top-3 goes from 2 prompts to 4 and mean tau from 0.327 to 0.414, but
+  top-1 falls from 2 to 1. Within a level the notes now differ by tenths (2.6, 2.4, 2.2) where they differed by
+  whole levels, so at 0.5 their order is search's: the bill comes before the gutters on `due-soon`, and that prompt's
+  top-1 is lost. The Urgent ticket rises to third on `next-ticket` and second on `blocking`, still behind rows that
+  lead it by meaning.
+* **The 11-02 board replay** (below) puts SMD-2908 3rd of 314, from 6th.
+* So the defaults stay 0 for search, and the agenda's order is level first. Level first moves which prompts each read
+  wins rather than how many: no single order of the items reaches 5 of 7, as SMD-4177 set out.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
 A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
@@ -4848,6 +4886,16 @@ with no declared work of its own. The replay found:
 So the Verify holds on SMD-3602 and SMD-1853, and fails on SMD-2908: the deadline that made it the pick was never
 stated where the agenda reads. With a due date of 11-03 on Linear, SMD-2908 would have taken urgency +2 and ranked
 first at 5.
+
+**Level first, 2026-11-09** (SMD-4177, migration 127; the same moment, on a board of 1,294 issues now; measured once,
+as pre-registered). A level now decides the place, and urgency and unblocks order items of one level:
+* **SMD-2908 ranks 3rd.** It still scores its High alone (3). The three Mediums that tied it through unblocking open
+  work now read 2.2 and fall below every High, so only SMD-2607 (High, 3) is beside it, ahead by key. First is still
+  SMD-2301, High and unblocking open work (3.2).
+* **SMD-3602 is left out as claimed,** as before; **SMD-1853 ranks 37th** on its own Medium (2), as before.
+
+So the Verify still fails on SMD-2908, for the same reason: its deadline was never stated where the agenda reads.
+Level first narrows the gap from five tickets ahead of it to two.
 
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
