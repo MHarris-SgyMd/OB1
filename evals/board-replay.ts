@@ -476,7 +476,7 @@ async function selfCheck(): Promise<void> {
   const items = [it("ZQ-201", 1, 3), it("ZQ-202", 2, 2), it("ZQ-203", 3, 2)];
   const settledTypes = ["completed", "canceled", "duplicate"];
   const lines = (total: number, shows: string[], why = new Map<string, LeftOutWhy>()) => reportLines({ initiative: "Board", at: AT, boardNow: 7, then, stated: 5, claimant: REPLAY_CLAIMANT,
-    agenda: { items, total, unknown: 0, leftOut: { blocked: 1, claimed: 1, waiting: 0 } }, settled: settledTypes, shows, leftOutWhy: why });
+    agenda: { items, total, unknown: 0, leftOut: { blocked: 1, claimed: 1, started: 0, waiting: 0 } }, settled: settledTypes, shows, leftOutWhy: why });
   const cut = lines(40, ["ZQ-202"]).join("\n"), whole = lines(3, ["ZQ-202"]).join("\n");
   ok(/tied with at least 1 at 2, 0 of them ahead/.test(cut) && /tied with 1 at 2, 0 of them ahead/.test(whole) && !/at least/.test(whole),
     "a tie reaching the read's last item says \"at least\" when more were listed past it, and not when the read holds them all");
@@ -504,7 +504,7 @@ async function selfCheck(): Promise<void> {
     "a key left out as blocked, one past the read's first items, one both blocked and claimed (blocked first, as the agenda counts it), and a listed key's place among the unstarted");
   const many = Array.from({ length: 20 }, (_, i) => it(`ZQ-${300 + i}`, i + 1, 3));
   then.push(...many.map((m) => t(m.key, "backlog")));
-  const capped = reportLines({ initiative: "Board", at: AT, boardNow: 30, then, stated: 0, claimant: REPLAY_CLAIMANT, agenda: { items: many, total: 20, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 } }, settled: settledTypes, shows: [], leftOutWhy: new Map() });
+  const capped = reportLines({ initiative: "Board", at: AT, boardNow: 30, then, stated: 0, claimant: REPLAY_CLAIMANT, agenda: { items: many, total: 20, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 } }, settled: settledTypes, shows: [], leftOutWhy: new Map() });
   then.splice(then.length - 20, 20);
   ok(capped.filter((l) => /^ +\d+\. \(\d+\) ZQ-3/.test(l)).length === 15 && capped.some((l) => /^ +15\. \(15\) ZQ-314 /.test(l)), "the unstarted list stops at fifteen");
   ok(instantOf("2026-11-02T14:11:00Z") === "2026-11-02T14:11:00.000Z" && instantOf("2026-11-02T14:11+01:00") === "2026-11-02T13:11:00.000Z"
