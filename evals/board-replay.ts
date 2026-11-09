@@ -8,7 +8,7 @@
  *       Linear's shape, the history fetch and the budget read against a stub
  *       of Linear, and the report on a stub agenda. No database, no Linear.
  *
- *   ../db/with-postgres.sh bun board-replay.ts --at 2026-11-02T14:11:00Z [--show SMD-2908,SMD-3602]
+ *   ../db/with-postgres.sh bun board-replay.ts --at 2026-11-02T14:11:00Z [--show SMD-2908,SMD-3602,SMD-1853]
  *       Reads every issue on the initiative's board from Linear now
  *       (LINEAR_API_KEY, as board-sync reads it), and undoes each issue's
  *       history after `--at`: its state, priority, due date, parent,
@@ -129,6 +129,19 @@ export function issueAt(issue: LinearIssue, history: readonly HistoryEntry[], at
   return was;
 }
 
+/**
+ * `--at` as an ISO instant: a day, a time to the minute or finer, and Z or an offset; refused when the day does not
+ * exist (Date.parse rolls 02-30 over to 03-02) or the string is anything less (review pass 3: "1Z" read as 2001).
+ */
+export function instantOf(s: string): string | null {
+  const m = /^(\d{4})-(\d\d)-(\d\d)T\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:?\d\d)$/.exec(s);
+  if (!m) return null;
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (day.getUTCFullYear() !== Number(m[1]) || day.getUTCMonth() !== Number(m[2]) - 1 || day.getUTCDate() !== Number(m[3])) return null;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
 /** Who holds the stand-in claim on a ticket started at the moment: another agent's key, not the replay's own. */
 export const REPLAY_CLAIMANT = "board-replay-other-agent";
 
@@ -192,10 +205,14 @@ export type Budget = { points: number | null; requests: number | null; resetAt: 
 export async function budgetOf(key: string, fetchImpl: typeof fetch = fetch): Promise<Budget> {
   let headers: Headers | null = null;
   const probe = linearClient(key, (async (input: RequestInfo | URL, init?: RequestInit) => { const r = await fetchImpl(input, init); headers = r.headers; return r; }) as typeof fetch);
-  await strict(probe, "{ viewer { id } }");
+  let failure: Error | null = null;
+  try { await strict(probe, "{ viewer { id } }"); } catch (e) { failure = e as Error; }
   const read = (name: string) => { const raw = (headers as Headers | null)?.get(name) ?? null; const n = raw === null || raw.trim() === "" ? NaN : Number(raw); return Number.isFinite(n) ? n : null; };
   const reset = read("x-ratelimit-complexity-reset");
-  return { points: read("x-ratelimit-complexity-remaining"), requests: read("x-ratelimit-requests-remaining"), resetAt: reset === null ? null : new Date(reset).toISOString() };
+  const b: Budget = { points: read("x-ratelimit-complexity-remaining"), requests: read("x-ratelimit-requests-remaining"), resetAt: reset === null ? null : new Date(reset).toISOString() };
+  // A probe refused for the limit itself still carries the budget: said as a short one, with its reset (review pass 3).
+  if (failure && !((b.points !== null && b.points < REPLAY_POINTS) || (b.requests !== null && b.requests < REPLAY_REQUESTS))) throw failure;
+  return b;
 }
 
 /** Why a budget is too short to start a replay, or null when it is enough. Pure. */
@@ -252,7 +269,9 @@ export function reportLines(r: ReportInput): string[] {
       out.push(`  not a candidate: settled then`);
     } else {
       const w = r.leftOutWhy.get(k);
-      const why = !w ? "not read" : w.claimedBy.length ? `left out: claimed by ${w.claimedBy.join(", ")}` : w.blockers.length ? `left out: blocked by ${w.blockers.join(", ")}` : `not in the agenda's first ${r.agenda.items.length}`;
+      // Blocked first, as the agenda counts a ticket both blocked and claimed (review pass 3), and each reason said.
+      const reasons = w ? [...(w.blockers.length ? [`blocked by ${w.blockers.join(", ")}`] : []), ...(w.claimedBy.length ? [`claimed by ${w.claimedBy.join(", ")}`] : [])] : [];
+      const why = !w ? "not read" : reasons.length ? `left out: ${reasons.join(", and ")}` : `not in the agenda's first ${r.agenda.items.length}`;
       out.push(`  ${why}; effective ${w?.score?.effective ?? "?"} (${w?.score ? showTerms(w.score) : "not read"})`);
     }
   }
@@ -461,6 +480,27 @@ async function selfCheck(): Promise<void> {
   const shown = lines(3, ["ZQ-205", "ZQ-206", "ZQ-299"], why).join("\n");
   ok(/ZQ-205: Medium, duplicate \(duplicate\)[^\n]*\n  not a candidate: settled then/.test(shown) && /ZQ-206[^\n]*\n  left out: claimed by someone; effective 2 \(level \+2\)/.test(shown) && /ZQ-299: not replayed/.test(shown),
     "a --show key settled then (a Duplicate among them), one left out with its reason, and one not on the replayed board are each said as they are");
+  const more = new Map<string, LeftOutWhy>([
+    ["ZQ-206", { claimedBy: [], blockers: ["ZQ-1"], score: { effective: 2, terms: [{ term: "level", value: 2 }] } }],
+    ["ZQ-207", { claimedBy: [], blockers: [], score: { effective: 1, terms: [{ term: "level", value: 1 }] } }],
+    ["ZQ-208", { claimedBy: ["someone"], blockers: ["ZQ-1"], score: null }],
+  ]);
+  then.push(t("ZQ-207", "backlog"), t("ZQ-208", "started"));
+  const other = lines(3, ["ZQ-206", "ZQ-207", "ZQ-208", "ZQ-203"], more).join("\n");
+  then.splice(then.length - 2, 2);
+  ok(/ZQ-206[^\n]*\n  left out: blocked by ZQ-1; effective 2/.test(other) && /ZQ-207[^\n]*\n  not in the agenda's first 3; effective 1/.test(other)
+      && /ZQ-208[^\n]*\n  left out: blocked by ZQ-1, and claimed by someone; effective \? \(not read\)/.test(other) && /ZQ-203[^\n]*\n  listed: rank 3 of 3, 3 among the unstarted/.test(other),
+    "a key left out as blocked, one past the read's first items, one both blocked and claimed (blocked first, as the agenda counts it), and a listed key's place among the unstarted");
+  const many = Array.from({ length: 20 }, (_, i) => it(`ZQ-${300 + i}`, i + 1, 3));
+  then.push(...many.map((m) => t(m.key, "backlog")));
+  const sixteen = reportLines({ initiative: "Board", at: AT, boardNow: 30, then, stated: 0, claimant: REPLAY_CLAIMANT, agenda: { items: many, total: 20, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 } }, settled: settledTypes, shows: [], leftOutWhy: new Map() });
+  then.splice(then.length - 20, 20);
+  ok(sixteen.filter((l) => /^ +\d+\. \(\d+\) ZQ-3/.test(l)).length === 15 && sixteen.some((l) => /^ +15\. \(15\) ZQ-314 /.test(l)), "the unstarted list stops at fifteen");
+  const limited = await budgetOf("lin_api_x", answer(400, { "x-ratelimit-complexity-remaining": "0", "x-ratelimit-requests-remaining": "2400", "x-ratelimit-complexity-reset": "1794195912579" }));
+  ok(limited.points === 0 && /waits for 1,000,000; the hour resets at 2026-11-09T03:45:12.579Z/.test(budgetShort(limited) ?? ""), "a probe Linear refuses for the limit is said as a short budget, with when the hour resets");
+  ok(instantOf("2026-11-02T14:11:00Z") === "2026-11-02T14:11:00.000Z" && instantOf("2026-11-02T14:11+01:00") === "2026-11-02T13:11:00.000Z"
+      && ["2026-11-02", "2026-11-02Z", "1Z", "2026-02-30T00:00Z", "2026-11-02T14:11", "yesterday"].every((x) => instantOf(x) === null),
+    "--at takes an instant to the minute with Z or an offset, and refuses a bare day, a year alone, a day that does not exist, or no zone");
   report();
 }
 
@@ -468,10 +508,10 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
   if (args.includes("--self-check")) await selfCheck();
-  const at = flag("--at");
-  if (!at || Number.isNaN(Date.parse(at)) || !/(Z|[+-]\d\d:?\d\d)$/.test(at)) { console.error("usage: bun board-replay.ts --self-check | --at <ISO instant with Z or an offset> [--show KEY,KEY]"); process.exit(2); }
+  const at = instantOf(flag("--at") ?? "");
+  if (!at) { console.error("usage: bun board-replay.ts --self-check | --at <ISO instant: YYYY-MM-DDTHH:MM[:SS], then Z or an offset> [--show KEY,KEY]"); process.exit(2); }
   // A moment ahead of now would outlive the stand-in claims' one-day lease, and no board stood there yet.
   if (Date.parse(at) > Date.now()) { console.error(`--at ${at} is in the future: a replay reads a board that stood`); process.exit(2); }
-  await replay(new Date(at).toISOString(), (flag("--show") ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  await replay(at, (flag("--show") ?? "").split(",").map((s) => s.trim()).filter(Boolean));
   process.exit(0);
 }

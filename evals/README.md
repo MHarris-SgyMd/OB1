@@ -4620,8 +4620,8 @@ tool's own list would need a name of its own. A new read is added there with wha
 "what next" session can then be checked against the order the brain would have given.
 
 ```bash
-bun board-replay.ts --self-check                                          # the rollback rules; no database, no Linear
-../db/with-postgres.sh bun board-replay.ts --at 2026-11-02T14:11:00Z --show SMD-2908,SMD-3602
+bun board-replay.ts --self-check     # the rollback, fetch, budget read and report; no database, no Linear
+../db/with-postgres.sh bun board-replay.ts --at 2026-11-02T14:11:00Z --show SMD-2908,SMD-3602,SMD-1853
 ```
 
 **The board comes from Linear's own history** (the maintainer's choice, 2026-11-08), read at run time with
