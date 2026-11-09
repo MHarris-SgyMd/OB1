@@ -936,14 +936,15 @@ services:
       # PR 2b-1), kept across the brain's processes by advisory locks: each slot
       # held, one waiting call per share and process, and a process's
       # subscription to the slots' channel while a call of it waits (PR 2c-1),
-      # cost a connection of their own; a live call takes none. By default (PR 2b-2b) a local model
-      # server's chat and embedding calls are held to OB1_MODEL_SLOTS less one,
-      # so a slot is left for live calls, the decide tier's to one; a remote
-      # provider's are not held. Types with optional per-model overrides, e.g.
-      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, merge over the defaults and
-      # hold every endpoint; off holds none; a value that does not parse is said,
-      # and the defaults stay. The REST core reads it, the coordinator hands it
-      # to its passes, and the orchestration runner to its reembed.
+      # cost a connection of their own; a live call takes none. By default (PR
+      # 2b-2b) a local model server's chat and embedding calls are held to
+      # OB1_MODEL_SLOTS less one, so a slot is left for live calls, the decide
+      # tier's to one; a remote provider's are not held. Types with optional
+      # per-model overrides, e.g. chat=1,embed=2,decide=1,chat:qwen3.8:27b=1,
+      # merge over the defaults and hold every endpoint; off holds none; a value
+      # that does not parse is said, and the defaults stay. The REST core reads
+      # it, the coordinator hands it to its passes, and the orchestration runner
+      # to its reembed.
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
       # A local model server's parallel calls per model, 1 to 16 (SMD-3379 PR
       # 2b-2b): the bundled Ollama answers this many at once (its

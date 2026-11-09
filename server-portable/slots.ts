@@ -44,12 +44,13 @@
  * closed 2 s after the process's last, as a live subscription holds a process
  * open; one that fails to open is said once and asked again at a head's round
  * 2 s or more on, and one found deaf — a ping of the process's own, sent at a
- * nap no release ended, not heard back by a later one — is dropped, said once, and
- * subscribed again; a ping is judged a second or more after it was sent, as
- * another share's head may look while it is on its way. The head takes its slot and lets the queue go, its next waiter's
- * turn. Processes counting a share's slots differently queue apart, each size
- * its own queue. A stop ends a wait at once, a connect or a
- * statement in flight included: the call's own signal, or the process's
+ * nap no release ended, not heard back by a later one — is dropped, said
+ * once, and subscribed again; a ping is judged a second or more after it
+ * was sent, as another share's head may look while it is on its way. The
+ * head takes its slot and lets the queue go, its next waiter's turn.
+ * Processes counting a share's slots differently queue apart, each size
+ * its own queue. A stop ends a wait at once, a connect or a statement in
+ * flight included: the call's own signal, or the process's
  * (`stop`, or `uninstall`, which leaves a call already running its slot until
  * it ends); a wait in the queue is cancelled on the server (pg_cancel_backend,
  * from a connection of its own: Bun's own cancel leaves the server waiting,
@@ -122,9 +123,9 @@ const CONNECT_S = 5;
 const IDLE_MS = 2000;
 const IDLE_MAX = 4;
 /**
- * How long a close waits for a statement in flight, in s, before it ends the connection: Bun's close with none waits for
- * an unanswered statement for good, so a stop or a fail-open on a stalled session held the process open after its work
- * (review pass 4: a ping unanswered kept a CLI alive 47 s, until killed).
+ * How long a close waits for a statement in flight, in s, before it ends the connection: Bun's close with none waits
+ * for an unanswered statement for good, so a stop or a fail-open on a stalled session held the process open after its
+ * work (review pass 4: a ping unanswered kept a CLI alive 47 s, until killed).
  */
 const CLOSE_S = 1;
 /** How long a semaphore found down is not asked again, in ms: its calls run without a slot meanwhile. */
@@ -276,7 +277,7 @@ function sessionEnded(e: unknown): boolean {
  * its nap — a slot let go goes to the head at once, not at its next try (review pass 6: 424 embeddings at embed=1, two
  * workers, took 36 s against 0.6 with a poll a handoff).
  */
-type Local = { key: string; limit: number; polling: boolean; queue: { go: () => void; waiting: () => void }[]; pid: number; freed: number; busy: boolean; wake?: () => void };
+type Local = { key: string; limit: number; waiter: boolean; queue: { go: () => void; waiting: () => void }[]; pid: number; freed: number; busy: boolean; wake?: () => void };
 
 /**
  * A share's queue (PR 2c-1): a lock a process's waiting call takes with pg_advisory_lock, Postgres granting it in the
@@ -320,17 +321,18 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   const locals = new Map<string, Local>();
   const localOf = (key: string, limit: number): Local => {
     let l = locals.get(key);
-    if (!l) locals.set(key, (l = { key, limit, polling: false, queue: [], pid: 0, freed: 0, busy: false }));
+    if (!l) locals.set(key, (l = { key, limit, waiter: false, queue: [], pid: 0, freed: 0, busy: false }));
     return l;
   };
   /** The share's turn to wait for a slot in this process: at once when no call of it has it, else in order; a stop takes a call out of the queue. */
   const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void): Promise<void> => {
-    if (!l.polling) {
-      l.polling = true;
+    if (!l.waiter) {
+      l.waiter = true;
       return Promise.resolve();
     }
     // Queued behind the waiter: a wait only once it waits in the share's queue or finds no slot free (`busy`), told
-    // then — not for its own statements, a slot free (review pass 7: a stopping fan-out gave back seven answered blurbs).
+    // then — not for its own statements, a slot free (review pass 7: a stopping fan-out gave back seven answered
+    // blurbs).
     if (l.busy) waiting();
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(signal.reason);
@@ -362,7 +364,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   const passTurn = (l: Local) => {
     const next = l.queue.shift();
     if (next) next.go();
-    else l.polling = false;
+    else l.waiter = false;
   };
   /** A connection's state: whether it has closed since it opened, and how to wake a head napping on it. */
   type Conn = { lost: boolean; wake?: () => void };
@@ -372,7 +374,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   type Held = Session & { local: Local; slot: number; pid: number };
   /** Sessions that let their slot go cleanly, holding no lock, kept a while for the next call. */
   const idle: { session: Session; timer: ReturnType<typeof setTimeout> }[] = [];
-  const close = (s: Session) => s.client.close({ timeout: CLOSE_S }).catch(() => {});
+  const close = (s: { client: SQL }) => s.client.close({ timeout: CLOSE_S }).catch(() => {});
   const park = (s: Session) => {
     if (s.conn.lost || ended.signal.aborted || idle.length >= IDLE_MAX) return void close(s);
     const entry = { session: s, timer: setTimeout(() => { idle.splice(idle.indexOf(entry), 1); void close(s); }, IDLE_MS) };
@@ -404,21 +406,21 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   });
   /**
    * The process's subscription to the channel, a connection of its own: opened at a head's first wait, closed 2 s after
-   * the process's last (`quiet`), since a live subscription holds a process open, and a CLI never uninstalls. `ready` is
-   * whether it subscribed, `subscribed` the same once settled. One that did not is said once and dropped, asked again at
-   * a round LISTEN_RETRY_MS or more on by a head still waiting, which meanwhile tries again every RECHECK_MS untold
+   * the process's last (`quiet`), since a live subscription holds a process open, and a CLI never uninstalls.
+   * `subscribed` is whether it subscribed, once settled. One that did not is said once and dropped, asked again at a
+   * round LISTEN_RETRY_MS or more on by a head still waiting, which meanwhile tries again every RECHECK_MS untold
    * (review pass 1: kept, a failed one held the process's head deaf for as long as calls waited, and every process's
    * calls behind it, 21 calls in 12 s where 185 ran). `pingAt` is when the process's ping last sent on it was answered
    * as sent, `heardAt` when it last heard one back, both by performance.now() (`stillHearing`).
    */
-  type Listener = { client: SQL; ready: Promise<boolean>; timer?: ReturnType<typeof setTimeout>; subscribed?: boolean; pingAt?: number; heardAt?: number };
+  type Listener = { client: SQL; timer?: ReturnType<typeof setTimeout>; subscribed?: boolean; pingAt?: number; heardAt?: number };
   let listener: Listener | undefined;
   /** Until when (Date.now()) a subscription that failed to open is not asked again. */
   let listenAgainAt = 0;
   /** This process's own ping on the channel: no share's key, which begins `ob1:slot:`. */
   const ping = `ping:${crypto.randomUUID()}`;
   /** A slot told let go: its share's head, in this process, tries again at once. */
-  const told = (key: string) => {
+  const wakeHead = (key: string) => {
     const l = locals.get(key);
     if (!l) return;
     l.freed++;
@@ -437,29 +439,28 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (!listener) {
       if (Date.now() < listenAgainAt) return;
       const client = new SQL({ url: opts.url, max: 1, connectionTimeout: boundS, connection: SESSION });
-      const it: Listener = { client, ready: Promise.resolve(false) };
+      const it: Listener = { client };
       // Subscribed, and again after Bun re-subscribes a dropped connection: a slot let go before was told to no one, so
       // each head waiting tries again, and a ping sent meanwhile is not judged (review pass 3: lost in a restart, it
       // dropped a subscription Bun had brought back).
       const onListen = () => {
         it.pingAt = undefined;
-        for (const k of locals.keys()) told(k);
+        for (const k of locals.keys()) wakeHead(k);
       };
       const onNotify = (payload: string) => {
         if (payload === ping) it.heardAt = performance.now();
-        else told(payload);
+        else wakeHead(payload);
       };
-      it.ready = bounded(client.listen(SLOTS_CHANNEL, onNotify, onListen), boundS * 1000).then(() => { it.subscribed = true; return true; }, (e: unknown) => {
+      void bounded(client.listen(SLOTS_CHANNEL, onNotify, onListen), boundS * 1000).then(() => { it.subscribed = true; }, (e: unknown) => {
         // Closed on purpose meanwhile — the process stopping, the subscription idle or dropped — nothing to say (review
         // pass 2: said at a stop, the one saying spent).
-        if (listener !== it) return false;
+        if (listener !== it) return;
         // Bun does not ask again after a first refusal: dropped, so a head still waiting asks again in a while.
         listener = undefined;
         if (it.timer) clearTimeout(it.timer);
-        void client.close({ timeout: CLOSE_S }).catch(() => {});
+        void close(it);
         listenAgainAt = Date.now() + LISTEN_RETRY_MS;
         sayOnce("listen", `  background slots: the ${SLOTS_CHANNEL} channel could not be heard (${(e as Error).message}) — a slot another process lets go is found at the next try, a second or two on; asked again at a waiting head's round ${LISTEN_RETRY_MS / 1000} s or more on`);
-        return false;
       });
       listener = it;
     }
@@ -469,10 +470,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
    * RECHECK_MS or more ago, heard back since. Not heard, the subscription is dropped and said once, a head subscribing
    * again at its next round (review pass 2: Bun stops re-subscribing a dropped one after some 3 minutes, and a
    * connection that swallows what it is sent never drops — the head left deaf, unsaid, every process behind it waiting
-   * its tries out). A ping younger than RECHECK_MS is not judged: another share's head may check while it is still on its
-   * way (review pass 3: twelve shares waiting dropped six healthy subscriptions in 30 s). Its time is taken as sent and
-   * kept once the database answers it; a ping that fails is dropped unsent, not failing the call open — the ping is a
-   * check, not the semaphore. Then the next ping sent, where none is on its way.
+   * its tries out). A ping younger than RECHECK_MS is not judged: another share's head may check while it is still on
+   * its way (review pass 3: twelve shares waiting dropped six healthy subscriptions in 30 s). Its time is taken as sent
+   * and kept once the database answers it; a ping that fails is dropped unsent, not failing the call open — the ping is
+   * a check, not the semaphore. Then the next ping sent, where none is on its way.
    */
   const stillHearing = async (ask: <T>(q: PromiseLike<T>) => Promise<T>, session: SQL, signal: AbortSignal): Promise<void> => {
     const it = listener;
@@ -483,7 +484,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       if ((it.heardAt ?? -1) < it.pingAt) {
         listener = undefined;
         if (it.timer) clearTimeout(it.timer);
-        void it.client.close({ timeout: CLOSE_S }).catch(() => {});
+        void close(it);
         sayOnce("deaf", `  background slots: the ${SLOTS_CHANNEL} channel was no longer heard — subscribing again; meanwhile a slot another process let go was found at the next try`);
         return;
       }
@@ -498,13 +499,13 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   /** No call of this process waits for a slot: the subscription closed 2 s on, unless one waits again by then. */
   const quiet = () => {
     const it = listener;
-    if (!it || it.timer || [...locals.values()].some((x) => x.polling)) return;
+    if (!it || it.timer || [...locals.values()].some((x) => x.waiter)) return;
     it.timer = setTimeout(() => {
       it.timer = undefined;
       // A call of this process waiting again by now, not yet at a head's try: kept, its own end closing it.
-      if ([...locals.values()].some((x) => x.polling)) return;
+      if ([...locals.values()].some((x) => x.waiter)) return;
       if (listener === it) listener = undefined;
-      void it.client.close({ timeout: CLOSE_S }).catch(() => {});
+      void close(it);
     }, IDLE_MS);
     it.timer.unref();
   };
@@ -610,8 +611,6 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
             // Asked each round, so a subscription that failed is asked again while the call waits; a live one costs
             // nothing.
             listening();
-            // A session closed while the subscription was asked for: its wake came before the nap (review pass 2).
-            if (conn.lost) continue;
             if (l.freed === seen && !(await nap(l, RECHECK_MS + Math.floor(Math.random() * RECHECK_MS), signal))) await stillHearing(ask, session, signal);
           }
         } catch (e) {
@@ -666,7 +665,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
         // than missing the wake (review pass 7). Another process's: told on the channel. None: the next call to ask
         // finds the slot free.
         const heads = (u.heads ?? "").split(",").filter((p) => p !== "").map(Number);
-        if (heads.includes(held.local.pid)) told(held.local.key);
+        if (heads.includes(held.local.pid)) wakeHead(held.local.key);
         if (heads.some((p) => p !== held.local.pid)) {
           await bounded(held.client`SELECT pg_notify(${SLOTS_CHANNEL}, ${held.local.key})`, boundS * 1000).catch(() => {
             // Untold, the head finds the slot at its next try; the session, not answering, is not kept.
@@ -718,7 +717,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       const it = listener;
       listener = undefined;
       if (it?.timer) clearTimeout(it.timer);
-      await Promise.all([...idle.splice(0).map((e) => { clearTimeout(e.timer); return close(e.session); }), ...(it ? [it.client.close({ timeout: CLOSE_S }).catch(() => {})] : [])]);
+      await Promise.all([...idle.splice(0).map((e) => { clearTimeout(e.timer); return close(e.session); }), ...(it ? [close(it)] : [])]);
     },
   };
 }
