@@ -368,13 +368,15 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // the tier is configured.
       classifyGenre(content, { ...clientMetadata, source: origin }, resolveJevConfig(ctx.env()), subject),
       // The priority and due time the text states (SMD-3670): opt-in (OB1_INFER_PRIORITY) and on the chat gate's terms,
-      // as the tags' call is. Asked only of a text no thought holds yet: a re-capture states nothing (stateInferred
-      // runs for a fresh row alone), so its call would be spent for nothing (review pass 1). A text that lands
-      // between this read and the write is the rare case paying one call for nothing. It never fails the capture: a
-      // failed read asks anyway, and the runtime's own error is logged here and states nothing.
+      // as the tags' call is. For a key that can read, asked only of a text no thought holds yet: a re-capture states
+      // nothing (stateInferred runs for a fresh row alone), so its call would be spent for nothing (review pass 1). A
+      // key that cannot read is asked either way: the call's time would tell it whether a text exists, which the
+      // capture never tells such a key (review pass 2). A text that lands between this read and the write is the rare
+      // case paying one call for nothing. It never fails the capture: a failed read asks anyway, and the runtime's own
+      // error is logged here and states nothing.
       cfg.inferPriority && gate.chat.allowed
         ? ctx.store()
-            .then((store) => store.keyAtText(content))
+            .then((store) => (reader ? store.keyAtText(content) : null))
             .then((held) => held !== null, () => false)
             .then((held) => (held ? null : inferPriority(content, capturedAt, subject, cfg)))
             .catch((e: unknown) => {

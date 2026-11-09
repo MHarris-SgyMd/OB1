@@ -2921,6 +2921,11 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["before 5pm Friday", "2026-11-06"], ["before the trip on Friday", "2026-11-05"], ["before noon tomorrow", "2026-11-04"], ["not before Friday", null], ["not until the 20th", null], ["after the trip", null],
     ["by March 15, 2028", "2028-03-15"], ["by 15 March 2028", "2028-03-15"], ["by December 1, 2025", null], ["by 2025-01-01", null], ["by 2030-01-01", "2030-01-01"],
     ["before the 12th", "2026-11-11"], ["by the 2nd", "2026-12-02"], ["by the 3rd", TUE], ["in 2 decades", null], ["by 3 maybe", null],
+    // Review pass 2: "the Nth" only with nothing after it but punctuation, "March the 5th" a date, "before" an end
+    // named or a count before it, and the weekdays' abbreviations.
+    ["by March the 5th", "2027-03-05"], ["before March the 5th", "2027-03-04"], ["by the 12th.", "2026-11-12"], ["by the 3rd week of November", null],
+    ["before the 2nd meeting", null], ["by the 1st round", null], ["before the end of the month", "2026-11-30"], ["before end of month", "2026-11-30"],
+    ["2 days before the 20th", null], ["by Fri", "2026-11-06"], ["due Sat.", "2026-11-07"], ["by Thurs", "2026-11-05"], ["this tues", "2026-11-10"],
   ];
   const wrong = rows.filter(([p, want]) => resolveDue(p, TUE) !== want).map(([p, want]) => `${p}: ${resolveDue(p, TUE)} not ${want}`);
   assert(wrong.length === 0, `the rules read a due phrase from the capture day, leaving "next Friday" and a phrase naming no day to the model (${wrong.join("; ") || `${rows.length} rows`})`);
@@ -2932,6 +2937,8 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     "the model's date is taken only as a real YYYY-MM-DD from the capture day to 366 days after it");
   assert(modelDay("2026-11-06", TUE, "by") === null && modelDay("2026-11-06", TUE, "soon-ish") === null && modelDay("2026-11-06", TUE, "not until Friday") === null && modelDay("2026-11-20", TUE, "the Friday after next") === "2026-11-20",
     "…on a phrase that names a time (\"by\" alone names none) and isn't a start; \"after next\" is a deadline");
+  assert(modelDay("2026-11-06", TUE, "next Fri") === "2026-11-06" && modelDay("2026-11-07", TUE, "next Fri") === null,
+    "…and an abbreviated weekday holds the model's date to that weekday too");
   assert(modelDay("2026-11-13", TUE, "next Friday") === "2026-11-13" && modelDay("2026-11-10", TUE, "next Friday") === null && modelDay("2026-11-10", TUE, "in a fortnight or so") === "2026-11-10",
     "…and on the weekday the phrase names, when it names one (the local 7B gave \"next Friday\" as a Tuesday)");
   const text = "Urgent:  the landlord wants an answer by\nFriday";
@@ -2943,6 +2950,18 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   assert(negatedIn("urgent", notUrgent) && !negatedIn("not urgent", notUrgent) && !negatedIn("urgent", "Urgent, and not urgent later") && !negatedIn("absent", notUrgent)
       && readAnswer({ level: "urgent", level_phrase: "urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "low", level_phrase: "not urgent" }, notUrgent, TUE).level?.value === 1,
     "a level word the text negates everywhere drops the level; a phrase carrying its own negation is read as written");
+  // Review pass 2: two words between, "non-", and a High off a phrase that negates its own cue.
+  assert(["this is not very urgent", "not that urgent", "not all that urgent really", "a non-urgent task", "nothing's urgent here"].every((t) => negatedIn("urgent", t))
+      && !negatedIn("urgent", "no matter what, urgent")
+      && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
+      && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
+    "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands");
+  // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
+  const slides = "Before the meeting, I need the slides by Friday.";
+  const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
+  const whole = readAnswer({ level: "urgent", level_phrase: "Urgent: landlord wants an answer by Friday", due_phrase: "by Friday" }, "Urgent: landlord wants an answer by Friday", TUE);
+  assert(asLevel.level === null && asLevel.due?.day === "2026-11-06" && inferredStatement(asLevel)?.level === DUE_ONLY_LEVEL && whole.level?.value === 3,
+    `a level phrase with no word about how much it matters that holds the deadline drops the level (the due phrase alone: Medium); one with such a word stands (${JSON.stringify(asLevel)} | ${JSON.stringify(whole.level)})`);
 
   // The ticket's Verify: "Urgent: landlord wants an answer by Friday", captured on Tuesday, proposes High, due 2026-11-06, quoting the phrase.
   const verify = "Urgent: landlord wants an answer by Friday";
@@ -2996,7 +3015,8 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   }
 
   // The capture path (core/writes.ts) over a stub store: the knob off asks nothing; on, the statement goes on the
-  // thought, inferred, under the key's scope; a text a thought holds already is not asked (review pass 1); a fault
+  // thought, inferred, under the key's scope; a text a thought holds already is not asked of a key that can read
+  // (review pass 1), and is of one that cannot (review pass 2); a fault
   // stating it, or a chat endpoint that refuses the connection, never fails the capture.
   const calls = { infer: 0, tags: 0 };
   const closedPort = (() => { const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; })();
@@ -3033,6 +3053,9 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     existed = true;
     const re = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never);
     assert(re.ok && stated.length === 1 && calls.infer === 1 && calls.tags === 3, `a re-capture of a text a thought holds asks nothing and states nothing (${JSON.stringify(calls)})`);
+    // A key that cannot read is asked either way: the call's time would tell it whether the text exists (review pass 2).
+    const hookRe = await capture(ctxWith(true), { name: "hook", scope: "capture", keyHash: "k" } as never, { content: "this matters, due tomorrow" } as never);
+    assert(hookRe.ok && stated.length === 1 && calls.infer === 2, `a capture-only key's re-capture is asked all the same, and states nothing (${JSON.stringify(calls)})`);
     existed = false; assertFails = true;
     const errs: string[] = [];
     const realErr = console.error;
