@@ -3,8 +3,8 @@
 // in a scope, ranked by 122's effective priority, each with the terms behind
 // its place, and what was left out and why. A read: the database decides the
 // candidates, the filters and the order; this file turns the caller's
-// arguments into the call, passes the calling key for `mine`, answers 123's
-// refusal of `mine` as CLAIMS_UNREADABLE, and writes the call's query_log row.
+// arguments into the call, passes the calling key for `mine`, answers the
+// agenda's refusal of `mine` (123's words, kept by 124) as CLAIMS_UNREADABLE, and writes the call's query_log row.
 
 import type { Principal } from "../auth.ts";
 import type { AgendaResult } from "../store.ts";

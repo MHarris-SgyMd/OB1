@@ -6960,6 +6960,8 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     let missing = "", notCount = "";
     try { normaliseAgenda({ ...answer(0), left_out: { blocked: 0, claimed: 0, waiting: 0 } }, "agenda"); } catch (e) { missing = (e as Error).message; }
     try { normaliseAgenda({ ...answer(0), claims_live: "x" }, "agenda"); } catch (e) { notCount = (e as Error).message; }
+    let noCount = "";
+    try { const { claims_live: _dropped, ...without } = answer(0); normaliseAgenda(without, "agenda"); } catch (e) { noCount = (e as Error).message; }
     // A status is the board's free text: quoted, on one line, cut at 40 characters.
     const odd = answer(3);
     odd.items[0].status = 'Waiting on "QA"\nand a status well past forty characters long';
@@ -6968,9 +6970,9 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
         && /^1 of 1 item, most pressing first:\n1\. ticket SMD-7 \("Todo"\) "T"/.test(said) && /\nLeft out: 2 started \(include_started lists them\)\./.test(said)
         && /\nThis brain records no live claim, so none left anything out: work claimed through another brain is not seen here\.$/.test(said)
         && /Claims could not be read/.test(saidUnread) && !/records no live claim/.test(saidUnread) && !/records no live claim/.test(saidSome)
-        && /answered no agenda this server reads/.test(missing) && /answered no agenda this server reads/.test(notCount)
+        && /answered no agenda this server reads/.test(missing) && /answered no agenda this server reads/.test(notCount) && /answered no agenda this server reads/.test(noCount)
         && /^1 of 1 item, most pressing first:\n1\. ticket SMD-7 \("Waiting on \\"QA\\" and a status well past f[^"]{0,6}…"\) "T"/.test(saidOdd),
-      `a ticket's status beside its key, started left out counted, no live claim said once and only when claims were read; an answer without the started count or with a claims count not a number refused; a status quoted, on one line, cut (${said.split("\n").join(" | ")} || ${saidOdd.split("\n")[1]})`);
+      `a ticket's status beside its key, started left out counted, no live claim said once and only when claims were read; an answer without the started count, without a claims count or with one not a number refused; a status quoted, on one line, cut (${said.split("\n").join(" | ")} || ${saidOdd.split("\n")[1]})`);
   }
   // The agenda (SMD-3669 review pass 2): holder mine on a role without the claims group is a refusal, in words.
   const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);

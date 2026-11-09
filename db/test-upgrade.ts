@@ -5635,7 +5635,7 @@ console.log("\n[20bo] Migration 124: onto a populated brain at the file before i
   const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION ob1_item_blockers_away(text, text) RENAME TO ob1_item_blockers`;
   const kept = await agendas();
-  assert(/^migration 124 needs 068, 115, 122 and 123/.test(without) && kept === "8",
+  assert(/^migration 124 needs 034, 068, 115, 122 and 123 \(query_log, /.test(without) && kept === "8",
     `without 123's ob1_item_blockers the file is refused by name, and 123's eight-argument agenda stays alone (${without.slice(0, 80)} | ${kept})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 });

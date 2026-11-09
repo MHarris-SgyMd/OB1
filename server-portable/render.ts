@@ -2425,7 +2425,7 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
   // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
   lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
-  if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): claimed work is not left out or named.");
+  if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
 }, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);

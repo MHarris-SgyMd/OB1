@@ -2510,9 +2510,10 @@ Migration 124 replaces the agenda under a ninth argument, `include_started`
 started ticket no live claim covers is left out unless asked, and counted in
 `left_out.started` (decided 2026-11-09: 123 took every unsettled ticket). A
 claimed started ticket is the claim rule's: counted as claimed, and listed by
-`include_claimed` or under holder `mine`. `claims_live` says how many live claims the brain records on any ticket:
-0 means no claim could leave anything out, as on a brain whose board is claimed
-through another. 123's eight positional arguments read as 124's default.
+`include_claimed` or under holder `mine`. `claims_live` says how many live
+claims the brain records on any ticket: 0 means no claim could leave anything
+out, as on a brain whose board is claimed through another. 123's eight
+positional arguments read as 124's default.
 
 Migration 123 adds the agenda, `agenda(scope, holder, limit, …)` (SMD-3669): what
 matters now, as one read. Its candidates are every ticket whose head has a known,

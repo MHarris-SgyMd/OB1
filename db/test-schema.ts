@@ -18324,13 +18324,14 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
   const now = new Date().toISOString();
   const after = await ag({ now }), mine = await ag({ now, holder: { name: "ag111-bot", agent_id: BOT_ID } }), withClaimed = await ag({ now, claimed: true });
   const nobody = await ag({ now: "2099-01-01T00:00:00Z" });
-  assert(claimed.outcome === "claimed" && elsewhere.outcome === "claimed" && before === direct && after.claims_read && after.claims_live === before + 2
+  const directAfter = await liveCount(now);
+  assert(claimed.outcome === "claimed" && elsewhere.outcome === "claimed" && before === direct && after.claims_read && after.claims_live === directAfter && directAfter >= 2
       && lo(after) === '{"blocked":1,"claimed":1,"started":0,"waiting":1}'
       && row(withClaimed) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && withClaimed.items.find((i) => i.key === "SMD-9903")?.claimed?.[0]?.holder === "ag111-bot"
       && lo(withClaimed) === '{"blocked":1,"claimed":0,"started":0,"waiting":1}'
       && row(mine) === "SMD-9903 In Progress/started, SMD-9906 In Progress/started" && mine.left_out.started === 0
       && nobody.claims_live === 0,
-    `claims_live is the brain's live claims, in scope or not (work_claims says ${direct}), two more for the bot's; a claimed started ticket counted once, as claimed, and listed with its holder by include_claimed alone; holder mine shows both, started; every lease run out, 0 (${before} → ${after.claims_live}; ${lo(after)} | ${row(withClaimed)}; ${lo(withClaimed)} | ${row(mine)} | ${nobody.claims_live})`);
+    `claims_live is the brain's live claims, in scope or not (work_claims says ${direct}, then ${directAfter} with the bot's two); a claimed started ticket counted once, as claimed, and listed with its holder by include_claimed alone; holder mine shows both, started; every lease run out, 0 (${before} → ${after.claims_live}; ${lo(after)} | ${row(withClaimed)}; ${lo(withClaimed)} | ${row(mine)} | ${nobody.claims_live})`);
 
   // A role without the claims group: claims_live null, and with no claim to read a claimed started ticket is a started one.
   await db.exec(`CREATE ROLE ag111_noclaims NOLOGIN; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ag111_noclaims; REVOKE SELECT ON work_claims FROM ag111_noclaims`);
@@ -18347,10 +18348,11 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
   // Released, a claim is no longer live: claims_live one down, the started ticket counted as started again.
   const release = async (c: Claimed) => (await db.query<{ r: { outcome: string } }>(`SELECT release_work_claim($1::uuid, $2, 'test-schema [111]', false, $3::jsonb) AS r`, [c.claim?.id ?? null, c.token, BOT])).rows[0].r.outcome;
   const released = await release(claimed);
-  const freed = await ag({ now: new Date().toISOString() });
+  const freedAt = new Date().toISOString();
+  const freed = await ag({ now: freedAt }), directFreed = await liveCount(freedAt);
   const releasedElsewhere = await release(elsewhere);
-  assert(released === "released" && releasedElsewhere === "released" && freed.claims_live === before + 1 && lo(freed) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
-    `a released claim is not live: claims_live ${before} + 1 (the other claim), the started ticket counted as started (${released}; ${freed.claims_live}; ${lo(freed)})`);
+  assert(released === "released" && releasedElsewhere === "released" && freed.claims_live === directFreed && lo(freed) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
+    `a released claim is not live: claims_live as work_claims counts it (${directAfter} → ${freed.claims_live}, work_claims ${directFreed}), the started ticket counted as started (${released}; ${lo(freed)})`);
 
   // query_log.filter's comment says an agenda row holds four flags.
   const filterComment = (await db.query<{ c: string | null }>(`SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS c`)).rows[0].c ?? "";
