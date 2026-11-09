@@ -42,8 +42,10 @@
  * that dies, or one from before PR 2c-1, lets its slot go untold. It hears the
  * channel on a connection of the process's own, opened at its first wait and
  * closed 2 s after the process's last, as a live subscription holds a process
- * open; one that fails to open is said once and asked again every 2 s while a
- * call waits. The head takes its slot and lets the queue go, its next waiter's
+ * open; one that fails to open is said once and asked again at a head's round
+ * 2 s or more on, and one found deaf — a ping of the process's own, sent at a
+ * nap no release ended, not heard back by the next — is dropped, said once, and
+ * subscribed again. The head takes its slot and lets the queue go, its next waiter's
  * turn. Processes counting a share's slots differently queue apart, each size
  * its own queue. A stop ends a wait at once, a connect or a
  * statement in flight included: the call's own signal, or the process's
@@ -331,14 +333,14 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       l.queue.push(entry);
     });
   };
-  /** The head's sleep between its tries: `ms`, ended early by a stop (rejecting) or by a slot told let go (`wake`). */
-  const nap = (l: Local, ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+  /** The head's sleep between its tries: `ms`, ended early by a stop (rejecting) or by a slot told let go (`wake`); whether it was woken. */
+  const nap = (l: Local, ms: number, signal: AbortSignal): Promise<boolean> => new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason);
     const done = () => { clearTimeout(t); signal.removeEventListener("abort", onAbort); l.wake = undefined; };
-    const t = setTimeout(() => { done(); resolve(); }, ms);
+    const t = setTimeout(() => { done(); resolve(false); }, ms);
     const onAbort = () => { done(); reject(signal.reason); };
     signal.addEventListener("abort", onAbort, { once: true });
-    l.wake = () => { done(); resolve(); };
+    l.wake = () => { done(); resolve(true); };
   });
   /** The waiter waits — in the share's queue, or at its head with no slot free — and so does each call queued behind it, told now. */
   const tellWaiting = (l: Local, waiting: () => void) => {
@@ -396,14 +398,20 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   /**
    * The process's subscription to the channel, a connection of its own: opened at a head's first wait, closed 2 s after
    * the process's last (`quiet`), since a live subscription holds a process open, and a CLI never uninstalls. `ready` is
-   * whether it subscribed. One that did not is said once and dropped, asked again LISTEN_RETRY_MS on by a head still
-   * waiting, which meanwhile tries again every RECHECK_MS untold (review pass 1: kept, a failed one held the process's
+   * whether it subscribed. One that did not is said once and dropped, asked again at a round LISTEN_RETRY_MS or more on
+   * by a head still waiting, which meanwhile tries again every RECHECK_MS untold (review pass 1: kept, a failed one held the process's
    * head deaf for as long as calls waited, and every process's calls behind it, 21 calls in 12 s where 185 ran).
    */
-  type Listener = { client: SQL; ready: Promise<boolean>; timer?: ReturnType<typeof setTimeout> };
+  /**
+   * `subscribed` once Bun said so; `pingAt` when a head last sent the process's ping, `heardAt` when the subscription
+   * last heard it back (`stillHearing`).
+   */
+  type Listener = { client: SQL; ready: Promise<boolean>; timer?: ReturnType<typeof setTimeout>; subscribed?: boolean; pingAt?: number; heardAt?: number };
   let listener: Listener | undefined;
   /** Until when (Date.now()) a subscription that failed to open is not asked again. */
   let listenAgainAt = 0;
+  /** This process's own ping on the channel: no share's key, which begins `ob1:slot:`. */
+  const ping = `ping:${crypto.randomUUID()}`;
   /** A slot told let go: its share's head, in this process, tries again at once. */
   const told = (key: string) => {
     const l = locals.get(key);
@@ -428,18 +436,45 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
         subscribed = true;
       };
       const it: Listener = { client, ready: Promise.resolve(false) };
-      it.ready = bounded(client.listen(SLOTS_CHANNEL, told, onListen), boundS * 1000).then(() => true, (e: unknown) => {
+      const onNotify = (payload: string) => {
+        if (payload === ping) it.heardAt = Date.now();
+        else told(payload);
+      };
+      it.ready = bounded(client.listen(SLOTS_CHANNEL, onNotify, onListen), boundS * 1000).then(() => { it.subscribed = true; return true; }, (e: unknown) => {
+        // Closed on purpose meanwhile — the process stopping, the subscription idle or dropped — nothing to say (review
+        // pass 2: said at a stop, the one saying spent).
+        if (listener !== it) return false;
         // Bun does not ask again after a first refusal: dropped, so a head still waiting asks again in a while.
-        if (listener === it) listener = undefined;
+        listener = undefined;
         if (it.timer) clearTimeout(it.timer);
         void client.close({ timeout: 0 }).catch(() => {});
         listenAgainAt = Date.now() + LISTEN_RETRY_MS;
-        sayOnce("listen", `  background slots: the ${SLOTS_CHANNEL} channel could not be heard (${(e as Error).message}) — a slot another process lets go is found at the next try, a second or two on; asked again every ${LISTEN_RETRY_MS / 1000} s while a call waits`);
+        sayOnce("listen", `  background slots: the ${SLOTS_CHANNEL} channel could not be heard (${(e as Error).message}) — a slot another process lets go is found at the next try, a second or two on; asked again at a waiting head's round ${LISTEN_RETRY_MS / 1000} s or more on`);
         return false;
       });
       listener = it;
     }
     return bounded(listener.ready, boundS * 1000, signal);
+  };
+  /**
+   * After a nap no release ended, whether the process still hears the channel: its ping, sent at the last such nap, heard
+   * back since. Not heard, the subscription is dropped and said once, a head asking again at its next round (review pass
+   * 2: Bun stops re-subscribing a dropped one after some 3 minutes, and a connection that swallows what it is sent
+   * never drops — the head left deaf, unsaid, every process behind it waiting its tries out). Heard, the next ping sent.
+   */
+  const stillHearing = async (ask: <T>(q: PromiseLike<T>) => Promise<T>, session: SQL): Promise<boolean> => {
+    const it = listener;
+    if (!it?.subscribed) return true;
+    if (it.pingAt !== undefined && (it.heardAt ?? 0) < it.pingAt) {
+      listener = undefined;
+      if (it.timer) clearTimeout(it.timer);
+      void it.client.close({ timeout: 0 }).catch(() => {});
+      sayOnce("deaf", `  background slots: the ${SLOTS_CHANNEL} channel was no longer heard — subscribed again; meanwhile a slot another process let go was found at the next try`);
+      return false;
+    }
+    it.pingAt = Date.now();
+    await ask(session`SELECT pg_notify(${SLOTS_CHANNEL}, ${ping})`);
+    return true;
   };
   /** No call of this process waits for a slot: the subscription closed 2 s on, unless one waits again by then. */
   const quiet = () => {
@@ -565,7 +600,9 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
             }
             // A slot told let go since the round began, the head not yet napping: tried again at once, the wake not
             // lost (review pass 7: lost between the try and the nap, 424 1 ms calls took 13 s).
-            if (l.freed === seen) await nap(l, RECHECK_MS + Math.floor(Math.random() * RECHECK_MS), signal);
+            // A session closed while the subscription was asked for: its wake came before the nap (review pass 2).
+            if (conn.lost) continue;
+            if (l.freed === seen && !(await nap(l, RECHECK_MS + Math.floor(Math.random() * RECHECK_MS), signal)) && !(await stillHearing(ask, session))) heard = false;
           }
         } catch (e) {
           if (signal.aborted || !answered || !sessionEnded(e)) throw e;

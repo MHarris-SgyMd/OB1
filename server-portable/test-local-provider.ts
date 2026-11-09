@@ -2385,22 +2385,30 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
    * does; `close`, the next connection to send a byte closed, as a Postgres restart ends a session mid-statement;
    * `closeSecond`, each connection closed at its first write after the server's third ReadyForQuery — the session up,
    * and its first statement answered whether Bun sends it in one sync or two — so every session answers once and then
-   * ends. `opened` counts the connections made through it.
+   * ends; `deafListen`, a connection that has sent a LISTEN hears nothing more from the server for good, as a path
+   * swallowing what it is sent does, while it stays open. `opened` counts the connections made through it.
    */
   const pgProxy = () => {
     const pg = new URL(URL_!);
-    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[]; ready: number };
-    const state = { mode: "pass" as "pass" | "stall" | "close" | "closeSecond", opened: 0 };
+    type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[]; ready: number; listen?: boolean; deaf?: boolean };
+    const state = { mode: "pass" as "pass" | "stall" | "close" | "closeSecond" | "deafListen", opened: 0 };
     // ReadyForQuery messages in a chunk from the server: 'Z', length 5.
     const readies = (d: Uint8Array) => { let n = 0; for (let i = 0; i + 4 < d.length; i++) if (d[i] === 0x5a && d[i + 1] === 0 && d[i + 2] === 0 && d[i + 3] === 0 && d[i + 4] === 5) n++; return n; };
     const listener = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
       open(c) {
         state.opened++;
         c.data = { buf: [], ready: 0 };
-        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) { if (state.mode === "stall") return; c.data.ready += readies(d); c.write(d); }, close() { c.end(); }, error() { c.end(); } } })
+        Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) {
+          if (state.mode === "stall") return;
+          if (state.mode === "deafListen" && c.data.listen) c.data.deaf = true;
+          if (c.data.deaf) return;
+          c.data.ready += readies(d);
+          c.write(d);
+        }, close() { c.end(); }, error() { c.end(); } } })
           .then((up) => { c.data.up = up; for (const b of c.data.buf) up.write(b); c.data.buf = []; }, () => c.end());
       },
       data(c, d) {
+        if (!c.data.listen && Buffer.from(d).includes("LISTEN ")) c.data.listen = true;
         if (state.mode === "stall") return;
         if (state.mode === "close") { state.mode = "pass"; c.end(); return; }
         if (state.mode === "closeSecond" && c.data.ready >= 3) { c.end(); return; }
@@ -2514,6 +2522,71 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     } finally {
       await inst.uninstall();
       await other.close();
+      proxy.stop(true);
+    }
+  }
+  // A subscription that goes deaf while it stays open — what its server sends swallowed, which Bun never sees, as it
+  // never sees a re-subscription it has given up after some 3 minutes — is found by the process's ping, sent at a nap no
+  // release ended and not heard back by the next: dropped, said once, and subscribed again once the path passes, slots
+  // then told at once (review pass 2: deaf for good, unsaid, every handoff a try's 1 to 2 s).
+  {
+    const proxy = pgProxy();
+    const deafSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => deafSaid.push(l), connectS: 1 });
+    const holder = new SQL({ url: URL_, max: 1 });
+    const admin = new SQL({ url: URL_, max: 1 });
+    const listens = async () => Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`)[0].c);
+    // One handoff: the slot held elsewhere, a call waiting on it, then let go as a PR 2c-1 process does, told.
+    const handoff = async (before: () => Promise<void>) => {
+      await holder`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
+      let ranAt = 0;
+      const waiting = modelCall(call(), async () => { ranAt = Date.now(); });
+      await before();
+      const letGo = Date.now();
+      await holder`SELECT pg_advisory_unlock(hashtext(${key}), 0), pg_notify(${SLOTS_CHANNEL}, ${key})`;
+      await waiting;
+      return ranAt - letGo;
+    };
+    try {
+      const first = await handoff(async () => { for (let k = 0; k < 100 && (await listens()) === 0; k++) await Bun.sleep(20); await Bun.sleep(100); });
+      proxy.mode = "deafListen";
+      const deaf = await handoff(async () => {
+        // Found deaf at the second nap no release ends, a few seconds on; subscribed again once the path passes, within
+        // a retry's 2 s and a try.
+        for (let k = 0; k < 400 && !deafSaid.some((l) => /no longer heard/.test(l)); k++) await Bun.sleep(20);
+        proxy.mode = "pass";
+        await Bun.sleep(5000);
+      });
+      assert(first < 300 && deafSaid.filter((l) => /no longer heard/.test(l)).length === 1 && deaf < 300,
+        `a subscription gone deaf while open is found by the process's ping, said once, and subscribed again: handoffs ${first} ms before, ${deaf} ms after (${JSON.stringify(deafSaid.map((l) => l.slice(0, 70)))})`);
+    } finally {
+      await inst.uninstall();
+      await holder.close();
+      await admin.close();
+      proxy.stop(true);
+    }
+  }
+  // A subscription closed on purpose while its first LISTEN is unanswered — here the process stopping — says nothing:
+  // its failure is no channel unheard, and the one saying is kept for a real one (review pass 2).
+  {
+    const proxy = pgProxy();
+    proxy.mode = "deafListen";
+    const stopSaid: string[] = [];
+    const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => stopSaid.push(l), connectS: 1 });
+    const holder = new SQL({ url: URL_, max: 1 });
+    try {
+      await holder`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
+      const waiting = modelCall(call(), async () => "ran").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
+      await Bun.sleep(300);
+      await inst.uninstall();
+      const ended = await waiting;
+      // Past the subscription's 1 s bound, so a failure said late is seen.
+      await Bun.sleep(1500);
+      assert(/rejected: .*stopping/.test(ended) && !stopSaid.some((l) => /could not be heard/.test(l)),
+        `a subscription closed as the process stops, its LISTEN unanswered, says nothing (${ended}; ${JSON.stringify(stopSaid.map((l) => l.slice(0, 70)))})`);
+    } finally {
+      await inst.uninstall();
+      await holder.close();
       proxy.stop(true);
     }
   }
