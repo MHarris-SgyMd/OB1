@@ -7140,6 +7140,13 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
     `one read for the page: each row once as its own thought, then the tickets they name, a key that is no ticket by 115's rule (SMD-0) not sent (${JSON.stringify(asked)})`);
   assert(JSON.stringify(got) === JSON.stringify({ t1: { effective: 3, known: true }, t2: { effective: 2, known: false }, t3: { effective: 4, known: true }, t4: { effective: 0, known: true } }),
     `the ranking takes each row's own answer as 122 gives it, never a ticket it names: an inherited level known, an unknown not, a stated level known, a stated None known at 0 (${JSON.stringify(got)})`);
+  // SMD-4149 (migration 125): a level read from the note's open items is known; a due time alone from them is not.
+  const fromItems = prioritiesOf({ by: new Map([
+    ["thought:f1", { ...ep("f1", 6, null), terms: [{ term: "from_items", value: 4, detail: { level: 4, item: "i1" } }] }],
+    ["thought:f2", { ...ep("f2", 4, null), terms: [{ term: "unknown", value: 2, detail: {} }, { term: "urgency", value: 2, detail: { due_from: "from_items", item: "i2" } }] }],
+  ]) as never, keyed: new Map() }, [{ id: "f1" }, { id: "f2" }]);
+  assert(JSON.stringify(fromItems) === JSON.stringify({ f1: { effective: 6, known: true }, f2: { effective: 4, known: false } }),
+    `a level read from a note's open item is known to the floor; an unknown with an item's due time ranks by its effective and is not known (${JSON.stringify(fromItems)})`);
   const none = prioritiesOf(await readPriorities({ effectivePriority: async () => [] } as never, [{ id: "z", content: "" }]), [{ id: "z" }]);
   assert(JSON.stringify(none) === JSON.stringify({ z: { effective: 0, known: false } }), `a row the read answered nothing for is unknown, at 0 (${JSON.stringify(none)})`);
   // Review pass 1: a ranked search's window read asks its rows' own thoughts alone (`tickets: false`), so a ticket only
@@ -7285,6 +7292,39 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   const listLine = say.renderListThoughts({ ok: true, value: { thoughts: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, supersededBy: null, claimed: [], claimedMore: 0, claimedNotRead: 0, ...got!.c }], sort: "newest", cursor: null } } as never).content[0].text;
   assert(kwLine.includes("\nPriority: this ticket's row (SMD-4) at 5 (critical (5)), settled.\n") && listLine.includes("\n   Priority: none known on the items read; 10 more tickets it names not read."),
     `keyword and list print the line too; tickets not read are said with none shown (${kwLine.match(/Priority: .*/)?.[0]} | ${listLine.match(/Priority: .*/)?.[0]})`);
+  // SMD-4149 (migration 125): a note's level read from its open item is known — labelled, `fromItem` in the value, the
+  // item named in the line and the title; a due time alone from an item is no label, as an unknown with urgency is not.
+  const ITEM = "44444444-4444-4444-8444-444444444444";
+  answers["thought:n1"] = ans("thought", "n1", { effective: 6, dueAt: "2026-11-02T00:00:00.000Z", dueFrom: "from_items", urgency: 2,
+    terms: [term("from_items", 4, { level: 4, tier: 1, maker: "operator-key", item: ITEM }), term("urgency", 2, { window: "soon", due_at: "2026-11-02T00:00:00.000Z", due_from: "from_items", item: ITEM })] });
+  answers["thought:n2"] = ans("thought", "n2", { effective: 4, dueAt: "2026-11-02T00:00:00.000Z", dueFrom: "from_items", urgency: 2,
+    terms: [term("unknown", 2), term("urgency", 2, { window: "soon", due_at: "2026-11-02T00:00:00.000Z", due_from: "from_items", item: ITEM })] });
+  answers["thought:n3"] = ans("thought", "n3", { effective: 0, terms: [term("from_items", 0, { level: 0, tier: 1, maker: "operator-key", item: ITEM })] });
+  // The store reads 125's row: a from_items term and due_from (a server without them refused every ranked search).
+  const { normaliseEffectivePriority } = await import("./store.ts");
+  const row125 = { item_kind: "thought", item_key: "n1", effective: "6", level: null, inherited_from: null, due_at: "2026-11-02T00:00:00Z", due_from: "from_items",
+    urgency: "2", overdue: false, unblocks: 0, settled: false, not_before: null, waiting: false, winner: null, passed_over: [],
+    terms: [{ term: "from_items", value: 4, level: 4, tier: 1, maker: "k", item: ITEM }, { term: "urgency", value: 2, window: "soon", due_from: "from_items", item: ITEM }] };
+  let read125: ReturnType<typeof normaliseEffectivePriority> | null = null;
+  try { read125 = normaliseEffectivePriority(row125, "effective_priority"); } catch { read125 = null; }
+  let refusedTerm = "";
+  try { normaliseEffectivePriority({ ...row125, terms: [{ term: "from_elsewhere", value: 4 }] }, "effective_priority"); } catch (e) { refusedTerm = (e as Error).message; }
+  assert(read125?.dueFrom === "from_items" && read125.terms[0].term === "from_items" && read125.terms[0].detail.item === ITEM && read125.level === null
+      && refusedTerm === "effective_priority answered a row this server cannot read",
+    `the store reads a from_items term and due_from, the item in the term's detail; a term it doesn't know is still refused (${read125?.terms.map((t) => t.term).join(" ") ?? "refused"}; ${refusedTerm})`);
+  const noteRows = [{ id: "n1", content: "the bill", metadata: {} }, { id: "n2", content: "the gutters", metadata: {} }, { id: "n3", content: "the coffee", metadata: {} }];
+  const noteGot = await priorityOf(store(), noteRows);
+  const n1 = noteGot!.n1.priority[0];
+  const noteHit = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, ...noteGot!.n1 }], facts, window: null, priority: null } } as never, false);
+  const noteVal = (noteHit.structuredContent.hits as Record<string, unknown>[])[0].priority as Record<string, unknown>[];
+  const noneFromItem = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, ...noteGot!.n3 }], facts, window: null, priority: null } } as never, false).content[0].text;
+  const noteTitle = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n1") }, { id: "z", title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n3") }] } } as never).content[0].text).results as { title: string }[];
+  assert(n1?.self && n1.level === null && JSON.stringify(n1.fromItem) === JSON.stringify({ key: ITEM, level: 4 }) && noteGot!.n2.priority.length === 0 && noteGot!.n3.priority[0]?.fromItem?.level === 0
+      && noteHit.content[0].text.includes(`\nPriority: this thought at 6 (urgent (4) from open item ${ITEM}; +2 due by the end of 2026-11-01 (UTC) (open item ${ITEM})).\n`)
+      && JSON.stringify(noteVal[0]) === JSON.stringify({ kind: "thought", self: true, effective: 6, fromItem: { key: ITEM, level: 4 }, dueAt: "2026-11-02T00:00:00.000Z", urgency: 2 })
+      && noneFromItem.includes(`\nPriority: this thought at 0 (stated none (0) from open item ${ITEM}).\n`)
+      && noteTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM}, due by the end of 2026-11-01 (UTC)] t` && noteTitle[1].title === `[priority: this thought stated none (0) from open item ${ITEM}] t`,
+    `a note's level from its open item is known, the item named in the value, the line and the title, a None from it said as stated; a due time alone from an item is no label (${noteHit.content[0].text.match(/Priority: .*/)?.[0]} | ${noteTitle.map((r) => r.title).join(" | ")})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

@@ -506,7 +506,7 @@ export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
 
 /** What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known priority on. */
 export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number };
-/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a stated or inherited level). */
+/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a level stated, read from its open items, or inherited). */
 export type MatchPriority = { effective: number; known: boolean };
 
 /**
@@ -515,12 +515,14 @@ export type MatchPriority = { effective: number; known: boolean };
  * docs/priority.md decision 5 says (review pass 1: an earlier reading took the highest of a thought's and its filed
  * tickets', against three of the ADR's rules):
  * - a ticket's own row reads as its ticket;
- * - any other thought takes its own stated level, else one inherited from the ticket it is about (metadata ticket or
- *   issue, else its standing subject) at one level less a hop, counted only above unknown's 2, and nothing from a
- *   settled ticket;
+ * - any other thought takes its own stated level, else the highest counted on its open items (125, SMD-4149), else one
+ *   inherited from the ticket it is about (metadata ticket or issue, else its standing subject) at one level less a
+ *   hop, counted only above unknown's 2, and nothing from a settled ticket; its due time its own, else its open items'
+ *   soonest;
  * - a ticket its text only mentions does not rank it: inheritance through mentions waits for SMD-3662's numbers ("Not
  *   decided here"); the label shows that ticket's priority beside the row's own.
- * Known is a stated or a counted inherited level; otherwise the row's unknown, ordered as 122's `unknown` weight.
+ * Known is a stated level, one read from its open items, or a counted inherited one; otherwise the row's unknown,
+ * ordered as 122's `unknown` weight (plus any urgency its due time adds).
  */
 export function prioritiesOf(read: PriorityRead, rows: readonly { id: string }[]): Record<string, MatchPriority> {
   const out: Record<string, MatchPriority> = {};
@@ -531,19 +533,25 @@ export function prioritiesOf(read: PriorityRead, rows: readonly { id: string }[]
   return out;
 }
 
-/** A priority is known when a counted statement states its level or it inherits a counted one (decision 5): unknown's 2 is no label. */
-const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom">) => p.level !== null || p.inheritedFrom !== null;
+/**
+ * A priority is known when a counted statement states its level, a thought reads one from its open items (`from_items`,
+ * migration 125, SMD-4149), or it inherits a counted one (decision 5): unknown's 2 is no label, nor is a due time alone.
+ */
+const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom" | "terms">) =>
+  p.level !== null || p.inheritedFrom !== null || p.terms.some((t) => t.term === "from_items");
 
 /**
  * A prioritised item a result names (SMD-3668 PR 2), as 122 read it: the result itself (`self`) — a ticket's own row
  * as its ticket, kind `ticket` — or a ticket it is filed under or names. Its effective priority and the level behind
- * it, stated (`level`) or inherited (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
+ * it, stated (`level`), read from an open item opened from it (`fromItem`, migration 125) or inherited
+ * (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
  * items it unblocks; whether it is settled (a finished ticket's own level stands, its urgency and unblocks dropped)
  * or waiting on a not_before; and every term, named, as the agenda shows them.
  */
 export type PriorityOn = {
   kind: "thought" | "ticket"; key: string; self: boolean; effective: number; level: number | null;
   inheritedFrom: { kind: string; key: string; level: number; hops: number } | null;
+  fromItem: { key: string; level: number } | null;
   dueAt: string | null; urgency: number; overdue: boolean; unblocks: number; settled: boolean; notBefore: string | null; waiting: boolean;
   terms: PriorityTerm[];
 };
@@ -608,11 +616,16 @@ const readAs = (p: EffectivePriority): string | null => {
   const as = p.terms[0]?.detail.as as { kind?: unknown; key?: unknown } | undefined;
   return as?.kind === "ticket" && typeof as.key === "string" ? as.key : null;
 };
+/** The open item a thought read its level from (125's `from_items` term): its id and the level counted on it, else null. */
+const fromItemOf = (p: EffectivePriority): PriorityOn["fromItem"] => {
+  const t = p.terms.find((x) => x.term === "from_items");
+  return t && typeof t.detail.item === "string" ? { key: t.detail.item, level: t.value } : null;
+};
 const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
   const as = self ? readAs(p) : null;
   return {
     kind: as !== null || p.item.kind === "ticket" ? "ticket" : "thought", key: as ?? p.item.key, self, effective: p.effective, level: p.level,
-    inheritedFrom: p.inheritedFrom, dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
+    inheritedFrom: p.inheritedFrom, fromItem: fromItemOf(p), dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
     notBefore: p.notBefore, waiting: p.waiting, terms: p.terms,
   };
 };
