@@ -533,7 +533,7 @@ export function restartCommand(worker, job) {
  */
 export function startRefusalRemedy(kind, worker) {
   if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";
-  if (worker === "reembed" && kind === "provider") return "the provider refused the embedding request: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
+  if (worker === "reembed" && kind === "provider") return "the provider refused the embedding request: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), the account's credit where it answered 402, and, where its log names a field the request sends (dimensions), OB1_EMBEDDING_DIMENSIONS or OB1_EMBEDDING_MODEL";
   switch (kind) {
     // The subject sweep's beside the extraction pass's: the sleep row carries the kind alone (SMD-3306 PR 6b-1's review
     // pass 1), its switch run in the stack (review pass 2, walkthrough: from a checkout, the egress gate's default

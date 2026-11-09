@@ -2359,9 +2359,13 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   // (probedFault). Answered: the thought's, such as a content filter's. Refused: the request's.
                   // No answer: the provider's outage, the thought a suspect. The probe is part of the call in hand:
                   // the pass's caller aborting it (abortInHand) sets the thought back, as an aborted call does, where
-                  // a probe deaf to it held the pass up to the call's timeout after a deadline (review pass 1).
+                  // a probe deaf to it held the pass up to the call's timeout after a deadline (review pass 1). Its
+                  // wait for a slot on the model-call seam is not the call's time, as the call's is not (review
+                  // pass 3: a probe only queued was aborted as a call past its bound). Another worker's refusal
+                  // stopping every worker, it is not made (review pass 3: it held the exit up to a timeout more).
+                  if (configError !== null) return;
                   const call = inCall.get(workerId);
-                  const probe = await embedProbe(call ? AbortSignal.any([onStop.signal, call.abort.signal]) : onStop.signal, probeGate.allowed ? probeSubject : rowSubject);
+                  const probe = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => embedProbe(call ? AbortSignal.any([onStop.signal, call.abort.signal]) : onStop.signal, probeGate.allowed ? probeSubject : rowSubject));
                   const act = probedFault(probe);
                   if (call?.aborted) {
                     outcome = { outcome: "setBack" };
