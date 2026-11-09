@@ -31,10 +31,19 @@
  *       not sit at chance for a baseline read or the ceiling. Keyless: no
  *       provider is called.
  *
+ *   ../db/with-postgres.sh bun eval-priority.ts --seeded --priority-weight 0.7,0.9
+ *       The same run, with SMD-3668's priority_weight also measured at each
+ *       weight listed (0 to 1, comma-separated), each as an exploratory read
+ *       named priority_weight@<weight>. The pre-registered read still runs and
+ *       gives the verdict. An exploratory read is scored, checked for reading
+ *       the answer and printed against the bar, but its line says it is no
+ *       verdict: a sweep over these prompts picks nothing (BAR's rule).
+ *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
- * priority_weight needs the notes' facts where it reads them: priority.ts's
- * Facts), and the run prints each one's verdict against the baselines of the
+ * current, filter), and its MEASURED: SMD-3669's agenda and SMD-3668's
+ * priority_weight at its pre-registered 0.5 (which sees the tickets' levels
+ * and none of the notes' facts: priority.ts's Facts), and the run prints each
+ * one's verdict against the baselines of the
  * same run. A measured read's verdict does not fail the run; the gold
  * ceiling's, which runs the same path, does.
  *
@@ -52,7 +61,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, DOGFOOD_READS, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -243,6 +252,19 @@ async function selfCheck(): Promise<void> {
   assert(READ_K === 10, `the score reads ${READ_K} hits; --seeded fails when a baseline read returns more, which the score would not read`);
   assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
+  const sent: { tool: SearchTool; args: Record<string, unknown> }[] = [];
+  const pwIds = await PRIORITY_WEIGHT_READ.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (tool, args) => { sent.push({ tool, args }); return ["a", "b"]; } });
+  assert(PRIORITY_WEIGHT === 0.5 && sent.length === 1 && sent[0].tool === "search_thoughts" && JSON.stringify(sent[0].args) === JSON.stringify({ query: "q", priority_weight: 0.5 }) && JSON.stringify(pwIds) === '["a","b"]',
+    "priority_weight is search_thoughts at the weight pre-registered on SMD-3668 (0.5), its other arguments the tool's defaults, its hits as the tool returns them: a changed weight is a new pre-registration, never a re-run");
+  const sentAt: Record<string, unknown>[] = [];
+  const at7 = priorityWeightRead(0.7, "priority_weight@0.7");
+  await at7.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (_tool, args) => { sentAt.push(args); return []; } });
+  assert(at7.name === "priority_weight@0.7" && at7.ticket === "SMD-3668" && JSON.stringify(sentAt) === JSON.stringify([{ query: "q", priority_weight: 0.7 }]), "an exploratory read sends its own weight under its own name; the pre-registered read keeps 0.5 (above)");
+  const ew = (raw: string | undefined) => exploratoryWeights(raw);
+  const weightsOf = (raw: string) => { const r = ew(raw); return "weights" in r ? JSON.stringify(r.weights) : `error: ${r.error}`; };
+  assert(weightsOf("0.7,0.9") === "[0.7,0.9]" && weightsOf(" 0 , 1 ") === "[0,1]", "--priority-weight reads weights from 0 to 1, comma-separated, in the order given");
+  assert(["", "1.2", "-0.1", "x", "0.7,", "NaN", "Infinity"].every((raw) => "error" in ew(raw)) && "error" in ew(undefined), "--priority-weight refuses no value, a value outside 0 to 1, and one that is no number");
+  assert(weightsOf("0.7,0.7").includes("twice") && weightsOf("0.9,0.5").includes("pre-registered"), "--priority-weight refuses a weight listed twice, and the pre-registered one, which always runs");
 
   console.log("[7] The dogfood rows");
   const raw = loadDogfood();
@@ -268,7 +290,38 @@ async function selfCheck(): Promise<void> {
   report();
 }
 
-async function seeded(): Promise<void> {
+/**
+ * --priority-weight's value: the weights to measure SMD-3668's read at beside the pre-registered one, each once, in the
+ * order given. Refused: no value, a value that is not a number from 0 to 1, a weight listed twice, and the
+ * pre-registered weight, which always runs.
+ */
+export function exploratoryWeights(raw: string | undefined): { weights: number[] } | { error: string } {
+  if (raw === undefined || raw.trim() === "") return { error: "--priority-weight takes weights from 0 to 1, comma-separated (e.g. 0.7,0.9)" };
+  const weights: number[] = [];
+  for (const part of raw.split(",")) {
+    const w = Number(part.trim());
+    if (part.trim() === "" || !Number.isFinite(w) || w < 0 || w > 1) return { error: `--priority-weight: ${JSON.stringify(part.trim())} is not a weight from 0 to 1` };
+    if (w === PRIORITY_WEIGHT) return { error: `--priority-weight: ${w} is the pre-registered weight, which always runs` };
+    if (weights.includes(w)) return { error: `--priority-weight: ${w} is listed twice` };
+    weights.push(w);
+  }
+  return { weights };
+}
+
+/** The value after --priority-weight, or after --priority-weight=; undefined when the flag is absent, "" when it has none. */
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  const eq = args.find((a) => a.startsWith(`${flag}=`));
+  if (eq !== undefined) return eq.slice(flag.length + 1);
+  const i = args.indexOf(flag);
+  if (i < 0) return undefined;
+  const next = args[i + 1];
+  return next === undefined || next.startsWith("--") ? "" : next;
+}
+
+async function seeded(explore: readonly number[] = []): Promise<void> {
+  // SMD-3668's read at each weight asked for, exploratory: measured as the others are, never the verdict.
+  const exploratory = explore.map((w) => priorityWeightRead(w, `priority_weight@${w}`));
+  const measured = [...MEASURED, ...exploratory];
   const url = process.env.DATABASE_URL;
   if (!url) { console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun eval-priority.ts --seeded"); process.exit(2); }
   const problems = corpusProblems();
@@ -384,14 +437,14 @@ async function seeded(): Promise<void> {
       results.set(r.name, { hits, scores: hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
     }
     // The reads measured against the bar, the gold ceiling last: one that errors on a prompt scores it false, false, 0.
-    for (const r of [...MEASURED, CEILING]) {
+    for (const r of [...measured, CEILING]) {
       const first = await runMeasured(r, "");
       errors.push(...first.errors);
       results.set(r.name, { hits: first.hits, scores: first.hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
     }
     // Each measured read again with the answer moved: one whose ids move with it reads the answer. The ceiling is the control.
     // A pass that errors is reported as an error, not compared: an error is not a sign of reading the answer.
-    for (const r of [...MEASURED, CEILING]) {
+    for (const r of [...measured, CEILING]) {
       const again = await withAnswerMoved(() => runMeasured(r, " (answer moved)"));
       if (again.errors.length) { errors.push(...again.errors); continue; }
       if (JSON.stringify(again.hits) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
@@ -406,14 +459,14 @@ async function seeded(): Promise<void> {
   console.log(`priority eval, seeded: ${ITEMS.length} items, ${PROMPTS.length} prompts, corpus ${corpusHash()}, stub ${STUB_MODEL} @ ${STUB_DIM}\n`);
   for (const [i, p] of PROMPTS.entries()) {
     console.log(`${p.key}: "${p.query}"\n  gold     ${p.gold.join(" > ")}`);
-    for (const r of [...READS, ...MEASURED]) {
+    for (const r of [...READS, ...measured]) {
       const { hits, scores } = results.get(r.name)!;
       const sc = scores[i];
       console.log(`  ${r.name.padEnd(8)} ${hits[i].join(", ") || "(nothing)"}  [top-1 ${sc.top1 ? "yes" : "no"}, top-3 ${sc.top3 ? "yes" : "no"}, tau ${sc.tau === null ? "–" : sc.tau.toFixed(3)}]`);
     }
   }
 
-  const table = [...READS, ...MEASURED, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
+  const table = [...READS, ...measured, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
     read: r.name,
     score: meanScore(r.scores, golds),
     mutant: meanTriple(mutantTriples(r.hits, golds), golds),
@@ -428,9 +481,10 @@ async function seeded(): Promise<void> {
   const t = barOn(bases, golds);
   const kept = t.keepTop3.map((i) => PROMPTS[i].key);
   console.log(`The bar a priority read must clear on this corpus (priority.ts's BAR, pre-registered): top-1 on at least ${t.top1Need} of ${t.prompts} (at least ${t.top1Floor}, and the best baseline's ${t.bestTop1} + ${BAR.top1Gain}); mean tau at least ${t.tauNeed.toFixed(3)} (the best baseline's ${t.bestTau.toFixed(3)} + ${BAR.tauGain}); top-3 kept on ${kept.length ? kept.join(", ") : "no prompt (no baseline read had any)"}.`);
-  for (const r of MEASURED) {
+  for (const r of measured) {
     const v = verdict(results.get(r.name)!.scores, bases, golds);
-    console.log(`Measured read ${r.name} (${r.ticket}) against the baselines: ${v.helped ? "HELPS: it clears the pre-registered bar" : `does not clear the bar: ${v.failed.join("; ")}`}.`);
+    if (exploratory.includes(r)) console.log(`Exploratory read ${r.name} (${r.ticket}; not the pre-registered ${PRIORITY_WEIGHT}, so no verdict: a sweep over these prompts picks nothing) against the baselines: ${v.helped ? "would clear the bar" : `would not clear the bar: ${v.failed.join("; ")}`}.`);
+    else console.log(`Measured read ${r.name} (${r.ticket}) against the baselines: ${v.helped ? "HELPS: it clears the pre-registered bar" : `does not clear the bar: ${v.failed.join("; ")}`}.`);
   }
   const ceiling = verdict(results.get(CEILING.name)!.scores, bases, golds);
   console.log(`The gold ceiling against the baselines: ${ceiling.helped ? "helps (the bar is reachable)" : `fails: ${ceiling.failed.join("; ")}`}.`);
@@ -464,6 +518,14 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes("--self-check")) await selfCheck();
   // The server's own pools stay open after the run; the verdict is the exit code.
-  else if (args.includes("--seeded")) { await seeded(); process.exit(0); }
-  else { console.error("usage: bun eval-priority.ts --self-check | --seeded"); process.exit(2); }
+  else if (args.includes("--seeded")) {
+    const unknown = args.filter((a) => a.startsWith("--") && a !== "--seeded" && a !== "--priority-weight" && !a.startsWith("--priority-weight="));
+    if (unknown.length) { console.error(`--seeded does not take ${unknown.join(", ")}: its one option is --priority-weight w,...`); process.exit(2); }
+    const raw = flagValue(args, "--priority-weight");
+    const explore = raw === undefined ? { weights: [] } : exploratoryWeights(raw);
+    if ("error" in explore) { console.error(explore.error); process.exit(2); }
+    await seeded(explore.weights);
+    process.exit(0);
+  }
+  else { console.error("usage: bun eval-priority.ts --self-check | --seeded [--priority-weight w,...]"); process.exit(2); }
 }
