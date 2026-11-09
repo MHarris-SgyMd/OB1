@@ -687,10 +687,10 @@ alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
 `Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
 thoughts in them, and whether every thread's standing edges (migration 120) are the ones its thoughts want, compared
-edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, or a gap a delete left; a key
-no thought holds that still carries edges is counted beside it. Either names the run that links them, `cd db && bun
-threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000 standing subjects
-and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`, `ticket:` and
+edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw
+write's; a key no thought holds that still carries edges is counted beside it. Either names the run that links them, `cd
+db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000 standing
+subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`, `ticket:` and
 `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the keys before
 the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key, counts those
 that differ and names the first ten. It names no key here, since a phrase key is the judge model's words. `not counted`

@@ -1125,11 +1125,17 @@ const n = (v: unknown, field: string): number => {
 export function threadCensusValue(r: Record<string, unknown> | undefined): ThreadCensus {
   if (!r) throw new Error("the thread census answered no row");
   const first = Array.isArray(r.first) ? r.first.filter((k): k is string => typeof k === "string") : [];
-  return {
+  const c = {
     threads: n(r.threads, "thread count"), thoughts: n(r.thoughts, "thought count"), standing: n(r.standing, "edge count"), whole: n(r.whole, "wanted edge count"),
     unlinked: n(r.unlinked, "unlinked count"), orphaned: n(r.orphaned, "orphaned count"), first,
     keys: n(r.keys, "key count"), complete: r.complete === true,
   };
+  // Each thread wants one edge fewer than its thoughts, so the edges wanted are the thoughts less the threads — unless
+  // the join to thoughts lost members: a thoughts table earlier on this role's search_path than the brain's. Said as
+  // an error, never every thread unlinked (review pass 3).
+  if (c.whole !== c.thoughts - c.threads)
+    throw new Error(`the thread census found ${c.whole} edge(s) wanted for ${c.threads} thread(s) of ${c.thoughts} thought(s): its join to thoughts lost members — a thoughts table earlier on this role's search_path than the brain's?`);
+  return c;
 }
 
 /**
@@ -1606,9 +1612,15 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
              -- 079's pair rule, which the findings' board pairs apply (SMD-2680).
              to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS tickets_linked,
              -- 120's re-link (SMD-3306 PR 7a-2c): where it stands, thread edges do; before it every thread would read unlinked.
-             -- Present in any schema, not resolved: a role whose search_path misses the brain's schema is told so by the
-             -- read's own entry (thought_facets invisible), never that 120 is not applied (review pass 2).
-             EXISTS (SELECT 1 FROM pg_proc p WHERE p.proname = 'thread_relink' AND p.pronargs = 2) AS thread_relink,
+             -- In thought_facets' own schema, as (text, boolean): the census reads that table, so a 120 elsewhere is not
+             -- this one's (review pass 3). In any schema only where thought_facets does not resolve, so a role whose
+             -- search_path misses the brain's schema is told so by the read's own entry, never that 120 is not applied
+             -- (review pass 2).
+             EXISTS (SELECT 1 FROM pg_proc p
+                      WHERE p.proname = 'thread_relink' AND p.proargtypes = '25 16'::oidvector -- (text, boolean): the built-in types' fixed OIDs
+                        AND (to_regclass('thought_facets') IS NULL
+                             OR p.pronamespace = (SELECT c.relnamespace FROM pg_class c WHERE c.oid = to_regclass('thought_facets'))))
+               AS thread_relink,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
                -- Daemonic Brain's ledger resolves only if the table the path
@@ -2324,7 +2336,8 @@ function relationsLine(db: DatabaseSummary): string {
 export function threadsLine(db: Pick<DatabaseSummary, "threads" | "unread">): string {
   const t = db.threads;
   if (t === null) {
-    if ("threads" in db.unread) return `? (${deniedObject(db.unread.threads.message)?.name ?? "thought_facets"} ${unreadWords(db.unread.threads)})`;
+    // The census joins thoughts too: a lock refused there names thoughts (review pass 3), as the Findings row does.
+    if ("threads" in db.unread) return `? (${deniedObject(db.unread.threads.message)?.name ?? /^not tried — a lock on (\w+)/.exec(db.unread.threads.message)?.[1] ?? "thought_facets"} ${unreadWords(db.unread.threads)})`;
     return "not counted — migration 120 is not applied (it keeps the threads' edges)";
   }
   const num = (n: number) => n.toLocaleString("en-US");
@@ -2368,7 +2381,7 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
       return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
     return { status: "warn", detail: `could not verify: ${u.message}`,
              fix: u.reason === "timeout"
-               ? `A migration or a long transaction may hold thought_facets, or the census outran the statement cap; run preflight again once it has finished, or read it whole: ${linkCommand} --status.`
+               ? `A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with ${linkCommand} --status.`
                : "The check reads thought_facets and thoughts; the message says why it failed." };
   }
   // Nothing read: the first key in key order alone passes the bound — not a pass (review pass 1).
@@ -2380,12 +2393,15 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
   // Only orphans before the cut: said, not "0 thread(s) among the first 0" (review pass 2).
   const head = !t.complete && t.keys === 0 ? "no subject key before the census's cut" : `${t.threads} thread(s)${among}`;
   const scope = t.complete ? "" : `; the census stops at ${THREAD_CENSUS_BOUND} rows (${linkCommand} --status reads every key)`;
+  // No thread and nothing to do: said as the Threads row says it (review pass 3).
+  if (t.complete && t.threads === 0 && t.unlinked === 0 && t.orphaned === 0)
+    return { status: "ok", detail: "none — no subject key two thoughts hold, and no edge standing to close" };
   if (t.unlinked === 0 && t.orphaned === 0)
     return { status: "ok", detail: `${t.threads} thread(s)${among}, ${t.thoughts} thought(s) in them, ${t.standing} edge(s) standing — ${t.complete ? "every thread linked" : "each read linked"}${scope}` };
   const differ = [t.unlinked ? `${t.unlinked} key(s) whose edges differ from their thread's` : "", t.orphaned ? `${t.orphaned} key(s) no thought holds still carrying edges` : ""].filter(Boolean).join(", ");
   // --status's shape (review pass 1): standing counts an orphan's edges, so "N of M" read 12 of 5.
   return { status: "warn", detail: `${head}; ${t.standing} edge(s) standing, ${t.whole} once every thread read is linked; ${differ}${scope}`,
-           fix: `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names the first ${THREAD_CENSUS_NAMED} keys, --key '<key>' re-links one). A brain upgraded to 120 needs it once, for the threads it already held; a gap after that is a delete or a re-key whose role could not re-link, or a raw write (120's NOT HERE). Every read but the thread's own works meanwhile.` };
+           fix: `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names the first ${THREAD_CENSUS_NAMED} keys, each as --key takes it). A brain upgraded to 120 needs it once, for the threads it already held; a gap after that is a delete whose role could not re-link, or a raw write (120's NOT HERE). Every read but the thread's own works meanwhile.` };
 }
 
 /**

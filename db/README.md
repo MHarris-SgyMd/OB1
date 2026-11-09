@@ -2606,7 +2606,7 @@ compose stack, from a checkout, reaching its Postgres through deploy/README's
 host-ports file):
 
 ```bash
-bun threads.ts --url … --status                # the threads, and the keys whose edges differ
+bun threads.ts --url … --status                # the threads, and the keys whose edges differ (the first ten, one a line, quoted as --key takes them)
 bun threads.ts --url … --dry-run               # counts what it would close and write; writes nothing
 bun threads.ts --url …                         # links them (--batch N keys a transaction at most, 200 the default and the most)
 bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete

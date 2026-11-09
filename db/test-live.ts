@@ -29398,7 +29398,7 @@ if (want("47")) {
     assert(JSON.stringify(written) === JSON.stringify(["a2→a1 a3→a2", "b2→b1"]) && census.code === 0
         && now.threads === was.threads + 2 && now.thoughts === was.thoughts + 5 && now.standing === was.standing + 1 && now.whole === was.whole + 3
         && /^ {2}linked: {4}2 key\(s\) whose edges differ from their thread's, 1 key\(s\) no thought holds still carrying edges — threads\.ts without --status links them$/m.test(census.out)
-        && census.out.includes(`  keys:      ${KA}, ${KB}, ${KO} — --key '<key>' re-links one`),
+        && census.out.includes(`  keys:      ${KA}\n             ${KB}\n             ${KO}\n             --key <a key as printed above> re-links one`),
       `the subjects' writes linked each thread; unlinked, --status reads two more threads of five thoughts, the orphan's edge standing where three are wanted, and names both keys and the orphan's (${JSON.stringify([was, now])}; ${census.out.trim().split("\n").at(-1)})`);
 
     const withWork = await keysWithWork();
@@ -29501,7 +29501,7 @@ if (want("47")) {
       `--key re-links one thread, its dry run counting first (${keyDry.out} | ${keyRun.out})`);
     // A key nothing holds is said so, not read as a thread linked already.
     const nothing = await threads({ key: "ticket:SMD-9479" });
-    assert(nothing.code === 0 && nothing.out === "  ticket:SMD-9479: 0 thought(s), 0 edge(s) closed, 0 written\n  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the keys whose edges differ)"
+    assert(nothing.code === 0 && nothing.out === "  ticket:SMD-9479: 0 thought(s), 0 edge(s) closed, 0 written\n  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the first keys whose edges differ, each as --key takes it)"
         && !/no thought holds this key/.test(keyRun.out),
       `--key on a key nothing holds says so (${nothing.out})`);
     // A thread linked wrong with the right number of edges: --status compares the edges, not their count.
@@ -29511,7 +29511,7 @@ if (want("47")) {
     const skewed = await threads({ status: true });
     const mended = await threads({ key: KA });
     assert(skewedPairs === "a2→a1 a3→a1" && /^ {2}linked: {4}1 key\(s\) whose edges differ from their thread's — threads\.ts without --status links them$/m.test(skewed.out)
-        && skewed.out.includes(`  keys:      ${KA} — --key '<key>' re-links one`)
+        && skewed.out.includes(`  keys:      ${KA}\n             --key <a key as printed above> re-links one`)
         && mended.out === `  ${KA}: 3 thought(s), 1 edge(s) closed, 1 written` && (await pairs(KA)) === "a2→a1 a3→a2",
       `a thread linked wrong with as many edges as it wants is read as differing, and --key mends it (${skewedPairs}; ${skewed.out.trim().split("\n").at(-1)}; ${mended.out})`);
 
@@ -29600,7 +29600,7 @@ if (want("47b")) {
   // Keys that sort before every other key the suite writes (a phrase's digits before any letter, phrase before pr,
   // ticket and version), so a bound counts their rows from the first: P1 < P2 < OB < P3 < OD < PE.
   const P1 = "phrase:0000 a", P2 = "phrase:0000 b", OB = "phrase:0000 bb", P3 = "phrase:0000 c", OD = "phrase:0000 d", PE = "phrase:0000 e";
-  let renamed = false, pathSet = false;
+  let renamed = false, pathSet = false, decoy = false;
   try {
     // Settled first: every other section's thread linked, so the counts below are this section's alone.
     const settle = await threads({});
@@ -29631,7 +29631,7 @@ if (want("47b")) {
     assert(settle.code === 0 && before.s === 0 && before.e === 0,
       `the brain settled, and this section's keys sort before every other key: no subject or thread edge before them (${JSON.stringify(before)})`);
     assert(whole.complete && whole.unlinked === 1 && whole.orphaned === 2 && JSON.stringify(whole.first) === JSON.stringify([P2, OB, OD])
-        && status.out.includes(`  keys:      ${P2}, ${OB}, ${OD} — --key '<key>' re-links one`),
+        && status.out.includes(`  keys:      '${P2}'\n             '${OB}'\n             '${OD}'\n             --key <a key as printed above> re-links one`),
       `with no bound the census reads every key: P2 unlinked, OB and OD orphaned, named in key order, as --status says (${JSON.stringify(whole)})`);
     // A bound of 2 cuts P1, the first key, so no key is read: not complete, all zero — and the line and the row say
     // so, never "linked" (review pass 1).
@@ -29691,11 +29691,19 @@ if (want("47b")) {
     await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
     renamed = true;
     const without = await readDatabaseFacts(sql as never, { stats: false });
+    // A thread_relink(text, boolean) in another schema is not this brain's 120 (review pass 3): the census reads the
+    // thought_facets the path resolves, so a function of that name elsewhere does not open the read.
+    await sql`CREATE FUNCTION pg_temp.thread_relink(text, boolean) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb'`;
+    decoy = true;
+    const elsewhere = await readDatabaseFacts(sql as never, { stats: false });
+    await sql`DROP FUNCTION pg_temp.thread_relink(text, boolean)`;
+    decoy = false;
     await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
     renamed = false;
     assert(relinked.code === 0 && after.complete && after.unlinked === 0 && after.orphaned === 0
-        && without.threads === null && !("threads" in without.unread) && threadsLine(without) === "not counted — migration 120 is not applied (it keeps the threads' edges)",
-      `linked again, nothing differs; a brain without 120 carries no threads fact and says why (${JSON.stringify(after)} | ${threadsLine(without)})`);
+        && without.threads === null && !("threads" in without.unread) && threadsLine(without) === "not counted — migration 120 is not applied (it keeps the threads' edges)"
+        && elsewhere.threads === null && !("threads" in elsewhere.unread),
+      `linked again, nothing differs; a brain without 120 carries no threads fact and says why, a thread_relink in another schema not counting as its (${JSON.stringify(after)} | ${threadsLine(without)} | ${JSON.stringify(elsewhere.threads)})`);
 
     // A role whose search_path misses the brain's schema is told so, never that 120 is not applied (review pass 2):
     // the gate finds thread_relink in any schema, and the read's own entry says thought_facets does not resolve.
@@ -29704,15 +29712,32 @@ if (want("47b")) {
     const lost = new SQL({ url: URL_!, max: 1 });
     let lostFacts: Awaited<ReturnType<typeof readDatabaseFacts>>;
     try { lostFacts = await readDatabaseFacts(lost as never, { stats: false }); } finally { await lost.close(); }
+    // threads.ts --status says the same, not that 120 is missing (review pass 3).
+    const lostStatus = await threads({ status: true });
     await sql`ALTER ROLE CURRENT_USER RESET search_path`;
     pathSet = false;
     const lostRow = threadsRow(lostFacts.threads, lostFacts.unread.threads);
     assert(lostFacts.threads === null && lostFacts.unread.threads?.reason === "invisible" && /^\? \(thought_facets /.test(threadsLine(lostFacts))
-        && lostRow.status === "warn" && /^Put that schema on the server role's search_path/.test(lostRow.fix ?? ""),
-      `a role whose search_path misses the schema: the threads read is said invisible, with the search_path fix, not "120 is not applied" (${JSON.stringify(lostFacts.unread.threads)} | ${threadsLine(lostFacts)})`);
+        && lostRow.status === "warn" && /^Put that schema on the server role's search_path/.test(lostRow.fix ?? "")
+        && lostStatus.code === 2 && /thought_facets exists \(schema public\) but does not resolve for this role/.test(lostStatus.err) && !/migration 120/.test(lostStatus.err),
+      `a role whose search_path misses the schema: the threads read is said invisible, with the search_path fix, and --status says so too — not "120 is not applied" (${JSON.stringify(lostFacts.unread.threads)} | ${threadsLine(lostFacts)} | ${lostStatus.err})`);
+
+    // --status prints each key it names on a line of its own, quoted as the shell takes it (review pass 3): a phrase key
+    // may hold an apostrophe, a comma and a space. The printed word, pasted into a shell, gives the key back.
+    const QK = "phrase:0000 o'brien, notes";
+    const q1 = await thought(`${QK} #1`, "2026-10-08T01:00:00Z");
+    await subject(q1, QK);
+    await edge(q1, p1a, QK);
+    const quoted = await threads({ status: true });
+    const printed = quoted.out.split("\n").find((l) => l.includes("brien"))?.replace(/^\s*keys:\s*/, "").trim() ?? "";
+    const pasted = Bun.spawnSync(["bash", "-c", `printf %s ${printed}`]).stdout.toString();
+    const requoted = await threads({});
+    assert(printed === "'phrase:0000 o'\\''brien, notes'" && pasted === QK && quoted.out.endsWith("\n             --key <a key as printed above> re-links one") && requoted.code === 0,
+      `--status prints a key holding an apostrophe, a comma and a space on its own line, quoted so a shell gives it back (${printed} → ${pasted})`);
   } finally {
     if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
     if (pathSet) await sql`ALTER ROLE CURRENT_USER RESET search_path`;
+    if (decoy) await sql`DROP FUNCTION IF EXISTS pg_temp.thread_relink(text, boolean)`;
     await sql`DELETE FROM thoughts WHERE content LIKE '[47b]%'`;
     await sql.close();
   }

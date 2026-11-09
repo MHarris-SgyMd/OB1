@@ -48,7 +48,7 @@ import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { subjectKeyValid } from "../server-portable/subject.ts";
 // The census (--status) is brain_info's and preflight's too, read here with no bound (SMD-3306 PR 7a-2c).
-import { threadCensus, UNBOUNDED } from "../server-portable/brain-info.ts";
+import { shellWord, threadCensus, UNBOUNDED } from "../server-portable/brain-info.ts";
 
 const FLAGS = { url: "one", key: "one", batch: "one", status: "none", "dry-run": "none" } as const;
 const HINTS = { url: "<postgres://…>", key: "<subject key> (ticket:SMD-123, pr:727, version:v1.2.3, phrase:…)", batch: "<N> keys a transaction at most (1–200)" };
@@ -70,10 +70,17 @@ export interface ThreadsOptions {
 
 type Relink = { ok: boolean; key: string; thoughts: number; closed: number; added: number; dry: boolean };
 
-/** Whether 120 is on this brain: thread_relink exists. */
-async function hasThreads(sql: SQL): Promise<boolean> {
-  const [r] = (await sql`SELECT to_regprocedure('thread_relink(text, boolean)') IS NOT NULL AS ok`) as { ok: boolean }[];
-  return r.ok;
+/**
+ * Whether 120 is on this brain: thread_relink resolves (true). Else why not — thought_facets in a schema this role's
+ * search_path misses (its name), or 120 not applied (null) — so a role off the path is not told 120 is missing, as
+ * brain_info's read is not (review pass 3).
+ */
+async function hasThreads(sql: SQL): Promise<true | string | null> {
+  const [r] = (await sql`
+    SELECT to_regprocedure('thread_relink(text, boolean)') IS NOT NULL AS ok,
+           (SELECT string_agg(n.nspname::text, ', ' ORDER BY n.nspname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relname = 'thought_facets' AND to_regclass('thought_facets') IS NULL) AS unresolved`) as { ok: boolean; unresolved: string | null }[];
+  return r.ok ? true : r.unresolved;
 }
 
 /** What a re-link writes that this role lacks, and the groups that grant it (consolidate.ts's words for its door's). */
@@ -151,8 +158,11 @@ export async function run(opts: ThreadsOptions): Promise<number> {
   const BATCH = opts.batch ?? DEFAULT_BATCH;
   const sql = opts.sql ?? openSql(opts.url as string);
   try {
-    if (!(await hasThreads(sql))) {
-      err("  thread_relink is not on this brain: migration 120 (SMD-3306) is missing. Apply it — cd db && bun migrate.ts --url <url> — and run again.");
+    const has = await hasThreads(sql);
+    if (has !== true) {
+      err(has === null
+        ? "  thread_relink is not on this brain: migration 120 (SMD-3306) is missing. Apply it — cd db && bun migrate.ts --url <url> — and run again."
+        : `  thought_facets exists (schema ${has}) but does not resolve for this role — not on its search_path, or no USAGE on that schema. Run as the owner (--url <the owner's connection string>), or put that schema on this role's search_path.`);
       return 2;
     }
     if (STATUS) {
@@ -163,7 +173,13 @@ export async function run(opts: ThreadsOptions): Promise<number> {
         ? "  linked:    every thread — nothing to do"
         : `  linked:    ${c.unlinked} key(s) whose edges differ from their thread's${c.orphaned ? `, ${c.orphaned} key(s) no thought holds still carrying edges` : ""} — threads.ts without --status links them`);
       const named = c.first;
-      if (named.length) out(`  keys:      ${named.join(", ")}${c.unlinked + c.orphaned > named.length ? `, and ${c.unlinked + c.orphaned - named.length} more` : ""} — --key '<key>' re-links one`);
+      // Each key on a line of its own, quoted as the shell takes it: a phrase key may hold an apostrophe, a comma or a
+      // space, so a list joined with commas read as other keys and a pasted '<key>' broke (review pass 3).
+      if (named.length) {
+        const more = c.unlinked + c.orphaned - named.length;
+        named.forEach((k, i) => out(`  ${i === 0 ? "keys:     " : "          "} ${shellWord(k)}`));
+        out(`             ${more > 0 ? `and ${more} more; ` : ""}--key <a key as printed above> re-links one`);
+      }
       return 0;
     }
     if (!DRY) {
@@ -177,7 +193,7 @@ export async function run(opts: ThreadsOptions): Promise<number> {
       const r = await readCommitted(sql, async (tx) => ((await tx`SELECT thread_relink(${KEY}, ${DRY}) AS r`) as { r: Relink }[])[0].r);
       out(`  ${KEY}: ${r.thoughts} thought(s), ${r.closed} edge(s) ${DRY ? "to close" : "closed"}, ${r.added} ${DRY ? "to write" : "written"}${DRY ? " (dry run: nothing written)" : ""}`);
       // A key nothing holds reads the same as a thread already linked: said, so a mistyped key is not taken for one.
-      if (r.thoughts === 0 && r.closed === 0) out("  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the keys whose edges differ)");
+      if (r.thoughts === 0 && r.closed === 0) out("  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the first keys whose edges differ, each as --key takes it)");
       return 0;
     }
     let after = "";
