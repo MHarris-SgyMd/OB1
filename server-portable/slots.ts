@@ -44,8 +44,9 @@
  * closed 2 s after the process's last, as a live subscription holds a process
  * open; one that fails to open is said once and asked again at a head's round
  * 2 s or more on, and one found deaf — a ping of the process's own, sent at a
- * nap no release ended, not heard back by the next — is dropped, said once, and
- * subscribed again. The head takes its slot and lets the queue go, its next waiter's
+ * nap no release ended, not heard back by a later one — is dropped, said once, and
+ * subscribed again; a ping is judged a second or more after it was sent, as
+ * another share's head may look while it is on its way. The head takes its slot and lets the queue go, its next waiter's
  * turn. Processes counting a share's slots differently queue apart, each size
  * its own queue. A stop ends a wait at once, a connect or a
  * statement in flight included: the call's own signal, or the process's
@@ -398,13 +399,11 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   /**
    * The process's subscription to the channel, a connection of its own: opened at a head's first wait, closed 2 s after
    * the process's last (`quiet`), since a live subscription holds a process open, and a CLI never uninstalls. `ready` is
-   * whether it subscribed. One that did not is said once and dropped, asked again at a round LISTEN_RETRY_MS or more on
-   * by a head still waiting, which meanwhile tries again every RECHECK_MS untold (review pass 1: kept, a failed one held the process's
-   * head deaf for as long as calls waited, and every process's calls behind it, 21 calls in 12 s where 185 ran).
-   */
-  /**
-   * `subscribed` once Bun said so; `pingAt` when a head last sent the process's ping, `heardAt` when the subscription
-   * last heard it back (`stillHearing`).
+   * whether it subscribed, `subscribed` the same once settled. One that did not is said once and dropped, asked again at
+   * a round LISTEN_RETRY_MS or more on by a head still waiting, which meanwhile tries again every RECHECK_MS untold
+   * (review pass 1: kept, a failed one held the process's head deaf for as long as calls waited, and every process's
+   * calls behind it, 21 calls in 12 s where 185 ran). `pingAt` is when the process's ping last sent on it was answered
+   * as sent, `heardAt` when it last heard one back, both by performance.now() (`stillHearing`).
    */
   type Listener = { client: SQL; ready: Promise<boolean>; timer?: ReturnType<typeof setTimeout>; subscribed?: boolean; pingAt?: number; heardAt?: number };
   let listener: Listener | undefined;
@@ -419,25 +418,29 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     l.freed++;
     l.wake?.();
   };
-  /** Whether the process hears the channel, subscribing at the first ask; a stop ends the wait for it. */
-  const listening = (signal: AbortSignal): Promise<boolean> => {
+  /**
+   * The process's subscription asked for: one opened where there is none, not awaited — a LISTEN slow to answer would
+   * hold the head's tries for up to its bound (review pass 3). Each head waiting is woken as it subscribes, so a slot
+   * let go before it heard is tried for at once.
+   */
+  const listening = (): void => {
     if (listener?.timer) {
       clearTimeout(listener.timer);
       listener.timer = undefined;
     }
     if (!listener) {
-      if (Date.now() < listenAgainAt) return Promise.resolve(false);
+      if (Date.now() < listenAgainAt) return;
       const client = new SQL({ url: opts.url, max: 1, connectionTimeout: boundS, connection: SESSION });
-      let subscribed = false;
-      // Bun re-subscribes after a dropped connection: a slot let go meanwhile was told to no one, so each head waiting
-      // tries again then.
-      const onListen = () => {
-        if (subscribed) for (const k of locals.keys()) told(k);
-        subscribed = true;
-      };
       const it: Listener = { client, ready: Promise.resolve(false) };
+      // Subscribed, and again after Bun re-subscribes a dropped connection: a slot let go before was told to no one, so
+      // each head waiting tries again, and a ping sent meanwhile is not judged (review pass 3: lost in a restart, it
+      // dropped a subscription Bun had brought back).
+      const onListen = () => {
+        it.pingAt = undefined;
+        for (const k of locals.keys()) told(k);
+      };
       const onNotify = (payload: string) => {
-        if (payload === ping) it.heardAt = Date.now();
+        if (payload === ping) it.heardAt = performance.now();
         else told(payload);
       };
       it.ready = bounded(client.listen(SLOTS_CHANNEL, onNotify, onListen), boundS * 1000).then(() => { it.subscribed = true; return true; }, (e: unknown) => {
@@ -454,27 +457,37 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       });
       listener = it;
     }
-    return bounded(listener.ready, boundS * 1000, signal);
   };
   /**
-   * After a nap no release ended, whether the process still hears the channel: its ping, sent at the last such nap, heard
-   * back since. Not heard, the subscription is dropped and said once, a head asking again at its next round (review pass
-   * 2: Bun stops re-subscribing a dropped one after some 3 minutes, and a connection that swallows what it is sent
-   * never drops — the head left deaf, unsaid, every process behind it waiting its tries out). Heard, the next ping sent.
+   * After a nap no release ended, whether the process still hears the channel: its ping, last sent at such a nap a
+   * RECHECK_MS or more ago, heard back since. Not heard, the subscription is dropped and said once, a head subscribing
+   * again at its next round (review pass 2: Bun stops re-subscribing a dropped one after some 3 minutes, and a
+   * connection that swallows what it is sent never drops — the head left deaf, unsaid, every process behind it waiting
+   * its tries out). A ping younger than RECHECK_MS is not judged: another share's head may check while it is still on its
+   * way (review pass 3: twelve shares waiting dropped six healthy subscriptions in 30 s). Its time is taken as sent and
+   * kept once the database answers it; a ping that fails is dropped unsent, not failing the call open — the ping is a
+   * check, not the semaphore. Then the next ping sent, where none is on its way.
    */
-  const stillHearing = async (ask: <T>(q: PromiseLike<T>) => Promise<T>, session: SQL): Promise<boolean> => {
+  const stillHearing = async (ask: <T>(q: PromiseLike<T>) => Promise<T>, session: SQL, signal: AbortSignal): Promise<void> => {
     const it = listener;
-    if (!it?.subscribed) return true;
-    if (it.pingAt !== undefined && (it.heardAt ?? 0) < it.pingAt) {
-      listener = undefined;
-      if (it.timer) clearTimeout(it.timer);
-      void it.client.close({ timeout: 0 }).catch(() => {});
-      sayOnce("deaf", `  background slots: the ${SLOTS_CHANNEL} channel was no longer heard — subscribed again; meanwhile a slot another process let go was found at the next try`);
-      return false;
+    if (!it?.subscribed) return;
+    const now = performance.now();
+    if (it.pingAt !== undefined) {
+      if (now - it.pingAt < RECHECK_MS) return;
+      if ((it.heardAt ?? -1) < it.pingAt) {
+        listener = undefined;
+        if (it.timer) clearTimeout(it.timer);
+        void it.client.close({ timeout: 0 }).catch(() => {});
+        sayOnce("deaf", `  background slots: the ${SLOTS_CHANNEL} channel was no longer heard — subscribing again; meanwhile a slot another process let go was found at the next try`);
+        return;
+      }
     }
-    it.pingAt = Date.now();
-    await ask(session`SELECT pg_notify(${SLOTS_CHANNEL}, ${ping})`);
-    return true;
+    try {
+      await ask(session`SELECT pg_notify(${SLOTS_CHANNEL}, ${ping})`);
+      if (listener === it) it.pingAt = now;
+    } catch (e) {
+      if (signal.aborted) throw e;
+    }
   };
   /** No call of this process waits for a slot: the subscription closed 2 s on, unless one waits again by then. */
   const quiet = () => {
@@ -521,9 +534,6 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     try {
       // Queued behind a waiter that found the database down: run without a slot as well.
       if (Date.now() < downUntil) return null;
-      // Whether this call has heard the channel: once it does, a round of tries following, so a slot let go before it
-      // listened is not missed.
-      let heard = false;
       for (;;) {
         // A session kept from a slot let go, or a new one, built inside the try: Bun throws at once on some URLs
         // (review pass 2). Named, so pg_stat_activity tells the semaphore's connections apart; a connection ending
@@ -591,18 +601,12 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
             // subscription is opened for it (review pass 1).
             tellWaiting(l, waiting);
             if (signal.aborted) throw signal.reason;
-            // Asked each round, so a subscription that failed is asked again while the call waits; at once where it is
-            // live. Subscribed, one round more.
-            const live = await listening(signal);
-            if (live && !heard) {
-              heard = true;
-              continue;
-            }
-            // A slot told let go since the round began, the head not yet napping: tried again at once, the wake not
-            // lost (review pass 7: lost between the try and the nap, 424 1 ms calls took 13 s).
+            // Asked each round, so a subscription that failed is asked again while the call waits; a live one costs
+            // nothing.
+            listening();
             // A session closed while the subscription was asked for: its wake came before the nap (review pass 2).
             if (conn.lost) continue;
-            if (l.freed === seen && !(await nap(l, RECHECK_MS + Math.floor(Math.random() * RECHECK_MS), signal)) && !(await stillHearing(ask, session))) heard = false;
+            if (l.freed === seen && !(await nap(l, RECHECK_MS + Math.floor(Math.random() * RECHECK_MS), signal))) await stillHearing(ask, session, signal);
           }
         } catch (e) {
           if (signal.aborted || !answered || !sessionEnded(e)) throw e;

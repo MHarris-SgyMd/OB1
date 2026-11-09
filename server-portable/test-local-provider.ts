@@ -2123,6 +2123,40 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         await admin.close();
       }
     }
+    // Several shares waiting in one process share its subscription, each head pinging it at a nap no release ends: a
+    // ping still on its way is not judged by another share's head, so a healthy subscription is kept — here three shares'
+    // naps in step, every slot held elsewhere, for 6 s (review pass 3: judged at once, two shares in step dropped one at
+    // nearly every nap, twelve dropped six in 30 s).
+    {
+      const holds = new SQL({ url: URL_, max: 1 });
+      const admin = new SQL({ url: URL_, max: 1 });
+      const stepSaid: string[] = [];
+      const step = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: (l) => stepSaid.push(l) });
+      const random = Math.random;
+      const models = ["step-a", "step-b", "step-c"];
+      const keys = models.map((m) => shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call(m), cls: "background" })!.key);
+      const pids = new Set<number>();
+      try {
+        for (const k of keys) await holds`SELECT pg_advisory_lock(hashtext(${k}), 0)`;
+        Math.random = () => 0;
+        const waiting = models.map((m) => modelCall(call(m), async () => "ran"));
+        const t0 = Date.now();
+        while (Date.now() - t0 < 6000) {
+          for (const r of (await admin`SELECT pid FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`) as { pid: number }[]) pids.add(r.pid);
+          await Bun.sleep(50);
+        }
+        Math.random = random;
+        await holds`SELECT pg_advisory_unlock_all()`;
+        await Promise.all(waiting);
+        assert(pids.size === 1 && !stepSaid.some((l) => /no longer heard/.test(l)),
+          `three shares waiting in step in one process keep one healthy subscription between their pings for 6 s (${pids.size} subscription backend(s) seen; ${JSON.stringify(stepSaid.map((l) => l.slice(0, 70)))})`);
+      } finally {
+        Math.random = random;
+        await step.uninstall();
+        await holds.close();
+        await admin.close();
+      }
+    }
     // A process that waited, its subscription to the channel live, still ends on its own once its work is done: the
     // subscription closes 2 s after its last wait, as a CLI never uninstalls the hook (PR 2c-1: a live one holds a
     // process open).
