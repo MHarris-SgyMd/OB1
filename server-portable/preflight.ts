@@ -1019,6 +1019,15 @@ if (!egress.problems.length) {
     add("egress policy", "warn", `${strayPlugins.map((t) => `plugin:${t.value}`).join(", ")} name(s) no plugin OB1_PLUGINS enables (${[...enabled].join(", ") || "none"}) — such a term matches no call`,
         "Name an enabled plugin, as plugins/registry.ts spells it, or drop the term.");
   }
+  // Under allow, a plugin's model call is one subject — its key, its plugin, its
+  // text — though its text may hold rows other keys wrote: a row's deny term,
+  // or one naming another key, never holds it (PR 3a's fourth review pass; the
+  // gate judging each row it carries is SMD-4195).
+  const rowDeny = egress.deny.filter((t) => ["actor", "source", "type", "topic"].includes(t.unit));
+  if (egress.mode === "allow" && rowDeny.length && enabled.size) {
+    add("egress policy", "warn", `${rowDeny.map((t) => `${t.unit}:${t.value}`).join(", ")} hold(s) no plugin's model call (ctx.model) whose text carries such a row — the gate sees the call's key, plugin and text, not whose rows the plugin read (SMD-4195); an actor: term holds that key's own calls alone`,
+        "Hold a plugin's calls with OB1_EGRESS_DENY=plugin:<name>, or a marker its text carries; or run under deny, where only an OB1_EGRESS_ALLOW plugin: term lets one out.");
+  }
   // Terms in the knob the mode does not read decide nothing — a natural
   // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently
   // (first review pass). Said, with the knob the mode reads.

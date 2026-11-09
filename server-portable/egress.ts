@@ -77,7 +77,10 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * only one that releases a plugin's call: its text is whatever the plugin
  * read, other keys' rows among them, so neither the caller's `actor:` term
  * nor a `marker:` one row of a bundle carries may let it out (the
- * maintainer's call, PR 3a's third review pass). Any deny term still holds it.
+ * maintainer's call, PR 3a's third review pass). Under allow a deny term on
+ * its key, its plugin or a marker holds it; a `source:`, `type:` or `topic:`
+ * term never does, nor another key's `actor:`, since the gate cannot see whose
+ * rows the text holds (SMD-4195; preflight warns).
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker", "plugin"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
@@ -223,8 +226,8 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
       // The row's own label, server-written — an edit, the re-embed and
       // consolidation passes, and db/sync-linear.ts's authoritative captures.
       // capture_thought keeps its caller-claimed source OFF the subject, so it
-      // never reaches here; the gate does NOT branch on kind (SMD-1941; the
-      // rationale is on EGRESS_UNITS).
+      // never reaches here; termMatches does NOT branch on kind (SMD-1941;
+      // the rationale is on EGRESS_UNITS).
       return lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;

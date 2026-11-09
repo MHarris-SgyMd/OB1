@@ -198,7 +198,9 @@ SMD-2888, SMD-2889). A refused search says which tool works without a model call
 (`search_thoughts_keyword`). Terms are `unit:value`, comma-separated — `actor`
 (the access key's name), `source`, `type`, `topic` (a row's metadata, known to
 the passes and the re-embed, not at a first capture), `marker` (a literal in the
-text) — and a term that does not parse fails preflight and closes the gate.
+text), `plugin` (a plugin's model call, `ctx.model`: under `deny` only a
+`plugin:<name>` term lets one out) — and a term that does not parse fails
+preflight and closes the gate.
 Preflight prints the mode and, per endpoint, what leaves; `deploy/.env.example`
 has the block.
 

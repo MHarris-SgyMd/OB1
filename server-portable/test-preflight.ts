@@ -5429,6 +5429,21 @@ if (want("8")) {
          && /✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term/.test(strayPlugin.out),
          "a plugin: term naming no enabled plugin is warned by name; an actor: term beside it keeps the endpoint row ok");
   assert(!/no plugin OB1_PLUGINS enables/.test(pluginOnly.out), "…and no such warning for an enabled plugin's name");
+  const caseOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:EXAMPLE" });
+  const offStray = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "off", OB1_EGRESS_ALLOW: "plugin:exampel" });
+  assert(!/no plugin OB1_PLUGINS enables/.test(caseOnly.out) && !/no plugin OB1_PLUGINS enables/.test(offStray.out),
+         "…nor for the name in another case (the gate matches it so), nor under off, where no term is read");
+  // Under allow a row's deny term, or a key's, holds no plugin's call carrying such a row (SMD-4195): said while a plugin is enabled.
+  const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
+  const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
+  const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });
+  assert(/!\s+egress policy\s+type:phi, actor:alice hold\(s\) no plugin's model call \(ctx\.model\) whose text carries such a row — .*\(SMD-4195\)/.test(allowRows.out)
+         && /!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables/.test(allowRows.out)
+         && !/hold\(s\) no plugin's model call/.test(allowRowsNoPlugins.out) && !/hold\(s\) no plugin's model call/.test(allowMarkerOnly.out),
+         "under allow, a row's or a key's deny term is said to hold no plugin's call carrying such a row while a plugin is enabled (a marker does); a stray name in OB1_EGRESS_DENY is warned too");
+  // The chat row's consequence names what a plugin's call needs.
+  assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — .* an enabled plugin's model call \(ctx\.model\) is refused unless an OB1_EGRESS_ALLOW plugin: term names it/.test(split.out),
+         "…and the chat row says a plugin's call needs a plugin: term");
 }
 
 if (want("9")) {

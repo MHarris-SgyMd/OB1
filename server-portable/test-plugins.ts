@@ -1314,8 +1314,9 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     const markedSystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
     const markedSystemSent = bodies.length - beforeSystem;
     const unmarked = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "plain", user: "plain" });
-    // Only allow reads deny terms, and a declared-local endpoint is never judged: the system text is read in neither.
+    // Only allow reads deny terms (not deny, not off), and a declared-local endpoint is never judged: the system text is read in none.
     const underDeny = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    const underOff = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "off", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
     const onLocal = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
     // The embeddings endpoint declared local and the chat endpoint not: the chat endpoint's declaration is the one read.
     const beforeSplit = bodies.length;
@@ -1328,7 +1329,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     assert(!kept.ok && kept.refusal.code === "REFUSED_EGRESS" && kept.refusal.retryable === false && kept.refusal.to === `127.0.0.1:${provider.port}` && /no OB1_EGRESS_ALLOW term matches this plugin/.test(kept.refusal.reason) && !kept.refusal.reason.includes(base) && keptSent === 0
       && byPlugin.ok && [byActor, byMarker].every((b) => !b.ok && b.refusal.code === "REFUSED_EGRESS" && /only a plugin: term releases a plugin's call/.test((b.refusal as { reason: string }).reason)) && !otherPlugin.ok && otherPlugin.refusal.code === "REFUSED_EGRESS" && !bySourceName.ok && bySourceName.refusal.code === "REFUSED_EGRESS"
       && !markedUser.ok && markedUser.refusal.code === "REFUSED_EGRESS" && !allowedBySystem.ok && allowedBySystem.refusal.code === "REFUSED_EGRESS"
-      && !markedSystem.ok && markedSystem.refusal.code === "REFUSED_EGRESS" && /OB1_EGRESS_DENY marker:do-not-send matches this plugin's system text/.test(markedSystem.refusal.reason) && markedSystemSent === 0 && unmarked.ok && underDeny.ok && onLocal.ok
+      && !markedSystem.ok && markedSystem.refusal.code === "REFUSED_EGRESS" && /OB1_EGRESS_DENY marker:do-not-send matches this plugin's system text/.test(markedSystem.refusal.reason) && markedSystemSent === 0 && unmarked.ok && underDeny.ok && underOff.ok && onLocal.ok
       && !splitChat.ok && splitChat.refusal.code === "REFUSED_EGRESS" && splitSent === 0
       && [deniedPlugin, deniedActor].every((d) => !d.ok && d.refusal.code === "REFUSED_EGRESS" && !/system text/.test((d.refusal as { reason: string }).reason))
       && !deniedPlugin.ok && /plugin:smart-ingest/.test((deniedPlugin.refusal as { reason: string }).reason) && !deniedActor.ok && /actor:writer/.test((deniedActor.refusal as { reason: string }).reason),
