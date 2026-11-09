@@ -1014,8 +1014,9 @@ async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: str
 /**
  * The priority and due time a captured text states (SMD-3670), stated at tier 4, flagged inferred, by the capturing
  * key: on each open item this capture proposed from the thought, else on the thought itself (the maintainer,
- * 2026-11-09). Nothing ranks on it until the measurement clears its bar (effective_priority's `count_inferred`).
- * Never fails the capture: a refusal or a fault is logged and the rest are not stated.
+ * 2026-11-09), for a fresh capture alone (its caller's `existed === false`; the maintainer confirmed the same day). Nothing
+ * ranks on it until the measurement clears its bar (effective_priority's `count_inferred`). Never fails the capture:
+ * a refusal or a fault is logged and the rest are not stated.
  */
 async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], inferred: Inferred | null): Promise<void> {
   const statement = inferredStatement(inferred);

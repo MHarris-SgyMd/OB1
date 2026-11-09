@@ -13,7 +13,10 @@
  *   ("not very urgent" read as urgent), a High read off a phrase negating its
  *   own cue ("no rush"), and a level phrase that is only the deadline's words.
  * - An inferred level is at most High (3): "urgent" costs nothing to write in
- *   a note, and the maintainer's own example reads "Urgent: …" as High.
+ *   a note, and the maintainer's own example reads "Urgent: …" as High
+ *   (confirmed by the maintainer, 2026-11-09, with the two rules below and in
+ *   core/writes.ts: a due phrase alone states Medium, and only a fresh capture
+ *   is read).
  * - A due phrase is resolved by the rules below from the capture's UTC day
  *   ("by Friday" captured on Tuesday 2026-11-03 is 2026-11-06). Only a phrase
  *   the rules can't read takes the model's date, and only a real day from the
@@ -40,9 +43,9 @@ export const INFER_PROMPT = `Read the user's captured note for how much it matte
 - "due_date": that deadline as YYYY-MM-DD, counted from the capture day, or null
 Copy phrases exactly as the note writes them. Only read what the note says.`;
 
-/** The highest level an inferred statement takes: High. */
+/** The highest level an inferred statement takes: High (the maintainer, 2026-11-09). */
 export const INFERRED_CEILING: PriorityLevel = 3;
-/** The level a due phrase with no level phrase is stated at: 116 takes no statement without a level, and Medium is what unknown counts as (decision 3). */
+/** The level a due phrase with no level phrase is stated at: 116 takes no statement without a level, and Medium is what unknown counts as (decision 3; the maintainer, 2026-11-09). */
 export const DUE_ONLY_LEVEL: PriorityLevel = 2;
 
 /** The model's level words, and the level each is on the scale before the ceiling. */
