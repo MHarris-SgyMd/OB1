@@ -7329,7 +7329,7 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
-  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS } = await import("./core/plan.ts");
+  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT } = await import("./core/plan.ts");
   const say = await import("./render.ts");
   const text = (r: { content: { text: string }[] }) => r.content[0].text;
   // Keys: the filed key first, then the text's, in hit order, once each; only 068's form (no SMD-0, no lower case).
@@ -7337,18 +7337,18 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     { content: "about SMD-12 and SMD-0 and smd-13", metadata: { issue: "SMD-11" } },
     { content: "again SMD-12, then OPS-3", metadata: null },
   ]);
-  // The board reads every ticket the page names, once each, the first 100: one hit naming 120 reads 100 and counts 20;
-  // three of 50 the same; a key two hits name, or a hit returned twice, counts once (review pass 1: per-hit counts
+  // The board reads every ticket the page names, once each, the first 500: one hit naming 600 reads 500 and counts 100;
+  // three of 200 the same; a key two hits name, or a hit returned twice, counts once (review pass 1: per-hit counts
   // summed counted 10 read keys as not read). A key past the agenda's form (a prefix past 16, a number past 10 digits)
   // is no ticket the board can read, and is dropped, never sent (one would fail the agenda's whole call).
   const sixty = Array.from({ length: 60 }, (_, i) => `SMD-${i + 1}`).join(" ");
-  const one = boardKeysOf([{ content: Array.from({ length: 120 }, (_, i) => `SMD-${i + 1}`).join(" "), metadata: null }]);
-  const many = boardKeysOf([0, 1, 2].map((n) => ({ content: Array.from({ length: 50 }, (_, i) => `SMD-${n * 50 + i + 1}`).join(" "), metadata: null })));
+  const one = boardKeysOf([{ content: Array.from({ length: 600 }, (_, i) => `SMD-${i + 1}`).join(" "), metadata: null }]);
+  const many = boardKeysOf([0, 1, 2].map((n) => ({ content: Array.from({ length: 200 }, (_, i) => `SMD-${n * 200 + i + 1}`).join(" "), metadata: null })));
   const overlap = boardKeysOf([{ content: sixty, metadata: null }, { content: Array.from({ length: 10 }, (_, i) => `SMD-${i + 51}`).join(" "), metadata: null }]);
   const twice = boardKeysOf([{ content: sixty, metadata: null }, { content: sixty, metadata: null }]);
   const odd = boardKeysOf([{ content: "ABCDEFGHIJKLMNOPQ-1 and SMD-12345678901 and ABCDEFGHIJKLMNOP-1 and SMD-1234567890", metadata: null }]);
-  assert(JSON.stringify(keyed) === '{"keys":["SMD-11","SMD-12","OPS-3"],"notRead":0}' && one.keys.length === BOARD_KEYS && one.notRead === 20
-      && many.keys.length === BOARD_KEYS && many.keys[0] === "SMD-1" && many.keys[99] === "SMD-100" && many.notRead === 50
+  assert(JSON.stringify(keyed) === '{"keys":["SMD-11","SMD-12","OPS-3"],"notRead":0}' && one.keys.length === BOARD_KEYS && one.notRead === 100
+      && many.keys.length === BOARD_KEYS && many.keys[0] === "SMD-1" && many.keys[499] === "SMD-500" && many.notRead === 100
       && overlap.keys.length === 60 && overlap.notRead === 0 && twice.keys.length === 60 && twice.notRead === 0
       && JSON.stringify(odd.keys) === '["ABCDEFGHIJKLMNOP-1","SMD-1234567890"]',
     `the hits' tickets in order, once each, in the agenda's form; the first ${BOARD_KEYS} read, the distinct rest counted (${JSON.stringify(keyed)}; ${one.notRead}; ${many.notRead}; ${overlap.notRead}; ${twice.notRead}; ${JSON.stringify(odd.keys)})`);
@@ -7385,9 +7385,14 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     otherBad = await boardOf(raise("22023", "an agenda's keys scope is 1 to 100 ticket keys, such as SMD-1234"), named, 50);
   } finally { console.error = origError; }
   const g = (x: { gaps: { gap: string; reason?: string }[] }) => x.gaps.map((y) => y.reason ? `${y.gap}:${y.reason}` : y.gap).join(",");
+  // Review pass 2: three open named tickets, the list cut to one, counts two not read; a board not read says how many the hits named.
+  const cut = await boardOf(store(() => ({ ...answer, total: 3 })), { keys: ["SMD-11", "SMD-12", "OPS-3"], notRead: 0 }, 50);
+  const cutRead = (cut.gaps.find((x) => x.gap === "tickets_not_read") as { count?: number } | undefined)?.count;
+  const lateNamed = (late.gaps.find((x) => x.gap === "section_unavailable") as { named?: number } | undefined)?.named;
+  assert(cutRead === 2 && lateNamed === 3, `the agenda's list cut at its limit counts the rest not read; a board not read names how many tickets the hits named (${cutRead}, ${lateNamed})`);
   assert(read.board.available && read.board.tickets.length === 1 && read.board.others[0]?.key === "SMD-12" && read.board.claimsRead === true && read.board.claimsLive === 0
       && JSON.stringify(a?.scope) === '{"keys":["SMD-11","SMD-12","OPS-3"]}' && a?.includeBlocked === true && a?.includeClaimed === true && a?.includeStarted === true
-      && a?.includeProposed === false && a?.limit === BOARD_KEYS && a?.timeoutMs === 4321 && g(read) === "tickets_missing,tickets_not_read"
+      && a?.includeProposed === false && a?.limit === BOARD_LIMIT && a?.timeoutMs === 4321 && g(read) === "tickets_missing,tickets_not_read"
       && none.board.available && none.board.claimsRead === null && none.board.claimsLive === null && g(none) === ""
       && lateCalls === 0 && g(late) === "section_unavailable:deadline,tickets_not_read"
       && g(cancelled) === "section_unavailable:deadline,tickets_not_read" && g(old) === "section_unavailable:no_keys_scope,tickets_not_read"

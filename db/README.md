@@ -2505,8 +2505,9 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
-Migration 126 gives the agenda's scope `keys` (SMD-2684): 1 to 100 ticket keys,
-those tickets alone, under every other rule. The answer's `keyed` lists the named
+Migration 126 gives the agenda's scope `keys` (SMD-2684): 1 to 500 ticket keys,
+those tickets alone, under every other rule, and refused beside any other scope or
+a holder. The answer's `keyed` lists the named
 tickets it does not rank beside the list: a settled one, or one whose status type
 the brain does not know, with its status (`others`), one a not_before ahead keeps
 out (`waiting`), and a key no thought records (`missing`). plan_context's board section reads it, so one ranking serves both

@@ -107,7 +107,8 @@ export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts
     if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
-    console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
+    console.error(stopped ? `${opts.tool}: the embedding provider at ${base} did not answer before the caller's deadline; answered by exact matches alone`
+      : `${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
     // The provider's state, as every embedding call tells it (SMD-2890) — not when the caller stopped the call.
     if (!stopped) heardFrom(ctx.providerHealth, embedStarted, e);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });

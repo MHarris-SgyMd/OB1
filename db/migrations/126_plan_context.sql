@@ -14,14 +14,17 @@
 --   tickets with it, so SMD-1719's utilization rate can score the read.
 --
 -- WHAT
---   * agenda's scope gains `keys`: 1 to 100 ticket keys (068's upper-case
---     form). With it, the candidates are those tickets alone, no open item,
+--   * agenda's scope gains `keys`: 1 to 500 ticket keys (068's upper-case
+--     form), standing alone: beside a source, project, label or holder it is
+--     refused (review pass 2: a named open ticket outside that scope was in no
+--     list). With it, the candidates are those tickets alone, no open item,
 --     under every other rule of 124's unchanged (the include flags, the claim
---     rule, the order). The answer gains `keyed`, null without keys:
+--     rule, the order); a candidate past p_limit is counted in total alone. The answer gains `keyed`, null without keys:
 --     {others: each named ticket that is no candidate, its head settled or
 --     its status type unknown here, with its title, status, status_type and
 --     `settled`; waiting: each named ticket a not_before ahead keeps out, with
---     its status and not_before; missing: each named key no thought records}.
+--     its status and not_before; missing: each named key no thought records
+--     whose prefix some ticket here carries (UTF-8 names no ticket)}.
 --     So a named key is in items, others, waiting or missing (review pass 1:
 --     a waiting one was in none). A named candidate left out by a flag is
 --     counted in left_out as before.
@@ -140,12 +143,16 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('an agenda scope is a non-empty string of at most 200 characters: %s', v_bad), ERRCODE = 'invalid_parameter_value';
   END IF;
   v_source := p_scope->>'source'; v_project := p_scope->>'project'; v_label := p_scope->>'label';
-  -- keys (126, SMD-2684): the tickets named, 1 to 100 keys in their upper-case form, a duplicate counted once. Tickets
-  -- alone: no open item is named by a key a caller holds.
+  -- keys (126, SMD-2684): the tickets named, 1 to 500 keys in their upper-case form, a duplicate counted once. Tickets
+  -- alone: no open item is named by a key a caller holds. It stands alone (review pass 2): beside a source, project,
+  -- label or holder, a named open ticket outside that scope would be in no list at all.
   IF p_scope ? 'keys' THEN
-    IF jsonb_typeof(p_scope->'keys') <> 'array' OR jsonb_array_length(p_scope->'keys') NOT BETWEEN 1 AND 100
+    IF jsonb_typeof(p_scope->'keys') <> 'array' OR jsonb_array_length(p_scope->'keys') NOT BETWEEN 1 AND 500
        OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_scope->'keys') k WHERE jsonb_typeof(k) <> 'string' OR (k #>> '{}') !~ c_key) THEN
-      RAISE EXCEPTION USING MESSAGE = 'an agenda''s keys scope is 1 to 100 ticket keys, such as SMD-1234', ERRCODE = 'invalid_parameter_value';
+      RAISE EXCEPTION USING MESSAGE = 'an agenda''s keys scope is 1 to 500 ticket keys, such as SMD-1234', ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF v_source IS NOT NULL OR v_project IS NOT NULL OR v_label IS NOT NULL OR v_mine THEN
+      RAISE EXCEPTION USING MESSAGE = 'an agenda''s keys scope stands alone: no source, project, label or holder beside it', ERRCODE = 'invalid_parameter_value';
     END IF;
     SELECT array_agg(DISTINCT k ORDER BY k) INTO v_keys FROM jsonb_array_elements_text(p_scope->'keys') k;
   END IF;
@@ -254,8 +261,10 @@ BEGIN
                                    FROM ob1_ticket_head h JOIN thoughts t ON t.id = h.head_id
                                   WHERE h.issue = ANY(v_keys)
                                     AND NOT COALESCE(h.status_type = ANY(node_lifecycle_types()) AND NOT h.status_type = ANY(node_settled_types()), false)), '[]'),
+             -- A key whose prefix no ticket here carries (UTF-8, SHA-256) is no ticket at all: not missing (review pass 2).
              'missing', COALESCE((SELECT jsonb_agg(k ORDER BY k) FROM unnest(v_keys) k
-                                   WHERE NOT EXISTS (SELECT 1 FROM ob1_ticket_head h WHERE h.issue = k)), '[]'))
+                                   WHERE NOT EXISTS (SELECT 1 FROM ob1_ticket_head h WHERE h.issue = k)
+                                     AND EXISTS (SELECT 1 FROM ob1_ticket_head h WHERE h.issue LIKE split_part(k, '-', 1) || '-%')), '[]'))
       INTO v_keyed;
   END IF;
 
@@ -329,7 +338,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean) IS
-  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 100 ticket keys: those tickets alone, no open item), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records}), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migrations 123 (SMD-3669), 124 (SMD-4162) and 126 (SMD-2684).';
+  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 500 ticket keys: those tickets alone, no open item, refused beside any other scope or a holder), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records whose prefix some ticket carries}), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migrations 123 (SMD-3669), 124 (SMD-4162) and 126 (SMD-2684).';
 
 -- ---------------------------------------------------------------------------
 -- query_log: plan_context's kind

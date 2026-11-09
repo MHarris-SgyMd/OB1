@@ -659,13 +659,15 @@ const thoughtCount = (n: number) => n > TEXT_PAGE ? `more than ${TEXT_PAGE} thou
  * the tool that matches any word — search_thoughts_keyword, which the compat
  * `search`'s caller may not have, so it is named there as the brain's.
  */
-function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts" | "plan_context"): string {
+function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched"> & { reason?: string }, tool: "search" | "search_thoughts" | "plan_context"): string {
   // Its literals; then, those matching nothing, the query as one text; or nothing could be (review passes 4 and 5).
   const how = f.matched === "text"
     ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
     : f.matched === "none"
       ? "nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text"
       : "the query was matched only by its identifiers and quoted spans, exactly — not by meaning";
+  // A caller's deadline (plan_context, SMD-2684 review pass 2) is no failure of the provider's: said as the deadline.
+  if (f.reason === "deadline") return `Semantic search was cut short: the embedding provider at ${f.base} did not answer within plan_context's deadline. So ${how}.`;
   return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how}. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
 }
@@ -2463,7 +2465,7 @@ const gapWords = (g: PlanGap): string => {
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
-    case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}.`;
+    case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}; the hits name ${g.named} ticket${g.named === 1 ? "" : "s"}.`;
   }
 };
 
@@ -2477,7 +2479,9 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   const k = v.knowledge;
   const literal = k.vectorFailed ? literalOnlyNote(k.vectorFailed, "plan_context") : null;
   const out: string[] = [`Plan context for ${quoted(v.request, 200)}. The brain hands over what it holds; the plan and the judgement are yours.`];
-  out.push(`\n## Knowledge: ${k.hits.length} hit${k.hits.length === 1 ? "" : "s"}, current work ranked first${literal ? ` (${literal})` : ""}`);
+  // A text match has no ranking for current work (review pass 2): newest first.
+  const order = k.vectorFailed?.matched === "text" ? "newest first, matched as one text" : "current work ranked first";
+  out.push(`\n## Knowledge: ${k.hits.length} hit${k.hits.length === 1 ? "" : "s"}, ${order}${literal ? ` (${literal})` : ""}`);
   if (k.hits.length) {
     const notes: string[] = [];
     if (k.hits.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);

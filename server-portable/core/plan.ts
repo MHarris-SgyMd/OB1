@@ -9,10 +9,11 @@
 //   tools       what this key's scope may call here, core and plugin, and that other servers' tools are unknown to it;
 //   gaps        what it could not find, as values: no hit at all, every hit superseded or ingested, a named ticket the
 //               brain does not hold, tickets past the board's reach, semantic search unavailable, a board not read.
-// Bounded: one deadline, held by the two calls that wait on something else — the query's embedding (the provider) and
-// the board's agenda call (its statement timeout, what is left). An embedding past it answers by exact matches alone,
-// as a provider that did not answer does; a board past it, or failing, is a gap. The search's own SQL and the labels
-// run under the database's statement timeout, as every read does.
+// Bounded: one deadline, held by the two calls that wait on something else — the query's embedding (the provider),
+// stopped early enough to leave the board its reserve, and the board's agenda call (its statement timeout, what is
+// left). An embedding past its stop answers by exact matches alone, as a provider that did not answer does; a board
+// past the deadline, or failing, is a gap. The search's own SQL and the labels run under the database's statement
+// timeout, as every read does.
 // Logged as one query_log row of its own kind (126): the request, the hits' ids, the board's tickets, why it was not read.
 
 import type { Principal } from "../auth.ts";
@@ -26,8 +27,16 @@ import type { Input } from "./schemas.ts";
 
 /** The read's deadline, in ms: the query's embedding and the board's agenda call. */
 export const PLAN_DEADLINE_MS = 10_000;
-/** The board's reach: the agenda's own ceiling of 100 keys (126). Named tickets past it are counted, not read. */
-export const BOARD_KEYS = 100;
+/**
+ * What the embedding leaves the board: it is stopped this long before the deadline, or at half of it, whichever is
+ * later (review pass 2: a provider slow but alive took the whole deadline, and the board, which needs no provider,
+ * was never read).
+ */
+export const BOARD_RESERVE_MS = 2_000;
+/** The board's reach: the agenda's own ceiling of 500 keys (126). Named tickets past it are counted, not read. */
+export const BOARD_KEYS = 500;
+/** The board's list: the agenda's ceiling of 100 items. Open named tickets past it are counted, not read. */
+export const BOARD_LIMIT = 100;
 /** A ticket key as the agenda takes one (126's `c_key`, 068's form). Kept in step with the SQL: one key it refuses fails the whole call. */
 export const AGENDA_KEY = /^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$/;
 
@@ -60,7 +69,7 @@ export type PlanGap =
   | { gap: "semantic_unavailable"; reason: string }
   | { gap: "tickets_missing"; keys: string[] }
   | { gap: "tickets_not_read"; count: number }
-  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead };
+  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number };
 
 export type PlanTools = {
   scope: Principal["scope"];
@@ -142,8 +151,9 @@ const sqlState = (e: unknown) => String((e as { errno?: unknown; code?: unknown 
  * cancelled, 57014: the deadline, or a stricter timeout the database keeps), an agenda before 126 (which refuses the
  * keys scope by name), or any other failure, which the server's log names. A failure never fails the read.
  */
-export async function boardOf(ctx: Pick<Ctx, "store">, named: { keys: string[]; notRead: number }, leftMs: number): Promise<{ board: PlanBoard; gaps: PlanGap[] }> {
+export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; notRead: number }, leftMs: number): Promise<{ board: PlanBoard; gaps: PlanGap[] }> {
   const gaps: PlanGap[] = [];
+  let named = given;
   let board: PlanBoard;
   if (named.keys.length === 0) {
     board = { available: true, tickets: [], others: [], waiting: [], claimsRead: null, claimsLive: null, boardSync: null };
@@ -152,12 +162,14 @@ export async function boardOf(ctx: Pick<Ctx, "store">, named: { keys: string[]; 
   } else {
     try {
       const a = await (await ctx.store()).agenda({
-        scope: { keys: named.keys }, limit: BOARD_KEYS, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true, timeoutMs: leftMs,
+        scope: { keys: named.keys }, limit: BOARD_LIMIT, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true, timeoutMs: leftMs,
       });
       // An agenda before 126 refuses a keys scope (below), so an answer without `keyed` is a fault.
       if (a.keyed === null) throw new Error("agenda answered no keyed tickets for a keys scope");
       board = { available: true, tickets: a.items, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
       if (a.keyed.missing.length) gaps.push({ gap: "tickets_missing", keys: a.keyed.missing });
+      // Open named tickets past the list's 100: in total alone (review pass 2).
+      named = { ...named, notRead: named.notRead + Math.max(0, a.total - a.items.length) };
     } catch (e) {
       const code = sqlState(e);
       if (code === "57014") board = { available: false, reason: "deadline", waitsOn: [] };
@@ -168,7 +180,8 @@ export async function boardOf(ctx: Pick<Ctx, "store">, named: { keys: string[]; 
       }
     }
   }
-  if (!board.available) gaps.push({ gap: "section_unavailable", section: "board", reason: board.reason });
+  // How many tickets the hits named, so a board not read still says what it would have read (review pass 2).
+  if (!board.available) gaps.push({ gap: "section_unavailable", section: "board", reason: board.reason, named: named.keys.length });
   if (named.notRead > 0) gaps.push({ gap: "tickets_not_read", count: named.notRead });
   return { board, gaps };
 }
@@ -191,8 +204,8 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   const started = clock();
   const request = input.request;
 
-  // Knowledge: the embedding stopped at the deadline, answered then by exact matches alone.
-  const stop = AbortSignal.timeout(deadlineMs);
+  // Knowledge: the embedding stopped before the deadline, leaving the board its reserve; answered then by exact matches.
+  const stop = AbortSignal.timeout(Math.max(deadlineMs - BOARD_RESERVE_MS, Math.floor(deadlineMs / 2)));
   const r = await (opts.search ?? planSearch)(ctx, principal, { query: request, limit: input.limit, signal: stop });
   if (r.refusal) return refuse(r.refusal);
   const { rows, hits } = r;

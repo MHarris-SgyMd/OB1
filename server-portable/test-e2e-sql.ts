@@ -78,6 +78,13 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (typeof stubDown === "number") return new Response(`{"error":"stub answers ${stubDown}"}`, { status: stubDown, headers: { "Content-Type": "application/json" } });
     stubBodies.push(String(init?.body ?? ""));
     const body = JSON.parse(String(init?.body ?? "{}"));
+    // A provider that never answers a query marked so, until the caller stops it ([27], SMD-2684 review pass 2).
+    if (url.endsWith("/embeddings") && String(body.input).includes("hang-until-stopped")) {
+      return new Promise<Response>((_, reject) => {
+        const stop = init?.signal;
+        stop?.addEventListener("abort", () => reject(stop.reason ?? new DOMException("stopped", "AbortError")));
+      });
+    }
     if (url.endsWith("/embeddings")) {
       const v = new Array(EMBEDDING_DIM).fill(0);
       v[axisFor(String(body.input))] = 1;
@@ -4313,6 +4320,25 @@ console.log("\n[26] plan_context's query_log row (migration 126, SMD-2684): one 
         && JSON.stringify(row.ids) === JSON.stringify(shown) && row.ids.includes(note) && Array.isArray(row.result_items)
         && row.result_items.some((i: { key: string }) => i.key === "KES-1"),
       `one plan_context row a call and no search row, the default limit 8: the request, the limit, arm current, the hits' ids in the order shown, the board's tickets (${planBefore} → ${planAfter}, search ${searchBefore} → ${searchAfter} | ${JSON.stringify(row?.result_items)})`);
+  } finally {
+    await sql.close();
+  }
+}
+
+console.log("\n[27] plan_context's deadline over a provider that never answers (SMD-2684 review pass 2): the embedding is stopped with the board's reserve left, the knowledge is the request's exact matches, said as the deadline and not as a provider failure, the board is still read, and the row's arm is literal");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+    const note = idIn(await call("capture_thought", { content: '[27] "osprey plan" leans on KES-1' }))!;
+    const t0 = performance.now();
+    const text = await call("plan_context", { request: 'hang-until-stopped "osprey plan"' });
+    const ms = performance.now() - t0;
+    const [row] = await sql`SELECT arm, filter, result_ids::text[] AS ids, result_items FROM query_log WHERE kind = 'plan_context' AND query = 'hang-until-stopped "osprey plan"' ORDER BY logged_at DESC LIMIT 1`;
+    assert(ms >= 7_500 && ms < 9_900 && text.includes(`ID: ${note}`) && /did not answer within plan_context's deadline/.test(text) && !/failed:/.test(text.split("## Board")[0])
+        && /\n1\. ticket KES-1 /.test(text) && !/ran out of time/.test(text)
+        && row?.arm === "literal" && JSON.stringify(row.filter) === "{}" && row.ids.includes(note) && row.result_items.some((i: { key: string }) => i.key === "KES-1"),
+      `answered in ${Math.round(ms)} ms: the embedding stopped before the deadline, the exact match found, said as the deadline; the board read in the reserve; arm literal (${JSON.stringify(row?.filter)} | ${text.split("\n").find((l) => l.startsWith("## Knowledge"))})`);
   } finally {
     await sql.close();
   }

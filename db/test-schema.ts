@@ -18547,7 +18547,8 @@ console.log("\n[113] Migration 126: the agenda's keys scope — the tickets name
   await ticket("SMD-9941", "Backlog", "backlog"); await ticket("SMD-9942", "In Progress", "started"); await ticket("SMD-9943", "Done", "completed");
   await ticket("SMD-9944", "Todo", "unstarted", { blockedBy: "SMD-9941" }); await ticket("SMD-9945", "Parked", "parked"); await ticket("SMD-9946", "Backlog", "backlog");
   await db.query(`SELECT assert_priority('ticket', 'SMD-9941', 3, NULL, NULL, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
-  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941", "SMD-9947", "SMD-9948", "SMD-9949"];
+  // UTF-8 is key-shaped, and no ticket here carries its prefix: no ticket, so not missing (review pass 2).
+  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941", "SMD-9947", "SMD-9948", "SMD-9949", "UTF-8"];
   const ag = async (scope: object | null, all = true) =>
     (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, $2, $2, false, NULL, $3::timestamptz, $2) AS a`, [scope === null ? null : JSON.stringify(scope), all, NOW])).rows[0].a;
   const row = (a: Ag) => a.items.map((i) => `${i.kind}:${i.key} ${i.status}`).join(", ");
@@ -18563,25 +18564,28 @@ console.log("\n[113] Migration 126: the agenda's keys scope — the tickets name
   // Every flag on: the named open tickets alone, in agenda order (the High one first), no open item though earlier
   // sections left some, the never-named one out; the Done and the unknown-type ones beside, with their status; the
   // key no thought records missing; a duplicate counted once. Flags off: the blocked and the started ones left out
-  // and counted, keyed the same. A keys scope with a project narrows by both. Without keys, keyed is null.
+  // and counted, keyed the same. Without keys, keyed is null.
   const named = await ag({ keys: NAMED }), off = await ag({ keys: NAMED }, false);
-  const both = await ag({ keys: NAMED, project: "nothing in scope [113]" }), plain = await ag({ project: P });
+  const plain = await ag({ project: P });
   assert(row(named) === "ticket:SMD-9941 Backlog, ticket:SMD-9942 In Progress, ticket:SMD-9944 Todo" && named.total === 3
       && JSON.stringify(named.items.find((i) => i.key === "SMD-9944")?.blockers) === '["SMD-9941"]'
       && others(named) === "SMD-9943 Done/completed settled, SMD-9945 Parked/parked, SMD-9948 null/null" && JSON.stringify(named.keyed?.missing) === '["SMD-9949"]'
       && waits(named) === "SMD-9947 Todo 2027-04-01" && waits(off) === waits(named)
       && named.keyed?.others[0]?.title === "SMD-9943 — [113] SMD-9943"
       && row(off) === "ticket:SMD-9941 Backlog" && JSON.stringify(off.left_out) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}' && others(off) === others(named)
-      && both.items.length === 0 && others(both) === others(named)
       && plain.keyed === null && row(plain).includes("SMD-9946"),
-    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown-type, status-less, not yet startable and missing ones beside, a key named twice once (${row(named)}; ${others(named)}; ${waits(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${both.items.length} | ${plain.keyed === null})`);
+    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown-type, status-less, not yet startable and missing ones beside, a key named twice once (${row(named)}; ${others(named)}; ${waits(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${plain.keyed === null})`);
 
-  // Refused, 22023: keys not an array, none, more than 100, a lower-case key, a number.
-  const raisedCode = async (scope: unknown) => { try { await db.query(`SELECT agenda($1::jsonb, NULL, 20, false, false, false, NULL, now(), false)`, [JSON.stringify(scope)]); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
-  const hundredOne = Array.from({ length: 101 }, (_, i) => `SMD-${i + 1}`);
-  const refused = [await raisedCode({ keys: "SMD-9941" }), await raisedCode({ keys: [] }), await raisedCode({ keys: hundredOne }),
-                   await raisedCode({ keys: ["smd-9941"] }), await raisedCode({ keys: [9941] }), await raisedCode({ keys: Array.from({ length: 100 }, (_, i) => `SMD-${i + 1}`) })];
-  assert(refused.join(",") === "22023,22023,22023,22023,22023,", `a keys scope that is not 1 to 100 ticket keys is refused 22023, 100 taken (${refused.join(",")})`);
+  // Refused, 22023: keys not an array, none, more than 500, a lower-case key, a number; and keys beside a project, a
+  // label, a source or a holder (review pass 2: a named open ticket outside that scope was in no list). 500 taken.
+  const raisedCode = async (scope: unknown, holder: unknown = null) => { try { await db.query(`SELECT agenda($1::jsonb, $2::jsonb, 20, false, false, false, NULL, now(), false)`, [JSON.stringify(scope), holder === null ? null : JSON.stringify(holder)]); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const keysOf = (n: number) => Array.from({ length: n }, (_, i) => `SMD-${i + 1}`);
+  const refused = [await raisedCode({ keys: "SMD-9941" }), await raisedCode({ keys: [] }), await raisedCode({ keys: keysOf(501) }),
+                   await raisedCode({ keys: ["smd-9941"] }), await raisedCode({ keys: [9941] }),
+                   await raisedCode({ keys: ["SMD-9941"], project: P }), await raisedCode({ keys: ["SMD-9941"], label: "x" }), await raisedCode({ keys: ["SMD-9941"], source: "linear" }),
+                   await raisedCode({ keys: ["SMD-9941"] }, { name: "ag112-op" }), await raisedCode({ keys: keysOf(500) })];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023,22023,22023,22023,22023,",
+    `a keys scope that is not 1 to 500 ticket keys, or stands beside a project, label, source or holder, is refused 22023; 500 taken (${refused.join(",")})`);
 
   // query_log: the plan_context kind, its row needing a query and an items array (23514 otherwise).
   const logRow = async (query: string | null, items: string | null) => {
