@@ -450,10 +450,13 @@ window's own thoughts' effective priority once (`effective_priority`, migration
 - **A match's priority** is its own effective priority, as `docs/priority.md`
   decision 5 composes it:
   - A ticket's row reads as its ticket.
-  - Any other thought takes its own counted level, else one inherited from the
-    ticket it is about (its metadata `ticket` or `issue`, else its standing
-    subject). An inherited level is one less a hop, two hops at most, and
-    counts only above unknown's 2.
+  - Any other thought takes its own counted level, else the highest counted on
+    the open items opened from it (migration 125, SMD-4149), else one inherited
+    from the ticket it is about (its metadata `ticket` or `issue`, else its
+    standing subject). An inherited level is one less a hop, two hops at most,
+    and counts only above unknown's 2. With no due time of its own, such a
+    thought takes its open items' soonest, so a note whose open item is due
+    tomorrow reads +2.
   - A level counts when a key the operator classified stated it. An
     unclassified or importer's key's statement is inferred, and not counted
     until SMD-3670.
@@ -472,8 +475,8 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   priority alone. Priority is the effective priority (a level, unknown counted as
   2, plus urgency and what it unblocks) over 9, the default weights' largest.
   Ties keep the window's order.
-- **`min_priority`** keeps the matches whose priority is known (counted, or
-  inherited from what they serve) and whose effective priority is at least the
+- **`min_priority`** keeps the matches whose priority is known (counted, read
+  from their open items, or inherited from what they serve) and whose effective priority is at least the
   level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
   unknown priority never passes.
 
@@ -491,9 +494,10 @@ hint naming the fix.
 The ChatGPT `search` tool takes only its query, so it never ranks by priority.
 `evals/eval-priority.ts` (SMD-3662) measures the weight before any default
 changes. At its pre-registered 0.5 it doesn't clear the bar (2026-11-09,
-`evals/README.md`): a note's due time and level sit on its open item, which
-`effective_priority` doesn't read yet (SMD-4149, which re-measures it). The
-default stays 0.
+`evals/README.md`). Its due time and level then sat on its open item, which
+`effective_priority` didn't read. Measured again once it does (SMD-4149, the
+same day), it still doesn't: top-1 on 2 of 7 and mean tau 0.327, where the bar
+asks 5 and 0.502. The default stays 0.
 
 **Each result's priority, a label (SMD-3668 PR 2).** `search`, `search_thoughts`,
 `search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its

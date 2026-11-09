@@ -18249,6 +18249,152 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
 }
 
+console.log("\n[112] Migration 125: a note's open items reach its priority — a thought that is no ticket's row reads the highest level counted on its open items (from_items, no hop discount) where it states none, before what it inherits; its own due time, else its open items' soonest, an item at level 0 passing none and a level 0 so read taking no urgency; only an open item counts, and only its own counted level and due time, so an item still inherits only its note's stated level; a ticket's row reads as its ticket; each term names the item; the shape; a re-apply a no-op (SMD-4149)");
+{
+  const file = files.find((f) => /^\d{3}_effective_priority_from_items\.sql$/.test(f)) ?? "no NNN_effective_priority_from_items.sql";
+  // [109] re-applies 122's effective_priority, which 125 replaces: this section holds 125's.
+  await reapply(file.slice(0, 4));
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fi-op', 'operator')`);
+  const OP = { name: "fi-op", scope: "write" };
+  type Term = { term: string; value: number; window?: string; item?: string; level?: number; due_from?: string; from?: { kind: string; key: string } };
+  type Row = { item_key: string; effective: string; level: number | null; inherited_from: object | null; due_at: string | null; due_from: string | null; urgency: string; overdue: boolean; terms: Term[] };
+  const note = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "fi-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  const item = async (origin: string, text: string, o: { due?: string; level?: number; status?: string; proposed?: boolean; inferred?: boolean; ref?: [string, string]; stateDue?: string } = {}) => {
+    const r = (await db.query<{ r: { outcome: string; item?: { id: string } } }>(`SELECT open_item($1, NULL, $2, $3::uuid, NULL, $4, $5::jsonb) AS r`,
+      [text, o.due ?? null, origin, o.proposed ?? false, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "opened" || !r.item) throw new Error(`[112] fixture: open_item answered ${JSON.stringify(r)}`);
+    const id = r.item.id;
+    if (o.level !== undefined) await put("item", id, o.level, { inferred: o.inferred, ref: o.ref, due: o.stateDue });
+    if (o.status) {
+      const s = (await db.query<{ r: { outcome: string } }>(`SELECT set_item_status($1, $2, NULL, $3::jsonb) AS r`, [id, o.status, JSON.stringify(OP)])).rows[0].r;
+      if (s.outcome === "refused") throw new Error(`[112] fixture: set_item_status answered ${JSON.stringify(s)}`);
+    }
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, o: { due?: string; ref?: [string, string]; inferred?: boolean } = {}) => {
+    const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, $5, $6, NULL, $7, $8::jsonb) AS r`,
+      [kind, key, level, o.due ?? null, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.inferred ?? false, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[112] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+  };
+  const eff = async (items: [string, string][], weights: object | null = null) =>
+    (await db.query<Row>(`SELECT * FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), weights === null ? null : JSON.stringify(weights), NOW])).rows;
+  const one = async (kind: string, key: string, weights: object | null = null) => (await eff([[kind, key]], weights))[0];
+  // Each term, its value, and the item it names as the fixture's own name for it.
+  const names = new Map<string, string>();
+  const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}${t.window ? `:${t.window}` : ""}=${t.value}${t.item ? `@${names.get(t.item) ?? "?"}` : ""}`).join(" ");
+  const nameItem = (id: string, name: string) => { names.set(id, name); return id; };
+
+  // The shape: two new functions, STABLE and commented; effective_priority's comment names 125.
+  const fns = (await db.query<{ n: string; v: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_due', 'ob1_thought_items', 'effective_priority') ORDER BY 1`)).rows;
+  assert(fns.length === 3 && fns.every((f) => f.v === "s" && /migration 125 \/ SMD-4149/i.test(f.c ?? "")),
+    `two new functions and the replaced read, each STABLE and commented with 125 (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // SMD-4149's first Verify, in small: the bill due tomorrow +2, the gutters overdue +3, the passport its item's level 4.
+  const bill = await note("[112] the electric bill is due tomorrow");
+  nameItem(await item(bill, "pay the bill", { due: "2027-03-11" }), "bill");
+  const gutters = await note("[112] clean the gutters, two weeks overdue");
+  nameItem(await item(gutters, "clean the gutters", { due: "2027-02-24" }), "gutters");
+  const passport = await note("[112] this matters: the passport renewal");
+  nameItem(await item(passport, "renew the passport", { level: 4 }), "passport");
+  const [rb, rg, rp] = await eff([["thought", bill], ["thought", gutters], ["thought", passport]]);
+  assert(named(rb) === "unknown=2 urgency:soon=2@bill" && Number(rb.effective) === 4 && rb.due_from === "from_items"
+         && named(rg) === "unknown=2 overdue=3@gutters" && Number(rg.effective) === 5 && rg.overdue === true
+         && named(rp) === "from_items=4@passport" && Number(rp.effective) === 4 && rp.level === null && rp.inherited_from === null,
+    `a note reads its open item: the bill +2 by the end of tomorrow, the gutters overdue +3, the passport its item's 4, each term naming the item, the level column the note's own (null) (${named(rb)}; ${named(rg)}; ${named(rp)})`);
+
+  // Precedence: a level stated on the note wins; an item's level beats the inherited one, even when lower; of the
+  // items, the highest, at one level the one due soonest.
+  const stated = await note("[112] stated Low, its item High");
+  nameItem(await item(stated, "a High to-do", { level: 3 }), "high");
+  await put("thought", stated, 1);
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9901', '[112] SMD-9901', 'text/markdown')`, [await note("[112] SMD-9901", { source: "linear", issue: "SMD-9901", status: "Todo", status_type: "unstarted" })]);
+  await put("ticket", "SMD-9901", 5);
+  const under = await note("[112] filed under a Critical ticket, its item Medium", { ticket: "SMD-9901" });
+  nameItem(await item(under, "a Medium to-do", { level: 2 }), "medium");
+  const inheritsAlone = await note("[112] filed under a Critical ticket, no item", { ticket: "SMD-9901" });
+  const many = await note("[112] three items");
+  nameItem(await item(many, "a Low due today", { level: 1, due: "2027-03-10" }), "low");
+  nameItem(await item(many, "a High due in a week", { level: 3, due: "2027-03-16" }), "high-week");
+  nameItem(await item(many, "a High due tomorrow", { level: 3, due: "2027-03-11" }), "high-soon");
+  const [rs, ru, ri, rm] = await eff([["thought", stated], ["thought", under], ["thought", inheritsAlone], ["thought", many]]);
+  assert(named(rs) === "level=1" && Number(rs.effective) === 1
+         && named(ru) === "from_items=2@medium" && Number(ru.effective) === 2 && ru.inherited_from === null && named(ri) === "inherited=4"
+         && named(rm) === "from_items=3@high-soon urgency:soon=2@low" && Number(rm.effective) === 5,
+    `a stated Low beats its item's High; an item's Medium beats a Critical ticket's inherited 4, which a note without items takes; the highest of three items, at one level the sooner, and the soonest due time of them all (${named(rs)}; ${named(ru)}; ${named(ri)}; ${named(rm)})`);
+
+  // The due time: the note's own (stated) wins over its items'; an item at level 0 passes none; a note reading level 0
+  // from its items takes no urgency from another item's due time; an item with a due time and no level passes it.
+  const ownDue = await note("[112] its own due time in a week, its item's tomorrow");
+  nameItem(await item(ownDue, "due tomorrow", { due: "2027-03-11" }), "tomorrow");
+  await put("thought", ownDue, 2, { due: "2027-03-16T00:00:00Z" });
+  const zeroDue = await note("[112] its only due item at level 0");
+  nameItem(await item(zeroDue, "an overdue none", { level: 0, due: "2027-03-01" }), "zero-overdue");
+  nameItem(await item(zeroDue, "a Low with no date", { level: 1 }), "low-undated");
+  const zeroLevel = await note("[112] level 0 from one item, a due time from another");
+  nameItem(await item(zeroLevel, "a none", { level: 0 }), "none");
+  nameItem(await item(zeroLevel, "due tomorrow, no level", { due: "2027-03-11" }), "undated-level");
+  const [ro, rz, rl] = await eff([["thought", ownDue], ["thought", zeroDue], ["thought", zeroLevel]]);
+  assert(named(ro) === "level=2 urgency:week=1" && ro.due_from === "stated"
+         && named(rz) === "from_items=1@low-undated" && rz.due_at === null && Number(rz.effective) === 1
+         && named(rl) === "from_items=0@none" && Number(rl.effective) === 0 && rl.due_from === "from_items" && Number(rl.urgency) === 0,
+    `the note's own due time wins over its item's; a level-0 item's overdue passes nothing; a note at level 0 from its items keeps the other item's due time and takes no urgency (${named(ro)}; ${named(rz)}, due ${rz.due_at}; ${named(rl)}, due_from ${rl.due_from})`);
+
+  // What counts: an open item alone (done, dropped and proposed give nothing); its own counted level (an inferred one
+  // only when counted) and its own due time (its statement's, else by due_ref, else its own); never what it inherits.
+  const settled = await note("[112] items done, dropped and proposed");
+  await item(settled, "done", { level: 5, due: "2027-03-01", status: "done" });
+  await item(settled, "dropped", { level: 5, due: "2027-03-01", status: "dropped" });
+  await item(settled, "proposed", { level: 5, due: "2027-03-01", proposed: true });
+  const inferred = await note("[112] its item's level inferred");
+  nameItem(await item(inferred, "an inferred High", { level: 3, inferred: true }), "inferred");
+  const refd = await note("[112] its item's due time by reference");
+  const target = nameItem(await item(refd, "the referenced one, at level 0", { level: 0, due: "2027-03-11" }), "target");
+  nameItem(await item(refd, "a Low due as the target is", { level: 1, ref: ["item", target] }), "by-ref");
+  const stateDue = await note("[112] its item's due time stated");
+  nameItem(await item(stateDue, "stated due in a week, own due tomorrow", { level: 2, due: "2027-03-11", stateDue: "2027-03-16T00:00:00Z" }), "stated-due");
+  const [rd, rinf, rinf2, rr, rsd] = [await one("thought", settled), await one("thought", inferred), await one("thought", inferred, { count_inferred: true }), await one("thought", refd), await one("thought", stateDue)];
+  assert(named(rd) === "unknown=2" && rd.due_at === null && named(rinf) === "unknown=2" && named(rinf2) === "from_items=3@inferred"
+         && named(rr) === "from_items=1@by-ref urgency:soon=2@by-ref" && named(rsd) === "from_items=2@stated-due urgency:week=1@stated-due",
+    `done, dropped and proposed items give nothing; an inferred level only when counted; an item's due time by its due_ref, and its statement's over its own (${named(rd)}; ${named(rinf)} / ${named(rinf2)}; ${named(rr)}; ${named(rsd)})`);
+  // No cycle, nothing counted twice: an item with no level of its own, beside one at 4 on the same note, inherits
+  // nothing from the note's 4 (read from the other item, not stated on the note), and the stated item reads its own.
+  const pair = await note("[112] two items, one stated Urgent");
+  const urgent = nameItem(await item(pair, "an Urgent to-do", { level: 4 }), "urgent");
+  const bare = nameItem(await item(pair, "a to-do with no level"), "bare");
+  const [rpair, rurgent, rbare] = await eff([["thought", pair], ["item", urgent], ["item", bare]]);
+  assert(named(rpair) === "from_items=4@urgent" && named(rurgent) === "level=4" && named(rbare) === "unknown=2" && Number(rbare.effective) === 2,
+    `the note reads 4 from its Urgent item; the item reads its own 4; its sibling with no level inherits nothing from the note (${named(rpair)}; ${named(rurgent)}; ${named(rbare)})`);
+
+  // A ticket's own row reads as its ticket, never its items (the maintainer, SMD-4149: plain thoughts only).
+  const row = await note("[112] SMD-9902", { source: "linear", issue: "SMD-9902", status: "Todo", status_type: "unstarted" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9902', '[112] SMD-9902', 'text/markdown')`, [row]);
+  await item(row, "an Urgent to-do opened from the row", { level: 4, due: "2027-03-11" });
+  const [rrow, rticket] = await eff([["thought", row], ["ticket", "SMD-9902"]]);
+  assert(named(rrow) === "unknown=2" && (rrow.terms[0] as { as?: { key: string } }).as?.key === "SMD-9902" && named(rticket) === "unknown=2" && rrow.due_at === null,
+    `a ticket's row and its ticket read nothing from an item opened from the row (${named(rrow)}; ${named(rticket)})`);
+
+  // The helpers, as the read uses them: an open item's due time is its own (due_from item), the done ones are not listed.
+  const own = (await db.query<{ due_at: string | null; due_from: string | null }>(`SELECT d.due_at::text, d.due_from FROM ob1_priority_due(NULL::priority_assertions, 'item', $1, false) d`, [target])).rows[0];
+  const listed = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_thought_items($1::uuid, false)`, [settled])).rows[0].n;
+  assert(own?.due_from === "item" && own?.due_at !== null && listed === 0, `ob1_priority_due reads an open item's own due time; ob1_thought_items lists no settled or proposed item (${own?.due_from}; ${listed})`);
+
+  // A re-apply is a no-op.
+  const before = JSON.stringify(await eff([["thought", bill], ["thought", many], ["thought", zeroLevel], ["thought", pair]]));
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await eff([["thought", bill], ["thought", many], ["thought", zeroLevel], ["thought", pair]])) === before, "a re-apply is a no-op: the same reads");
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

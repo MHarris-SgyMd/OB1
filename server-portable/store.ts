@@ -1463,13 +1463,14 @@ export type PriorityWeights = {
   unknown: number; hop: number; hops: number; soon: number; soon_days: number; week: number; week_days: number; overdue: number;
   unblocks_one: number; unblocks_many: number; unblocks_many_at: number; depth: number; cap: number; count_inferred: boolean;
 };
-/** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from). */
-export type PriorityTerm = { term: "level" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
+/** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from, the open item a thought read its level or due time from: `item`, migration 125). */
+export type PriorityTerm = { term: "level" | "from_items" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
 /**
  * One item's effective priority (migration 122, SMD-3667): the order a ranking read uses and every term that made
- * it. `level` is the counted statement's (null: unknown, or inherited); `inheritedFrom` the item it inherits from, its
- * level and how many hops; `dueFrom` where the due time came from; `waiting`, a not_before still ahead; `passedOver`
- * every other open statement, inferred ones among them when they are not counted.
+ * it. `level` is the counted statement's (null: unknown, inherited, or read from a thought's open items, its first
+ * term then `from_items`, migration 125); `inheritedFrom` the item it inherits from, its level and how many hops;
+ * `dueFrom` where the due time came from (`from_items`: the soonest of a thought's open items); `waiting`, a
+ * not_before still ahead; `passedOver` every other open statement, inferred ones among them when they are not counted.
  */
 export type EffectivePriority = {
   item: PriorityItem;
@@ -1477,7 +1478,7 @@ export type EffectivePriority = {
   level: number | null;
   inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
   dueAt: string | null;
-  dueFrom: "stated" | "due_ref" | "item" | null;
+  dueFrom: "stated" | "due_ref" | "item" | "from_items" | null;
   urgency: number;
   overdue: boolean;
   unblocks: number;
@@ -1552,8 +1553,9 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   };
 }
 
-const TERM_NAMES = new Set(["level", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
-const DUE_FROM = new Set(["stated", "due_ref", "item"]);
+// from_items: a thought's open items (migration 125, SMD-4149).
+const TERM_NAMES = new Set(["level", "from_items", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
+const DUE_FROM = new Set(["stated", "due_ref", "item", "from_items"]);
 
 /** One row of 122's effective_priority; a row that is not one throws, naming the call and nothing of the row. */
 export function normaliseEffectivePriority(r: unknown, what: string): EffectivePriority {
@@ -1606,7 +1608,7 @@ export type AgendaItem = {
   level: number | null;
   inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
   dueAt: string | null;
-  dueFrom: "stated" | "due_ref" | "item" | null;
+  dueFrom: "stated" | "due_ref" | "item" | "from_items" | null;
   urgency: number;
   overdue: boolean;
   unblocks: number;
