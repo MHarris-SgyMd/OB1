@@ -33,19 +33,26 @@ export type ModelRequest = {
  * - REFUSED_EGRESS: the egress gate kept the text in (`reason` names the rule); nothing was sent.
  * - PROVIDER_UNAVAILABLE: the provider did not answer — the deadline, a 5xx, 408 or 429, or no
  *   connection (providerDown's rule, the capture path's) — so the same call may answer later.
- * - PROVIDER_REFUSED: it answered with another error status, or a body that is not JSON.
- * - NOT_JSON: `json` was asked and the answer is no JSON object.
+ * - PROVIDER_REFUSED: it answered with another error status (`provider`, its own words), a body that
+ *   is not JSON, or no message (`finish_reason: "length"` when it spent max_tokens first). Logged, as
+ *   capture's metadata call logs it, so an operator sees a model or a field the provider refuses.
+ * - NOT_JSON: `json` was asked and the answer is no JSON object (`finish_reason: "length"` when it
+ *   was cut off at max_tokens).
  */
 export type ModelRefusal =
   | { code: "REFUSED_INPUT"; retryable: false; message: string }
   | { code: "REFUSED_EGRESS"; retryable: false; to: string; reason: string }
   | { code: "PROVIDER_UNAVAILABLE"; retryable: true; to: string; reason: string; detail: string }
-  | { code: "PROVIDER_REFUSED"; retryable: false; to: string; status?: number; detail: string }
-  | { code: "NOT_JSON"; retryable: false; detail: string };
+  | { code: "PROVIDER_REFUSED"; retryable: false; to: string; status?: number; detail: string; provider?: string; finish_reason?: string }
+  | { code: "NOT_JSON"; retryable: false; detail: string; finish_reason?: string };
 
-/** The answer: the model's text, the object parsed from it when `json` was asked, and the model that answered. */
+/**
+ * The answer: the model's text, the object parsed from it when `json` was
+ * asked, the model that answered, and why it stopped (`length`: cut off at
+ * max_tokens) when the provider says.
+ */
 export type ModelAnswer =
-  | { ok: true; value: { text: string; json?: Record<string, unknown>; model: string } }
+  | { ok: true; value: { text: string; json?: Record<string, unknown>; model: string; finish_reason?: string } }
   | { ok: false; refusal: ModelRefusal };
 
 const refusedInput = (message: string): ModelAnswer => ({ ok: false, refusal: { code: "REFUSED_INPUT", retryable: false, message } });
@@ -76,24 +83,29 @@ function jsonObjectOf(text: string): Record<string, unknown> | null {
   }
 }
 
+/** A message's text: a string, or (as some OpenAI-compatible servers answer) its text parts joined; null for none. */
+function contentText(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts = content.flatMap((p) => (p && typeof p === "object" && typeof (p as { text?: unknown }).text === "string" ? [(p as { text: string }).text] : []));
+  return parts.length ? parts.join("") : null;
+}
+
 /**
  * One chat call for `plugin`'s handler, made as `actor` (the caller's key's
- * name). The egress subject is the plugin's: its actor, the plugin's name as
- * its `source` (so `OB1_EGRESS_ALLOW=source:<plugin>` or `actor:<key>` lets it
- * out), and the text it sends.
+ * name). The egress subject is the plugin's: its actor, the plugin (the
+ * `plugin` unit, so `OB1_EGRESS_ALLOW=plugin:<name>` or `actor:<key>` lets it
+ * out), and the user text alone as its content. The system prompt is the
+ * plugin's own words, not the brain's text: a `marker:` term read against it
+ * would let out, or keep in, every call the plugin makes, whatever it sends.
  */
 export async function pluginChat(cfg: EmbedConfig, actor: string, plugin: string, req: ModelRequest): Promise<ModelAnswer> {
   const problem = requestProblem(req);
   if (problem) return refusedInput(problem);
   const to = hostOf(cfg.chat.base);
-  const subject: EgressSubject = {
-    kind: "plugin",
-    actor,
-    metadata: { source: plugin },
-    content: req.system ? `${req.system}\n\n${req.user}` : req.user,
-  };
+  const subject: EgressSubject = { kind: "plugin", actor, plugin, content: req.user };
   const messages = [...(req.system ? [{ role: "system", content: req.system }] : []), { role: "user", content: req.user }];
-  let answer: { model?: unknown; choices?: { message?: { content?: unknown } }[] };
+  let answer: { model?: unknown; choices?: { message?: { content?: unknown }; finish_reason?: unknown }[] };
   try {
     answer = await providerCall(cfg, "/chat/completions", {
       model: cfg.metadataModel,
@@ -111,15 +123,33 @@ export async function pluginChat(cfg: EmbedConfig, actor: string, plugin: string
     const down = providerDown(e);
     if (down) return { ok: false, refusal: { code: "PROVIDER_UNAVAILABLE", retryable: true, to, reason: down.reason, detail: down.detail } };
     if (e instanceof ProviderError) {
-      return { ok: false, refusal: { code: "PROVIDER_REFUSED", retryable: false, to, ...(e.status !== undefined ? { status: e.status } : {}), detail: e.kind === "body" ? "its answer is not JSON" : `it answered ${e.status ?? e.kind}` } };
+      // Logged as capture's metadata call logs it (the provider's capped words, never the text sent): a model the
+      // provider does not serve, or a field it refuses, is the operator's to see, not only the plugin's.
+      console.error(`ctx.model (plugin ${plugin}): ${e.message}`);
+      return {
+        ok: false,
+        refusal: {
+          code: "PROVIDER_REFUSED", retryable: false, to, ...(e.status !== undefined ? { status: e.status } : {}),
+          detail: e.kind === "body" ? "its answer is not JSON" : `it answered ${e.status ?? e.kind}`, ...(e.body ? { provider: e.body } : {}),
+        },
+      };
     }
     throw e;
   }
-  const text = answer?.choices?.[0]?.message?.content;
-  if (typeof text !== "string") return { ok: false, refusal: { code: "PROVIDER_REFUSED", retryable: false, to, detail: "its answer holds no message" } };
+  const choice = answer?.choices?.[0];
+  const finish = typeof choice?.finish_reason === "string" ? { finish_reason: choice.finish_reason } : {};
+  const text = contentText(choice?.message?.content);
+  if (text === null) {
+    const detail = finish.finish_reason === "length" ? "it spent max_tokens before any answer" : "its answer holds no message";
+    console.error(`ctx.model (plugin ${plugin}): ${to} answered no message${finish.finish_reason ? ` (finish_reason ${finish.finish_reason})` : ""}`);
+    return { ok: false, refusal: { code: "PROVIDER_REFUSED", retryable: false, to, detail, ...finish } };
+  }
   const model = typeof answer.model === "string" && answer.model ? answer.model : cfg.metadataModel;
-  if (!req.json) return { ok: true, value: { text, model } };
+  if (!req.json) return { ok: true, value: { text, model, ...finish } };
   const json = jsonObjectOf(text);
-  if (!json) return { ok: false, refusal: { code: "NOT_JSON", retryable: false, detail: `the answer (${text.length} characters) is no JSON object` } };
-  return { ok: true, value: { text, json, model } };
+  if (!json) {
+    const cut = finish.finish_reason === "length" ? ", cut off at max_tokens" : "";
+    return { ok: false, refusal: { code: "NOT_JSON", retryable: false, detail: `the answer (${text.length} characters${cut}) is no JSON object`, ...finish } };
+  }
+  return { ok: true, value: { text, json, model, ...finish } };
 }

@@ -1026,7 +1026,7 @@ const MEND = mendIntervalFrom(env.OB1_VECTOR_MEND_INTERVAL);
 const EMB_REFUSED = MEND.intervalS > 0
   ? "captures land without a vector, findable by exact text only, until the gate allows the call (a changed policy takes a restart) — the servers' vector mender then embeds them (SMD-2889)"
   : "captures land without a vector, findable by exact text only — OB1_VECTOR_MEND_INTERVAL is off, so only a db/reembed.ts pass against an endpoint the gate allows embeds them";
-const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
+const CHAT_REFUSED = "captures land untagged (no topics, no type), the entity and consolidation passes fail every row they claim, and an enabled plugin's model call (ctx.model) is refused unless a plugin: or actor: term lets it out";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what
  * leaves and under what rule. An endpoint the credential rule above CALLS

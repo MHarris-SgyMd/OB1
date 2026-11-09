@@ -1,7 +1,8 @@
 /**
  * egress.ts — what content may leave the box for a model call (SMD-1903).
  *
- * Every embedding and chat call carries a thought's full text to whatever
+ * Every embedding and chat call carries a thought's full text (or, for a
+ * plugin's model call, the text its operation sends) to whatever
  * `OB1_LLM_BASE_URL` (and, since SMD-1902, `OB1_CHAT_BASE_URL`) names. With a
  * hosted provider that is every capture, every consolidation pair, every
  * entity pass, and the only policy was which URL the operator typed. For a
@@ -68,9 +69,13 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * gate — the handler keeps it OFF the capture subject entirely, so no `source:`
  * term can match it, and WHO may capture is named with `actor`, which the key
  * proves (SMD-1941). `marker` is a literal the text contains — `#public`,
- * `[phi]` — the one unit a writer controls per thought.
+ * `[phi]` — the one unit a writer controls per thought. `plugin` names the
+ * plugin whose operation asks the model (ctx.model, SMD-2690 PR 3a): its own
+ * unit, never `source`, which a plugin's captures carry too (a `source:` term
+ * written for the passes would otherwise release the plugin's calls, and a
+ * `plugin:` term the rows it labelled).
  */
-export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
+export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker", "plugin"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
 
 /**
@@ -80,6 +85,13 @@ export type EgressUnit = (typeof EGRESS_UNITS)[number];
  * them (boyscout: each had its own copy).
  */
 export const ROW_UNITS = ["source", "type", "topic", "marker"] as const satisfies readonly EgressUnit[];
+
+/**
+ * The units a keyed caller's calls carry: its key and a row's own. Every
+ * caller of refusesEverything but a plugin's model call, which no blanket
+ * check asks about, so a `plugin:` term never reads as "a row might pass".
+ */
+export const KEYED_UNITS = ["actor", ...ROW_UNITS] as const satisfies readonly EgressUnit[];
 
 export type EgressTerm = { unit: EgressUnit; value: string };
 
@@ -160,7 +172,8 @@ export function resolveEgressPolicy(env: EgressEnv): EgressPolicy {
  * What is about to be sent, in the terms the policy reads. `kind` names the
  * call for the reason text; the rest is whatever the caller knows — a capture
  * knows its actor and text, a pass knows the row's metadata, a query knows
- * the actor and the query text.
+ * the actor and the query text, a plugin's model call its actor, its plugin
+ * and the text it sends.
  */
 export type EgressSubject = {
   kind: "capture" | "edit" | "query" | "re-embed" | "judge" | "extraction" | "decision" | "digest" | "finding" | "plugin";
@@ -170,6 +183,8 @@ export type EgressSubject = {
   metadata?: Record<string, unknown>;
   /** The text — the `marker` unit. */
   content?: string;
+  /** The plugin whose operation asks the model (kind `plugin`) — the `plugin` unit. */
+  plugin?: string;
 };
 
 export type EgressDecision = {
@@ -215,6 +230,8 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     }
     case "marker":
       return (subject.content ?? "").toLowerCase().includes(want);
+    case "plugin":
+      return lower(subject.plugin) === want;
   }
 }
 
@@ -324,7 +341,7 @@ export function decideCalls(
  * nothing this one line does not (first review pass). Null when some row
  * might pass: a term might match, or the mode lets text through.
  */
-export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy, units: readonly EgressUnit[] = EGRESS_UNITS): string | null {
+export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy, units: readonly EgressUnit[] = KEYED_UNITS): string | null {
   if (endpoint.local) return null;
   const host = hostOf(endpoint.base);
   if (policy.problems.length) return `the egress policy did not parse (${policy.problems.join("; ")}), so the gate fails closed and every call to ${host} is refused`;
