@@ -18727,7 +18727,7 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
     `every effective number of [114]'s ladder reads as under 127 (${under128})`);
 
   // The Verify: a migration replacing only the defaults moves the read and the span, nothing else edited. Rolled back.
-  let moved = "", spanMoved = "";
+  let moved = "", spanMoved = "", spanUnknown = "";
   try {
     await db.transaction(async (tx) => {
       await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
@@ -18736,12 +18736,17 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
       moved = (await tx.query<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`,
         [JSON.stringify([{ kind: "ticket", key: "SMD-9964" }, { kind: "ticket", key: "SMD-9967" }]), NOW])).rows.map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
       spanMoved = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
+      // Unknown past a critical level (review pass 1): the span takes the larger of 5 and unknown's value.
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
+        SELECT '{"unknown": 6, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdue": 0.6,
+                 "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
+      spanUnknown = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
       throw new Error("[115] roll back");
     });
   } catch (e) { if (!/\[115\] roll back/.test(String((e as Error).message))) throw e; }
   const after = await eff(ladderKeys);
-  assert(moved === "SMD-9964 5, SMD-9967 5" && Number(spanMoved) === 9 && after === under127,
-    `a defaults function with 122's weights reads the High due tomorrow and the overdue Medium at 5 and the span at 9, no other function edited; rolled back, 127's numbers again (${moved}; ${spanMoved})`);
+  assert(moved === "SMD-9964 5, SMD-9967 5" && Number(spanMoved) === 9 && Number(spanUnknown) === 6.8 && after === under127,
+    `a defaults function with 122's weights reads the High due tomorrow and the overdue Medium at 5 and the span at 9, no other function edited; with unknown at 6 the span is 6.8; rolled back, 127's numbers again (${moved}; ${spanMoved}; ${spanUnknown})`);
 
   // A re-apply is a no-op.
   await reapply(file.slice(0, 4));

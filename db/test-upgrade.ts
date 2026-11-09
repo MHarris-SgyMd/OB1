@@ -5814,7 +5814,7 @@ console.log("\n[20bs] Migration 128: onto a populated brain at the file before i
   const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the128 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION effective_priority_away(jsonb, jsonb, timestamptz) RENAME TO effective_priority`;
   const made = Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('ob1_priority_defaults', 'ob1_priority_span')`)[0].n);
-  assert(/^migration 128 needs 127 \(effective_priority and 125's helpers\)/.test(without) && made === 0,
+  assert(/^migration 128 needs 125 and 127 \(effective_priority and 125's helpers/.test(without) && made === 0,
     `without 127's effective_priority the file is refused by name, and neither function is made (${without.slice(0, 80)} | ${made})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the128 });

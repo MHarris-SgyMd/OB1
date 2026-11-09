@@ -588,6 +588,8 @@ export function priorityHint(msg: string): string {
   // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span.
   return /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight reads the brain's scale, ob1_priority_span, migration 128 (db/migrations/128_priority_defaults.sql), which is not applied; search without it meanwhile"
+    : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
+    ? " — priority_weight reads ob1_priority_span (migration 128), whose EXECUTE is PUBLIC's as 128 made it; a hand-made REVOKE took it from the server's role, so grant it back; search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight and min_priority read effective_priority, migration 122 (db/migrations/122_effective_priority.sql), which is not applied; search without them meanwhile"
     : /permission denied for (table|function|relation) (priority_|open_item|ob1_|thought_facets|thought_sources|node_)/i.test(msg)

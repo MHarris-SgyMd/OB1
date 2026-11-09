@@ -737,8 +737,12 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   if (ranked && data.length) {
     const store = await ctx.store();
     // The blend's scale is the brain's own (SMD-4194): read beside the window, and only when a weight blends; a floor
-    // alone at weight 0 never divides.
-    const [all, span] = await Promise.all([readPriorities(store, data, { tickets: false }), priority_weight > 0 ? store.prioritySpan() : Promise.resolve(1)]);
+    // alone at weight 0 never divides. The window read's failure is the one said when both fail (review pass 1: on a
+    // brain before 122 the span's failed first, and the hint named 128 alone).
+    const [allRead, spanRead] = await Promise.allSettled([readPriorities(store, data, { tickets: false }), priority_weight > 0 ? store.prioritySpan() : Promise.resolve(1)]);
+    if (allRead.status === "rejected") throw allRead.reason;
+    if (spanRead.status === "rejected") throw spanRead.reason;
+    const all = allRead.value, span = spanRead.value;
     const prio = prioritiesOf(all, data);
     const read = data.length;
     data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit, span);

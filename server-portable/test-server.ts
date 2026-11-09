@@ -7132,6 +7132,7 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const { searchHint, priorityHint } = await import("./render.ts");
   const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
   assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
+      && /EXECUTE is PUBLIC's/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
       && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",

@@ -51,7 +51,7 @@ DO $qc$
 BEGIN
   IF to_regprocedure('ob1_thought_items(uuid, boolean)') IS NULL OR to_regprocedure('effective_priority(jsonb, jsonb, timestamp with time zone)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 128 needs 127 (effective_priority and 125''s helpers); this schema lacks them',
+      MESSAGE = 'migration 128 needs 125 and 127 (effective_priority and 125''s helpers, whose body 128 carries as 127 left it); this schema lacks them',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -88,20 +88,21 @@ COMMENT ON FUNCTION ob1_priority_defaults() IS
 -- ---------------------------------------------------------------------------
 -- ob1_priority_span — the largest effective priority the defaults allow
 -- ---------------------------------------------------------------------------
--- A critical level (5) plus the largest urgency term and the largest unblocks
--- term. Search's priority_weight divides an effective priority by this, capped
+-- The larger of a critical level (5) and unknown's value (a retune may set it
+-- past 5; an inherited level is at most 5 less a hop) plus the largest urgency
+-- term and the largest unblocks term (review pass 1). Search's priority_weight divides an effective priority by this, capped
 -- at 1, so the blend's two halves share a 0-1 scale (SMD-3668).
 CREATE OR REPLACE FUNCTION ob1_priority_span()
 RETURNS numeric
 LANGUAGE sql
 IMMUTABLE
 AS $$
-  SELECT 5 + greatest((d->>'soon')::numeric, (d->>'week')::numeric, (d->>'overdue')::numeric)
+  SELECT greatest(5, (d->>'unknown')::numeric) + greatest((d->>'soon')::numeric, (d->>'week')::numeric, (d->>'overdue')::numeric)
            + greatest((d->>'unblocks_one')::numeric, (d->>'unblocks_many')::numeric)
     FROM ob1_priority_defaults() d
 $$;
 COMMENT ON FUNCTION ob1_priority_span() IS
-  'The largest effective priority under ob1_priority_defaults(): a critical level (5) plus the largest urgency term (soon, week or overdue) plus the largest unblocks term; 5.8 under 127''s defaults. Search''s priority_weight divides an effective priority by it, capped at 1. Migration 128 / SMD-4194.';
+  'The largest effective priority under ob1_priority_defaults(): the larger of a critical level (5) and unknown''s value, plus the largest urgency term (soon, week or overdue) plus the largest unblocks term; 5.8 under 127''s defaults. Search''s priority_weight divides an effective priority by it, capped at 1. Migration 128 / SMD-4194.';
 
 -- ---------------------------------------------------------------------------
 -- effective_priority — the composed read
@@ -357,4 +358,4 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION effective_priority(jsonb, jsonb, timestamptz) IS
-  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: effective — the level first: the counted level (116''s rule, tier 4 left out unless count_inferred), else, for a thought that is no ticket''s row, the highest level counted on its open items (from_items, no hop discount), else the level inherited from what it serves (less hop a hop, at most hops hops, only above unknown''s value), else unknown''s value; then, within that level, urgency from its due time — its own (stated, by due_ref, or an open item''s own), else such a thought''s open items'' soonest (from_items; an item at level 0 passes none) — in calendar days in UTC (soon 0.4 by the end of tomorrow, week 0.2 by the end of the seventh day, overdue 0.6 in their place once due; none at a level 0, stated or from its items, or once settled); plus the unblocks term (0.1, or 0.2 for unblocks_many_at or more open items it blocks through active blocks / blocked_by links, transitively to depth). By default the terms after the level add at most 0.8, so they order items of one level and never lift one past the next (SMD-4177). Only an item whose status is open gives a from_items term, and only its own counted level and due time. Each term is named in terms; winner is the counted assertion and passed_over every other open one; due_from says where the due time came from (stated, due_ref, item, from_items). p_weights overrides docs/priority.md''s weights by name (an unknown name or a value out of range raises 22023), the old full-level weights among them; p_now is the clock. Raises on a malformed item. Migration 122 / SMD-3667; from_items, migration 125 / SMD-4149; level first, migration 127 / SMD-4177; its defaults from ob1_priority_defaults(), migration 128 / SMD-4194.';
+  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: effective — the level first: the counted level (116''s rule, tier 4 left out unless count_inferred), else, for a thought that is no ticket''s row, the highest level counted on its open items (from_items, no hop discount), else the level inherited from what it serves (less hop a hop, at most hops hops, only above unknown''s value), else unknown''s value; then urgency from its due time — its own (stated, by due_ref, or an open item''s own), else such a thought''s open items'' soonest (from_items; an item at level 0 passes none) — in calendar days in UTC (soon by the end of tomorrow, week by the end of the seventh day, overdue in their place once due; none at a level 0, stated or from its items, or once settled); plus the unblocks term (for one, or for unblocks_many_at or more open items it blocks through active blocks / blocked_by links, transitively to depth). The weights are ob1_priority_defaults() (level first since SMD-4177: the terms after the level stay under one level), each overridden by name in p_weights (an unknown name or a value out of range raises 22023). Only an item whose status is open gives a from_items term, and only its own counted level and due time. Each term is named in terms; winner is the counted assertion and passed_over every other open one; due_from says where the due time came from (stated, due_ref, item, from_items). p_now is the clock. Raises on a malformed item. Migration 122 / SMD-3667; from_items, migration 125 / SMD-4149; level first, migration 127 / SMD-4177; its defaults from ob1_priority_defaults(), migration 128 / SMD-4194.';
