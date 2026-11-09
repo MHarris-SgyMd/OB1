@@ -4948,6 +4948,8 @@ if (want("10")) {
   let answer429 = 0;
   /** The statuses the next calls answer, one each, in order (SMD-3311 review pass 5): a 500 the runner crashed, a 503 a gateway's while it restarts. */
   const callScript: number[] = [];
+  /** The statuses the next probes answer, one each, in order (SMD-2636 PR 3a). */
+  const probeScript: number[] = [];
   /** While set, a probe answered (not one the outage turns away) is refused 401, as a key revoked meanwhile (SMD-2636 PR 2). */
   let probeRefuses = false;
   /** The thoughts of the calls an outage turned away (SMD-2636 PR 2, review pass 2): whose call met it. */
@@ -4984,6 +4986,9 @@ if (want("10")) {
       }
       if (isProbe) {
         probes++;
+        // The statuses the next probes answer, in order (SMD-2636 PR 3a): a gateway's 503 while it restarts.
+        const probeStatus = probeScript.shift();
+        if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
         // A key revoked while the provider was away: the wait's probe refused (SMD-2636 PR 2).
         if (probeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
@@ -5697,7 +5702,7 @@ if (want("10")) {
 
 
   // SMD-3311: the follower reads the provider's errors through followClassify's
-  // split (followerFault). A 429 past the pauses says nothing about the thought
+  // split (`fault`). A 429 past the pauses says nothing about the thought
   // in hand: two workers under a concurrency limit — a second call in flight
   // answered 429, probes exempt — record nothing failed, where the thought in
   // hand was a suspect and, re-claimed, met the limit again right after the
@@ -5915,6 +5920,52 @@ if (want("10")) {
     if (hungNote) await sql`SELECT delete_thought(${hungNote}::uuid, NULL::jsonb)`;
   }
 
+  // SMD-2636 PR 3a: a 4xx no rule reads is the probe's to decide under --follow (the maintainer's rule, 2026-11-05),
+  // where before every 4xx stopped every worker unprobed. A 403 the probe answers past is the thought's — recorded failed,
+  // the follower running on; a 401 whose probe meets a 503 is the provider's outage, waited out, the thought
+  // extracted after. Stopped at 30 s each if they run on.
+  for (const c of [
+    { status: 403, probes: [] as number[], want: "failed", text: "Lena's note the provider's content policy refuses." },
+    { status: 401, probes: [503], want: "succeeded", text: "Lena's note met while the gateway restarts." },
+  ]) {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 30_000);
+    let note = "";
+    let row: string | undefined;
+    let ended = false;
+    let code = -1;
+    try {
+      const startProbes = probes;
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((x) => { ended = true; return x; });
+      await pollUntil(async () => probes > startProbes, 10_000);
+      await Bun.sleep(500);
+      callScript.push(c.status);
+      probeScript.push(...c.probes);
+      note = await seed(c.text);
+      await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${note}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === c.want, 20_000);
+      row = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${note}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+      await Bun.sleep(1_000);
+      ac.abort();
+      code = await running;
+    } finally {
+      clearTimeout(backstop);
+      callScript.length = 0;
+      probeScript.length = 0;
+      restoreOutage();
+      restorePauses();
+    }
+    const waited = lines.some((l) => new RegExp(`the provider is not answering \\(Extraction request to [^)]*${c.status}`).test(l));
+    const lastError = ((await sql`SELECT last_error FROM thought_work_claims WHERE thought_id = ${note}::uuid AND work_type = ${KEY}`)[0] as { last_error: string | null } | undefined)?.last_error ?? "";
+    assert(row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded")
+           && (c.want !== "failed" || /a one-token call right after answered, so this thought's; --retry-failed revisits it/.test(lastError)),
+           `under --follow a ${c.status} is probed first: ${c.want === "failed" ? "answered, the thought's, recorded failed and the follower running on" : "its probe meeting a 503, the provider's outage, waited out and the thought extracted"} (SMD-2636 PR 3a; ${row}, exit ${code}${ended ? "" : " at the stop"}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+    if (note) await sql`SELECT delete_thought(${note}::uuid, NULL::jsonb)`;
+  }
+
   // A follower whose provider stays down (SMD-2261's heartbeat under
   // SMD-2599): past the pauses the thought goes back to the pool and the
   // follower waits, its heartbeat "failed" — the provider, not a document —
@@ -6063,16 +6114,23 @@ if (want("10")) {
          `after the provider's refusal, the pass's first stop is the hard one: the other worker's thought in hand is released, not finished (exit ${fatal.code}, ${afterFatal instanceof Promise ? "a release" : String(afterFatal)}, claims ${JSON.stringify(await noteClaims())})`);
   // A follower the provider refuses ends, and its heartbeat says failed, not
   // stopped: a restart will not help until the request is fixed (SMD-2261).
+  // A revoked key refuses the probe too: under --follow a 401 is probed first, its refusal the request's (SMD-2636
+  // PR 3a, the maintainer's rule; a probe that answered would read the 401 the thought's and the follower run on).
+  // Stopped at 20 s if it runs on.
   const refusedNote = await seed("A note the provider will refuse while followed.");
   refuseCalls = 1;
-  const refusedFollow = await extractInProcess({ workers: 1, follow: 30 });
+  probeRefuses = true;
+  const refusedAc = new AbortController();
+  const refusedTimer = setTimeout(() => refusedAc.abort(), 20_000);
+  const refusedFollow = await extractInProcess({ workers: 1, follow: 30, signal: refusedAc.signal }).finally(() => clearTimeout(refusedTimer));
+  probeRefuses = false;
   refuseCalls = 0;
   const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
   assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
   assert(refusedBeat.refused === "provider", `…the refusal named on its row, provider, so preflight and the held row say why (SMD-3214; ${JSON.stringify(refusedBeat)})`);
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
-  // The answer budget refused (a 400 naming max_tokens) is the request's under --follow too, read through followerFault
-  // with extract's maxTokensFatal: the follower ends refused, exit 2, nothing failed — not each thought's length, the pool
+  // The answer budget refused (a 400 naming max_tokens) is the request's under --follow too, read through `fault`
+  // with extract's requestFault: the follower ends refused, exit 2, nothing failed — not each thought's length, the pool
   // failed a row at a time while it runs on (SMD-3311 review pass 1, mutant: no row held the option). Stopped at 20 s if not.
   const budgetNote = await seed("A note whose answer budget the provider refuses while followed.");
   /** Every claim recorded failed under the key: the run's first call may meet an older pending thought, not the seed (review pass 3). */
@@ -6090,7 +6148,7 @@ if (want("10")) {
   assert(budgetCode === 2 && budgetRow !== "failed" && budgetFailed === 0 && budgetLines.some((l) => /refuses the request itself \(Extraction request to [^)]*400 [^)]*max_tokens/.test(l)),
          `a follower whose provider refuses the answer budget ends refused, exit 2, no thought failed (exit ${budgetCode}, ${budgetRow}, ${budgetFailed} failed)`);
   await sql`SELECT delete_thought(${budgetNote}::uuid, NULL::jsonb)`;
-  // A run without --follow keeps classifyError's rules: a 408 is the request's, exit 2, nothing failed — followerFault is
+  // A run without --follow keeps classifyError's rules: a 408 is the request's, exit 2, nothing failed — `fault` is
   // the followers' alone (SMD-3311 review pass 2, mutant: no row held the one-shot side). The pauses cut, so a run that
   // reads it as the provider's ends within seconds, exit 1.
   {
@@ -6895,6 +6953,10 @@ if (want("10e")) {
   /** What GET /models lists, and whether a gone-stub* escalation model is served, for a follower's cases below (SMD-2599 review pass 4). */
   let listedIds: string[] = ["stub-meta"];
   let goneServed = false;
+  /** While set, the big-stub escalation model answers 403, a project without access to it (SMD-2636 PR 3a, review pass 1). */
+  let bigRefused = false;
+  /** While set, the stub-meta metadata model answers the same (SMD-2636 PR 3a, review pass 2). */
+  let metaRefused = false;
   const escModel = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -6902,6 +6964,10 @@ if (want("10e")) {
       if (req.method === "GET") return Response.json({ object: "list", data: listedIds.map((id) => ({ id })) });
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
       if (body.model?.startsWith("gone-stub") && !goneServed) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      // The escalation model's access refused, its calls and probes alike (SMD-2636 PR 3a, review pass 1).
+      if (bigRefused && body.model === "big-stub") return new Response(JSON.stringify({ error: { message: "Project does not have access to model big-stub" } }), { status: 403 });
+      // The metadata model's the same, the escalation model served (review pass 2).
+      if (metaRefused && body.model === "stub-meta") return new Response(JSON.stringify({ error: { message: "Project does not have access to model stub-meta" } }), { status: 403 });
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/runaway/.test(prompt) && body.model === "stub-meta" && body.frequency_penalty === undefined) {
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -6989,13 +7055,50 @@ if (want("10e")) {
       await seedOne("The runaway widget report, with an escalation model never confirmed.");
       await unseenRun;
       clearTimeout(unseenGuard);
-      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l)),
-             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever (exit ${unseenCode})`);
+      assert(unseenCode === 2 && unseenLines.some((l) => /the provider refuses the request itself \(Extraction request to [^)]*404/.test(l)) && !unseenLines.some((l) => /the follower calls gone-stub/.test(l))
+             && unseenLines.some((l) => /and OB1_EXTRACT_ESCALATE_MODEL against the provider/.test(l)),
+             `an escalation model the start could not confirm draws the provider's refusal at its first 404, exit 2, not an outage that waits on it for ever, the remedy naming its setting (SMD-2636 PR 3a, review pass 3; exit ${unseenCode})`);
     } finally {
       listedIds = ["stub-meta"];
       goneServed = false;
       restorePauses();
     }
+  }
+
+  // SMD-2636 PR 3a, review passes 1 and 2: a call refused is probed on the model it called. An escalated call refused
+  // (a 403, the project without access to the escalation model) is probed on the escalation model — refused, exit 2,
+  // the remedy naming OB1_EXTRACT_ESCALATE_MODEL — not the metadata model, which would answer and read every
+  // escalating thought its own; and with escalation set, a metadata call refused is still probed on the metadata model,
+  // its remedy OB1_METADATA_MODEL. Nothing failed either way. Stopped at 20 s each if they run on.
+  for (const c of [
+    { who: "escalation", set: () => { bigRefused = true; }, text: "The runaway widget report, whose escalation model the project cannot reach.", knob: "OB1_EXTRACT_ESCALATE_MODEL" },
+    { who: "metadata", set: () => { metaRefused = true; }, text: "A plain widget note, whose metadata model the project cannot reach.", knob: "OB1_METADATA_MODEL" },
+  ]) {
+    const restorePauses = shortenPauses();
+    listedIds = ["stub-meta", "big-stub"];
+    const lines: string[] = [];
+    const stop = new AbortController();
+    const guard = setTimeout(() => stop.abort(), 20_000);
+    let code = -1;
+    let refusedNote = "";
+    try {
+      const running = runExtract({ url: URL_!, env: { ...baseEnv, OB1_EXTRACT_ESCALATE_MODEL: "big-stub" }, workers: 1, follow: 1, signal: stop.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((x) => { code = x; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      await Bun.sleep(1000);
+      c.set();
+      refusedNote = await seedOne(c.text);
+      await running;
+    } finally {
+      clearTimeout(guard);
+      bigRefused = false;
+      metaRefused = false;
+      listedIds = ["stub-meta"];
+      restorePauses();
+    }
+    const refusedRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${refusedNote}::uuid AND work_type LIKE 'extract:%'`)[0] as { status: string } | undefined)?.status;
+    assert(code === 2 && refusedRow !== "failed" && lines.some((l) => /refuses the request itself \(Extraction request to [^)]*403/.test(l)) && lines.some((l) => new RegExp(`and ${c.knob} against the provider`).test(l))
+           && lines.some((l) => /The provider refused the request itself: a one-token call was refused \(403 /.test(l)),
+           `the ${c.who} model's call refused is probed on that model: refused, exit 2, the remedy naming ${c.knob}, the thought not failed (SMD-2636 PR 3a, review passes 1 and 2; exit ${code}, ${refusedRow}; ${lines.filter((l) => /refus|403/.test(l)).join(" | ").slice(0, 240)})`);
   }
 
   escModel.stop(true);
@@ -15179,6 +15282,10 @@ if (want("16")) {
   let judgeCallsInFlight = 0;
   /** While above zero, the next judge calls answer 429 at once, one each (SMD-3311 review pass 1). */
   let judge429 = 0;
+  /** While above zero, the next judge calls answer a 400 naming reasoning_effort, the request's shape (SMD-2636 PR 3a); two, as the judge asks again without logprobs. */
+  let judgeShape400 = 0;
+  /** While above zero, the next judge calls hang until their timeout, one each (SMD-2636 PR 3a, review pass 1). */
+  let judgeHang = 0;
   /** While set, a probe answered (not one the outage turns away) is refused 401 (SMD-2636 PR 2). */
   let judgeProbeRefuses = false;
   /** The prompts of the calls an outage turned away (SMD-2636 PR 2, review pass 3): whose call met it. */
@@ -15192,6 +15299,8 @@ if (want("16")) {
   let judge400TimedOut = 0;
   /** The statuses the next judge calls answer, one each, in order (SMD-3311 review pass 5). */
   const judgeCallScript: number[] = [];
+  /** The statuses the next probes answer, one each, in order (SMD-2636 PR 3a, review pass 4). */
+  const judgeProbeScript: number[] = [];
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
@@ -15221,6 +15330,9 @@ if (want("16")) {
       // A follower's one-token probe, answered apart: no judge call counted.
       if (isProbe) {
         judgeProbes++;
+        // The statuses the next probes answer, in order (SMD-2636 PR 3a, review pass 4).
+        const probeStatus = judgeProbeScript.shift();
+        if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
         // A key revoked while the judge was away: the wait's probe refused (SMD-2636 PR 2).
         if (judgeProbeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -15236,6 +15348,14 @@ if (want("16")) {
       if (judge400TimedOut > 0) {
         judge400TimedOut--;
         return new Response(JSON.stringify({ error: { message: "the tool call timed out" } }), { status: 400 });
+      }
+      if (judgeHang > 0) {
+        judgeHang--;
+        return neverAnswers();
+      }
+      if (judgeShape400 > 0) {
+        judgeShape400--;
+        return new Response(JSON.stringify({ error: { message: "reasoning_effort is not supported by this model" } }), { status: 400 });
       }
       if (judge429 > 0) {
         judge429--;
@@ -16656,7 +16776,7 @@ if (want("16")) {
   }
 
   // SMD-3311: consolidate's follower reads the judge's errors as extract's does
-  // in [10] (followerFault): two workers under a concurrency limit — a second
+  // in [10] (`fault`): two workers under a concurrency limit — a second
   // judge call in flight answered 429, probes exempt — record no pair's thought
   // failed past the pauses, and a 408 mid-pass is waited out, not exit 2.
   {
@@ -16720,7 +16840,7 @@ if (want("16")) {
       assert(run429Waits.some((l) => /for one token after \d+ s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, its pauses aside, nothing got past it since, so the last wait's schedule goes on\)$/.test(l)),
              `…its second outage carries the first's probe schedule on, nothing settled between (SMD-2636 PR 2; ${run429Waits.map((l) => l.slice(-140)).join(" | ")})`);
 
-      // A 400 whose words say "timed out" is no outage followerFault reads: under --follow it stays the pair's, probed
+      // A 400 whose words say "timed out" is no outage `fault` reads: under --follow it stays the pair's, probed
       // and recorded as the pair's timeout, as before SMD-3311 — not the thought failed at once in the 400's words
       // (review pass 3, cold read: pass 2's gate passed every answered "timed out" to the worker).
       const probesBefore400 = judgeProbes;
@@ -16879,6 +16999,106 @@ if (want("16")) {
     assert(waited && code === 0 && stoppedInMs >= 0 && stoppedInMs < 3_000,
            `a stop while the wait's probe hangs ends the consolidate follower at once, not at the probe's 30 s timeout (SMD-2636 PR 2, review pass 4; waited ${waited}, exit ${code} ${stoppedInMs} ms after the stop)`);
     for (const id of hungSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 3a: a judge call's 401 is probed first under --follow, its probe refused the request's — exit 2, the
+  // chat endpoint's remedy, its pair's thought not failed; and a 400 naming reasoning_effort, a field every judge call
+  // sends and the probe does not, is the request's shape, unprobed — exit 2, where the probe would answer and fail the
+  // pool a thought at a time. Stopped at 30 s each if they run on.
+  for (const c of [
+    { what: "401", arm: () => { judgeCallScript.push(401); judgeProbeRefuses = true; }, words: /refuses the request itself \(Judge request to [^)]*401/, probed: true },
+    { what: "reasoning_effort 400", arm: () => { judgeShape400 = 2; }, words: /refuses the request itself \(Judge request to [^)]*400[^)]*reasoning_effort/, probed: false },
+    // A pair's deadline whose probe is refused: the request's, as extract's deadline is (review pass 1), not the pair's timeout.
+    { what: "timeout", arm: () => { judgeHang = 1; judgeProbeRefuses = true; }, words: /refuses the request itself \(the judge call timed out after \d+ s, and a one-token call was refused/, probed: true },
+  ]) {
+    const restorePauses = shortenPauses();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 30_000);
+    const pairSeeds: string[] = [];
+    let code = -1;
+    let probesAfter = -1;
+    try {
+      const startJudgeProbes = judgeProbes;
+      const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      await Bun.sleep(500);
+      const probesAtArm = judgeProbes;
+      c.arm();
+      pairSeeds.push(await seed(`The refusal log names the judge's ${c.what}, the first.`, 76, 3, ["refusal-log"]));
+      pairSeeds.push(await seed(`The refusal log names the judge's ${c.what}, the second.`, 76, 0, ["refusal-log"]));
+      code = await running;
+      probesAfter = judgeProbes - probesAtArm;
+    } finally {
+      clearTimeout(backstop);
+      judgeCallScript.length = 0;
+      judgeProbeRefuses = false;
+      judgeShape400 = 0;
+      judgeHang = 0;
+      restorePauses();
+    }
+    const newerRow = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${pairSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status;
+    assert(code === 2 && newerRow !== "failed" && lines.some((l) => c.words.test(l)) && lines.some((l) => /Check the chat endpoint \(OB1_CHAT_BASE_URL/.test(l)) && (c.probed ? probesAfter >= 1 : probesAfter === 0)
+           && (c.what !== "401" || lines.some((l) => /The provider refused the request itself: a one-token call was refused \(401 /.test(l))),
+           `a consolidate follower's judge ${c.what} ${c.probed ? "is probed first, the probe refused: the request's" : "is the request's shape, unprobed"} — exit 2, its pair's thought not failed (SMD-2636 PR 3a; exit ${code}, ${newerRow}, ${probesAfter} probe(s) after; ${lines.filter((l) => /refus/.test(l)).join(" | ").slice(0, 200)})`);
+    for (const id of pairSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 3a, review pass 4: [10]'s twins for consolidate — a judge 403 the probe answers past is the thought's,
+  // recorded failed with the probe's note, the follower running on; a judge 401 whose probe meets a 503 is the
+  // provider's outage, waited out, the pair judged after. And a run without --follow keeps classifyError's rule: a
+  // judge 401 ends it, exit 2, nothing failed. Stopped at 30 s each if they run on.
+  for (const c of [
+    { status: 403, probes: [] as number[], want: "failed", follow: 1 },
+    { status: 401, probes: [503], want: "succeeded", follow: 1 },
+    { status: 401, probes: [] as number[], want: "pending", follow: 0 },
+  ]) {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 30_000);
+    const twinSeeds: string[] = [];
+    let code = -1;
+    let row: string | undefined;
+    let lastError = "";
+    try {
+      if (c.follow) {
+        const startJudgeProbes = judgeProbes;
+        const running = runConsolidate({ url: URL_!, env, workers: 1, follow: c.follow, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+        await Bun.sleep(500);
+        twinSeeds.push(await seed(`The twin log names the judge's ${c.status}, the first.`, 77 + c.follow, 3, ["twin-log"]));
+        judgeCallScript.push(c.status);
+        judgeProbeScript.push(...c.probes);
+        twinSeeds.push(await seed(`The twin log names the judge's ${c.status}, the second.`, 77 + c.follow, 0, ["twin-log"]));
+        await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${twinSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string } | undefined)?.status === c.want, 20_000);
+        await Bun.sleep(1_000);
+        ac.abort();
+        code = await running;
+      } else {
+        twinSeeds.push(await seed("The twin log names a one-shot run's 401, the first.", 79, 3, ["twin-log-once"]));
+        twinSeeds.push(await seed("The twin log names a one-shot run's 401, the second.", 79, 0, ["twin-log-once"]));
+        judgeCallScript.push(c.status);
+        code = await runConsolidate({ url: URL_!, env, workers: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      }
+      const claim = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${twinSeeds[1]}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+      row = claim?.status;
+      lastError = claim?.last_error ?? "";
+    } finally {
+      clearTimeout(backstop);
+      judgeCallScript.length = 0;
+      judgeProbeScript.length = 0;
+      restoreOutage();
+      restorePauses();
+    }
+    const waited = lines.some((l) => new RegExp(`the provider is not answering \\(Judge request to [^)]*${c.status}`).test(l));
+    const ok = !c.follow
+      ? code === 2 && row !== "failed" && lines.some((l) => /refuses the request itself/.test(l))
+      : row === c.want && code === 0 && !lines.some((l) => /refuses the request itself/.test(l)) && waited === (c.want === "succeeded")
+        && (c.want !== "failed" || /a one-token call right after answered, so this thought's; --retry-failed revisits it/.test(lastError));
+    assert(ok, `consolidate's judge ${c.status}${c.follow ? c.want === "failed" ? " probed first, answered: the thought's, recorded failed with the probe's note, the follower running on" : ", its probe meeting a 503: the provider's outage, waited out, the pair judged" : " without --follow: the request's, exit 2, nothing failed"} (SMD-2636 PR 3a, review pass 4; ${row}, exit ${code}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
+    for (const id of twinSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-2636 PR 2, review pass 5: consolidate counts thoughts finished having asked the judge, not pairs. A thought put
