@@ -395,7 +395,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   /**
    * The turn handed to the next call queued, or given up: the longest queued of those whose pass goes first or that
    * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked, so the first
-   * such is the longest queued. The waiter is never passed over: a call queued after it waits for its slot.
+   * such is the longest queued. The waiter is never passed over: a call queued after it waits for its slot. A call
+   * passed over is told it waits, as it now does on another's calls — not only once a waiter finds no slot free, which
+   * a share with slots to spare never does (review pass 2: an extraction call behind seven consolidation workers waited
+   * 10 s on the hook untold, N12's clock, the stall clock and a stop's sweep reading it as running).
    */
   const passTurn = (l: Local) => {
     if (l.queue.length === 0) {
@@ -403,8 +406,11 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       return;
     }
     const now = performance.now();
-    const i = l.queue.findIndex((e) => e.first || now - e.at >= maxWaitMs);
-    const [next] = l.queue.splice(i < 0 ? 0 : i, 1);
+    const i = Math.max(0, l.queue.findIndex((e) => e.first || now - e.at >= maxWaitMs));
+    const passed = l.queue.slice(0, i);
+    const [next] = l.queue.splice(i, 1);
+    // Told after the turn is taken out: telling can stop a call, which takes it out of the queue as this goes.
+    for (const e of passed) e.waiting();
     next.go();
   };
   /** A connection's state: whether it has closed since it opened, and how to wake a head napping on it. */

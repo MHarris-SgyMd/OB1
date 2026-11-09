@@ -14,7 +14,7 @@
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
  *   --capture SECONDS (20)   --abort-after SECONDS (60; at least extraction's 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1, for each claim pass; the subject sweep runs one)
  *   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
- *   --max-wait SECONDS (60; 1 to 86,400)   in this process's share of a model server's slots consolidation's calls go before the other passes', and a call that has waited this long goes first at the next turn whatever its pass (SMD-3379 PR 2c-2)
+ *   --max-wait SECONDS (60; 1 to 86,400)   among this process's calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn — as the call ahead of it takes its slot — after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
  *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
  *   --quiet and --budget were removed in 2.0.0: either given is refused (2), naming what replaced it; OB1_SLEEP_QUIET and OB1_SLEEP_BUDGET are read by nothing
  *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
@@ -596,6 +596,11 @@ export interface SleepOptions {
   capture?: number;
   /** N12's bound in seconds (DEFAULT_ABORT_AFTER_S): --abort-after, at or above the stall floor (SMD-3379 PR 1c-4a). */
   abortAfter?: number;
+  /**
+   * --max-wait, said at the start where given: the order of the slots' hook, which the CLI installs with it and run()
+   * does not (SMD-3379 PR 2c-2, review pass 2: nothing showed the value in force).
+   */
+  maxWait?: number;
   poll?: number;
   workers?: number;
   follow?: boolean;
@@ -1295,6 +1300,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s and once a vector comes — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
   out(`  pause:  in a period, a live write pauses the passes between thoughts, windows and pairs until ${CAPTURE} s with none, a call in hand past ${ABORT_AFTER_MS / 1000} s aborted meanwhile; the period ends once its pools drain`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
+  if (opts.maxWait !== undefined) out(`  order:  among this process's calls waiting for a share of a model server's slots, consolidation's go first, and a call queued ${opts.maxWait} s goes first at the next turn, after older ones that go first; not a timeout`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
   const outside = await atStart(() => followersOutside(sql));
   if (outside === null) { err(STOPPED_EARLY); return 130; }
@@ -3423,7 +3429,7 @@ if (import.meta.main) {
   let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
-      sql, url, capture, abortAfter, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
+      sql, url, capture, abortAfter, maxWait, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
       ...(dumpDir === undefined ? {} : { dumpDir }),
       follow: cli.has("follow"),
       dryRun: cli.has("dry-run"),

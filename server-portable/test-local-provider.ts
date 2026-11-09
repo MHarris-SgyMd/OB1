@@ -3228,7 +3228,7 @@ console.log("\n[15] The background slots on by default (SMD-3379 PR 2b-2b): a lo
 console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): consolidation's before the other passes', the rest in the order they asked, and a call that has waited --max-wait first whatever its pass; never more than the share");
 {
   const { installBackgroundSlots, shareOf, backgroundSlotsFrom, SLOTS_CHANNEL } = await import("./slots.ts");
-  const { modelCall, asPass } = await import("./model-call.ts");
+  const { modelCall, asPass, withCallWaits } = await import("./model-call.ts");
   const call = { type: "chat" as const, model: META_MODEL, base: PROVIDER, purpose: "test" };
   const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call, cls: "background" })!.key;
   const holder = new SQL({ url: URL_, max: 1 });
@@ -3265,21 +3265,41 @@ console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): con
       { label: "consolidate", pass: "consolidate", after: 20 }, { label: "none", after: 20 }, { label: "extract3", pass: "extract", after: 20 },
     ]);
     assert(ordered.ran === "extract1,consolidate,extract2,subjects,none,extract3" && ordered.most === 1,
-      `consolidation's call, queued fourth, runs next after the head, the rest in the order they asked, one at a time (${ordered.ran}; ${ordered.most} at most)`);
+      `consolidation's call, queued fourth, runs next after the head, the rest in the order they asked, the share's one slot held (${ordered.ran}; ${ordered.most} at most)`);
     // Two consolidation calls between them keep the order they asked, both ahead of extraction's.
     const twoFirst = await orderOf([
       { label: "extract1", pass: "extract" }, { label: "extract2", pass: "extract", after: 20 },
       { label: "consolidateA", pass: "consolidate", after: 20 }, { label: "consolidateB", pass: "consolidate", after: 20 },
     ]);
     assert(twoFirst.ran === "extract1,consolidateA,consolidateB,extract2", `two consolidation calls keep their own order, both before extraction's (${twoFirst.ran})`);
-    // --max-wait: a call that has waited this long goes first whatever its pass — here extraction's second, queued 400 ms
-    // before consolidation's under a bound of 300 ms — so no pass waits behind another's for good; under the default 60 s
-    // the same plan runs consolidation's first.
+    // --max-wait: a call that has waited this long goes first whatever its pass — here extraction's second, queued some
+    // 500 ms before the turn passes (consolidation's 400 ms after it, the slot let go 100 ms on), under a bound of 300 ms —
+    // so no pass waits behind another's for good; under the default 60 s the same plan runs consolidation's first.
     const plan = [{ label: "extract1", pass: "extract" }, { label: "extract2", pass: "extract", after: 20 }, { label: "consolidate", pass: "consolidate", after: 400 }];
     const aged = await orderOf(plan, 0.3);
     const unaged = await orderOf(plan);
     assert(aged.ran === "extract1,extract2,consolidate" && unaged.ran === "extract1,consolidate,extract2" && aged.most === 1,
       `a call queued past --max-wait goes first whatever its pass (${aged.ran} under 0.3 s), consolidation's first within it (${unaged.ran} under the default)`);
+    // A call passed over is told it waits, as it does on another's calls, though every slot is free to the calls that go
+    // before it — here extraction's behind seven consolidation calls at chat=8, each taking a free slot at once, so no
+    // waiter ever finds the share full (review pass 2: untold, N12's clock, the stall clock and a stop's sweep read it
+    // as running).
+    {
+      const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
+      const told = { waiting: 0, running: 0 };
+      const ran: string[] = [];
+      try {
+        const run = (label: string) => async () => { ran.push(label); await Bun.sleep(150); };
+        const calls = [asPass("consolidate", () => modelCall(call, run("c0")))];
+        calls.push(withCallWaits({ waiting: () => { told.waiting++; }, running: () => { told.running++; } }, () => asPass("extract", () => modelCall(call, run("extract")))));
+        for (let k = 1; k < 7; k++) calls.push(asPass("consolidate", () => modelCall(call, run(`c${k}`))));
+        await Promise.all(calls);
+      } finally {
+        await wide.uninstall();
+      }
+      assert(ran.at(-1) === "extract" && told.waiting === 1 && told.running === 1,
+        `extraction's call passed over by six consolidation calls, each slot free, runs last and is told it waited once (${ran.join(",")}; told ${JSON.stringify(told)})`);
+    }
   } finally {
     await holder.close();
   }
