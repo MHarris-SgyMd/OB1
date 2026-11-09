@@ -37,6 +37,66 @@ export const BOARD_RESERVE_MS = 2_000;
 export const BOARD_KEYS = 500;
 /** The board's list: the agenda's ceiling of 100 items. Open named tickets past it are counted, not read. */
 export const BOARD_LIMIT = 100;
+
+/**
+ * The reply's budget (SMD-4191: one canary answer ran to 63,108 characters for 8 hits). Every cap here is applied in
+ * the core, so REST and MCP still give one record, and each cut is counted in the `trimmed` gap.
+ * - HIT_TEXT_BUDGET: the knowledge's text, shared across the hits, each at least HIT_TEXT_MIN, cut to its head;
+ * - HIT_LABELS: a hit's labels, past which the rest are counted in its `…More`, as search_thoughts counts its own;
+ * - BOARD_SHOWN: the open tickets listed, the rest counted; BOARD_TITLE: a title's characters;
+ * - OTHERS_TITLED: the settled and unknown-type tickets listed with their titles, the rest by key and status.
+ */
+export const HIT_TEXT_BUDGET = 1_600;
+export const HIT_TEXT_MIN = 160;
+export const HIT_LABELS = { claimed: 2, relations: 2, priority: 3 } as const;
+export const BOARD_SHOWN = 15;
+export const BOARD_TITLE = 80;
+export const OTHERS_TITLED = 5;
+
+const shortTitle = (t: string): { title: string; cut: boolean } =>
+  t.length <= BOARD_TITLE ? { title: t, cut: false } : { title: `${t.slice(0, BOARD_TITLE - 1)}…`, cut: true };
+
+/** A list cut to its first `n`, the rest added to its count of more. */
+function capped<T>(list: T[] | null, more: number, n: number): { list: T[] | null; more: number; cut: number } {
+  if (list === null || list.length <= n) return { list, more, cut: 0 };
+  return { list: list.slice(0, n), more: more + list.length - n, cut: list.length - n };
+}
+
+/**
+ * The reply held to its budget (SMD-4191): each hit's text cut to its share of HIT_TEXT_BUDGET, each hit's labels to
+ * HIT_LABELS, the board's open tickets to BOARD_SHOWN and every title to BOARD_TITLE, the settled ones past
+ * OTHERS_TITLED by key and status alone; what was cut said in one `trimmed` gap. Nothing else changes.
+ */
+export function budgetPlan(v: Omit<PlanContextResult, "knowledge"> & { knowledge: Omit<PlanContextResult["knowledge"], "hits"> & { hits: SearchHit[] } }): PlanContextResult {
+  const trimmed: PlanTrimmed = { gap: "trimmed", hitText: 0, labels: 0, tickets: 0, titles: 0 };
+  const share = v.knowledge.hits.length ? Math.max(HIT_TEXT_MIN, Math.floor(HIT_TEXT_BUDGET / v.knowledge.hits.length)) : HIT_TEXT_BUDGET;
+  const hits: PlanHit[] = v.knowledge.hits.map((h) => {
+    const contentChars = h.content.length;
+    if (contentChars > share) trimmed.hitText++;
+    const claimed = capped(h.claimed, h.claimedMore ?? 0, HIT_LABELS.claimed);
+    const relations = capped(h.relations, h.relationsMore ?? 0, HIT_LABELS.relations);
+    const priority = capped(h.priority, h.priorityMore ?? 0, HIT_LABELS.priority);
+    trimmed.labels += claimed.cut + relations.cut + priority.cut;
+    return {
+      ...h, content: contentChars > share ? h.content.slice(0, share) : h.content, contentChars,
+      claimed: claimed.list, claimedMore: claimed.more, relations: relations.list, relationsMore: relations.more, priority: priority.list, priorityMore: priority.more,
+    };
+  });
+  let board = v.board;
+  if (board.available) {
+    const shown = board.tickets.slice(0, BOARD_SHOWN);
+    trimmed.tickets = board.tickets.length - shown.length;
+    const tickets = shown.map((t) => { const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title }; });
+    const waiting = board.waiting.map((t) => { const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title }; });
+    const others = board.others.map((t, i) => {
+      if (i >= OTHERS_TITLED) { if (t.title) trimmed.titles++; return { ...t, title: "" }; }
+      const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title };
+    });
+    board = { ...board, tickets, waiting, others };
+  }
+  const cut = trimmed.hitText + trimmed.labels + trimmed.tickets + trimmed.titles > 0;
+  return { ...v, knowledge: { ...v.knowledge, hits }, board, gaps: cut ? [...v.gaps, trimmed] : v.gaps };
+}
 /** A ticket key as the agenda takes one (126's `c_key`, 068's form). Kept in step with the SQL: one key it refuses fails the whole call. */
 export const AGENDA_KEY = /^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$/;
 
@@ -69,7 +129,15 @@ export type PlanGap =
   | { gap: "semantic_unavailable"; reason: string }
   | { gap: "tickets_missing"; keys: string[] }
   | { gap: "tickets_not_read"; count: number }
-  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number };
+  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
+  | PlanTrimmed;
+
+/**
+ * What the reply's budget cut (SMD-4191), so nothing is dropped without a word: hits whose text was cut to its head
+ * (`fetch` reads the whole), labels past a hit's caps (`fetch`, `relations` and `list_claims` read them), open tickets
+ * past the board's first BOARD_SHOWN (the agenda lists them), and titles shortened or left off.
+ */
+export type PlanTrimmed = { gap: "trimmed"; hitText: number; labels: number; tickets: number; titles: number };
 
 export type PlanTools = {
   scope: Principal["scope"];
@@ -81,9 +149,12 @@ export type PlanTools = {
   elsewhere: "unknown";
 };
 
+/** A knowledge hit as plan_context hands it over: its text perhaps cut to its head, `contentChars` the whole text's length. */
+export type PlanHit = SearchHit & { contentChars: number };
+
 export type PlanContextResult = {
   request: string;
-  knowledge: { hits: SearchHit[]; preferCurrent: true; vectorFailed?: QueryVectorFailed };
+  knowledge: { hits: PlanHit[]; preferCurrent: true; vectorFailed?: QueryVectorFailed };
   board: PlanBoard;
   specs: NotAvailable;
   procedures: NotAvailable;
@@ -216,11 +287,12 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   const { board, gaps: boardGaps } = await boardOf(ctx, named, deadlineMs - (clock() - started));
   gaps.push(...boardGaps);
 
-  const value: PlanContextResult = {
+  // Held to the reply's budget (SMD-4191); the log below names every hit and ticket read, cut or not.
+  const value = budgetPlan({
     request,
     knowledge: { hits, preferCurrent: true, ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) },
     board, specs: SPECS, procedures: PROCEDURES, tools: toolsFor(ctx, principal), gaps, deadlineMs,
-  };
+  });
   // A board not read says why in the row's filter, so its empty items are not read as a board that named nothing.
   await ctx.logPlanContext(principal, {
     query: request, matchCount: input.limit, arm: r.vectorFailed ? "literal" : "current",

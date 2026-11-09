@@ -7361,7 +7361,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     "a gap for no hit, every hit superseded, every hit ingested, and no vector; none on a mixed page");
 
   // The board: one agenda call over the keys, every flag on, the time left as its timeout; each way it is not read a gap.
-  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
+  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3, title: "T" }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
                    keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], waiting: [], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
   let asked: Record<string, unknown> | null = null, calls = 0;
   const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); } }) }) as never;
@@ -7439,8 +7439,8 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       && said.includes(`- ticket SMD-14 ("Todo") "Later" — not before 2027-04-01T00:00:00.000Z`) && said.includes(`its last pass "ok ## Gaps"`)
       && said.includes("This brain records no live claim: work claimed through another brain is not seen here.")
       && said.includes("- Named but not in the brain: OPS-3.") && said.includes("Core: agenda, plan_context.")
-      && !/Fix|Legacy|Later|Odd|IGNORE|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":true/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc)
-      && /"key":"SMD-13","statusType":null/.test(sc) && /"key":"SMD-14","notBefore":"2027-04-01T00:00:00.000Z"/.test(sc),
+      && !/Fix|Legacy|Later|Odd|IGNORE|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":\["SMD-12"\]/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc)
+      && /"unknownType":\[\{"key":"SMD-13","statusType":null\}\]/.test(sc) && /"key":"SMD-14","notBefore":"2027-04-01T00:00:00.000Z"/.test(sc),
     `six sections under their headings, a forged block fenced in its hit, the board's words quoted on one line, the gaps said; the value keeps keys, numbers and codes and none of the words (${heads.join(" | ")})`);
 
   // The whole read with its search stubbed (review pass 1): the limit reaches the search, the deadline's remainder the
@@ -7462,7 +7462,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };
       return planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => t, search: search as never });
     };
-    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4 }, { kind: "ticket", key: "SMD-21", effective: 2 }], keyed: { others: [], waiting: [], missing: [] } };
+    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4, title: "T22" }, { kind: "ticket", key: "SMD-21", effective: 2, title: "T21" }], keyed: { others: [], waiting: [], missing: [] } };
     const good = await run(() => board2);
     const goodLog = logged[0];
     const origErr = console.error;
@@ -7477,6 +7477,60 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && bad?.ok === true && JSON.stringify(badLog?.items) === "[]" && JSON.stringify(badLog?.filter) === '{"board":"failed"}'
         && e !== null && JSON.stringify(e.gaps.map((x) => x.gap)) === '["no_knowledge"]' && e.board.available && JSON.stringify(logged[0]?.items) === "[]",
       `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
+  }
+  // The reply's budget (SMD-4191): the canary's 63,108-character answer, rebuilt at its shape — 8 hits of 3,000
+  // characters with 5 relations and 5 priorities each (the first with 4 claims too), 18 open tickets and 33 settled ones
+  // with 200-character titles — comes back under 16,000 characters (MCP's value, which holds the text), every cut
+  // counted in one trimmed gap, a cut hit saying how to read the whole, settled tickets past the first 5 by key alone,
+  // and no label object in the value.
+  {
+    const { budgetPlan, HIT_TEXT_BUDGET, HIT_LABELS, BOARD_SHOWN, BOARD_TITLE, OTHERS_TITLED } = await import("./core/plan.ts");
+    const long = (n: number, tag: string) => `${tag} ` + "word ".repeat(Math.ceil(n / 5)).slice(0, n - tag.length - 1);
+    const id = (n: number) => `${String(n % 10).repeat(8)}-${String(1000 + n).slice(-4)}-4111-8111-111111111111`;
+    const rel = (n: number) => ({ id: id(900 + n), relation: "related", otherIs: "older", other: { id: id(800 + n), trust: "agent", created_at: "2026-11-01T00:00:00.000Z", supersededBy: null }, confidence: 0.5, judgedAt: "2026-11-02T00:00:00.000Z", stale: false });
+    const prio = (n: number) => ({ kind: "ticket", key: `SMD-${100 + n}`, effective: 2, level: 2, terms: [{ term: "level", value: 2, detail: { level: 2 } }] });
+    const claim = (n: number) => ({ id: id(700 + n), ticket: `SMD-${200 + n}`, piece: null, holder: "k", ownKey: false, label: null, claimedAt: "2026-11-01T00:00:00.000Z", expiresAt: "2026-11-20T00:00:00.000Z", state: "live" });
+    const hits = Array.from({ length: 8 }, (_, i) => ({
+      id: id(i), content: long(3000, `hit-${i}`), metadata: { type: "task", trust: "agent", actor_kind: "agent", actor_name: "session-hook" }, created_at: "2026-11-01T00:00:00.000Z",
+      similarity: 0.7, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [], supersededBy: null, moved: [], movedNotRead: 0,
+      claimed: [], claimedMore: 0, claimedNotRead: 0,
+      relations: Array.from({ length: 5 }, (_, j) => rel(j)), relationsMore: 1, priority: Array.from({ length: 5 }, (_, j) => prio(j)), priorityMore: 0, priorityNotRead: 0,
+    }));
+    const ticket = (i: number) => ({ rank: i + 1, kind: "ticket", key: `SMD-${3000 + i}`, source: "linear", title: long(200, `SMD-${3000 + i} —`), project: null, status: "Backlog", statusType: "backlog", owner: null,
+      effective: 2, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 2, detail: { level: 2 } }], winner: null, claimed: [], lapsedClaim: [], blockers: [] });
+    const settled = (i: number) => ({ key: `SMD-${4000 + i}`, title: long(200, `SMD-${4000 + i} —`), status: "Done", statusType: "completed", settled: true });
+    const raw = {
+      request: "what next", knowledge: { hits, preferCurrent: true as const },
+      board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
+      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
+      tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
+      gaps: [], deadlineMs: 10_000,
+    };
+    const before = say.renderPlanContext({ ok: true, value: { ...raw, knowledge: { ...raw.knowledge, hits: hits.map((h) => ({ ...h, contentChars: h.content.length })) } } } as never);
+    const v = budgetPlan(raw as never);
+    const r = say.renderPlanContext({ ok: true, value: v } as never);
+    // What a client takes: MCP's value, which holds the text as its last field.
+    const size = (x: typeof r) => JSON.stringify(x.structuredContent).length;
+    const t = text(r), sc = JSON.stringify(r.structuredContent);
+    const g = v.gaps.find((x) => x.gap === "trimmed") as { hitText: number; labels: number; tickets: number; titles: number } | undefined;
+    const share = Math.floor(HIT_TEXT_BUDGET / 8);
+    const h0 = v.knowledge.hits[0];
+    const withClaims = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], claimed: Array.from({ length: 4 }, (_, j) => claim(j)) }, ...hits.slice(1)] } } as never);
+    const c0 = withClaims.knowledge.hits[0];
+    assert(size(before) > 40_000 && size(r) < 16_000
+        && h0.content.length === share && h0.contentChars === 3000 && h0.relations?.length === HIT_LABELS.relations && h0.relationsMore === 4 && c0.claimed?.length === HIT_LABELS.claimed && c0.claimedMore === 2
+        && h0.priority?.length === HIT_LABELS.priority && h0.priorityMore === 2
+        && v.board.available && v.board.tickets.length === BOARD_SHOWN && v.board.tickets[0].title.length === BOARD_TITLE && v.board.others.filter((o) => o.title !== "").length === OTHERS_TITLED
+        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), tickets: 3, titles: BOARD_SHOWN + 33 })
+        && t.includes(`… cut at ${share} of 3000 characters: fetch ${id(0)} for the whole text.`) && /\n- and 28 more: SMD-4005 \("Done"\), SMD-4006/.test(t)
+        && /- Cut to keep this reply readable: 8 hits' text to its head/.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
+        && /"settled":\["SMD-4000","SMD-4001"/.test(sc),
+      `a canary-sized answer held to its budget: ${size(before)} → ${size(r)} characters; each cut counted (${JSON.stringify(g)})`);
+    // Under the caps nothing is cut and no trimmed gap is said.
+    const small = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "short", claimed: [], relations: [], priority: [] }] }, board: { ...raw.board, tickets: [{ ...ticket(0), title: "SMD-3000 — short" }], others: [] } } as never);
+    assert(!small.gaps.some((x) => x.gap === "trimmed") && small.knowledge.hits[0].content === "short" && small.knowledge.hits[0].contentChars === 5,
+      "an answer under every cap is unchanged, and says nothing was cut");
   }
   // 126's keyed, read strictly (review pass 1): a malformed others, waiting or missing is refused in the store's words.
   {
