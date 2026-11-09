@@ -324,5 +324,28 @@ To try it by hand instead:
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or
   `--reject`). Each one's lineage records the decider, the writer, decide
   mode's prompt hash, and what each model said.
-- **Memory:** in float16 the tier holds about 9 GB of unified memory beside
-  Ollama's models.
+- **Memory and co-load** (measured 2026-11-09 on the dogfood Mac, 64 GB:
+  `evals/eval-jev-coload.ts --n 30` against the deployed :8022, beside
+  Ollama's embedder and the 27B writer, `OLLAMA_NUM_PARALLEL=3`,
+  `OLLAMA_MAX_LOADED_MODELS=2`):
+  - The tier's footprint is 9.8 GB (`footprint -p`), steady through the run.
+    With the 7B and the 27B loaded beside it, the box had 6.1 GB free.
+  - The tier evicted nothing: it isn't an Ollama model and never asks Ollama
+    to load one. Ollama evicted one of its own models at each load, since
+    `OLLAMA_MAX_LOADED_MODELS=2` holds two of the three. Loading the 27B
+    evicted the embedder, and the embedder's reload evicted the 7B. That's
+    SMD-3034's churn between Ollama's models, which the tier neither causes
+    nor relieves.
+  - The three share the GPU, so each slows while the others run:
+
+    | Call | Alone: calls, p50 / p95 | Beside the other two: calls, p50 / p95 | p50 ratio |
+    | -- | -- | -- | -- |
+    | Embedding | 30, 22 / 45 ms | 285, 44 / 54 ms | 1.99× |
+    | 27B chat, 16 tokens | 10, 863 / 10,512 ms | 9, 1,437 / 1,465 ms | 1.67× |
+    | Decision | 30, 116 / 148 ms | 36, 366 / 387 ms | 3.15× |
+
+    The 27B's p95 alone includes a model reload.
+  - Decide mode itself, measured on the real model on a spare port with a stub
+    writer, judged 1.7–1.8 pairs a second for one or two brains, since the
+    tier reads one request at a time. Nothing failed at the default
+    `JEV_MAX_QUEUED=8`.

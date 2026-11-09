@@ -17,7 +17,7 @@ import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, followedPass, followerFault, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probeUntil, ProviderDown, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -445,24 +445,57 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   const ownWrong = ownCells.filter(([e, want]) => followClassify(e) !== want).map(([e, want, what]) => `${what}: ${followClassify(e)}, not ${want}`);
   ok(ownWrong.length === 0, `followClassify reads the workers' own call errors as embed.ts's of the same status, and a deadline as a timeout (${ownWrong.join("; ") || `all ${ownCells.length}`})`);
 
-  // followerFault — the pausing followers' reading (SMD-3311): classifyError's kind, a 408 transient, and no suspect on backpressure.
-  const faults: [unknown, { kind: string; suspect: boolean }, string, { maxTokensFatal?: boolean }?][] = [
-    [own(408), { kind: "transient", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
-    [own(408, "litellm.Timeout: Request timed out."), { kind: "transient", suspect: true }, "a 408 whose words say \"timed out\" (a gateway's): the status outranks the words (review pass 1)"],
-    [own(504, "upstream request timed out"), { kind: "transient", suspect: true }, "a 504 saying \"timed out\": the same"],
-    [own(429, "Request timed out"), { kind: "transient", suspect: false }, "a 429 saying \"timed out\": backpressure, paused for, no suspect (review pass 2)"],
-    [own(503, "upstream timed out"), { kind: "transient", suspect: false }, "a 503 saying \"timed out\": the same"],
-    [own(400, "the tool call timed out"), { kind: "thought", suspect: true }, "a 400 saying \"timed out\": still the thought's, for the probe to decide"],
-    [own(429), { kind: "transient", suspect: false }, "a 429: paused for, then an outage with no suspect"],
-    [own(503), { kind: "transient", suspect: false }, "a 503: the same"],
-    [own(500), { kind: "transient", suspect: true }, "a 500: paused for, then an outage with a suspect"],
-    [own(404, 'model "m" not found'), { kind: "fatal", suspect: false }, "the model not served: the follower's own model-missing path, no suspect"],
-    [own(401), { kind: "fatal", suspect: true }, "a 401: still the request's"],
-    [own(400, "max_tokens is too large"), { kind: "fatal", suspect: true }, "extract's answer budget refused: still the request's", { maxTokensFatal: true }],
-    [new DOMException("The operation timed out.", "TimeoutError"), { kind: "thought", suspect: true }, "a timeout: the thought's until the probe says otherwise, a suspect if it does"],
+  // fault — what a follower does with a provider error (SMD-2636 PR 3a), on followClassify's split: paused for, an
+  // outage at once, the probe's to decide, the thought's, or the request's; and whether it makes a suspect.
+  const extractFields = (e: unknown) => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
+  const faults: [unknown, { act: string; suspect: boolean }, string, Parameters<typeof fault>[1]?][] = [
+    [own(408), { act: "pause", suspect: true }, "a 408: paused for, then an outage with a suspect — not the request's"],
+    [own(408, "litellm.Timeout: Request timed out."), { act: "pause", suspect: true }, "a 408 whose words say \"timed out\" (a gateway's): the status outranks the words (SMD-3311 review pass 1)"],
+    [own(504, "upstream request timed out"), { act: "pause", suspect: true }, "a 504 saying \"timed out\": the same"],
+    [own(429, "Request timed out"), { act: "pause", suspect: false }, "a 429 saying \"timed out\": backpressure, no suspect (SMD-3311 review pass 2)"],
+    [own(503, "upstream timed out"), { act: "pause", suspect: false }, "a 503 saying \"timed out\": the same"],
+    [own(429), { act: "pause", suspect: false }, "a 429: paused for, no suspect"],
+    [own(503), { act: "pause", suspect: false }, "a 503: the same"],
+    [own(500), { act: "pause", suspect: true }, "a 500: paused for, a suspect"],
+    [Object.assign(new Error("Extraction stream from http://h/v1 closed mid-answer: the socket closed after 80 characters with no finish_reason — not an answer"), { code: "ECONNRESET" }), { act: "pause", suspect: true }, "extract's stream cut, by its code: no connection, paused for"],
+    [Object.assign(new TypeError("ECONNREFUSED: Unable to connect"), { code: "ECONNREFUSED" }), { act: "pause", suspect: true }, "a connection refused"],
+    [own(404, 'model "m" not found'), { act: "outage", suspect: false }, "the model not served: an outage at once, no suspect"],
+    [own(404, 'model "m" not found'), { act: "fatal", suspect: false }, "…and the request's when `missing` says so (extract's escalation model the start could not confirm)", { missing: () => "fatal" }],
+    [new ProviderDown("the judge call timed out after 120 s, and a one-token call got no answer either"), { act: "outage", suspect: true }, "consolidate's ProviderDown: probed already, an outage"],
+    [new DOMException("The operation timed out.", "TimeoutError"), { act: "probe", suspect: true }, "a call's deadline with no answer: the probe's to decide"],
+    [new ProviderError("Embeddings request to http://h/v1 timed out after 2 s", "timeout"), { act: "probe", suspect: true }, "embed.ts's timeout: the same"],
+    [own(400, "the tool call timed out"), { act: "probe", suspect: true }, "a 400 saying \"timed out\": an answer, the probe's to decide"],
+    [own(401), { act: "probe", suspect: true }, "a 401: probed first, not every worker stopped unprobed (the maintainer's, 2026-11-05)"],
+    [own(402), { act: "probe", suspect: true }, "a 402: the same"],
+    [own(402, '{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 120."}}'), { act: "fatal", suspect: true }, "a 402 saying the call asks more than the account affords: the request's, which the probe's one token is not (review pass 1)"],
+    [new ProbeRefused("the judge call timed out after 120 s, and a one-token call was refused: 401"), { act: "fatal", suspect: true }, "consolidate's ProbeRefused: a deadline whose probe was refused, the request's (review pass 1)"],
+    [own(403), { act: "probe", suspect: true }, "a 403: probed first, as a 401"],
+    [own(404, "404 page not found"), { act: "probe", suspect: true }, "a 404 naming no model: the same"],
+    [own(302), { act: "probe", suspect: true }, "a redirect, which no call follows: the same (the probe refuses one)"],
+    [own(400, "content filtered"), { act: "probe", suspect: true }, "a 400 no rule reads: the probe's — answered, the thought's (a content filter)"],
+    [own(400, "max_tokens is too large: 4096. This model supports at most 2048 completion tokens"), { act: "fatal", suspect: true }, "the answer budget refused: the request's shape, before followClassify reads its tokens as the thought's length", { requestFault: extractFields }],
+    [own(400, "response_format json_schema is not supported"), { act: "fatal", suspect: true }, "response_format refused: the request's shape", { requestFault: extractFields }],
+    [own(400, "the input is too long: 9000 tokens"), { act: "thought", suspect: true }, "the thought's length: the thought's, requestFault naming no field of it", { requestFault: extractFields }],
+    [new ProviderError("not sent: the egress gate refused it", "egress"), { act: "thought", suspect: true }, "the egress gate's refusal: the thought's"],
+    [Object.assign(new Error("duplicate key value"), { name: "PostgresError", errno: "23505" }), { act: "thought", suspect: true }, "a database error at write time: recorded failed, as before (PR 4 reads these)"],
   ];
-  const faultWrong = faults.filter(([e, want, , o]) => { const f = followerFault(e, o); return f.kind !== want.kind || f.suspect !== want.suspect; }).map(([e, want, what, o]) => `${what}: ${JSON.stringify(followerFault(e, o))}, not ${JSON.stringify(want)}`);
-  ok(faultWrong.length === 0, `followerFault reads ${faults.length} errors through followClassify's split: a 408 the provider's, backpressure no suspect (${faultWrong.join("; ") || "every cell"})`);
+  const faultWrong = faults.filter(([e, want, , o]) => { const f = fault(e, o); return f.act !== want.act || f.suspect !== want.suspect; }).map(([e, want, what, o]) => `${what}: ${JSON.stringify(fault(e, o))}, not ${JSON.stringify(want)}`);
+  ok(faultWrong.length === 0, `fault reads ${faults.length} errors on followClassify's split: paused, an outage, the probe's, the thought's or the request's (${faultWrong.join("; ") || "every cell"})`);
+  const probed = ([["up", "thought"], ["refused", "fatal"], ["out", "outage"], ["missing", "outage"]] as const).filter(([state, want]) => probedFault(state === "up" ? { state } : { state, why: "w" }) !== want);
+  ok(probed.length === 0, `probedFault: answered the thought's, refused the request's, no answer or the model missing an outage (${probed.map(([s]) => s).join(", ") || "all four"})`);
+  ok(requestShapeRefused(own(400, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(422, "reasoning_effort is not supported"), /reasoning_effort/) && !requestShapeRefused(own(400, "bad words"), /reasoning_effort/)
+    && requestShapeRefused(http(400, '{"error":"response_format unsupported"}'), /response_format/)
+    && !requestShapeRefused(own(400, '{"error":{"message":"invalid input","param":"messages"},"input":"a note on response_format"}'), /response_format/)
+    && requestShapeRefused(own(400, '{"error":{"message":"unsupported parameter","param":"response_format"}}'), /response_format/)
+    && requestShapeRefused(own(400, '{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"reasoning_effort is not supported"}}}'), /reasoning_effort/),
+    "requestShapeRefused: a 400 naming a field in the provider's own error words — its message, its param, a gateway's upstream words — not an echo of the request's input, and no other status (review passes 1 and 2)");
+  // Each field of each worker's list, and the answer budget not the judge's (review pass 1, mutant: one field each held).
+  const fieldWrong = [
+    ...["max_tokens", "max_completion_tokens", "completion tokens", "response_format", "reasoning_effort", "frequency_penalty"].map((f) => [f, EXTRACT_REQUEST_FIELDS, true] as const),
+    ...["response_format", "reasoning_effort"].map((f) => [f, JUDGE_REQUEST_FIELDS, true] as const),
+    ...["max_tokens", "max_completion_tokens", "frequency_penalty"].map((f) => [f, JUDGE_REQUEST_FIELDS, false] as const),
+  ].filter(([f, fields, want]) => requestShapeRefused(own(400, `{"error":{"message":"${f} is not supported"}}`), fields) !== want).map(([f, fields]) => `${f} in ${fields === EXTRACT_REQUEST_FIELDS ? "extract's" : "the judge's"}`);
+  ok(fieldWrong.length === 0, `each worker's request fields: extract's six, the judge's two and not the answer budget (${fieldWrong.join(", ") || "all eleven"})`);
 
   // A stop ends a probe in flight, as "out" (review pass 1).
   const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
