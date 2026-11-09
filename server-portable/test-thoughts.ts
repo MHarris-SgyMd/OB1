@@ -2925,7 +2925,12 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     // named or a count before it, and the weekdays' abbreviations.
     ["by March the 5th", "2027-03-05"], ["before March the 5th", "2027-03-04"], ["by the 12th.", "2026-11-12"], ["by the 3rd week of November", null],
     ["before the 2nd meeting", null], ["by the 1st round", null], ["before the end of the month", "2026-11-30"], ["before end of month", "2026-11-30"],
-    ["2 days before the 20th", null], ["by Fri", "2026-11-06"], ["due Sat.", "2026-11-07"], ["by Thurs", "2026-11-05"], ["this tues", "2026-11-10"],
+    ["2 days before the 20th", null], ["by Fri", "2026-11-06"], ["by Thurs", "2026-11-05"], ["this tues", "2026-11-10"],
+    // Review pass 3: one anchor only, else the model's; "sat", "sun", "wed" and "mon" are words, not days.
+    ["a month from today", null], ["a fortnight from today", null], ["a year from today", null], ["a week from tomorrow", null], ["a week from the 12th", null],
+    ["a week from November 6", null], ["by Friday in two weeks", null], ["due by Fri 20th", null], ["by Monday 30th", null], ["the Friday before the 20th", null],
+    ["by the second Friday of the month", null], ["by the 2nd Friday", null], ["the slides for Monday's meeting by Friday", null],
+    ["before the sun goes down", null], ["due Sat.", null], ["by wed", null],
   ];
   const wrong = rows.filter(([p, want]) => resolveDue(p, TUE) !== want).map(([p, want]) => `${p}: ${resolveDue(p, TUE)} not ${want}`);
   assert(wrong.length === 0, `the rules read a due phrase from the capture day, leaving "next Friday" and a phrase naming no day to the model (${wrong.join("; ") || `${rows.length} rows`})`);
@@ -2953,15 +2958,23 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   // Review pass 2: two words between, "non-", and a High off a phrase that negates its own cue.
   assert(["this is not very urgent", "not that urgent", "not all that urgent really", "a non-urgent task", "nothing's urgent here"].every((t) => negatedIn("urgent", t))
       && !negatedIn("urgent", "no matter what, urgent")
+      // Review pass 3: emphasis is no negation.
+      && !negatedIn("urgent", "This has never been more urgent") && !negatedIn("important", "Nothing is more important than this") && !negatedIn("urgent", "This is not only urgent but critical")
+      && readAnswer({ level: "urgent", level_phrase: "This has never been more urgent" }, "This has never been more urgent: answer the bank by Friday", TUE).level?.value === 3
       && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
       && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
-    "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands");
+    "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands, and emphasis (\"never been more urgent\") is no negation");
   // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
   const slides = "Before the meeting, I need the slides by Friday.";
   const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
   const whole = readAnswer({ level: "urgent", level_phrase: "Urgent: landlord wants an answer by Friday", due_phrase: "by Friday" }, "Urgent: landlord wants an answer by Friday", TUE);
-  assert(asLevel.level === null && asLevel.due?.day === "2026-11-06" && inferredStatement(asLevel)?.level === DUE_ONLY_LEVEL && whole.level?.value === 3,
-    `a level phrase with no word about how much it matters that holds the deadline drops the level (the due phrase alone: Medium); one with such a word stands (${JSON.stringify(asLevel)} | ${JSON.stringify(whole.level)})`);
+  // Review pass 3: with no due phrase quoted, or one the text doesn't hold, a level phrase naming a time is a deadline's all the same.
+  const noDue = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: null }, slides, TUE);
+  const badDue = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday!" }, slides, TUE);
+  const plain = readAnswer({ level: "medium", level_phrase: "need to get the passport renewed" }, "need to get the passport renewed before the trip", TUE);
+  assert(asLevel.level === null && asLevel.due?.day === "2026-11-06" && inferredStatement(asLevel)?.level === DUE_ONLY_LEVEL && whole.level?.value === 3
+      && noDue.level === null && badDue.level === null && plain.level?.value === 2,
+    `a level phrase with no word about how much it matters that holds the deadline or names a time drops the level (the due phrase alone: Medium), a due phrase quoted or not; one with such a word stands, and one naming no time (${JSON.stringify(asLevel)} | ${JSON.stringify(whole.level)} | ${JSON.stringify(noDue.level)} | ${JSON.stringify(plain.level)})`);
 
   // The ticket's Verify: "Urgent: landlord wants an answer by Friday", captured on Tuesday, proposes High, due 2026-11-06, quoting the phrase.
   const verify = "Urgent: landlord wants an answer by Friday";
