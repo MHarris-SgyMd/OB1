@@ -4652,7 +4652,7 @@ branch creation (the maintainer's choice). The agenda is then asked with its clo
 * **The initiative's projects then:** board membership is judged against today's projects, since Linear's issue
   history doesn't record a project joining or leaving the initiative. On 11-02 no project had changed that way; three
   created on 11-06 hold only issues created after the moment, or issues that roll back to their earlier project.
-* **An unarchive:** an archive after the moment is undone, an unarchive isn't restored. The agenda doesn't read it.
+* **An unarchive:** an archive after the moment is undone, an unarchive after it isn't. The agenda doesn't read it.
 
 Nothing of the board is committed.
 

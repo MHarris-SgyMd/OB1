@@ -16,16 +16,17 @@
  *       moment is left out, as is one whose project then was not the
  *       initiative's. Plants the board into the throwaway database at
  *       DATABASE_URL (test-support's guards: refuseHeldDatabase, and
- *       resetSchema's loopback rule) by board-sync's own writers: each row
- *       with renderIssue's text and issueFacets' metadata, recordStructure
- *       for its source and links, board-sync declared a priority source by
- *       the operator and its own priority step stating the levels and due
- *       days. Work claims did not exist on every board a replay reads, so a
- *       ticket whose state then was started is claimed by another key, as
- *       today's rule has an agent claim at branch creation (the maintainer,
- *       2026-11-08). Then prints the agenda as of `--at`: its unstarted
- *       tickets in order, each with its terms, and for each `--show` key its
- *       state then and its place, or why it was left out.
+ *       resetSchema's loopback rule): each row inserted under board-sync's
+ *       actor with renderIssue's text and issueFacets' metadata, then
+ *       board-sync's own writers: recordStructure for its source and links,
+ *       and, once the operator declares board-sync a priority source, its
+ *       priority step stating the levels and due days. Work claims did not
+ *       exist on every board a replay reads, so a ticket whose state then
+ *       was started is claimed by another key, as today's rule has an agent
+ *       claim at branch creation (the maintainer, 2026-11-08). Then prints
+ *       the agenda as of `--at`: its unstarted tickets in order, each with
+ *       its terms, and for each `--show` key its state then and its place,
+ *       or why it was left out.
  *
  * Nothing of the board is committed: the issues are read at run time. The
  * description cannot be rolled back (Linear's history says only that it
@@ -93,7 +94,7 @@ export class UnknownChange extends Error {}
 export function issueAt(issue: LinearIssue, history: readonly HistoryEntry[], at: string): LinearIssue | null {
   const t = Date.parse(at);
   if (Date.parse(issue.createdAt) > t) return null;
-  const was: LinearIssue = { ...issue, labels: { nodes: [...issue.labels.nodes] } };
+  const was: LinearIssue = { ...issue };
   const rel = relationSet(issue);
   const labels = new Set(issue.labels.nodes.map((l) => l.name));
   for (const h of [...history].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))) {
@@ -121,7 +122,7 @@ export function issueAt(issue: LinearIssue, history: readonly HistoryEntry[], at
   }
   was.labels = { nodes: [...labels].sort().map((name) => ({ name })) };
   const node = (k: string) => k.slice(k.indexOf(":") + 1);
-  const ofType = (t2: string) => [...rel].filter((k) => k.startsWith(`${t2}:`)).map(node).sort();
+  const ofType = (type: string) => [...rel].filter((k) => k.startsWith(`${type}:`)).map(node).sort();
   was.relations = { nodes: [...ofType("x").map((id) => ({ type: "blocks", relatedIssue: { identifier: id } })), ...ofType("r").map((id) => ({ type: "related", relatedIssue: { identifier: id } })), ...ofType("d").map((id) => ({ type: "duplicate", relatedIssue: { identifier: id } }))] };
   was.inverseRelations = { nodes: [...ofType("b").map((id) => ({ type: "blocks", issue: { identifier: id } })), ...ofType("m").map((id) => ({ type: "duplicate", issue: { identifier: id } }))] };
   if (was.archivedAt && Date.parse(was.archivedAt) > t) was.archivedAt = null;
@@ -142,9 +143,6 @@ export function instantOf(s: string): string | null {
   return Number.isNaN(t) ? null : new Date(t).toISOString();
 }
 
-/** Who holds the stand-in claim on a ticket started at the moment: another agent's key, not the replay's own. */
-export const REPLAY_CLAIMANT = "board-replay-other-agent";
-
 // ── Linear ──────────────────────────────────────────────────────────────────
 
 /**
@@ -159,7 +157,10 @@ const HISTORY_BATCH = 20;
 const HISTORY_FIELDS = "createdAt fromState { name type } toState { name type } fromPriority toPriority fromDueDate toDueDate fromParent { identifier } toParent { identifier } fromProject { name } toProject { name } addedLabels { name } removedLabels { name } relationChanges { identifier type } fromTitle toTitle";
 type HistoryPage = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: HistoryEntry[] };
 
-/** Linear's history order broken: the stop rule reads newest first, and a page out of order would stop it early, silently. */
+/**
+ * Linear's history order broken: the stop rule reads newest first, and a page out of order would stop it early,
+ * silently.
+ */
 export class HistoryOrder extends Error {}
 
 export async function historiesOf(gql: Gql, identifiers: readonly string[], at: string): Promise<Map<string, HistoryEntry[]>> {
@@ -188,10 +189,6 @@ export async function historiesOf(gql: Gql, identifiers: readonly string[], at: 
   return out;
 }
 
-// ── The replay ──────────────────────────────────────────────────────────────
-
-const showTerms = (it: { terms: readonly { term: string; value: number }[] }) => it.terms.map((t) => `${t.term} ${t.value >= 0 ? "+" : ""}${t.value}`).join(", ");
-
 /**
  * What Linear has left this hour for the key, read off a one-field query's headers through the shared client (its
  * auth rule, its redirect refusal and its HTTP messages; review pass 2: a hand copy sent a bare token and read a
@@ -207,7 +204,7 @@ export async function budgetOf(key: string, fetchImpl: typeof fetch = fetch): Pr
   const probe = linearClient(key, (async (input: RequestInfo | URL, init?: RequestInit) => { const r = await fetchImpl(input, init); headers = r.headers; return r; }) as typeof fetch);
   let failure: Error | null = null;
   try { await strict(probe, "{ viewer { id } }"); } catch (e) { failure = e as Error; }
-  const read = (name: string) => { const raw = (headers as Headers | null)?.get(name) ?? null; const n = raw === null || raw.trim() === "" ? NaN : Number(raw); return Number.isFinite(n) ? n : null; };
+  const read = (name: string) => { const raw = headers?.get(name) ?? null; const n = raw === null || raw.trim() === "" ? NaN : Number(raw); return Number.isFinite(n) ? n : null; };
   const reset = read("x-ratelimit-complexity-reset");
   const b: Budget = { points: read("x-ratelimit-complexity-remaining"), requests: read("x-ratelimit-requests-remaining"), resetAt: reset === null ? null : new Date(reset).toISOString() };
   // A probe refused for the limit itself still carries the budget: said as a short one, with its reset (review pass 3).
@@ -224,7 +221,17 @@ export function budgetShort(b: Budget): string | null {
   return null;
 }
 
-/** A `--show` key's reasons the agenda left it out, read by the replay from the database: its live claims, its open blockers, its score. */
+// ── The replay ──────────────────────────────────────────────────────────────
+
+/** Who holds the stand-in claim on a ticket started at the moment: another agent's key, not the replay's own. */
+export const REPLAY_CLAIMANT = "board-replay-other-agent";
+
+const showTerms = (it: { terms: readonly { term: string; value: number }[] }) => it.terms.map((t) => `${t.term} ${t.value >= 0 ? "+" : ""}${t.value}`).join(", ");
+
+/**
+ * A `--show` key's reasons the agenda left it out, read by the replay from the database: its live claims, its open
+ * blockers, its score.
+ */
 export type LeftOutWhy = { claimedBy: string[]; blockers: string[]; score: { effective: number; terms: { term: string; value: number }[] } | null };
 
 export type ReportInput = {
@@ -284,7 +291,6 @@ async function replay(at: string, shows: readonly string[]): Promise<void> {
   const sources = loadEnv();
   const key = process.env.LINEAR_API_KEY?.trim();
   if (!key) { console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Read: ${describeEnv(sources)}`); process.exit(2); }
-  const gql = linearClient(key);
   // The database first, then Linear's budget: a held database or a short hour refuses before any point is spent
   // (review pass 1: the guards ran after the reads).
   await refuseHeldDatabase(url, "board-replay.ts");
@@ -294,6 +300,7 @@ async function replay(at: string, shows: readonly string[]): Promise<void> {
   const short = budgetShort(budget);
   if (short) { console.error(`${short}. Try again then.`); process.exit(2); }
 
+  const gql = linearClient(key);
   const board = await initiativeProjects(gql, process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE);
   const census = await censusOf(gql, board.projects.map((p) => p.id));
   const { issues, failed } = await fetchIssues(gql, census.map((c) => c.identifier));
@@ -316,10 +323,11 @@ async function replay(at: string, shows: readonly string[]): Promise<void> {
     // structure writer and priority step.
     const run = `board-replay@${at}`;
     for (const issue of then) {
+      const text = renderIssue(issue);
       await sql.begin(async (tx) => {
         await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: BOARD_SYNC })}, true)`;
         const [row] = (await tx`INSERT INTO thoughts (content, content_fingerprint, metadata, created_at)
-                               VALUES (${renderIssue(issue)}, content_fingerprint_of(${renderIssue(issue)}), (${JSON.stringify(issueFacets(issue))}::text)::jsonb, ${issue.createdAt}::timestamptz)
+                               VALUES (${text}, content_fingerprint_of(${text}), (${JSON.stringify(issueFacets(issue))}::text)::jsonb, ${issue.createdAt}::timestamptz)
                                RETURNING id`) as { id: string }[];
         await recordStructure(tx, row.id, linearAdapter.map(issue), run, { take: true });
       });
@@ -337,7 +345,7 @@ async function replay(at: string, shows: readonly string[]): Promise<void> {
 
     const agenda = await store.agenda({ limit: 100, includeBlocked: false, includeClaimed: false, includeProposed: false, now: at });
     // Settled as the brain reads it, not a list kept here (review pass 1: a Duplicate was misreported).
-    const settled = ((await sql`SELECT node_settled_types() AS t`)[0] as { t: string[] }).t;
+    const [{ t: settled }] = (await sql`SELECT node_settled_types() AS t`) as { t: string[] }[];
     // A shown key not listed and not settled: its reasons read as the agenda reads them (the first 11-02 run's lookup
     // read only the agenda's first 100, and a left-out ticket fell past them).
     const leftOutWhy = new Map<string, LeftOutWhy>();
@@ -435,9 +443,10 @@ async function selfCheck(): Promise<void> {
     `history fetched ${HISTORY_BATCH} issues a request, a further page only for an issue whose page has not reached the moment, and none past it (${calls}; ${got.get("ZQ-100")!.length}, ${got.get("ZQ-101")!.length})`);
   pages["ZQ-120"] = { start: page([entry("2026-11-01T00:00:00.000Z"), entry("2026-11-05T00:00:00.000Z")], null) };
   let order = "";
-  try { await historiesOf(stub, ["ZQ-120"], "2026-11-02T12:00:00.000Z"); } catch (e) { order = e instanceof HistoryOrder ? (e as Error).message : `other: ${(e as Error).message}`; }
+  try { await historiesOf(stub, ["ZQ-120"], "2026-11-02T12:00:00.000Z"); } catch (e) { order = e instanceof HistoryOrder ? e.message : `other: ${(e as Error).message}`; }
   ok(/out of order/.test(order), `a page out of newest-first order is refused, as the stop rule reads it newest first (${order})`);
-  // Review pass 2's gaps: the order across two pages, equal times allowed, and the moment itself kept for creation and archive.
+  // Review pass 2's gaps: the order across two pages, equal times allowed, and the moment itself kept for creation
+  // and archive.
   pages["ZQ-121"] = { start: page([entry("2026-11-06T00:00:00.000Z"), entry("2026-11-05T00:00:00.000Z")], "q2"), q2: page([entry("2026-11-07T00:00:00.000Z")], null) };
   let across = "";
   try { await historiesOf(stub, ["ZQ-121"], "2026-11-02T12:00:00.000Z"); } catch (e) { across = (e as Error).message; }
@@ -457,6 +466,8 @@ async function selfCheck(): Promise<void> {
     `the budget read off Linear's headers, a missing one unread rather than 0, and a refusal named by its status (${JSON.stringify(full)}; ${JSON.stringify(bare)}; ${denied.slice(0, 60)})`);
   ok(budgetShort(full) === null && /no complexity budget/.test(budgetShort(bare) ?? "") && /waits for 1,000,000/.test(budgetShort({ ...full, points: 400_000 }) ?? "") && /requests left/.test(budgetShort({ ...full, requests: 50 }) ?? ""),
     "a replay starts with enough of both budgets, and refuses an unread one or a short one by name");
+  const limited = await budgetOf("lin_api_x", answer(400, { "x-ratelimit-complexity-remaining": "0", "x-ratelimit-requests-remaining": "2400", "x-ratelimit-complexity-reset": "1794195912579" }));
+  ok(limited.points === 0 && /waits for 1,000,000; the hour resets at 2026-11-09T03:45:12.579Z/.test(budgetShort(limited) ?? ""), "a probe Linear refuses for the limit is said as a short budget, with when the hour resets");
 
   // The report, on a stub agenda: the tie line, the unstarted list, and each --show branch.
   const t = (key: string, type: string, label = "Medium"): LinearIssue => ({ ...base, identifier: key, title: key, priorityLabel: label, dueDate: null, parent: null, state: { name: type, type: type as LinearIssue["state"]["type"] } });
@@ -493,11 +504,9 @@ async function selfCheck(): Promise<void> {
     "a key left out as blocked, one past the read's first items, one both blocked and claimed (blocked first, as the agenda counts it), and a listed key's place among the unstarted");
   const many = Array.from({ length: 20 }, (_, i) => it(`ZQ-${300 + i}`, i + 1, 3));
   then.push(...many.map((m) => t(m.key, "backlog")));
-  const sixteen = reportLines({ initiative: "Board", at: AT, boardNow: 30, then, stated: 0, claimant: REPLAY_CLAIMANT, agenda: { items: many, total: 20, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 } }, settled: settledTypes, shows: [], leftOutWhy: new Map() });
+  const capped = reportLines({ initiative: "Board", at: AT, boardNow: 30, then, stated: 0, claimant: REPLAY_CLAIMANT, agenda: { items: many, total: 20, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 } }, settled: settledTypes, shows: [], leftOutWhy: new Map() });
   then.splice(then.length - 20, 20);
-  ok(sixteen.filter((l) => /^ +\d+\. \(\d+\) ZQ-3/.test(l)).length === 15 && sixteen.some((l) => /^ +15\. \(15\) ZQ-314 /.test(l)), "the unstarted list stops at fifteen");
-  const limited = await budgetOf("lin_api_x", answer(400, { "x-ratelimit-complexity-remaining": "0", "x-ratelimit-requests-remaining": "2400", "x-ratelimit-complexity-reset": "1794195912579" }));
-  ok(limited.points === 0 && /waits for 1,000,000; the hour resets at 2026-11-09T03:45:12.579Z/.test(budgetShort(limited) ?? ""), "a probe Linear refuses for the limit is said as a short budget, with when the hour resets");
+  ok(capped.filter((l) => /^ +\d+\. \(\d+\) ZQ-3/.test(l)).length === 15 && capped.some((l) => /^ +15\. \(15\) ZQ-314 /.test(l)), "the unstarted list stops at fifteen");
   ok(instantOf("2026-11-02T14:11:00Z") === "2026-11-02T14:11:00.000Z" && instantOf("2026-11-02T14:11+01:00") === "2026-11-02T13:11:00.000Z"
       && ["2026-11-02", "2026-11-02Z", "1Z", "2026-02-30T00:00Z", "2026-11-02T14:11", "yesterday"].every((x) => instantOf(x) === null),
     "--at takes an instant to the minute with Z or an offset, and refuses a bare day, a year alone, a day that does not exist, or no zone");
