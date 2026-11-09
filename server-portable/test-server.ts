@@ -7113,7 +7113,7 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   // migration defining effective_priority sets them (review: a hand-copied 5.8 would outlive the next retune).
   const { readdirSync, readFileSync } = await import("node:fs");
   const migDir = new URL("../db/migrations/", import.meta.url);
-  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /CREATE OR REPLACE FUNCTION effective_priority\(/.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
+  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION effective_priority\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
   const defaults = JSON.parse(/c_defaults CONSTANT jsonb := '([^']*)'/.exec(readFileSync(new URL(definer, migDir), "utf8"))![1]) as Record<string, number>;
   const largest = Math.round((5 + Math.max(defaults.soon, defaults.week, defaults.overdue) + defaults.unblocks_many) * 1000) / 1000;
   assert(PRIORITY_SPAN === largest, `PRIORITY_SPAN is ${definer}'s largest effective priority under its defaults (${PRIORITY_SPAN}, ${largest})`);

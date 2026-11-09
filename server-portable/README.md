@@ -517,7 +517,7 @@ priority; ten are named and `priorityMore` counts the rest. A settled item is
 ordered by the level it keeps and said settled: whether work is finished is its
 own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
 can come before an open High. Over MCP the three text tools print
-`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+`Priority: ticket SMD-2908 at 3.4 (high (3); +0.4 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
 `[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed

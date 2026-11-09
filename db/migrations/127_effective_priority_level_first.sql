@@ -27,7 +27,9 @@
 --     unblocks_one 0.5 -> 0.1, unblocks_many 1 -> 0.2.
 --   Their ratios are 122's, so items of one level keep 122's order. Every
 --   other weight, rule, term, refusal and column is 125's. A caller who wants
---   the old order passes the old weights by name (each is still a setting).
+--   the old order passes the old weights to effective_priority by name (SQL,
+--   or the store's effectivePriority; no REST or MCP tool takes weights, so
+--   the agenda and search always read the defaults).
 --
 -- WHO READS
 --   As 125: no actor, any role with EXECUTE. No grant changes.
