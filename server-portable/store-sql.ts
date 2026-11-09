@@ -1186,17 +1186,17 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
-  // SMD-3669: 123's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
+  // SMD-3669, SMD-4162: 124's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
-    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; now?: string;
+    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string;
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
     const rows = await this.sql`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
                     ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now())) AS a` as { a: unknown }[];
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a` as { a: unknown }[];
     return normaliseAgenda(rows[0]?.a, "agenda");
   }
 

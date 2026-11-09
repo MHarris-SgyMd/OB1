@@ -758,11 +758,12 @@ export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureI
  * SMD-3669's agenda, as a client would put it to a question (the maintainer, 2026-11-08): the agenda takes no query,
  * so the read searches the query as the plain baseline does (`search`, its defaults) and orders those hits by the
  * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda takes
- * its default flags (every source, startable and unclaimed work only) at its cap of 100, read through the store, as
- * are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer is not
- * exercised here). A hit is placed by its ticket when its metadata names one (board-sync's row, or an older row of
- * the same ticket), else by the best of the open items read from it (list_items). Priority orders what is relevant;
- * it adds nothing search did not find.
+ * its default flags (every source, startable, unclaimed and unstarted work only; 124's started default changes no
+ * seeded score, since the corpus's one started ticket, ZQ-103, is also claimed) at its cap of 100, read through the
+ * store, as are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer
+ * is not exercised here). A hit is placed by its ticket when its metadata names one (board-sync's row, or an older
+ * row of the same ticket), else by the best of the open items read from it (list_items). Priority orders what is
+ * relevant; it adds nothing search did not find.
  */
 export const AGENDA_READ: MeasuredRead = {
   name: "agenda", ticket: "SMD-3669",

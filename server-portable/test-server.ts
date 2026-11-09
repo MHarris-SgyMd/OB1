@@ -7019,16 +7019,45 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     let asked: Record<string, unknown> | null = null;
     const logged: unknown[][] = [];
     const ctx = {
-      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, waiting: 0 }, boardSync: null, claimsRead: true, now: "2027-01-01T00:00:00.000Z" }; } }),
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, now: "2027-01-01T00:00:00.000Z" }; } }),
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     };
     await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
-      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true } as never);
+      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true, include_started: true } as never);
     const a = asked as Record<string, unknown> | null;
-    assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
+    assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.includeStarted === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
            && logged.length === 1 && logged[0][2] === 7 && JSON.stringify(logged[0][3]) === '[{"kind":"ticket","key":"SMD-1","effective":4}]'
-           && (logged[0][1] as Record<string, unknown>).include_blocked === true,
+           && (logged[0][1] as Record<string, unknown>).include_blocked === true && (logged[0][1] as Record<string, unknown>).include_started === true,
       `each flag reaches its own argument, and one log row carries the scope, the limit and the items (${JSON.stringify(a)}; ${JSON.stringify(logged)})`);
+  }
+  // 124 (SMD-4162): a ticket's status said beside its key, the started tickets left out counted, and a brain recording
+  // no live claim said so; with claims unread, that line and not this one. The store's reader refuses an answer
+  // without the started count.
+  {
+    const { normaliseAgenda } = await import("./store.ts");
+    const answer = (claimsLive: number | null, claimsRead = true) => ({
+      items: [{ rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", status_type: "unstarted", owner: null, effective: 2,
+                level: 2, inherited_from: null, due_at: null, due_from: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 2 }], winner: null,
+                claimed: null, lapsed_claim: null, blockers: [] }],
+      total: 1, unknown: 0, left_out: { blocked: 0, claimed: 0, started: 2, waiting: 0 }, board_sync: null, claims_read: claimsRead, claims_live: claimsLive, now: "2027-01-01T00:00:00Z" });
+    const v = normaliseAgenda(answer(0), "agenda"), unread = normaliseAgenda(answer(null, false), "agenda"), some = normaliseAgenda(answer(3), "agenda");
+    const said = text(say.renderAgenda({ ok: true, value: v } as never)), saidUnread = text(say.renderAgenda({ ok: true, value: unread } as never)), saidSome = text(say.renderAgenda({ ok: true, value: some } as never));
+    let missing = "", notCount = "";
+    try { normaliseAgenda({ ...answer(0), left_out: { blocked: 0, claimed: 0, waiting: 0 } }, "agenda"); } catch (e) { missing = (e as Error).message; }
+    try { normaliseAgenda({ ...answer(0), claims_live: "x" }, "agenda"); } catch (e) { notCount = (e as Error).message; }
+    let noCount = "";
+    try { const { claims_live: _dropped, ...without } = answer(0); normaliseAgenda(without, "agenda"); } catch (e) { noCount = (e as Error).message; }
+    // A status is the board's free text: quoted, on one line, cut at 40 characters.
+    const odd = answer(3);
+    odd.items[0].status = 'Waiting on "QA"\nand a status well past forty characters long';
+    const saidOdd = text(say.renderAgenda({ ok: true, value: normaliseAgenda(odd, "agenda") } as never));
+    assert(v.items[0].status === "Todo" && v.items[0].statusType === "unstarted" && v.leftOut.started === 2 && v.claimsLive === 0 && unread.claimsLive === null
+        && /^1 of 1 item, most pressing first:\n1\. ticket SMD-7 \("Todo"\) "T"/.test(said) && /\nLeft out: 2 started \(include_started lists them\)\./.test(said)
+        && /\nThis brain records no live claim, so none left anything out: work claimed through another brain is not seen here\.$/.test(said)
+        && /Claims could not be read/.test(saidUnread) && !/records no live claim/.test(saidUnread) && !/records no live claim/.test(saidSome)
+        && /answered no agenda this server reads/.test(missing) && /answered no agenda this server reads/.test(notCount) && /answered no agenda this server reads/.test(noCount)
+        && /^1 of 1 item, most pressing first:\n1\. ticket SMD-7 \("Waiting on \\"QA\\" and a status well past f[^"]{0,6}…"\) "T"/.test(saidOdd),
+      `a ticket's status beside its key, started left out counted, no live claim said once and only when claims were read; an answer without the started count, without a claims count or with one not a number refused; a status quoted, on one line, cut (${said.split("\n").join(" | ")} || ${saidOdd.split("\n")[1]})`);
   }
   // The agenda (SMD-3669 review pass 2): holder mine on a role without the claims group is a refusal, in words.
   const unreadable = say.renderAgenda({ ok: false, refusal: { code: "CLAIMS_UNREADABLE", retryable: false } } as never);
