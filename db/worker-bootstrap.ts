@@ -21,7 +21,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { isRedirect, ProviderError, providerDown, refuseRedirect, refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
-import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
+import { DecisionRefused, jevInfo, type JevConfig } from "../server-portable/jev.ts";
 import { modelCall } from "../server-portable/model-call.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -213,13 +213,15 @@ export const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
  * retry the call); a 400 about the input's length (refusesLength, shared with
  * embed.ts) is the thought's; any other 4xx is fatal (stop the pass), and so is a
  * redirect, which no call follows (SMD-2908); a connection
- * error is transient; anything else is the thought's. Their followers read it
- * through followerFault, followClassify's split (SMD-3311).
+ * error is transient; anything else is the thought's. Their followers read a
+ * provider error through `fault` instead, on followClassify's split, not this
+ * function's rules (SMD-2636 PR 3a).
  *
  * `maxTokensFatal` (extract only): a 400 naming the answer budget
  * (max_tokens/max_completion_tokens) is about the REQUEST — the same shape goes to
  * every thought — so it is fatal rather than read as this thought's length
  * (refusesLength matches "tokens") and failing the pool one row at a time.
+ * Under --follow, `fault` reads it through EXTRACT_REQUEST_FIELDS, widened.
  */
 export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {}): ErrorKind {
   const status = (e as { status?: number }).status;
@@ -231,6 +233,9 @@ export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {
   if (status !== undefined && isRedirect(status)) return "fatal";
   if (opts.maxTokensFatal && status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
   if (status === 400 && refusesLength(status, msg)) return "thought";
+  // The decision tier's 422: one decision it cannot read faithfully (jev.ts, SMD-3326) — this thought's, so it is
+  // recorded failed with the tier's words, not a stop of every worker that the next run meets again.
+  if (e instanceof DecisionRefused) return "thought";
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
   return "thought";
@@ -331,9 +336,10 @@ function providerWords(e: unknown): string {
  * whose own words name a model as not found — Ollama's `model "x" not found,
  * try pulling it first`, OpenAI's and vLLM's `The model `x` does not exist`
  * or `model_not_found`. A 404 that names no model is a wrong base URL
- * (Ollama's `404 page not found`) and stays fatal. classifyError calls both
- * fatal; a --follow worker that has seen the model answer at start reads
- * this one as the provider's state — Ollama pulling or swapping the model —
+ * (Ollama's `404 page not found`). classifyError calls both fatal; under
+ * --follow a wrong base URL is probed first (`fault`, SMD-2636 PR 3a), and a
+ * worker that has seen the model answer at start reads a missing model as the
+ * provider's state — Ollama pulling or swapping the model —
  * and waits it out.
  */
 export function modelMissing(e: unknown): boolean {
@@ -410,6 +416,8 @@ export function followClassify(e: unknown): FollowVerdict {
   }
   const http = answerStatus(e);
   if (e instanceof ProviderError && e.kind === "egress") return "thought";
+  // The decision tier's 422 (classifyError's rule): this decision's, not the provider's state, so no probe decides it.
+  if (e instanceof DecisionRefused) return "thought";
   if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
   if (http !== null) {
     if (http === 429 || http === 503 || modelMissing(e)) return "backpressure";
@@ -424,29 +432,105 @@ export function followClassify(e: unknown): FollowVerdict {
 }
 
 /**
- * A provider error as a claim follower that pauses before an outage reads it
- * — extract-entities.ts's and consolidate.ts's — through followClassify's
- * split (SMD-3311; re-embed's follower has no pauses and reads the verdict
- * itself). `kind` is classifyError's, but two readings are transient —
- * paused for, then an outage: a 4xx followClassify reads as the provider's
- * outage, a 408, not the request's, which stopped every worker; and an
- * answer classifyError called the thought's for its words saying "timed out"
- * where followClassify reads its status as the provider's (a gateway's 408, a
- * 504, a 429 or a 503 saying so: review passes 1 and 2). `suspect`: whether an outage it
- * begins makes the thought in hand a suspect, recorded failed if it meets
- * the provider again right after a probe answers. followClassify's
- * backpressure — a 429, a 503, the model not served — says nothing about the
- * thought and makes none; any other error does, as before.
+ * What a follower does with a provider error (SMD-2636 PR 3a: one copy for extract and consolidate, re-embed's in
+ * PR 3b), read through followClassify's split (SMD-3311) on the maintainer's rules (2026-11-05):
+ * - `pause`: the provider busy or failing — a 429, a 503, any other 5xx, a 408, no connection — paused for, then,
+ *   past the pauses, an outage;
+ * - `outage`: the model not served, or a deadline the probe already found unanswered (`ProviderDown`): an outage at
+ *   once. `missing` may read the model's absence as `fatal` instead: extract's escalation model, which its start could
+ *   not confirm;
+ * - `probe`: a deadline with no answer, or a 4xx or a redirect no rule reads (a 401, 402 or 403, a 404 naming no
+ *   model, a 400 neither the thought's length nor the request's shape): the probe's answer decides (`probedFault`);
+ * - `thought`: the error names the thought — its length, the egress gate's refusal of it — or is a database error at
+ *   write time (the caller reads one not answering first; PR 4 reads the rest), recorded failed;
+ * - `fatal`: the request's shape refused (`requestFault`: a 400 naming a field every call sends whose refusal the
+ *   probe's one-token call does not meet — a response_format or a reasoning_effort it does not send, an answer budget
+ *   it asks one token of — so the probe would answer and read it the thought's, failing the pool row by row); a 402
+ *   saying what the call asks is more than the account affords (OpenRouter's "can only afford", which the probe's one
+ *   token is not); a deadline whose probe was refused (`ProbeRefused`): every worker stops, exit 2.
+ * `suspect`: whether an outage it begins makes the thought in hand a suspect, recorded failed if it meets the provider
+ * again right after a probe answers — not on backpressure (a 429, a 503, the model not served), which says nothing
+ * about the thought.
  */
-export function followerFault(e: unknown, opts: { maxTokensFatal?: boolean } = {}): { kind: ErrorKind; suspect: boolean } {
-  const verdict = followClassify(e);
-  const kind = classifyError(e, opts);
-  // An answer's status outranks classifyError's "timed out" in its words: a 408 whose body says
-  // "Request timed out" (a gateway's) is the provider's outage, not a call's deadline the probe
-  // decides (review pass 1), and so is a 429 or a 503 saying so, backpressure, no suspect (review
-  // pass 2). A deadline with no status keeps "thought", which the probe decides.
-  const outage = (verdict === "maybe-poison" && kind === "fatal") || (answerStatus(e) !== null && kind === "thought" && (verdict === "maybe-poison" || verdict === "backpressure"));
-  return { kind: outage ? "transient" : kind, suspect: verdict !== "backpressure" };
+export type FollowerFault = { act: "pause" | "outage" | "probe" | "thought" | "fatal"; suspect: boolean };
+export function fault(e: unknown, o: { requestFault?: (e: unknown) => boolean; missing?: (e: unknown) => "outage" | "fatal" } = {}): FollowerFault {
+  if (e instanceof ProviderDown) return { act: "outage", suspect: true };
+  if (e instanceof ProbeRefused) return { act: "fatal", suspect: true };
+  // Before the verdict: followClassify reads a 400 naming tokens as the thought's length.
+  const status = answerStatus(e);
+  if (o.requestFault?.(e)) return { act: "fatal", suspect: true };
+  // The account short of what the call asks, which the probe's one token is not (review pass 1).
+  if (status === 402 && /afford/i.test(errorWords(providerWords(e)))) return { act: "fatal", suspect: true };
+  switch (followClassify(e)) {
+    case "backpressure":
+      return modelMissing(e) ? { act: o.missing?.(e) ?? "outage", suspect: false } : { act: "pause", suspect: false };
+    case "maybe-poison":
+      // A deadline with no answer is the probe's to decide; any other is the provider's: paused for.
+      return { act: status === null && deadline(e) ? "probe" : "pause", suspect: true };
+    case "probe-decides":
+      return { act: "probe", suspect: true };
+    default:
+      return { act: "thought", suspect: true };
+  }
+}
+
+/** A call's deadline passing with no answer: embed.ts's `timeout`, or the workers' own fetch's (timedOut). */
+function deadline(e: unknown): boolean {
+  return (e instanceof ProviderError && e.kind === "timeout") || (e instanceof Error && timedOut(e));
+}
+
+/**
+ * Whose a `probe` fault is, by the probe the follower made after it (SMD-2636 PR 3a): answered, the thought's (a
+ * content filter, a 400 about its text); refused, the request's, every worker stopped (a key revoked, a base URL
+ * gone); no answer, or the model not served, the provider's outage, the thought a suspect.
+ */
+export function probedFault(p: Probe): "thought" | "fatal" | "outage" {
+  return p.state === "up" ? "thought" : p.state === "refused" ? "fatal" : "outage";
+}
+
+/**
+ * Whether a provider's 400 names one of `fields`, a field every call of the worker's sends: the request's shape,
+ * refused (`fault`'s `requestFault`). Read from the provider's own error words, not the body whole, which may echo the
+ * request's input — a thought naming a field (review pass 1).
+ */
+export function requestShapeRefused(e: unknown, fields: RegExp): boolean {
+  return answerStatus(e) === 400 && fields.test(errorWords(providerWords(e)));
+}
+
+/**
+ * The fields every extraction call sends whose refusal the probe's one-token call does not meet (SMD-2636 PR 3a): the
+ * answer budget (max_tokens, max_completion_tokens, a provider's "completion tokens"), response_format, reasoning_effort,
+ * the penalised retry's frequency_penalty — the closing remedy's list. extract-entities.ts's `requestFault`.
+ */
+export const EXTRACT_REQUEST_FIELDS = /max_tokens|max_completion_tokens|completion tokens|response_format|reasoning_effort|frequency_penalty/i;
+
+/**
+ * The same for every judge call (SMD-2636 PR 3a): response_format and reasoning_effort, the closing remedy's two. No
+ * answer budget: the judge sends none, so a 400 naming one is a gateway's default overflowing a long pair, the thought's
+ * length (review pass 1). consolidate.ts's `requestFault`.
+ */
+export const JUDGE_REQUEST_FIELDS = /response_format|reasoning_effort/i;
+
+/**
+ * A provider's own error words: a JSON body's error message, param and code, and a gateway's upstream words
+ * (OpenRouter's `metadata.raw`), when it is one; else the words as they came — a body cut at the callers' 300
+ * characters, which no longer parses, among them (review pass 2).
+ */
+function errorWords(words: string): string {
+  try {
+    const body = JSON.parse(words) as { error?: unknown; message?: unknown };
+    const err = body?.error;
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object") {
+      const o = err as Record<string, unknown>;
+      const raw = (o.metadata as { raw?: unknown } | undefined)?.raw;
+      return [o.message, o.param, o.code, raw].filter((v): v is string => typeof v === "string").join(" ");
+    }
+    if (typeof body?.message === "string") return body.message;
+  } catch {
+    // Not JSON: the words as they came.
+  }
+  return words;
 }
 
 /**
@@ -593,6 +677,16 @@ export async function probeTier(jev: JevConfig, model: string, timeoutMs: number
  */
 export class ProviderDown extends Error {
   override name = "ProviderDown";
+}
+
+/**
+ * A call that failed where the probe after it was refused — a deadline, and then a key or a base the probe could not
+ * pass: thrown by a worker that probes its own timeouts (consolidate's pairs) so the worker's catch reads it the
+ * request's, as `probedFault` reads extract's (SMD-2636 PR 3a, review pass 1). `tier`: the decision tier's probe refused it.
+ */
+export class ProbeRefused extends Error {
+  override name = "ProbeRefused";
+  tier?: true;
 }
 
 /**

@@ -942,13 +942,14 @@ async function extractExchange(text: string, cfg: EmbedConfig, timeoutMs: number
       messages: buildMessages(text, part),
     }),
   });
+  // The model called rides on a refusal, so a follower probes that one (SMD-2636 PR 3a): the escalation model's refusal
+  // is not the metadata model's to answer.
   const redirected = refuseRedirect("Extraction", cfg.chat.base, r);
-  if (redirected) throw redirected;
+  if (redirected) throw Object.assign(redirected, { model });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
     const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
-    (err as Error & { status?: number }).status = r.status;
-    throw err;
+    throw Object.assign(err, { status: r.status, model });
   }
   // Streamed when asked (SMD-1960), and the body read as what it IS rather
   // than what its content-type says (sixth review pass: an SSE body under
@@ -1155,7 +1156,9 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
     // punctuation, emoji or whitespace it lets run while a budget is left. Any
     // other cut is a socket that closed mid-answer, the worker's to pause on.
     if (repeatedTail(content, { cut: true }) !== null) return { kind: "sse", content, finish, repeated: "token" };
-    throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
+    // ECONNRESET, as Bun's fetch gives a socket closed mid-answer: a follower reads it by its code as no connection,
+    // not by its words (SMD-2636 PR 3a), where followClassify left this codeless one to the probe.
+    throw Object.assign(new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`), { code: "ECONNRESET" });
   }
   return { kind: "sse", content, finish, repeated: null };
 }

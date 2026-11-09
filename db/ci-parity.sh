@@ -292,6 +292,8 @@ free_rows() {
   nodb .                 scripts/agent-runner/dry-run.ts --self-check
   nodb .                 scripts/agent-runner/probes.ts --self-check
   nodb .                 scripts/agent-runner/gate-check.ts --self-check
+  nodb .                 scripts/agent-runner/brief-check.ts --self-check
+  nodb .                 scripts/agent-runner/bundle-check.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts

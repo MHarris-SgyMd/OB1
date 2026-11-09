@@ -36,7 +36,7 @@ import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type Cla
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
-import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -70,7 +70,7 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
-const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
+const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
 
 /**
@@ -174,6 +174,33 @@ const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
 const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 /**
+ * A result's priorities as a typed field (SMD-3668 PR 2): each item's kind, key, whether it is the result itself, its
+ * effective priority, its stated level or the item it inherits from, its due time and the urgency it adds, overdue,
+ * unblocks, settled and waiting. The terms ride the text, as a term's maker is another key's name. Null when the
+ * priorities were not read, and from a REST core older than this MCP server.
+ *
+ * Compact (review pass 4: a 100-row list's structured value grew from 35 KB to 103 KB, which Claude Code hands the
+ * model beside the text): `kind` and `effective` always; `level` whenever stated, None's 0 included; every other field
+ * only where it says something — no null, no false, no zero urgency or unblocks — and no `key` on a result's own
+ * thought, which is the result's id. Over REST the core's value keeps every field.
+ */
+const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
+  Array.isArray(priority) ? priority.map((p) => ({
+    kind: p.kind, ...(p.self && p.kind === "thought" ? {} : { key: p.key }), ...(p.self ? { self: true } : {}), effective: p.effective,
+    ...(p.level !== null ? { level: p.level } : {}),
+    ...(p.inheritedFrom ? { inheritedFrom: { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops } } : {}),
+    ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
+    ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
+    ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
+  })) : null;
+const priorityFields = (h: { priority?: readonly PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number }) =>
+  ({ priority: priorityField(h.priority), priorityMore: h.priorityMore ?? 0, priorityNotRead: h.priorityNotRead ?? 0 });
+/** The compat pair's priority fields (search, fetch): only where an item is prioritised, or a failed read's null; every other result keeps ChatGPT's shape. */
+const priorityCompat = (priority: readonly PriorityOn[] | null | undefined, more: number | undefined, notRead: number | undefined) =>
+  priority === null ? { priority: null }
+  : priority?.length ? { priority: priorityField(priority), ...(more ? { priorityMore: more } : {}), ...(notRead ? { priorityNotRead: notRead } : {}) }
+  : {};
+/**
  * A result's judged relations as a typed field (SMD-2726; SMD-3306 PR 7a-2b): each relation's id, word, side, the
  * judge's confidence, when it was last judged and whether it is stale, and the other thought's id, trust, time and
  * superseding thought — no title: a page's relations name none, and the relations read's title rides its text (fetch's
@@ -202,16 +229,17 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
     ...claimedFields(h), ...relationsFields(h),
+    ...priorityFields(h),
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
-  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h) })),
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h), ...priorityFields(h) })),
 });
 /** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
-  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t) })),
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t), ...priorityFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
 });
@@ -583,20 +611,24 @@ export function currentSearchHint(msg: string): string {
  * keeps the shape exactly (the maintainer's call: title and field).
  */
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
-  render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
+  render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, priority, priorityMore, priorityNotRead, ...r }) => {
     const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
     // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
     // SMD-3599: who holds a ticket it names, after the moved prefix; the holder's label never in a title.
     const held = claimedWords(r.claimed, r.claimedMore ?? 0, 0, true);
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : r.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
-    return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
+    // SMD-3668 PR 2: what matters among the items it names, after the claimed prefix; the field only where one does.
+    const prio = priorityWords(priority, priorityMore ?? 0, 0, true);
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : r.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${prio ? `[priority: ${prio}] ` : priority === null ? PRIORITY_UNREAD_TITLE : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
+    const prioField = priorityCompat(priority, priorityMore, priorityNotRead);
+    return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}), ...prioField } : { ...r, title, ...prioField };
   }),
   // …and the whole answer says so beside the results, for a surface that
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
   ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}),
-  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) }) : o,
+  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}),
+  ...(o.value.results.some((r) => r.priority === null) ? { priorityNote: PRIORITY_UNREAD_COMPAT } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
@@ -695,6 +727,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         if (held) parts.push(`⚠ Claimed: ${held}`);
+        // SMD-3668 PR 2: what matters, of itself and the tickets it names: a label; only priority_weight moves the rank.
+        const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0);
+        if (prio) parts.push(`Priority: ${prio}`);
         // SMD-2726: its judged relations — labels, so the rank above is unchanged; another hit named by its place.
         const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
         if (related) parts.push(`↔ Relations: ${related}`);
@@ -755,6 +790,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
+    if (data.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
@@ -817,6 +853,9 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
       const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
       if (held) parts.push(`⚠ Claimed: ${held}`);
+      // SMD-3668 PR 2: what matters, the line search_thoughts prints.
+      const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0);
+      if (prio) parts.push(`Priority: ${prio}`);
       const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
       if (related) parts.push(`↔ Relations: ${related}`);
       const topics = metaList(m.topics, TAG_MAX);
@@ -834,7 +873,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -852,9 +891,11 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // header group, so it trails the content. SMD-1248.
         // SMD-3599: who holds a ticket it names, after the superseded mark.
         const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+        // SMD-3668 PR 2: what matters, after the claimed mark.
+        const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0);
         // SMD-2726: its judged relations, after the claims.
         const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
-        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
+        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${prio ? `\n   Priority: ${prio}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
         // e2e suite ([8]) matched on and a client may too.
@@ -877,7 +918,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -2069,9 +2110,12 @@ const CLAIMED_KEY = "How to read a `⚠ Claimed` line: a claim whose id is in yo
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);
   const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
+  // SMD-3668 PR 2: what matters among the items it names, after the claimed prefix, as search's title says it.
+  const { priority, priorityMore, priorityNotRead, ...rest } = v;
+  const prio = priorityWords(priority, priorityMore ?? 0, 0, true);
   // SMD-2726: a related thought of outside text has its title marked as this one's is (review pass 1).
   const relations = Array.isArray(v.relations) ? { relations: v.relations.map((r) => r.other.trust === "ingested" && r.other.title !== undefined ? { ...r, other: { ...r.other, title: `[ingested] ${r.other.title}` } } : r) } : {};
-  return { ...v, ...relations, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) };
+  return { ...rest, ...relations, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${prio ? `[priority: ${prio}] ` : priority === null ? PRIORITY_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}), ...priorityCompat(priority, priorityMore, priorityNotRead), ...(priority === null ? { priorityNote: PRIORITY_UNREAD_COMPAT } : {}) } as FetchedThought;
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
@@ -2312,6 +2356,47 @@ const agendaTerm = (t: PriorityTerm): string => {
   if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
   return `${t.term} ${t.value}`;
 };
+
+/** A priorities read that failed, said once per reply (SMD-3668 PR 2), as a failed claims read is. */
+const PRIORITY_UNREAD_WHY = "The priorities of the items named here could not be read (for instance, a brain before migration 122, or a server role without its grants): a result";
+const PRIORITY_UNREAD = `⚠ ${PRIORITY_UNREAD_WHY} without a \`Priority\` line may still name an item that matters.`;
+const PRIORITY_UNREAD_COMPAT = `${PRIORITY_UNREAD_WHY} whose title has no \`[priority: …]\` may still name an item that matters.`;
+const PRIORITY_UNREAD_TITLE = "[priority not read] ";
+/** How many prioritised items a title names: the rest counted, the field keeping them all. */
+const PRIORITY_IN_TITLE = 2;
+/** Who an item is to the result it labels: the result itself (a ticket's own row said as its ticket), or a ticket it names. */
+const priorityWho = (p: PriorityOn) => (p.self ? (p.kind === "ticket" ? `this ticket's row (${p.key})` : "this thought") : `ticket ${p.key}`);
+/**
+ * A result's prioritised items in words (SMD-3668 PR 2): each one's effective priority and the terms behind it, as the
+ * agenda says them (the level stated or inherited, the urgency or overdue its due time adds, what it unblocks), and
+ * whether it is settled (a finished ticket keeps its level, its urgency and unblocks dropped) or waiting. A title's say
+ * the level and whether it is due or overdue, for the first two. The rest counted, the tickets not read counted. Null
+ * when there is nothing to say.
+ */
+function priorityWords(priority: readonly PriorityOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
+  const all = priority ?? [];
+  const shown = title ? all.slice(0, PRIORITY_IN_TITLE) : all;
+  const rest = all.length - shown.length + more;
+  const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not read` : "";
+  if (!shown.length) return title || !unread ? null : `none known on the items read; ${unread}.`;
+  const state = (p: PriorityOn) => `${p.settled ? ", settled" : ""}${p.waiting && p.notBefore ? `, not before ${p.notBefore}` : ""}`;
+  // A stated None is a statement, not an unknown (review pass 3: "none (0)" read as "no priority known").
+  const stated = (level: number) => `${level === 0 ? "stated " : ""}${levelText(level)}`;
+  const term = (t: PriorityTerm) => (t.term === "level" && Number(t.detail.level) === 0 ? `stated ${agendaTerm(t)}` : agendaTerm(t));
+  const one = (p: PriorityOn) => {
+    if (title) {
+      const inherited = p.terms.find((t) => t.term === "inherited");
+      // The inherited level after its hops, then the level it came from (review pass 1: "high (3) inherited from ticket SMD-1" read as SMD-1 High).
+      const from = p.inheritedFrom;
+      const level = p.level !== null ? stated(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
+      // What it unblocks, which orders it too (review pass 3: a High before an Urgent, the reason unshown).
+      return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${p.unblocks > 0 ? `, unblocks ${p.unblocks}` : ""}${state(p)}`;
+    }
+    return `${priorityWho(p)} at ${p.effective} (${p.terms.map(term).join("; ")})${state(p)}`;
+  };
+  const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more` : ""}${unread ? ` (+${unread})` : ""}`;
+  return title ? words : `${words}.`;
+}
 /**
  * The agenda (SMD-3669): one line an item — its place, what it is, its score and the terms behind it — then what was
  * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
