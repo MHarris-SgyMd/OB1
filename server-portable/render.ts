@@ -175,7 +175,7 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 /**
  * A result's priorities as a typed field (SMD-3668 PR 2): each item's kind, key, whether it is the result itself, its
- * effective priority, its stated level or the item it inherits from, its due time and the urgency it adds, overdue,
+ * effective priority, its stated level, the open item it read its level from or the item it inherits from, its due time and the urgency it adds, overdue,
  * unblocks, settled and waiting. The terms ride the text, as a term's maker is another key's name. Null when the
  * priorities were not read, and from a REST core older than this MCP server.
  *
@@ -189,6 +189,7 @@ const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
     kind: p.kind, ...(p.self && p.kind === "thought" ? {} : { key: p.key }), ...(p.self ? { self: true } : {}), effective: p.effective,
     ...(p.level !== null ? { level: p.level } : {}),
     ...(p.inheritedFrom ? { inheritedFrom: { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops } } : {}),
+    ...(p.fromItem ? { fromItem: { key: p.fromItem.key, level: p.fromItem.level } } : {}),
     ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
     ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
     ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
@@ -2342,17 +2343,22 @@ export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>
   ].join("\n"),
   itemRefusal, AS_JSON);
 
+/** The open item a thought's due time came from (migration 125), said after it. */
+const fromItem = (d: Record<string, unknown>) => (d.due_from === "from_items" ? ` (open item ${d.item ?? "?"})` : "");
 /** One of 122's terms behind an agenda item's place, in words. */
 const agendaTerm = (t: PriorityTerm): string => {
   const d = t.detail;
   if (t.term === "level") return levelText(Number(d.level));
+  // A thought's level read from an open item opened from it (migration 125, SMD-4149).
+  // A stated None is a statement, not an unknown (SMD-3668 PR 2's review pass 3).
+  if (t.term === "from_items") return `${Number(d.level) === 0 ? "stated " : ""}${levelText(Number(d.level))} from open item ${d.item ?? "?"}`;
   if (t.term === "inherited") {
     const f = d.from as { kind?: string; key?: string; level?: number; hops?: number } | undefined;
     return `inherited ${t.value} from ${f?.kind === "item" ? "open item" : f?.kind ?? "?"} ${f?.key ?? "?"} (${levelText(Number(f?.level))}, ${f?.hops} hop${f?.hops === 1 ? "" : "s"})`;
   }
   if (t.term === "unknown") return `no priority stated (read as ${t.value})`;
-  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}`;
-  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
+  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}${fromItem(d)}`;
+  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}${fromItem(d)}`;
   if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
   return `${t.term} ${t.value}`;
 };
@@ -2368,9 +2374,9 @@ const PRIORITY_IN_TITLE = 2;
 const priorityWho = (p: PriorityOn) => (p.self ? (p.kind === "ticket" ? `this ticket's row (${p.key})` : "this thought") : `ticket ${p.key}`);
 /**
  * A result's prioritised items in words (SMD-3668 PR 2): each one's effective priority and the terms behind it, as the
- * agenda says them (the level stated or inherited, the urgency or overdue its due time adds, what it unblocks), and
- * whether it is settled (a finished ticket keeps its level, its urgency and unblocks dropped) or waiting. A title's say
- * the level and whether it is due or overdue, for the first two. The rest counted, the tickets not read counted. Null
+ * agenda says them (the level stated, read from an open item (SMD-4149) or inherited, the urgency or overdue its due
+ * time adds, what it unblocks), and whether it is settled (a finished ticket keeps its level, its urgency and unblocks
+ * dropped) or waiting. A title's say the level and whether it is due or overdue, for the first two. The rest counted, the tickets not read counted. Null
  * when there is nothing to say.
  */
 function priorityWords(priority: readonly PriorityOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
@@ -2388,7 +2394,9 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
       const inherited = p.terms.find((t) => t.term === "inherited");
       // The inherited level after its hops, then the level it came from (review pass 1: "high (3) inherited from ticket SMD-1" read as SMD-1 High).
       const from = p.inheritedFrom;
-      const level = p.level !== null ? stated(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
+      const level = p.level !== null ? stated(p.level)
+        : p.fromItem ? `${stated(p.fromItem.level)} from open item ${p.fromItem.key}`
+        : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
       // What it unblocks, which orders it too (review pass 3: a High before an Urgent, the reason unshown).
       return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${p.unblocks > 0 ? `, unblocks ${p.unblocks}` : ""}${state(p)}`;
     }
