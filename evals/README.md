@@ -4673,6 +4673,25 @@ Neither would clear the bar. Each would pass (b) and (c), and fail (a) and (d).
 * **So a higher weight moves the misses rather than removing them.** The three prompts led by a note stay out of
   reach until a note reads its open items' due times and levels (SMD-4149).
 
+**On the canary's real board, 2026-11-09** (the maintainer asked for it; not a verdict, since the real board has no
+gold order and keeps moving). The seven prompts went to the canary brain's `search_thoughts` over MCP, at weights 0,
+0.5, 0.7 and 0.9, with a limit of 5 and the other arguments at their defaults. The canary ran commit 777b2adc
+(PRs 1 and 2 of SMD-3668, migration 123) and held 3,670 thoughts. These were reads only; `--seeded` can't run there,
+since it resets the database it is given.
+* **The weight has little to work with.** Of the 20 rows the weight re-ranks, only 2 to 14 carry a known priority.
+  Most hits are session summaries, which read as unknown 2. "What is the highest-value unstarted issue?" returns the
+  same five session summaries at every weight, the 2026-10-14 session's first (2 of its 20 rows known).
+* **At 0.9 a finished ticket leads.** "Which ticket should I pick up next?" puts three Done tickets first (SMD-2448,
+  SMD-2932, SMD-2657), each keeping its stated High, as decided for the read: a settled item keeps its level.
+  With `prefer_current` on as well, 0.9 puts SMD-4086 first (an open Medium that unblocks one item), and no Done
+  ticket is in the top five. A client that raises the weight needs `prefer_current` beside it.
+* **A stated Low ranks below an unknown,** because unknown counts as 2 (`docs/priority.md`). On "What is holding up
+  other work?", SMD-4071 (Low) falls from first at 0 to third at 0.5, behind SMD-4007 and a session summary.
+* **The 11-02 filter case** (`{"status_type":"backlog","priority":"High"}` on "What is the highest-value unstarted
+  issue?") returns its seven tickets in priority order already at 0, so no weight moves them.
+* **Latency** was 200 to 1,200 ms a search at every weight, 0 included, while the canary's sleep worker ran. These
+  numbers don't separate the weight's cost.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
 A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
