@@ -22,6 +22,8 @@ import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
 import { currentCallClass } from "./model-call.ts";
+import { MODEL_LIMITS, pluginChat, type ModelAnswer } from "./core/model.ts";
+import { resolveEmbedConfig } from "./embed.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
@@ -1229,6 +1231,119 @@ console.log("\n[16] A webhook's deferred work starts a trace of its own, linked 
   } finally {
     await tracing.shutdown();
   }
+}
+
+console.log("\n[17] ctx.model: a handler's model call through the brain's provider path, its egress gate and the caller's key, each refusal typed (SMD-2690 PR 3a)");
+{
+  // A stub provider on loopback; whether it is local is declared, never read off the address (embed.ts).
+  const bodies: Record<string, any>[] = [];
+  let answer: (body: Record<string, any>) => Response = () => Response.json({ model: "stub-model", choices: [{ message: { content: "the answer" } }] });
+  const provider = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (r) => {
+      const body = (await r.json()) as Record<string, any>;
+      bodies.push(body);
+      return answer(body);
+    },
+  });
+  const base = `http://127.0.0.1:${provider.port}/v1`;
+  const cfgOf = (env: Record<string, string>) => resolveEmbedConfig({ OB1_LLM_BASE_URL: base, OB1_METADATA_MODEL: "classifier-model", OB1_LLM_TIMEOUT: "2", ...env });
+  const local = cfgOf({ OB1_LLM_LOCAL: "1" });
+  try {
+    const plain = await pluginChat(local, "writer", "smart-ingest", { system: "Be brief.", user: "Say something." });
+    const sent = bodies.at(-1);
+    assert(plain.ok && plain.value.text === "the answer" && plain.value.model === "stub-model" && plain.value.json === undefined
+      && sent?.model === "classifier-model" && sent?.temperature === local.metadataTemperature && sent?.response_format === undefined && sent?.max_tokens === undefined
+      && JSON.stringify(sent?.messages) === JSON.stringify([{ role: "system", content: "Be brief." }, { role: "user", content: "Say something." }]),
+      `a call asks the brain's classifier model on its chat endpoint, the system and user texts as its messages, at the classifier's temperature (${JSON.stringify(plain)}; ${JSON.stringify(sent)})`);
+
+    answer = () => Response.json({ choices: [{ message: { content: "```json\n{\"thoughts\": [1, 2]}\n```" } }] });
+    const asJson = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true, temperature: 0.2, max_tokens: 512 });
+    const sentJson = bodies.at(-1);
+    assert(asJson.ok && JSON.stringify(asJson.value.json) === JSON.stringify({ thoughts: [1, 2] }) && asJson.value.model === "classifier-model"
+      && sentJson?.response_format?.type === "json_object" && sentJson?.temperature === 0.2 && sentJson?.max_tokens === 512
+      && JSON.stringify(sentJson?.messages) === JSON.stringify([{ role: "user", content: "Extract." }]),
+      `json asks for a JSON object and answers the object parsed, its code fence let go; temperature and max_tokens sent as given; no system, no system message (${JSON.stringify(asJson)}; ${JSON.stringify(sentJson)})`);
+
+    answer = () => Response.json({ choices: [{ message: { content: "[1, 2]" } }] });
+    const notObject = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true });
+    answer = () => Response.json({ choices: [{ message: { content: "not json at all" } }] });
+    const notJson = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true });
+    assert(!notObject.ok && notObject.refusal.code === "NOT_JSON" && !notJson.ok && notJson.refusal.code === "NOT_JSON" && notJson.refusal.retryable === false,
+      `json asked and the answer is no JSON object (an array, prose): NOT_JSON, not retryable (${JSON.stringify(notObject)}; ${JSON.stringify(notJson)})`);
+
+    // The gate: a chat endpoint not declared local, under deny with no term, sends nothing; a term for the plugin's source or the caller's key lets it out.
+    answer = () => Response.json({ choices: [{ message: { content: "let out" } }] });
+    const before = bodies.length;
+    const kept = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny" }), "writer", "smart-ingest", { user: "private text" });
+    const keptSent = bodies.length - before;
+    const bySource = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "source:smart-ingest" }), "writer", "smart-ingest", { user: "private text" });
+    const byActor = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "actor:writer" }), "writer", "smart-ingest", { user: "private text" });
+    const otherSource = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "source:agent-memory" }), "writer", "smart-ingest", { user: "private text" });
+    const byMarker = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), "writer", "smart-ingest", { system: "do-not-send", user: "plain" });
+    assert(!kept.ok && kept.refusal.code === "REFUSED_EGRESS" && kept.refusal.retryable === false && kept.refusal.to === `127.0.0.1:${provider.port}` && /no OB1_EGRESS_ALLOW term matches this plugin/.test(kept.refusal.reason) && !kept.refusal.reason.includes(base) && keptSent === 0
+      && bySource.ok && byActor.ok && !otherSource.ok && otherSource.refusal.code === "REFUSED_EGRESS"
+      && !byMarker.ok && byMarker.refusal.code === "REFUSED_EGRESS",
+      `the egress gate judges the call before it is made: refused under deny with no term (nothing sent), let out by the plugin's source or the caller's key, kept in by another plugin's source, and a deny term read against the system text too (${JSON.stringify(kept)}; ${JSON.stringify(otherSource)}; ${JSON.stringify(byMarker)})`);
+
+    // The provider: not answering is retryable; refusing is not.
+    const failed = async (respond: (body: Record<string, any>) => Response) => {
+      answer = respond;
+      return pluginChat(local, "writer", "smart-ingest", { user: "Extract." });
+    };
+    const down503 = await failed(() => new Response("busy", { status: 503 }));
+    const down429 = await failed(() => new Response("slow down", { status: 429 }));
+    const timedOut = await failed(() => new Response(new ReadableStream({ start() {} })));
+    const refused400 = await failed(() => new Response("bad request", { status: 400 }));
+    const notJsonBody = await failed(() => new Response("<html>oops</html>", { status: 200 }));
+    const noMessage = await failed(() => Response.json({ choices: [] }));
+    assert(!down503.ok && down503.refusal.code === "PROVIDER_UNAVAILABLE" && down503.refusal.retryable === true && down503.refusal.reason === "provider_503"
+      && !down429.ok && down429.refusal.code === "PROVIDER_UNAVAILABLE" && down429.refusal.reason === "provider_429"
+      && !timedOut.ok && timedOut.refusal.code === "PROVIDER_UNAVAILABLE" && timedOut.refusal.reason === "provider_timeout"
+      && !refused400.ok && refused400.refusal.code === "PROVIDER_REFUSED" && refused400.refusal.retryable === false && refused400.refusal.status === 400
+      && !notJsonBody.ok && notJsonBody.refusal.code === "PROVIDER_REFUSED" && notJsonBody.refusal.detail === "its answer is not JSON"
+      && !noMessage.ok && noMessage.refusal.code === "PROVIDER_REFUSED" && noMessage.refusal.detail === "its answer holds no message",
+      `a provider that does not answer (503, 429, the deadline) is PROVIDER_UNAVAILABLE, retryable; one that refuses (400), answers no JSON or no message is PROVIDER_REFUSED (${JSON.stringify([down503, timedOut, refused400, notJsonBody, noMessage])})`);
+  } finally {
+    provider.stop(true);
+  }
+
+  // No provider at all: a refused connection is an outage, retryable.
+  const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+  const closedBase = `http://127.0.0.1:${closed.port}/v1`;
+  closed.stop(true);
+  // A throw here would be the runtime's error passed through: caught, so it fails this row and not the suite.
+  const unreachable = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1", OB1_LLM_TIMEOUT: "2" }), "writer", "smart-ingest", { user: "Extract." })
+    .catch((e: unknown): ModelAnswer => ({ ok: false, refusal: { code: "REFUSED_INPUT", retryable: false, message: `thrown: ${String(e)}` } }));
+  assert(!unreachable.ok && unreachable.refusal.code === "PROVIDER_UNAVAILABLE" && unreachable.refusal.reason === "provider_unreachable",
+    `a provider no connection reaches is PROVIDER_UNAVAILABLE (${JSON.stringify(unreachable)})`);
+
+  // The request held to its bounds before anything is sent.
+  const bounds = await Promise.all([
+    { user: "" },
+    { user: "x".repeat(MODEL_LIMITS.text + 1) },
+    { user: "ok", system: "y".repeat(MODEL_LIMITS.text + 1) },
+    { user: "ok", temperature: 3 },
+    { user: "ok", max_tokens: 0 },
+    { user: "ok", max_tokens: MODEL_LIMITS.maxTokens + 1 },
+    { user: "ok", json: "yes" as unknown as boolean },
+  ].map((req) => pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1" }), "writer", "smart-ingest", req)));
+  assert(bounds.every((b) => !b.ok && b.refusal.code === "REFUSED_INPUT" && b.refusal.retryable === false),
+    `a request outside its bounds (no text, a text or system past ${MODEL_LIMITS.text} characters, a temperature past 2, max_tokens outside 1 to ${MODEL_LIMITS.maxTokens}, json not a boolean) is REFUSED_INPUT, nothing sent (${JSON.stringify(bounds.map((b) => (b.ok ? "ok" : b.refusal.code)))})`);
+
+  // The handler's context reaches it as the caller, for its plugin.
+  const seen: unknown[][] = [];
+  const stubCore = { pluginChat: async (...args: unknown[]) => { seen.push(args); return { ok: true, value: { text: "t", model: "m" } }; } } as unknown as Core;
+  const op = loadPlugins("example").flatMap((m) => m.operations)[0]!;
+  const ctxModel = await (async () => {
+    let got: unknown;
+    const probe = { ...op, handler: async (ctx: { model: { chat(req: unknown): Promise<unknown> } }) => { got = await ctx.model.chat({ user: "hi", json: true }); return ok({}); } };
+    await runOperation(probe as never, { core: stubCore, principal: { name: "reader", scope: "read" } as Principal }, {}).catch(() => undefined);
+    return got;
+  })();
+  assert(JSON.stringify(seen) === JSON.stringify([["example", "reader", { user: "hi", json: true }]]) && (ctxModel as { ok?: boolean })?.ok === true,
+    `ctx.model.chat is the core's call for the handler's plugin, made as the caller's key (${JSON.stringify(seen)})`);
 }
 
 report();

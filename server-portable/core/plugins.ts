@@ -302,6 +302,8 @@ export function contextFor(plugin: string, { core, principal, track }: OpDeps): 
     // Read when the handler asks, so an operation that touches no table never reaches the store.
     db: { tx: (fn) => core.pluginTx(plugin, fn) },
     caller: { name: principal.name, scope: principal.scope as PluginScope, ...(principal.agentId ? { agentId: principal.agentId } : {}) },
+    // The brain's model, as the caller for this plugin (core/model.ts): the gate reads the caller's key and the plugin.
+    model: { chat: (req) => core.pluginChat(plugin, principal.name, req) },
     call: async <K extends ToolName>(name: K, input: unknown) => {
       // The type admits a tool name alone; a plugin that casts past it is told, not served.
       if (!TOOL_NAMES.includes(name)) throw new Error(`ctx.call: ${JSON.stringify(name)} is no core operation`);
