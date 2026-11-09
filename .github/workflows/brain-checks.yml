@@ -440,6 +440,14 @@ jobs:
         working-directory: jev
         run: bun test-jev.ts
 
+      # H2O's adapter (SMD-3326): serve.handle, the whole of its POST /decide —
+      # one read at a time, SMD-2082's bounded queue, the 422 for a context it
+      # would read in part — with a fake reader and the standard library alone,
+      # so no model, no web framework and no install. ci-parity.sh runs bun
+      # scripts only (check 35), so a local run is `python3 jev/h2o/test_serve.py`.
+      - name: H2O adapter — one read at a time, the bounded queue, the 422
+        run: python3 jev/h2o/test_serve.py
+
       # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
       # with mutants, and the committed fixture held to them. Ids and closed
       # vocabulary only; no database, no model.

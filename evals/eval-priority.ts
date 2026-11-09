@@ -14,23 +14,29 @@
  *       DATABASE_URL (test-support's guards: refuseHeldDatabase refuses a
  *       database holding thoughts unless OB1_FIXTURE_RESET=1, and resetSchema
  *       a non-loopback one unless OB1_ALLOW_REMOTE_DB=1), plants the seeded
- *       corpus (priority.ts's plantRows), and runs every prompt through each
+ *       corpus (priority.ts's plantRows) and the facts beside it (plantFacts,
+ *       read back against the plan), and runs every prompt through each
  *       baseline read — a search tool called through the server's own core,
  *       the query embedded by its embedder through a stub provider on
  *       loopback — and each measured read. Prints the per-prompt hits, the
  *       table, the shuffled-gold mutant beside chance, the bar a priority read
  *       must clear against this baseline, and each measured read's verdict.
- *       Exits 1 when a baseline read errors, when a baseline read's scores
- *       differ from priority.ts's BASELINE, when the gold ceiling errors or
- *       cannot clear the bar, when a measured read reads the answer, when the
- *       dogfood rows are not sound, or when the mutant does not sit at chance
- *       for a baseline read or the ceiling. Keyless: no provider is called.
+ *       Exits 1 when fewer rows are planted than items, when the database
+ *       does not hold the planted facts (a fact dropped, or a statement 122
+ *       would not count), when a baseline read errors or returns more than
+ *       READ_K hits, when a baseline read's scores differ from priority.ts's
+ *       BASELINE, when the gold ceiling errors or cannot clear the bar, when a
+ *       measured read reads the answer or the answer-moved check misses the
+ *       ceiling, when the dogfood rows are not sound, or when the mutant does
+ *       not sit at chance for a baseline read or the ceiling. Keyless: no
+ *       provider is called.
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: a later read joins there (SMD-3668's
- * priority_weight, SMD-3669's agenda), and the run prints its verdict against
- * the baselines of the same run. A measured read's verdict does not fail the
- * run; the gold ceiling's, which runs the same path, does.
+ * current, filter), and its MEASURED: SMD-3669's agenda (SMD-3668's
+ * priority_weight needs the notes' facts where it reads them: priority.ts's
+ * Facts), and the run prints each one's verdict against the baselines of the
+ * same run. A measured read's verdict does not fail the run; the gold
+ * ceiling's, which runs the same path, does.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
@@ -46,11 +52,13 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
-  type DogfoodRow, type Item, type MeasureInput, type MeasuredRead, type PromptScore, type SearchTool,
+  BASELINE, DOGFOOD_READS, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** The read key's name: the key the eval's reads run under, never the claimant or the operator. */
+const READ_KEY = "priority-eval";
 const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
 
 /**
@@ -101,6 +109,38 @@ async function selfCheck(): Promise<void> {
   const zq = seedRow(ITEMS.find((i) => i.key === "zq-urgent")!, 0);
   assert(zq.metadata.source === "linear" && zq.metadata.issue === "ZQ-101" && zq.metadata.status_type === "unstarted" && zq.metadata.priority === "Urgent" && zq.metadata.genre !== undefined && zq.content.startsWith("ZQ-101 — "), "a board row is planted as board-sync writes it: issueFacets' metadata (source, issue, status, priority, genre) and renderIssue's text");
   assert(Object.keys(seedRow(ITEMS[0], 0).metadata).length === 0, "a personal row carries no tracker facets");
+  // The facts planted beside the rows (SMD-3669 PR 2): every board item recorded as board-sync records it, the
+  // claimed one another agent's; every personal note an open item, its day, done and level from its facts.
+  const plan = factPlan(ITEMS, "2026-02-27");
+  const at = (key: string) => plan.items.find((p) => ITEMS[p.index].key === key);
+  assert(plan.board.length === ITEMS.filter((i) => i.issue).length && plan.items.length === ITEMS.filter((i) => !i.issue).length && JSON.stringify(plan.claims) === JSON.stringify(["ZQ-103"]),
+    `the plan records every board item, opens every personal note as an item (chatter too), and claims the claimed ticket alone (${plan.board.length}, ${plan.items.length}, ${plan.claims})`);
+  assert(at("bill")?.due === "2026-02-28" && at("gutters")?.due === "2026-02-13" && at("renewal")?.due === "2026-03-29" && at("cat")?.due === null && at("claim-done")?.done === true && at("bill")?.done === false
+      && at("passport")?.level === 4 && at("coffee")?.level === 0 && at("cat")?.level === null && at("commitment")?.actor === "priority-eval-meeting-notes" && at("bill")?.actor === "priority-eval-operator",
+    "an item's day is the run's day moved by its facts, in calendar days across a month's end; done and the level are its facts'; its writer opens it");
+  assert(dayFrom("2028-02-28", 1) === "2028-02-29" && dayFrom("2026-03-01", -1) === "2026-02-28" && dueInstant("2026-02-28") === "2026-03-01T00:00:00Z",
+    "a day moves across a leap day and back across a month; a bare due day is held as the next day's start in UTC");
+  const facts = plannedFacts(ITEMS, "2026-02-27");
+  const named = [
+    "source linear ZQ-101 on zq-urgent", "statement on ticket:ZQ-101 level 4 tier 2 by board-sync due none not_before none due_ref none",
+    "statement on ticket:ZQ-102 level 3 tier 2 by board-sync due none not_before none due_ref none", "statement on ticket:ZQ-106 level 1 tier 2 by board-sync due none not_before none due_ref none",
+    "link zq-urgent linear blocks ZQ-104", "link zq-blocked linear blocked_by ZQ-101", "claim ZQ-103 piece none by priority-eval-other-agent",
+    "item from bill open due 2026-03-01T00:00:00Z by priority-eval-operator", "item from gutters open due 2026-02-14T00:00:00Z by priority-eval-operator",
+    "item from claim-done done due none by priority-eval-operator", "item from commitment open due 2026-03-03T00:00:00Z by priority-eval-meeting-notes",
+    "statement on item:passport level 4 tier 1 by priority-eval-operator due none not_before none due_ref none",
+    "statement on item:coffee level 0 tier 1 by priority-eval-operator due none not_before none due_ref none",
+  ];
+  assert(facts.length === 31 && named.every((l) => facts.includes(l)) && !facts.some((l) => l.startsWith("statement on ticket:ZQ-108")) && JSON.stringify([...facts].sort()) === JSON.stringify(facts),
+    `the facts a seeded database must hold, each by its value: eight sources, seven ticket levels from the items' facts (No priority states none), the blocks link from both sides, one claim, ten items with their due instants (a bare day's end, the next day's start), three item levels (${facts.length}: ${facts.slice(0, 2).join("; ")}…)`);
+  const zqLevels = ITEMS.filter((it) => it.issue && it.facts.level !== undefined).map((it) => `${it.issue!.identifier} ${it.facts.level}`);
+  assert(zqLevels.join(",") === "ZQ-101 4,ZQ-102 3,ZQ-103 3,ZQ-104 3,ZQ-105 2,ZQ-106 1,ZQ-107 3" && zqLevels.every((l) => facts.some((f) => f.startsWith(`statement on ticket:${l.replace(" ", " level ")} `))),
+    `every ticket's planned level is its facts', so a mapping change in board-sync's writer is a difference, not a shared move (${zqLevels})`);
+  // The facts, not the label: a High whose facts state 0, and one whose facts state none, plan 0 and no statement
+  // (review pass 3: every fixture ticket's facts equal its label's mapping, so the row above could not tell).
+  const relabelled = ITEMS.map((it) => (it.key === "zq-high" ? { ...it, facts: { ...it.facts, level: 0 } } : it.key === "zq-medium" ? { ...it, facts: { ...it.facts, level: undefined } } : it));
+  const off = plannedFacts(relabelled, "2026-02-27");
+  assert(off.includes("statement on ticket:ZQ-102 level 0 tier 2 by board-sync due none not_before none due_ref none") && !off.some((l) => l.startsWith("statement on ticket:ZQ-105")),
+    "a ticket's planned level follows its facts against its Linear label: a High stated 0 plans 0, a Medium with no level plans none");
   assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
@@ -214,6 +254,7 @@ async function selfCheck(): Promise<void> {
   assert(noPick.some((p) => p.includes("pick is not")) && !noPick.some((p) => p.includes("pick itself")), "a row missing its pick says so, and not that its alternative is the pick itself");
   assert(dogfoodProblems([null, rows[0]]).some((p) => p.includes("not an object")), "a row that is not an object, before another, is reported, not thrown on");
   assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
+  assert([...READS, ...MEASURED].every((r) => DOGFOOD_READS.includes(r.name)), `every seeded read, baseline and measured, is a name a dogfood row may use (${DOGFOOD_READS.join(", ")})`);
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
   assert(dogfoodProblems([{ ...rows[0], date: 20261314 }]).some((p) => p.includes("date")), "a row's date must be a real YYYYMMDD day");
   assert(dogfoodProblems([{ ...rows[0], pick: "SMD-2888" as unknown as number }]).some((p) => p.includes("pick")), "a pick is the ticket's number, not its key (check 9 allows numbers and ids)");
@@ -244,12 +285,26 @@ async function seeded(): Promise<void> {
   const seeds = ITEMS.map((it, i) => seedRow(it, i));
   const keyOf = new Map(seeds.map((row, i) => [row.id, ITEMS[i].key] as const));
   let planted = 0;
+  let facts: PlantedFacts = [];
+  let today = "";
+  const factStore = new SqlStore(url, { max: 1 });
   try {
     planted = await plantRows(sql, seeds);
+    // Before the facts, whose writers would refuse a missing row first and hide the count (review pass 3).
+    if (planted !== ITEMS.length) throw new Error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`);
+    // The facts on the database's own day, so the urgency windows the reads compute agree with the plan's days;
+    // to_char, so the session's DateStyle never shapes it.
+    today = String(((await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d`)[0] as { d: string }).d);
+    facts = await plantFacts(sql, factStore, ITEMS, seeds, today);
   } finally {
+    await factStore.close();
     await sql.close();
   }
-  if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
+  const want = plannedFacts(ITEMS, today);
+  // As sorted arrays, so a fact planted twice is a difference too; the message names each side's lines the other lacks.
+  const less = (a: readonly string[], b: readonly string[]) => { const left = [...b]; return a.filter((l) => { const i = left.indexOf(l); if (i < 0) return true; left.splice(i, 1); return false; }); };
+  const missing = less(want, facts), extra = less(facts, want);
+  if (JSON.stringify(facts) !== JSON.stringify(want)) { console.error(`the database holds the facts otherwise than planned: missing ${JSON.stringify(missing)}; not planned ${JSON.stringify(extra)}`); process.exit(1); }
 
   // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
   // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.
@@ -269,12 +324,12 @@ async function seeded(): Promise<void> {
   Object.assign(process.env, {
     DATABASE_URL: url, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_LOCAL: "1",
     OB1_EMBEDDING_MODEL: STUB_MODEL, OB1_EMBEDDING_DIM: String(STUB_DIM), OB1_LLM_TIMEOUT: "10",
-    MCP_ACCESS_KEYS: `priority-eval:read:${hashKey(KEY_RAW)}`,
+    MCP_ACCESS_KEYS: `${READ_KEY}:read:${hashKey(KEY_RAW)}`,
   });
   const worker = await mcpUnderTest();
   if (!servedByMcpServer()) { console.error("the server under test is not the MCP server (mcp-server/stack.ts)"); process.exit(1); }
-  // The server's request lines (one per tool call, timestamped) out of the eval's output, which two runs must print
-  // alike. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
+  // The server's request lines (one per tool call, timestamped) out of the eval's output: their times differ from run
+  // to run. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
   // which only the stack's own install carries (test-server's rule on db/ and evals/ imports).
   const telemetry = "../server-portable/telemetry.ts";
   ((await import(telemetry)) as { useRequestLog: (next: (line: string) => void) => unknown }).useRequestLog(() => {});
@@ -402,7 +457,7 @@ async function seeded(): Promise<void> {
     for (const f of failures) console.error(f);
     process.exit(1);
   }
-  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every read.`);
+  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every baseline read and the ceiling.`);
 }
 
 if (import.meta.main) {
