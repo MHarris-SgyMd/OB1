@@ -4268,7 +4268,8 @@ if (want("9f")) {
       }
       // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
       if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
-      // A thought whose call meets its deadline with no answer, the probe's answered (SMD-2636 PR 3b).
+      // A zz-deadline thought's call never answers, so its deadline passes; the probe after it answers unless a flag
+      // above says otherwise (SMD-2636 PR 3b).
       if (input.includes("zz-deadline") && deadlinesHang) {
         if (probeDownAfterDeadline) probeDownNext = true;
         return neverAnswers();

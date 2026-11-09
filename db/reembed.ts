@@ -2361,34 +2361,30 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   if (sendBack(msg, read.suspect) === "outage") return;
                   outcome = { outcome: "failed", error: again };
                 } else {
-                  // `probe`: a deadline with no answer, or a 4xx no rule reads. The probe's answer decides
-                  // (probedFault). Answered: the thought's, such as a content filter's. Refused: the request's.
-                  // No answer: the provider's outage, the thought a suspect. The probe is part of the call in hand:
-                  // the pass's caller aborting it (abortInHand) sets the thought back, as an aborted call does, where
-                  // a probe deaf to it held the pass up to the call's timeout after a deadline (review pass 1). Its
-                  // wait for a slot on the model-call seam is not the call's time, as the call's is not (review
-                  // pass 3: a probe only queued was aborted as a call past its bound). Another worker's refusal
-                  // stopping every worker, it is not made (review pass 3: it held the exit up to a timeout more), and the
-                  // drain's end — another worker's refusal or outage, the record moved — ends it, the thought handed
-                  // back or the outage joined (review pass 4: a refusal during the probe held the exit). It counts its
-                  // slot wait in the call's own count (review pass 4: two counts on one call misread a queued probe).
+                  // `probe`: a deadline with no answer, a 4xx or redirect no rule reads, an error of no known kind.
+                  // The probe's answer decides (probedFault): answered, the thought's (a content filter's); refused,
+                  // the request's; no answer, the provider's outage, the thought a suspect. The probe is part of the
+                  // call in hand: it counts its slot wait in the call's own count, not as the call's time; the pass's
+                  // caller aborting the call (abortInHand) sets the thought back; and the drain's end — another
+                  // worker's outage or refusal, the record moved — cuts it short, the outage joined or the thought
+                  // handed back. After another worker's refusal it is not made at all (review passes 1, 3 and 4: a
+                  // probe deaf to these held the pass, or the exit, up to a call's timeout).
                   if (configError !== null) return;
-                  const call = inCall.get(workerId);
-                  const drain = drainEnds.signal;
-                  const probe = await withCallWaits(callWaits, () => embedProbe(AbortSignal.any([onStop.signal, drain, ...(call ? [call.abort.signal] : [])]), probeGate.allowed ? probeSubject : rowSubject));
+                  const drainEnd = drainEnds.signal;
+                  const probe = await withCallWaits(callWaits, () => embedProbe(AbortSignal.any([onStop.signal, drainEnd, entry.abort.signal]), probeGate.allowed ? probeSubject : rowSubject));
                   const act = probedFault(probe);
-                  if (call?.aborted) {
+                  if (entry.aborted) {
                     outcome = { outcome: "setBack" };
                   } else if (act === "thought") {
                     // Said so, and that a retry revisits it, as extract's does (review pass 1).
                     outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's; --retry-failed revisits it)` };
-                  } else if (stopping || configError !== null || (drain.aborted && outage.reason === null)) {
+                  } else if (stopping || configError !== null || (drainEnd.aborted && outage.reason === null)) {
                     // Handed back: a stop, another worker's refusal (its words kept, not this probe's), the record moved.
                     return;
                   } else if (act === "outage") {
                     // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its
                     // next (review pass 5). Another worker's outage cut the probe short: joined, in this call's words.
-                    if (sendBack(isOut(probe) && !drain.aborted ? probe.why : msg, true) === "outage") return;
+                    if (sendBack(isOut(probe) && !drainEnd.aborted ? probe.why : msg, true) === "outage") return;
                     outcome = { outcome: "failed", error: again };
                   } else {
                     stopRefused(probe.state === "refused" ? probe.why : undefined);
