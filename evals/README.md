@@ -4645,7 +4645,13 @@ branch creation (the maintainer's choice). The agenda is then asked with its clo
 **What it can't replay:**
 * **The description:** Linear's history says only that it changed, so a row's text past its header is today's. The
   agenda reads none of it.
-* **Issues gone from today's census:** a trashed issue, or one that has left the initiative since, isn't replayed.
+* **Issues gone from today's census:** a trashed issue, or one that has left the initiative since, isn't replayed. A
+  ticket it blocked then reads that blocker as unknown, which counts as open, so it may read as blocked though the
+  blocker was settled at the moment.
+* **The initiative's projects then:** board membership is judged against today's projects, since Linear's issue
+  history doesn't record a project joining or leaving the initiative. On 11-02 no project had changed that way; three
+  created on 11-06 hold only issues created after the moment, or issues that roll back to their earlier project.
+* **An unarchive:** an archive after the moment is undone, an unarchive isn't restored. The agenda doesn't read it.
 
 Nothing of the board is committed.
 
@@ -4654,8 +4660,12 @@ Nothing of the board is committed.
   stable brain's board-sync uses the same key.
 * **What a history page costs:** it is charged by the page size asked for. A 100-entry page cost about 1,500 points
   an issue, and one run at that size spent the hour.
-* **How the replay stays cheap:** it reads 25 entries a page, 20 issues a request, and only back to the moment. It
-  never asks for an issue created after the moment. The 11-02 replay cost about 470,000 points.
+* **How the replay stays cheap:** it reads 25 entries a page, 20 issues a request, and only back to the moment, and
+  never asks for the history of an issue created after it. It still reads every issue on today's board once, with its
+  relations and labels. The 11-02 replay cost about 470,000 points.
+* **Before any of that,** it resets the throwaway database (refusing one that holds thoughts) and reads Linear's
+  remaining budget, refusing below 1,000,000: a run cut short by the limit keeps nothing, and the hour is
+  board-sync's too.
 
 **2026-11-02, 14:11Z.** This is the session that asked "what is the highest-value unstarted issue?" and picked
 SMD-2908 (the dogfood row of that date). SMD-3669's Verify says SMD-2908 comes first among the board's unstarted items
