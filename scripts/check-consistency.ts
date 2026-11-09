@@ -7721,6 +7721,7 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
   ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
+  ["server-portable/test-local-provider.ts", "SLOTS_CHANNEL, (k) =>", "a Postgres LISTEN on the background slots' channel (Bun's SQL listen, SMD-3379 PR 2c-1): a subscription on a database connection, no port bound"],
 ];
 
 /**
