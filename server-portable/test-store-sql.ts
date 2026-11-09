@@ -1999,18 +1999,18 @@ console.log("\n[22] effectivePriority reads migration 122's composed read (SMD-3
     const [r] = await store.effectivePriority([{ kind: "thought", key: t.id }], { now: NOW });
     const [tuned] = await store.effectivePriority([{ kind: "THOUGHT", key: t.id.toUpperCase() }], { now: NOW, weights: { soon: 3 } });
     const [today] = await store.effectivePriority([{ kind: "thought", key: t.id }], { now: "2027-01-01T00:00:00Z" });
-    assert(said.outcome === "asserted" && r?.item.kind === "thought" && r.item.key === t.id && r.effective === 4 && r.level === 2 && r.urgency === 2 && r.overdue === false
+    assert(said.outcome === "asserted" && r?.item.kind === "thought" && r.item.key === t.id && r.effective === 2.4 && r.level === 2 && r.urgency === 0.4 && r.overdue === false
         && r.dueAt === "2027-03-12T00:00:00.000Z" && r.dueFrom === "stated" && r.unblocks === 0 && r.settled === false && r.waiting === false && r.inheritedFrom === null
-        && JSON.stringify(r.terms.map((x) => [x.term, x.value])) === JSON.stringify([["level", 2], ["urgency", 2]]) && r.terms[1].detail.window === "soon" && r.terms[0].detail.maker === "smd-3667-store"
+        && JSON.stringify(r.terms.map((x) => [x.term, x.value])) === JSON.stringify([["level", 2], ["urgency", 0.4]]) && r.terms[1].detail.window === "soon" && r.terms[0].detail.maker === "smd-3667-store"
         && r.winner?.maker.name === "smd-3667-store" && r.winner.tierName === "operator" && r.passedOver.length === 0,
-      `a Medium due by the end of tomorrow, on a pinned clock: effective 4, the level and the urgency named, the operator's statement the winner (${JSON.stringify(r)?.slice(0, 200)})`);
+      `a Medium due by the end of tomorrow, on a pinned clock: effective 2.4 (127's level first), the level and the urgency named, the operator's statement the winner (${JSON.stringify(r)?.slice(0, 200)})`);
     assert(tuned?.effective === 5 && tuned.item.key === t.id && today?.effective === 2 && today.urgency === 0,
       `soon overridden to 3 reads 5, the item normalised as 116 keys it; on a clock ten weeks before, no urgency (${tuned?.effective}, ${today?.effective})`);
     // The database's clock when none is pinned: a due time a minute past is overdue, never a pinned day's.
     const soonItem = await store.captureThought({ content: "smd-3667 call back within the hour", payload: { metadata: {} }, embedding: unit(31) });
     await store.assertPriority({ kind: "thought", key: soonItem.id, level: 2, dueAt: new Date(Date.now() - 60_000).toISOString(), actor: { name: "smd-3667-store", via: "test-store-sql" }, scope: "write" });
     const [live] = await store.effectivePriority([{ kind: "thought", key: soonItem.id }]);
-    assert(live?.overdue === true && live.effective === 5, `with no clock pinned the database's is read: a due time a minute past is overdue (${live?.overdue}, ${live?.effective})`);
+    assert(live?.overdue === true && live.effective === 2.6, `with no clock pinned the database's is read: a due time a minute past is overdue (${live?.overdue}, ${live?.effective})`);
     const refused = async (run: () => Promise<unknown>) => { try { await run(); return "none"; } catch (e) { return e instanceof PriorityRefused ? e.problem : `other: ${(e as Error).message}`; } };
     const [weight, key, range, clock, endless] = [await refused(() => store.effectivePriority([], { weights: { soonn: 1 } as never })), await refused(() => store.effectivePriority([{ kind: "ticket", key: "not a key" }])),
       await refused(() => store.effectivePriority([], { weights: { depth: 9 } })), await refused(() => store.effectivePriority([], { now: "not a time" })), await refused(() => store.effectivePriority([], { now: "infinity" }))];

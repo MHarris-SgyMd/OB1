@@ -4236,7 +4236,7 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
       [urgentRow, "self:ticket:PWU-1:4"],
       [doneRow, "self:ticket:PWD-1:4:settled"],
       [underDone, "ticket:PWD-1:4:settled"],
-      [underHigh, `ticket:${last}:5`],
+      [underHigh, `ticket:${last}:3.4`],
       [statedNone, "self:thought:-:0 ticket:PWU-1:4"],
       [mention, "ticket:PWU-1:4"],
       [low, "self:thought:-:1"],
@@ -4245,7 +4245,7 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     assert(!plainAll.isError && wrong.length === 0,
       `each hit's label: a note under an Urgent ticket itself High by inheritance, then the ticket; a ticket's row once, as its ticket; a finished one settled at its level; a note under it nothing of its own; a mention the ticket alone; a stated None and a Low their own (${wrong.join("; ") || "all as the ADR reads them"})`);
     assert(plainAll.text.includes("Priority: this thought at 3 (inherited 3 from ticket PWU-1 (urgent (4), 1 hop)); ticket PWU-1 at 4 (urgent (4)).")
-        && plainAll.text.includes(`Priority: ticket ${last} at 5 (high (3); +2 due by the end of ${tomorrow} (UTC)).`),
+        && plainAll.text.includes(`Priority: ticket ${last} at 3.4 (high (3); +0.4 due by the end of ${tomorrow} (UTC)).`),
       `the text says each item's effective priority and its terms (${plainAll.text.match(/Priority: .*/)?.[0]})`);
     const rankedAll = await result("search_thoughts", { query, limit: 20, threshold: -1, filter, priority_weight: 0.5 });
     assert(!rankedAll.isError && want.every(([id, w]) => said(rankedAll, id) === w),
