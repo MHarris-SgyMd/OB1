@@ -2287,11 +2287,11 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
   const m = await mcp("agenda", { project: P });
   type It = { key: string; rank: number; effective: number; terms: { term: string }[] };
   const items = (r.body.items ?? []) as It[];
-  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9912 SMD-9911 SMD-9914"
-      && items[0].effective === 4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
-    `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
+  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9911 SMD-9912 SMD-9914"
+      && items[1].effective === 2.4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
+    `REST and MCP give one agenda, each stamped with its own clock, level first (127): the High (3), the Medium due tomorrow (2.4), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
   const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
-  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
+  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9911 \("backlog"\) "SMD-9911 — \[17\] SMD-9911" — 3: high \(3\)\n2\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 2\.4: medium \(2\); \+0\.4 due by the end of /.test(m.text)
       && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
@@ -2304,8 +2304,8 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
   const its = await rest("GET", "/v1/agenda?source=items&limit=100");
   const itsMcp = await mcp("agenda", { source: "items", limit: 100 });
   const mine17 = ((its.body.items ?? []) as (It & { kind: string })[]).find((i) => i.key === String((opened.body.item as { id?: string } | undefined)?.id));
-  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 4 && !itsMcp.isError
-      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 4: no priority stated \\(read as 2\\); \\+2 due by the end of `).test(itsMcp.text),
+  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 2.4 && !itsMcp.isError
+      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 2\\.4: no priority stated \\(read as 2\\); \\+0\\.4 due by the end of `).test(itsMcp.text),
     `an open item due tomorrow is listed over REST and said over MCP, unknown 2 plus its urgency (${its.status} ${mine17?.effective} | ${itsMcp.text.split("\n").find((l) => l.includes("water the ferns"))})`);
   const reader = await rest("GET", q, undefined, KEYS.reader);
   const hook = await rest("GET", q, undefined, KEYS.hook);
@@ -2833,11 +2833,11 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   const restRows = [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row];
   const due = `by the end of ${tomorrow} (UTC)`;
   assert(set.status === 200 && restRows.every((r) => r?.priority?.length === 1 && r.priority[0].kind === "ticket" && r.priority[0].key === "SMD-9921" && r.priority[0].self === false
-        && r.priority[0].effective === 5 && r.priority[0].level === 3 && r.priority[0].urgency === 2 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
+        && r.priority[0].effective === 3.4 && r.priority[0].level === 3 && r.priority[0].urgency === 0.4 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
     `over REST each of the five carries the High due tomorrow, its terms named; the unknown SMD-9922 no label (${JSON.stringify(restRows.map((r) => r?.priority?.map((p) => `${p.key} ${p.effective}`)))})`);
-  const line = `Priority: ticket SMD-9921 at 5 (high (3); +2 due ${due}).`;
+  const line = `Priority: ticket SMD-9921 at 3.4 (high (3); +0.4 due ${due}).`;
   const scs = [pick(stMcp.sc.hits, tid), pick(kwMcp.sc.hits, tid), pick(listMcp.sc.thoughts, tid)];
-  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 5 && !("terms" in h.priority[0])),
+  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 3.4 && !("terms" in h.priority[0])),
     `over MCP the three text tools print the line, and their values carry the item without its terms (${stMcp.text.match(/Priority: .*/)?.[0]})`);
   const title = `[priority: ticket SMD-9921 high (3), due ${due}] `;
   const compatHit = pick(JSON.parse(compatMcp.text).results, tid);

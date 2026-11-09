@@ -18609,6 +18609,92 @@ console.log("\n[113] Migration 126: the agenda's keys scope — the tickets name
   assert(JSON.stringify(again) === JSON.stringify(named) && await defs() === defsBefore, `a re-apply is a no-op: the same read and query_log's same constraints`);
 }
 
+console.log("\n[114] Migration 127: level first — the default weights after the level scaled by 0.2 (soon 0.4, week 0.2, overdue 0.6, unblocks 0.1 or 0.2), so an overdue note with no stated level stays below an Urgent ticket, a High due tomorrow below an Urgent, a Medium due tomorrow below a High, and a Low overdue and blocking three below a Medium; within a level, 122's order; 122's weights by name give 122's numbers; a level 0 still takes no urgency; the shape; a re-apply a no-op (SMD-4177)");
+{
+  const file = files.find((f) => /^\d{3}_effective_priority_level_first\.sql$/.test(f)) ?? "no NNN_effective_priority_level_first.sql";
+  // [109] and [112] re-apply 122's and 125's effective_priority, which 127 replaces: this section holds 127's.
+  await reapply(file.slice(0, 4));
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('lf-op', 'operator')`);
+  const OP = { name: "lf-op", scope: "write" };
+  const OLD = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  type Row = { item_key: string; effective: string; urgency: string; terms: { term: string; value: number }[] };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "lf-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  const ticket = async (issue: string, links: [string, string][] = [], statusType = "unstarted") => {
+    const content = `[114] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: statusType, status_type: statusType, linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+  };
+  const put = async (kind: string, key: string, level: number, due: string | null = null) => {
+    const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, NULL, NULL, NULL, false, $5::jsonb) AS r`,
+      [kind, key, level, due, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[114] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+  };
+  const eff = async (items: [string, string][], weights: object | null = null) =>
+    (await db.query<Row>(`SELECT item_key, effective::text AS effective, urgency::text AS urgency, terms FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), weights === null ? null : JSON.stringify(weights), NOW])).rows;
+  const nums = (rows: Row[]) => rows.map((r) => Number(r.effective));
+  const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}=${t.value}`).join(" ");
+
+  // The shape: effective_priority's comment names 127; its defaults are the scaled ones.
+  const c = (await db.query<{ c: string; d: string }>(`SELECT obj_description('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure, 'pg_proc') AS c,
+      pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0];
+  assert(/level first, migration 127 \/ SMD-4177/.test(c.c) && /"soon": 0\.4, .*"week": 0\.2, .*"overdue": 0\.6,/s.test(c.d) && /"unblocks_one": 0\.1, "unblocks_many": 0\.2,/.test(c.d),
+    "effective_priority is 127's: its comment names the migration, its defaults the scaled weights");
+
+  // The ticket's case: an overdue note with no stated level stays below an Urgent ticket that blocks one.
+  const gutters = await thoughtAs("[114] clean the gutters, two weeks overdue");
+  const opened = (await db.query<{ r: { outcome: string } }>(`SELECT open_item('clean the gutters', NULL, '2027-02-24', $1::uuid, NULL, false, $2::jsonb) AS r`, [gutters, JSON.stringify(OP)])).rows[0].r;
+  if (opened.outcome !== "opened") throw new Error(`[114] fixture: open_item answered ${JSON.stringify(opened)}`);
+  await ticket("SMD-9961", [["blocks", "SMD-9962"]]); await ticket("SMD-9962");
+  await put("ticket", "SMD-9961", 4);
+  const [g, u] = await eff([["thought", gutters], ["ticket", "SMD-9961"]]);
+  const [gOld, uOld] = await eff([["thought", gutters], ["ticket", "SMD-9961"]], OLD);
+  assert(Number(g.effective) === 2.6 && named(g) === "unknown=2 overdue=0.6" && Number(u.effective) === 4.1 && named(u) === "level=4 unblocks=0.1"
+         && Number(gOld.effective) === 5 && Number(uOld.effective) === 4.5,
+    `the overdue gutters read 2.6 below the Urgent ticket's 4.1, the terms the same names; with 122's weights by name, 5 above 4.5 as before (${named(g)}; ${named(u)}; old ${gOld.effective}, ${uOld.effective})`);
+
+  // No term crosses a level: a High due tomorrow under an Urgent; a Medium due tomorrow under a High; a Low overdue and
+  // blocking three under a Medium; and within one level 122's order (overdue, then soon, then the week, then none).
+  for (const t of ["SMD-9963", "SMD-9964", "SMD-9965", "SMD-9966", "SMD-9967", "SMD-9968", "SMD-9969", "SMD-9971", "SMD-9972", "SMD-9973"]) await ticket(t);
+  await ticket("SMD-9970", [["blocks", "SMD-9971"], ["blocks", "SMD-9972"], ["blocks", "SMD-9973"]]);
+  await put("ticket", "SMD-9963", 4);                              // Urgent, no date
+  await put("ticket", "SMD-9964", 3, "2027-03-12T00:00:00Z");     // High, due tomorrow
+  await put("ticket", "SMD-9965", 3);                              // High, no date
+  await put("ticket", "SMD-9966", 2, "2027-03-12T00:00:00Z");     // Medium, due tomorrow
+  await put("ticket", "SMD-9967", 2, "2027-03-01T00:00:00Z");     // Medium, overdue
+  await put("ticket", "SMD-9968", 2, "2027-03-15T00:00:00Z");     // Medium, within the week
+  await put("ticket", "SMD-9969", 2);                              // Medium, no date
+  await put("ticket", "SMD-9970", 1, "2027-03-01T00:00:00Z");     // Low, overdue, blocks three
+  const ladder = await eff([["ticket", "SMD-9963"], ["ticket", "SMD-9964"], ["ticket", "SMD-9965"], ["ticket", "SMD-9967"], ["ticket", "SMD-9966"], ["ticket", "SMD-9968"], ["ticket", "SMD-9969"], ["ticket", "SMD-9970"]]);
+  const old = await eff([["ticket", "SMD-9964"], ["ticket", "SMD-9963"], ["ticket", "SMD-9966"], ["ticket", "SMD-9965"]], OLD);
+  assert(JSON.stringify(nums(ladder)) === JSON.stringify([4, 3.4, 3, 2.6, 2.4, 2.2, 2, 1.8]) && JSON.stringify(nums(old)) === JSON.stringify([5, 4, 4, 3]),
+    `level first: Urgent 4, High due tomorrow 3.4, High 3, then the Mediums overdue 2.6, due tomorrow 2.4, within the week 2.2, undated 2, and a Low overdue that blocks three 1.8, under every Medium; under 122's weights the High due tomorrow (5) passed the Urgent and the Medium due tomorrow (4) the High (${nums(ladder).join(", ")}; old ${nums(old).join(", ")})`);
+
+  // A level 0 still takes no urgency, and a settled item neither urgency nor unblocks, as 122.
+  await ticket("SMD-9974");
+  await put("ticket", "SMD-9974", 0, "2027-03-01T00:00:00Z");
+  await ticket("SMD-9975", [["blocks", "SMD-9976"]], "completed"); await ticket("SMD-9976");
+  await put("ticket", "SMD-9975", 3, "2027-03-01T00:00:00Z");
+  const [zero, done] = await eff([["ticket", "SMD-9974"], ["ticket", "SMD-9975"]]);
+  assert(Number(zero.effective) === 0 && Number(zero.urgency) === 0 && named(zero) === "level=0" && Number(done.effective) === 3 && Number(done.urgency) === 0 && named(done) === "level=3",
+    `a level 0 overdue still reads 0 with no urgency term; a completed High, overdue and blocking an open ticket, keeps its 3 with neither term (${named(zero)}; ${named(done)})`);
+
+  // A re-apply is a no-op.
+  const before = JSON.stringify(ladder);
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await eff([["ticket", "SMD-9963"], ["ticket", "SMD-9964"], ["ticket", "SMD-9965"], ["ticket", "SMD-9967"], ["ticket", "SMD-9966"], ["ticket", "SMD-9968"], ["ticket", "SMD-9969"], ["ticket", "SMD-9970"]])) === before,
+    "a re-apply is a no-op: the same reads");
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

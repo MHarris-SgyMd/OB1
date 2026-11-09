@@ -472,13 +472,16 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   1 and the last 1/n. So the search's own order, ties and all, is what weighs,
   and a text match or a literal-only query's similarity order is kept too. Their
   fusion scores are 0, and a score over the top's would have left those rows to
-  priority alone. Priority is the effective priority (a level, unknown counted as
-  2, plus urgency and what it unblocks) over 9, the default weights' largest.
-  Ties keep the window's order.
+  priority alone. Priority is the effective priority over 5.8, the default
+  weights' largest. That is a level (unknown counted as 2), plus up to 0.8 from
+  urgency and what it unblocks, which order items of one level and never lift
+  one past the next (migration 127, SMD-4177; 9 under 122's weights). Ties keep
+  the window's order.
 - **`min_priority`** keeps the matches whose priority is known (counted, read
-  from their open items, or inherited from what they serve) and whose effective priority is at least the
-  level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
-  unknown priority never passes.
+  from their open items, or inherited from what they serve) and whose effective
+  priority is at least the level. Since migration 127 the level decides it: a
+  High due tomorrow (3.4) passes at high, not at urgent. An unknown priority
+  never passes.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
@@ -514,7 +517,7 @@ priority; ten are named and `priorityMore` counts the rest. A settled item is
 ordered by the level it keeps and said settled: whether work is finished is its
 own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
 can come before an open High. Over MCP the three text tools print
-`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+`Priority: ticket SMD-2908 at 3.4 (high (3); +0.4 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
 `[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed
