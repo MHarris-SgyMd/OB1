@@ -795,16 +795,18 @@ export const AGENDA_READ: MeasuredRead = {
 export const PRIORITY_WEIGHT = 0.5;
 
 /**
- * SMD-3668's priority_weight, as a client would send it: `search_thoughts` with `priority_weight` at PRIORITY_WEIGHT
- * and every other argument at its default, called over MCP as the baseline reads are. The tool re-ranks its top
- * min(100, 4 × limit) matches by its place among them and 122's effective priority, each match read as a thought:
- * a ticket's row reads its ticket's level, and a note what is stated on it or inherited from a ticket it is about,
- * which on this set is nothing, since a note's facts sit on its open item (Facts; SMD-4149).
+ * SMD-3668's priority_weight at `weight`, as a client would send it: `search_thoughts` with `priority_weight` at that
+ * weight and every other argument at its default, called over MCP as the baseline reads are. The tool re-ranks its
+ * top min(100, 4 × limit) matches by its place among them and 122's effective priority, each match read as a
+ * thought: a ticket's row reads its ticket's level, and a note what is stated on it or inherited from a ticket it is
+ * about, which on this set is nothing, since a note's facts sit on its open item (Facts; SMD-4149).
  */
-export const PRIORITY_WEIGHT_READ: MeasuredRead = {
-  name: "priority_weight", ticket: "SMD-3668",
-  run: ({ query, callTool }) => callTool("search_thoughts", { query, priority_weight: PRIORITY_WEIGHT }),
-};
+export function priorityWeightRead(weight: number, name = "priority_weight"): MeasuredRead {
+  return { name, ticket: "SMD-3668", run: ({ query, callTool }) => callTool("search_thoughts", { query, priority_weight: weight }) };
+}
+
+/** The read at the pre-registered weight: the one whose verdict counts. eval-priority.ts's --priority-weight adds others, each exploratory. */
+export const PRIORITY_WEIGHT_READ: MeasuredRead = priorityWeightRead(PRIORITY_WEIGHT);
 
 /** The reads under measurement, each with its ticket. */
 export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ, PRIORITY_WEIGHT_READ];

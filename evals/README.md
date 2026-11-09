@@ -4389,6 +4389,7 @@ are meant to fix that, and none turns on by default without this number.
 ```bash
 bun eval-priority.ts --self-check                       # the rules; no database, no model
 ../db/with-postgres.sh bun eval-priority.ts --seeded    # the seeded set on a throwaway Postgres; keyless
+../db/with-postgres.sh bun eval-priority.ts --seeded --priority-weight 0.7,0.9   # and priority_weight at those weights, exploratory
 ```
 
 **The seeded set.** It has 18 items and 7 prompts, with the gold order for each prompt written by judgement, not
@@ -4480,6 +4481,12 @@ by their place and 122's effective priority, each read as a thought. A ticket's 
 reads its ticket's level. A note reads unknown 2, since its facts sit on its open item, which `effective_priority`
 doesn't read (SMD-4149).
 
+**`--priority-weight w,...`** measures the same read at other weights, beside the pre-registered one, each as an
+exploratory read named `priority_weight@<w>`. Each weight is from 0 to 1; a weight listed twice, the pre-registered
+0.5, and any other option are refused. An exploratory read is scored, checked for reading the answer and set against
+the bar like the measured reads, but its line says it is no verdict. Choosing a weight from a sweep over these
+prompts would be fitting to the test, so a sweep shows how the read moves with its weight, and nothing more.
+
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;
 * **top-3:** the gold's first item is among the read's first three;
@@ -4534,7 +4541,9 @@ These mutants are each refused:
   due times hours off, a statement on a note and an operator's statement on a ticket (each fails the seeded run on
   its own message); a plan that takes a ticket's level from its Linear label, not its facts (the self-check);
 * a `priority_weight` read at a weight other than the pre-registered 0.5, through another tool, or with another
-  argument (the self-check).
+  argument (the self-check);
+* an exploratory read that ignores its weight, and a `--priority-weight` that takes a weight outside 0 to 1, one
+  listed twice, or the pre-registered one (the self-check).
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
@@ -4642,6 +4651,27 @@ reads and the agenda score as recorded above; two runs give the same hits for it
 * **The tau it loses is on `this-week`** (0.316 to 0.120). It draws the passport into the top ten, ahead of the bill
   and the commitment that the gold puts before it, and both stay out. On the other four prompts with a tau, it
   scores as plain search.
+
+**Exploratory: `priority_weight` at 0.7 and 0.9, 2026-11-09** (the maintainer asked for them after the verdict; the
+same main and registration, `--priority-weight 0.7,0.9`; the same hits as two earlier runs with the weight edited in).
+Not a verdict: a weight chosen from these rows would be fitted to the prompts that judge it. The program's output,
+verbatim, its other rows as above:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| priority_weight | 0.143 | 0.286 | 0.212 | 0.065 / 0.147 / -0.003 | 0.064 / 0.149 / 0.000 |
+| priority_weight@0.7 | 0.429 | 0.429 | 0.520 | 0.202 / 0.303 / -0.003 | 0.200 / 0.305 / 0.000 |
+| priority_weight@0.9 | 0.571 | 0.571 | 0.559 | 0.223 / 0.270 / -0.002 | 0.220 / 0.269 / 0.000 |
+
+Neither would clear the bar. Each would pass (b) and (c), and fail (a) and (d).
+* **The Urgent ticket comes first as the weight rises.** At 0.7 it leads `next-ticket`, `highest-value` and
+  `blocking`. At 0.9 it leads every prompt, which adds `matters-most`: 4 of 7, the most this read can reach while
+  every note reads unknown 2.
+* **The notes lose what the tickets gain.** On `due-soon` the High and Urgent tickets take the first places, and the
+  gutters, the gold's first, fall from second to fifth at 0.7 and seventh at 0.9. That fails (d). At 0.9 the read is
+  close to a sort by ticket level.
+* **So a higher weight moves the misses rather than removing them.** The three prompts led by a note stay out of
+  reach until a note reads its open items' due times and levels (SMD-4149).
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
