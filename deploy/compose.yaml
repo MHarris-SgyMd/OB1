@@ -832,12 +832,13 @@ services:
       # (SMD-1901). The server never judges; preflight, which runs in this
       # container, reports it beside the metadata model and probes it with --deep.
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
-      # The typed-decision tier (SMD-2050; the jev service below). The server
-      # never decides; preflight, which runs in this container, dials the tier
-      # when OB1_JEV_BASE_URL is set and fails the start when it does not
-      # answer — so no fallback here: a default would fail every stack that
-      # does not run the profile. With it, deploy/.env names
-      # OB1_JEV_BASE_URL=http://jev:8020 and OB1_JEV_LOCAL=1.
+      # The typed-decision tier (SMD-2050; the jev service below). The REST
+      # core's capture asks it for a thought's genre (SMD-2323); preflight,
+      # which runs in this container, dials the tier when OB1_JEV_BASE_URL is
+      # set and fails the start when it does not answer — so no fallback here:
+      # a default would fail every stack that does not run the profile. With
+      # it, deploy/.env names OB1_JEV_BASE_URL=http://jev:8020 and
+      # OB1_JEV_LOCAL=1.
       OB1_JEV_BASE_URL: ${OB1_JEV_BASE_URL:-}
       OB1_JEV_MODEL: ${OB1_JEV_MODEL:-}
       OB1_JEV_LOCAL: ${OB1_JEV_LOCAL:-}
@@ -845,6 +846,12 @@ services:
       # verdict and OB1_JUDGE_MODEL writes only the proposals it calls. The
       # workers inherit this block; preflight here names the pass key by it.
       OB1_CONSOLIDATE_DECIDER: ${OB1_CONSOLIDATE_DECIDER:-}
+      # Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B
+      # on the host (jev/h2o/README.md), reached as
+      # http://host.containers.internal:8022 under podman machine. Unset,
+      # decide mode asks the shared tier above.
+      OB1_CONSOLIDATE_DECIDER_URL: ${OB1_CONSOLIDATE_DECIDER_URL:-}
+      OB1_CONSOLIDATE_DECIDER_LOCAL: ${OB1_CONSOLIDATE_DECIDER_LOCAL:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
       # What may leave the box (SMD-1903): whether a thought's text may reach
       # an endpoint not declared local — deny (the default), allow or off —
@@ -933,13 +940,27 @@ services:
       # leader lock lets one mend at a time, where two run on one database.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       # Background calls held to a share of each model server's slots (SMD-3379
-      # PR 2b-1): types with optional per-model overrides, e.g.
-      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, kept across the brain's
-      # processes by advisory locks: each slot held, and one waiting call per
-      # share and process, costs a connection of its own; a live call takes none.
-      # Unset or off, none is held. The REST core reads it, the coordinator hands
-      # it to its passes, and the orchestration runner to its reembed.
+      # PR 2b-1), kept across the brain's processes by advisory locks: each slot
+      # held, and one waiting call per share and process, costs a connection of
+      # its own; a live call takes none. By default (PR 2b-2b) a local model
+      # server's chat and embedding calls are held to OB1_MODEL_SLOTS less one,
+      # so a slot is left for live calls, the decide tier's to one; a remote
+      # provider's are not held. Types with optional per-model overrides, e.g.
+      # chat=1,embed=2,decide=1,chat:qwen3.8:27b=1, merge over the defaults and
+      # hold every endpoint; off holds none; a value that does not parse is said,
+      # and the defaults stay. The REST core reads it, the coordinator hands it
+      # to its passes, and the orchestration runner to its reembed.
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
+      # A local model server's parallel calls per model, 1 to 16 (SMD-3379 PR
+      # 2b-2b): the bundled Ollama answers this many at once (its
+      # OLLAMA_NUM_PARALLEL, below), and the defaults above leave one for live
+      # calls. Unset, 4; each slot holds the model's context in memory. An Ollama
+      # on the host answers what its own OLLAMA_NUM_PARALLEL says, 1 unset in
+      # current releases: raise it to this, 2 or more. Two brains on one model
+      # server each take their share: per model, their chat and their embed
+      # shares together below its slots — OB1_BACKGROUND_SLOTS=chat=1,embed=1 on
+      # each of two brains on a server of 4 (deploy/.env.example).
+      OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
       # way /models cannot show), 1 to 3600, 0 or off for the start's probe
@@ -1523,6 +1544,12 @@ services:
     profiles: ["local-models"]
     volumes:
       - ollama:/root/.ollama
+    # The calls it answers at once per model: OB1_MODEL_SLOTS, which the
+    # background slots' defaults leave one of for live calls (SMD-3379 PR 2b-2b).
+    # Handed as written: a value the brain does not read (preflight says so,
+    # and the brain takes 4) still reaches Ollama as it is.
+    environment:
+      OLLAMA_NUM_PARALLEL: ${OB1_MODEL_SLOTS:-4}
     # No `ports:`. An unauthenticated model API; the server and ollama-pull reach
     # it as `ollama:11434` on `egress`, and nothing in the stack needs
     # it from the host. `compose exec ollama ollama pull <model>` (with the -f
@@ -1892,6 +1919,7 @@ services:
       OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
       OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
       OB1_BACKGROUND_SLOTS: ${OB1_BACKGROUND_SLOTS:-}
+      OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
       # No `:?`, for the reason n8n's block gives: the runner refuses to
       # start without it, and says why.
       OB1_RUNNER_KEY: ${OB1_RUNNER_KEY:-}

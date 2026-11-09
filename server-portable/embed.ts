@@ -229,7 +229,7 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
   // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it, so a refused call waits for no slot,
   // and the span inside it, so the span times the call and not a wait; the deadline starts in exchange.
-  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, purpose: subject.kind, ...(signal ? { signal } : {}) },
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, local: at.local, purpose: subject.kind, ...(signal ? { signal } : {}) },
     () => withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
       const answer = await exchange<T>(cfg, path, body, at, what, signal);
       span.set(usageOf(answer));
@@ -444,12 +444,12 @@ export type ProviderEndpoint = {
    * where preflight's credential rule calls it local.
    */
   local: boolean;
-  /** The knob that declared it, when `local`: what a row or a banner names (second review pass); OB1_JEV_LOCAL for the decision tier (jev.ts, SMD-2050). */
+  /** The knob that declared it, when `local`: what a row or a banner names (second review pass); OB1_JEV_LOCAL for the decision tier (jev.ts, SMD-2050), OB1_CONSOLIDATE_DECIDER_LOCAL for decide mode's own (SMD-3326). */
   declaredBy?: LocalKnob;
 };
 
 /** The knobs that declare an endpoint local. */
-export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL";
+export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL" | "OB1_CONSOLIDATE_DECIDER_LOCAL";
 
 /**
  * A base URL's user and password, out of it: the base without them, and the

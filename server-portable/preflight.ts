@@ -31,7 +31,7 @@ import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, sh
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
-import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
+import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
@@ -47,7 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
-import { backgroundSlotsFrom } from "./slots.ts";
+import { slotsSettingFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -683,13 +683,15 @@ add("judge model", "ok", env.OB1_JUDGE_MODEL
     ? `${judgeModel} (OB1_JUDGE_MODEL)${judgeModel === metaModel ? " — the same as the metadata model" : ""}`
     : `${judgeModel} — the metadata model; OB1_JUDGE_MODEL gives the judge its own`);
 // Decide mode (SMD-3115): the tier's model gives the pass's verdict and the judge's model only writes proposals.
-// What it needs is said here; whether the tier answers, and with which model, is the jev tier row's. A warning,
-// not a failure: the server never judges, and a pass's knob must not stop the server starting (the pass refuses).
+// What it needs is said here; whether the tier answers, and with which model, is the decide tier row's when decide
+// mode has a tier of its own (OB1_CONSOLIDATE_DECIDER_URL, SMD-3326), the jev tier row's when it asks the shared one.
+// A warning, not a failure: the server never judges, and a pass's knob must not stop the server starting (the pass
+// refuses).
 if (resolvedEmbed.decider) {
-  const tierCfg = resolveJevConfig(env);
-  if (!tierCfg) add("consolidate decide mode", "warn", `OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} and OB1_JEV_BASE_URL is unset — db/consolidate.ts refuses to start; capture is unaffected`, `Point OB1_JEV_BASE_URL at the typed-decision tier serving ${resolvedEmbed.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
-  else if (tierCfg.model && tierCfg.model !== resolvedEmbed.decider) add("consolidate decide mode", "warn", `OB1_JEV_MODEL is ${tierCfg.model} and OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} — db/consolidate.ts refuses to start; capture is unaffected`, "Set the two to the same model.");
-  else add("consolidate decide mode", "ok", `${resolvedEmbed.decider} gives each verdict through the tier; ${judgeModel} only writes the proposals it calls (OB1_CONSOLIDATE_DECIDER, pass key ${consolidatePassKey(resolvedEmbed)})`);
+  const tier = resolveDecideTier(env);
+  if (!tier) add("consolidate decide mode", "warn", `OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set — db/consolidate.ts refuses to start; capture is unaffected`, `Point OB1_CONSOLIDATE_DECIDER_URL at the typed-decision tier serving ${resolvedEmbed.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
+  else if (!tier.own && tier.cfg.model && tier.cfg.model !== resolvedEmbed.decider) add("consolidate decide mode", "warn", `OB1_JEV_MODEL is ${tier.cfg.model} and OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} — db/consolidate.ts refuses to start; capture is unaffected`, "Give decide mode a tier of its own (OB1_CONSOLIDATE_DECIDER_URL), or set the two to the same model.");
+  else add("consolidate decide mode", "ok", `${resolvedEmbed.decider} gives each verdict through ${tier.own ? "its own tier (OB1_CONSOLIDATE_DECIDER_URL)" : "the shared tier (OB1_JEV_BASE_URL)"}; ${judgeModel} only writes the proposals it calls (OB1_CONSOLIDATE_DECIDER, pass key ${consolidatePassKey(resolvedEmbed)})`);
 }
 
 /**
@@ -1114,13 +1116,49 @@ if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 
-// The background slots in force (SMD-3379 PR 2b-2a): only when set, off unless it is — a value the servers and the
-// passes cannot read leaves them off, with a line in each process's log an operator may never read.
-if (env.OB1_BACKGROUND_SLOTS !== undefined && env.OB1_BACKGROUND_SLOTS !== "") {
-  const bs = backgroundSlotsFrom(env.OB1_BACKGROUND_SLOTS);
-  if (bs.problem) add("background slots", "warn", bs.problem, "Correct the value as the line says, or unset OB1_BACKGROUND_SLOTS.");
-  else if (bs.slots === null) add("background slots", "ok", "off (OB1_BACKGROUND_SLOTS) — background model calls are not held");
-  else add("background slots", "ok", `${[...bs.slots].map(([k, v]) => `${k}=${v}`).join(", ")} (OB1_BACKGROUND_SLOTS) — background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named`);
+// The background slots in force (SMD-3379 PR 2b-2a), on by default since PR 2b-2b: a local model server's chat and
+// embedding calls held to OB1_MODEL_SLOTS less one, the decide tier's to one, OB1_BACKGROUND_SLOTS' own shares over
+// them, holding every endpoint. A value the servers and the passes cannot read leaves the defaults, with a line in each
+// process's log an operator may never read; the host rule warns where a share leaves a model server no slot for live
+// calls, and where a decide share above one queues background calls at a tier that answers one request at a time.
+{
+  const st = slotsSettingFrom(env.OB1_BACKGROUND_SLOTS, env.OB1_MODEL_SLOTS);
+  const jevConfigured = resolveJevConfig(env);
+  // Whether a share's endpoint is local, by its type (a model's override by its prefix): what the defaults hold.
+  const endpointLocal = (k: string) => (k.startsWith("chat") ? chatEndpoint.local : k.startsWith("embed") ? embEndpoint.local : jevConfigured?.endpoint.local === true);
+  const listed = (m: ReadonlyMap<string, number>) => [...m].map(([k, v]) => `${k}=${v}`).join(", ");
+  const where = "background model calls held to these shares of each model's slots on its server (the decide tier's per server) across the brain's processes, a live call never; the workers' waits are on brain_info's Model calls row, the servers' in their metrics where a collector is named";
+  // The local endpoints the defaults hold: chat and embeddings, one endpoint or two, and the decide tier's.
+  const locals = [...new Set([embEndpoint.local ? (chatEndpoint === embEndpoint ? "embeddings and chat" : "embeddings") : "", chatEndpoint !== embEndpoint && chatEndpoint.local ? "chat" : "", jevConfigured?.endpoint.local ? "decide" : ""].filter(Boolean))];
+  // The host rule: a chat or embedding share as large as the local server's slots leaves live calls none — set, on a
+  // local endpoint, for OB1_MODEL_SLOTS speaks of the local server alone; by default, a server of one slot, where
+  // some endpoint is local (review pass 1). The decide tier answers one request at a time, so a share of it above one
+  // queues background calls ahead of a capture's live genre call.
+  const ownShares = [...(st.set ?? new Map<string, number>())];
+  const full = st.defaults === null ? [] : ownShares.filter(([k, v]) => !k.startsWith("decide") && endpointLocal(k) && v >= st.modelSlots).map(([k]) => k);
+  // OB1_MODEL_SLOTS reaches a held share only through a local chat or embedding endpoint: the decide tier's is one
+  // whatever it says (review pass 2).
+  const noReserve = st.defaults !== null && st.modelSlots === 1 && (chatEndpoint.local || embEndpoint.local);
+  const decideQueue = st.defaults === null || jevConfigured === null ? [] : ownShares.filter(([k, v]) => k === "decide" && v > 1).map(([, v]) => v);
+  if (st.defaults === null) add("background slots", "ok", `off (OB1_BACKGROUND_SLOTS) — background model calls are not held`);
+  else {
+    const own = st.set ? `; ${listed(st.set)} set (OB1_BACKGROUND_SLOTS), every endpoint's` : "";
+    // The defaults as they stand: a type the value's own share gives is its, everywhere (review pass 1); a type's
+    // default only where its endpoint is local, a remote one's calls not held (review pass 2); none said where no
+    // endpoint is local.
+    const shown = new Map([...st.defaults].filter(([k]) => !st.set?.has(k) && endpointLocal(k)));
+    const byDefault = !locals.length
+      ? "none by default: no endpoint is declared local (OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL)"
+      : `${shown.size ? listed(shown) : "none"} by default on the local ${locals.join(", ")} endpoint(s)${chatEndpoint.local || embEndpoint.local ? ` (OB1_MODEL_SLOTS ${st.modelSlots}, ${st.modelSlots === 1 ? "none" : "one"} left for live calls)` : ""}`;
+    const detail = `${byDefault}${own} — ${where}`;
+    const problems = [...st.problems,
+      ...(full.length ? [`${full.join(", ")} take${full.length === 1 ? "s" : ""} every one of the local server's OB1_MODEL_SLOTS ${st.modelSlots}, leaving live calls none`] : []),
+      // One fault, one warning: a share of its own as large as a server of one slot is that fault already (review pass 3).
+      ...(noReserve && !full.length ? ["OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one"] : []),
+      ...(decideQueue.length ? [`decide=${decideQueue[0]} queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time`] : [])];
+    if (problems.length) add("background slots", "warn", `${problems.join("; ")} — in force: ${detail}`, "Correct the value as the line says: a chat or embedding share below OB1_MODEL_SLOTS, decide=1, OB1_MODEL_SLOTS the model server's parallel calls per model (its OLLAMA_NUM_PARALLEL) — a server of one slot leaves live calls none, so raise its OLLAMA_NUM_PARALLEL and OB1_MODEL_SLOTS together to 2 or more — or OB1_BACKGROUND_SLOTS=off.");
+    else add("background slots", "ok", detail);
+  }
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -3067,7 +3105,8 @@ if (configFailed) {
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
               : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
             // SELECT is every read's too since SMD-3599: the claimed label says its claims could not be read (review pass 2).
-            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599)" : ", and nothing else does";
+            // The agenda (SMD-3669) answers unfiltered by claims without SELECT, and refuses holder mine.
+            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599); agenda answers unfiltered by claims and refuses holder mine (SMD-3669)" : ", and nothing else does";
             add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table${also}`,
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
           } else if (logging.length) {
@@ -3122,7 +3161,10 @@ if (configFailed) {
             const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
               : itemOnly ? "set_priority and priority_history on an open item (kind item)"
               : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+            // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
+            // alone was left out, and the items row said otherwise).
+            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669)" : ", and nothing else does";
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
@@ -3160,7 +3202,7 @@ if (configFailed) {
             // By table, as the priority row names its calls (review pass 3): open_items is every tool's; the events
             // are item_history's and the writers'; the proposals list_items', item_history's and the writers'.
             const reads = it.ungranted.filter((g) => g.endsWith(" SELECT"));
-            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, and set_priority on an open item"
+            const failing = reads.some((g) => g.startsWith("open_items ")) ? "every open-item tool, set_priority on an open item, and agenda (SMD-3669)"
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
@@ -5702,42 +5744,62 @@ if (telemetry) {
 // a wrong or unreachable URL then fails here rather than at the first spike's
 // first decision. --deep also makes one decision, through the client and its
 // egress gate, and checks the answer's shape.
-const jevCfg = resolveJevConfig(env);
-if (!jevCfg) {
-  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (nothing the server does needs it)");
-} else {
+/** One typed-decision tier for tierRows: what to dial, and how its rows name it and its remedies. */
+type TierProbe = {
+  /** The rows' prefix: `<row> tier`, `<row> egress`, `<row> decision`. */
+  row: "jev" | "decide";
+  cfg: JevConfig;
+  baseKnob: string;
+  localKnob: string;
+  /** The model it is held to, the knob that holds it, and whether another model fails the row (else it warns). */
+  want: string | undefined;
+  wantKnob: string;
+  wantFails: boolean;
+  /**
+   * A tier whose name does not resolve, that answers nothing, refuses the request, answers not as the tier or with an
+   * untrusted certificate, or fails --deep's decision: "fail" for the shared one, which the server itself asks
+   * (capture's genre facet), so preflight fails the start; "warn" for decide mode's own, which only the consolidation
+   * pass asks — until it answers that pass decides nothing (jev/h2o/README.md, "When the tier is down", says how a
+   * follower and a one-shot run each go on; review passes 2 and 3), and a pass's tier must not stop the server starting.
+   */
+  down: "fail" | "warn";
+  /** The compose service's name, so a host of that name gets the service's remedies, and every other the start one. */
+  serviceHost: string;
+  /** What the tier is, in a remedy: "the jev service", or "decide mode's adapter". */
+  names: string;
+  start: string;
+  notRunning: string;
+  notListening: string;
+  /** What a refusing egress gate means for this tier's callers. */
+  refusedMeans: string;
+};
+
+async function tierRows(t: TierProbe): Promise<void> {
   // SMD-1875's rules for a probed endpoint, followed here (the merge review):
   // the base shown masked, since this row runs on every start; the name
   // resolved before it is dialled; the failure in probeFailure's words.
-  const base = jevCfg.endpoint.base;
-  const at = shownBase(jevCfg.endpoint);
+  const TIER = `${t.row} tier`;
+  const base = t.cfg.endpoint.base;
+  const at = shownBase(t.cfg.endpoint);
   const masked = (message: string) => message.split(base).join(at);
-  const START = "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
   const host = hostnameOf(base);
-  // The stack's own service name resolves only while the service runs: the
-  // profile is down, or `compose restart api` ran — which does not start
-  // what the server depends on (fifth review pass: ~5 restarts a second).
-  const NOT_RUNNING = "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart api does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.";
-  // It resolves and answers nothing: it runs but does not listen yet — it
-  // listens only after the fetch and the load, ~20 s on a first start — or is
-  // restarting, or the port is not its 8020 (sixth review pass: the
-  // not-running remedy was given here too, and dropped "fix the URL").
-  const NOT_LISTENING = "The jev service is up but not listening: on a first start it fetches the weights (~20 s) before it listens — compose ps shows its health — or it is restarting (compose logs jev), or OB1_JEV_BASE_URL's port is not the service's 8020.";
   const unresolved = await resolveFirst(host);
   if (unresolved) {
-    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
+    add(TIER, t.down, `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === t.serviceHost ? t.notRunning : t.start);
   } else try {
-    const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
+    const info = await jevInfo(t.cfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS, probe: "preflight" });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
-    // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
-    // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
-    const want = jevCfg.model ?? (resolvedEmbed.decider || undefined);
-    const knob = jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER";
+    // The model it is held to, and the knob that holds it (the caller's): a tier held by its own model knob
+    // fails on another; one held to decide mode's decider warns, as the decide mode row does: only the pass refuses it.
+    const want = t.want;
+    const knob = t.wantKnob;
     if (want && info.model.name !== want) {
-      add("jev tier", jevCfg.model ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${jevCfg.model ? "" : " — db/consolidate.ts refuses to start; capture is unaffected"}`,
-          `Point OB1_JEV_BASE_URL at the tier serving ${want}, or set ${knob}=${info.model.name}${jevCfg.model ? "" : " (a new pass key)"}.`);
+      add(TIER, t.wantFails ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${t.wantFails ? "" : " — the consolidation pass decides nothing (jev/h2o/README.md, \"When the tier is down\"); capture is unaffected"}`,
+          `Point ${t.baseKnob} at the tier serving ${want}, or set ${knob}=${info.model.name}${knob === "OB1_CONSOLIDATE_DECIDER" ? " (a new pass key)" : ""}`
+          // The shared tier held to the decider: decide mode can have a tier of its own instead (review pass 2).
+          + `${t.baseKnob !== "OB1_CONSOLIDATE_DECIDER_URL" && knob === "OB1_CONSOLIDATE_DECIDER" ? `, or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL` : ""}.`);
     } else {
-      add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${want ? ` (${knob})` : ""}`);
+      add(TIER, "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${want ? ` (${knob})` : ""}`);
     }
   } catch (e) {
     // Four answers, worded as the provider rows word them (fifth review pass):
@@ -5756,36 +5818,83 @@ if (!jevCfg) {
     if (err.kind === "http" && (err as { status?: number }).status === 401) {
       // A 401 is about the credential, not the path: the base's user and
       // password are the tier's only one (SMD-2885, fourth review pass).
-      add("jev tier", "fail", `${at} answers, but refuses the request: ${masked(err.message)}${route}`,
-          `${viaProxy}${jevCfg.endpoint.userinfo ? "The user and password in OB1_JEV_BASE_URL are rejected. Check them." : "It wants a credential and none was sent: put a user and password in OB1_JEV_BASE_URL."}`);
+      add(TIER, t.down, `${at} answers, but refuses the request: ${masked(err.message)}${route}`,
+          `${viaProxy}${t.cfg.endpoint.userinfo ? `The user and password in ${t.baseKnob} are rejected. Check them.` : `It wants a credential and none was sent: put a user and password in ${t.baseKnob}.`}`);
     } else if (err.kind === "http" || err.kind === "body") {
-      add("jev tier", "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
-          `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
+      add(TIER, t.down, `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
+          `${viaProxy}Check ${t.baseKnob} is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names ${t.names}, not another.`);
     } else if (failure?.kind === "tls") {
-      add("jev tier", "fail", `${at} answers, but ${failure.why}${route}`,
-          `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
+      add(TIER, t.down, `${at} answers, but ${failure.why}${route}`,
+          `${viaProxy}The tier serves plain http: use http:// in ${t.baseKnob}, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
     } else {
       const why = failure ? failure.why : `no HTTP answer in ${LOCAL_PROBE_SECONDS}`;
-      add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === "jev" ? NOT_LISTENING : START));
+      add(TIER, t.down, `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === t.serviceHost ? t.notListening : t.start));
     }
   }
-  egressRow("jev egress", jevCfg.endpoint, "OB1_JEV_LOCAL", "decision",
-            "every decision a spike asks for is refused before it is sent (a ProviderError of kind egress)");
+  egressRow(`${t.row} egress`, t.cfg.endpoint, t.localKnob, "decision", t.refusedMeans);
   if (!deep) {
-    add("jev decision", "skip", "not checked — pass --deep to make one decision");
-  } else if (!results.some((r) => r.name === "jev tier" && r.status === "ok")) {
-    add("jev decision", "skip", "not checked — the jev tier row failed");
+    add(`${t.row} decision`, "skip", "not checked — pass --deep to make one decision");
+  } else if (!results.some((r) => r.name === TIER && r.status === "ok")) {
+    // Named as the row ended, not as a down tier would end it: the shared tier's held to the decider warns (review pass 2).
+    add(`${t.row} decision`, "skip", `not checked — the ${TIER} row ${results.some((r) => r.name === TIER && r.status === "fail") ? "failed" : "warned"}`);
   } else {
     try {
       const t0 = performance.now();
-      const probe = await jevDecide(jevCfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
-      add("jev decision", "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
+      const probe = await jevDecide(t.cfg, { proposition: "the note is about a preflight check", context: "preflight: checking that the decision tier answers" }, { kind: "decision", actor: "preflight" }, { probe: "preflight" });
+      add(`${t.row} decision`, "ok", `one binary decision in ${(performance.now() - t0).toFixed(0)} ms: p ${probe.p === null ? "null" : probe.p.toFixed(3)}, insufficient ${probe.pInsufficient.toFixed(3)}, temperature ${probe.result.temperature} — the answer is a distribution over the decision's options`);
     } catch (e) {
       const err = e as Error & { kind?: string };
-      add("jev decision", err.kind === "egress" ? "warn" : "fail", masked(err.message),
-          err.kind === "egress" ? "See the jev egress row." : "The tier answered /info but not /decide in the contract's shape — check its log.");
+      add(`${t.row} decision`, err.kind === "egress" ? "warn" : t.down, masked(err.message),
+          err.kind === "egress" ? `See the ${t.row} egress row.` : "The tier answered /info but not /decide in the contract's shape — check its log.");
     }
   }
+}
+
+const jevCfg = resolveJevConfig(env);
+// Decide mode's own tier (a tier per caller, SMD-3326): when OB1_CONSOLIDATE_DECIDER_URL names one, the shared tier is
+// no longer the decider's, and decide mode's gets rows of its own.
+const decideTier = resolvedEmbed.decider ? resolveDecideTier(env) : null;
+// Its URL with no decider is read by nothing: say so, rather than run judge mode without a word (review pass 2).
+if (!resolvedEmbed.decider && (env.OB1_CONSOLIDATE_DECIDER_URL ?? "").trim()) {
+  add("decide tier", "warn", "OB1_CONSOLIDATE_DECIDER_URL is set, but OB1_CONSOLIDATE_DECIDER is not — decide mode is off, so nothing asks that tier and the consolidation pass judges with OB1_JUDGE_MODEL",
+      "Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL.");
+}
+if (!jevCfg) {
+  add("jev tier", "skip", "OB1_JEV_BASE_URL is unset — the typed-decision tier is off (capture's genre facet and the spikes ask it; decide mode can have its own at OB1_CONSOLIDATE_DECIDER_URL)");
+} else {
+  // Held to OB1_JEV_MODEL, else to decide mode's decider while decide mode asks this tier (SMD-3115).
+  const heldToDecider = !jevCfg.model && !!resolvedEmbed.decider && decideTier?.own !== true;
+  await tierRows({
+    row: "jev", cfg: jevCfg, baseKnob: "OB1_JEV_BASE_URL", localKnob: "OB1_JEV_LOCAL",
+    want: jevCfg.model ?? (heldToDecider ? resolvedEmbed.decider : undefined),
+    wantKnob: jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER", wantFails: !!jevCfg.model, down: "fail",
+    serviceHost: "jev", names: "the jev service",
+    start: "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.",
+    // The stack's own service name resolves only while the service runs: the
+    // profile is down, or `compose restart api` ran — which does not start
+    // what the server depends on (fifth review pass: ~5 restarts a second).
+    notRunning: "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart api does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.",
+    // It resolves and answers nothing: it runs but does not listen yet — it
+    // listens only after the fetch and the load, ~20 s on a first start — or is
+    // restarting, or the port is not its 8020 (sixth review pass: the
+    // not-running remedy was given here too, and dropped "fix the URL").
+    notListening: "The jev service is up but not listening: on a first start it fetches the weights (~20 s) before it listens — compose ps shows its health — or it is restarting (compose logs jev), or OB1_JEV_BASE_URL's port is not the service's 8020.",
+    refusedMeans: "every decision a caller asks for is refused before it is sent (a ProviderError of kind egress)",
+  });
+}
+if (decideTier?.own) {
+  // Always its own rows, even at the shared tier's URL: decide mode holds the tier to the decider and reads its own
+  // local declaration (OB1_CONSOLIDATE_DECIDER_LOCAL), neither of which the jev rows check (review pass 1: a same-URL
+  // shortcut said ok while the pass would refuse a model other than the decider, or an undeclared endpoint).
+  // A host process, not a compose service (decided 2026-10-25): H2O-Lightning-4B runs on PyTorch MPS, which only the
+  // host has, so its adapter runs beside the stack, kept running by a LaunchAgent (jev/h2o/README.md).
+  const START = "Start it on the host — jev/h2o/serve.py in decider-4b's venv, kept running by its LaunchAgent (jev/h2o/README.md) — reached from a container as http://host.containers.internal:8022 under podman machine or http://host.docker.internal:8022 under Docker Desktop; fix OB1_CONSOLIDATE_DECIDER_URL, or unset it to ask the shared tier at OB1_JEV_BASE_URL. Capture and search are unaffected; the consolidation pass decides nothing until it answers (jev/h2o/README.md, \"When the tier is down\").";
+  await tierRows({
+    row: "decide", cfg: decideTier.cfg, baseKnob: "OB1_CONSOLIDATE_DECIDER_URL", localKnob: "OB1_CONSOLIDATE_DECIDER_LOCAL",
+    want: resolvedEmbed.decider, wantKnob: "OB1_CONSOLIDATE_DECIDER", wantFails: false, down: "warn",
+    serviceHost: "", names: "decide mode's adapter", start: START, notRunning: START, notListening: START,
+    refusedMeans: "the verdict is never sent (a ProviderError of kind egress), that pair recorded on its claim and the next judged; db/consolidate.ts refuses to start only when the policy refuses every call",
+  });
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

@@ -315,6 +315,8 @@ const WORDS: Record<ToolName, Words> = {
   list_thoughts: { render: (o) => say.renderListThoughts(o), fault: readFault() },
   // Work threads (SMD-3306 PR 7a-2a).
   thread: { render: (o) => say.renderThread(o), fault: readFault() },
+  // Judged relations (SMD-2726; SMD-3306 PR 7a-2b).
+  relations: { render: (o) => say.renderRelations(o), fault: readFault() },
   list_supersession_proposals: { render: (o) => say.renderSupersessionProposals(o), fault: readFault(() => say.proposalsHint) },
   thought_stats: { render: (o) => say.renderThoughtStats(o), fault: readFault() },
   thought_changes: { render: (o) => say.renderThoughtChanges(o), fault: readFault(() => say.changesHint) },
@@ -350,6 +352,8 @@ const WORDS: Record<ToolName, Words> = {
   decide_item_close: { render: (o) => say.renderDecideItemClose(o), fault: writeFault("decide_item_close failed: ") },
   item_history: { render: (o) => say.renderItemHistory(o), fault: readFault() },
   list_items: { render: (o) => say.renderListItems(o), fault: readFault() },
+  // The agenda (SMD-3669).
+  agenda: { render: (o) => say.renderAgenda(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };

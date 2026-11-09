@@ -172,7 +172,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
-import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
+import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
@@ -657,15 +657,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   // Decide mode (SMD-3115): the typed-decision tier's model gives each verdict, and the judge's model writes only
-  // the proposals it calls. It needs the tier, at OB1_JEV_BASE_URL, and the model the tier is held to is the
-  // decider, so an answer from any other is refused (the pass key names the decider).
+  // the proposals it calls. It needs a tier: its own at OB1_CONSOLIDATE_DECIDER_URL, else the shared one at
+  // OB1_JEV_BASE_URL (a tier per caller, SMD-3326). The model the tier is held to is the decider, so an answer from
+  // any other is refused (the pass key names the decider).
   // A review (--accept/--reject) judges nothing, so it needs no tier.
   let jev: JevConfig | null = null;
+  // The knobs a message about the tier names: decide mode's own when it has them, the shared tier's otherwise.
+  let tierBaseKnob: DecideTier["baseKnob"] = "OB1_JEV_BASE_URL";
+  let tierLocalKnob: DecideTier["localKnob"] = "OB1_JEV_LOCAL";
   if (cfg.decider && !REVIEW_ONLY) {
-    const tier = resolveJevConfig(env as JevEnv);
-    if (!tier) return refused("usage", `\n  OB1_CONSOLIDATE_DECIDER is ${cfg.decider} and OB1_JEV_BASE_URL is unset: decide mode asks the typed-decision tier for every verdict (SMD-3115). Point OB1_JEV_BASE_URL at the tier serving ${cfg.decider}, or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
-    if (tier.model && tier.model !== cfg.decider) return refused("usage", `\n  OB1_JEV_MODEL is ${tier.model} and OB1_CONSOLIDATE_DECIDER is ${cfg.decider}: the tier's verdicts would come from a model the pass key does not name. Set the two to the same model.`);
-    jev = { ...tier, model: cfg.decider };
+    const tier = resolveDecideTier(env as JevEnv);
+    if (!tier) return refused("usage", `\n  OB1_CONSOLIDATE_DECIDER is ${cfg.decider} and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set: decide mode asks the typed-decision tier for every verdict (SMD-3115). Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving ${cfg.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
+    if (!tier.own && tier.cfg.model && tier.cfg.model !== cfg.decider) return refused("usage", `\n  OB1_JEV_MODEL is ${tier.cfg.model} and OB1_CONSOLIDATE_DECIDER is ${cfg.decider}: the shared tier's verdicts would come from a model the pass key does not name. Give decide mode a tier of its own (OB1_CONSOLIDATE_DECIDER_URL), or set the two to the same model.`);
+    jev = { ...tier.cfg, model: cfg.decider, modelKnob: "OB1_CONSOLIDATE_DECIDER" };
+    tierBaseKnob = tier.baseKnob;
+    tierLocalKnob = tier.localKnob;
   }
   // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
   // model (SMD-1901). The key carries it, so a pass under another judge is
@@ -682,10 +688,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
-  if (jev) say(`  tier:   ${egressDescription(jev.endpoint, jev.egress, "OB1_JEV_LOCAL")}`);
+  if (jev) say(`  tier:   ${egressDescription(jev.endpoint, jev.egress, tierLocalKnob)}`);
   if (jev) {
     // The tier's gate, as the chat endpoint's below: a policy that refuses every row stops the run before it claims.
-    const blanket = blanketGate({ endpoint: jev.endpoint, policy: jev.egress, units: env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "decided", localKnobKey: "OB1_JEV_LOCAL" });
+    const blanket = blanketGate({ endpoint: jev.endpoint, policy: jev.egress, units: env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "decided", localKnobKey: tierLocalKnob });
     if (blanket && !STATUS_ONLY && !DRY_RUN) return refused("egress", `\n  ${blanket}`);
   }
   {
@@ -766,7 +772,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   function startRefusal(p: Probe): string | null {
     if (p.state !== "up" && p.tier && p.state !== "out") {
       return `\n  ${p.why.slice(0, 300)} at start.\n` +
-        `  A --follow worker refuses this before it claims anything (SMD-2599, SMD-3115): ${p.state === "missing" ? `serve ${cfg.decider} at OB1_JEV_BASE_URL, or set OB1_CONSOLIDATE_DECIDER to the model the tier serves (a new pass key). Once running, a decider that goes missing is waited for.` : "check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md)."}`;
+        `  A --follow worker refuses this before it claims anything (SMD-2599, SMD-3115): ${p.state === "missing" ? `serve ${cfg.decider} at ${tierBaseKnob}, or set OB1_CONSOLIDATE_DECIDER to the model the tier serves (a new pass key). Once running, a decider that goes missing is waited for.` : `check ${tierBaseKnob}: it must be an ob1-jev/1 tier (jev/README.md).`}`;
     }
     if (p.state === "missing") {
       return `\n  ${cfg.chat.base} does not serve ${cfg.judgeModel} at start (${p.why.slice(0, 300)}).\n` +
@@ -1838,6 +1844,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           problems.push(`pair with ${c.older_id}: ${e.message}`);
           continue;
         }
+        // The tier refused this pair's decision (its 422, SMD-3326): a fact about the pair's text — two thoughts'
+        // context together past what the model reads whole — recorded on the claim like egress, naming the older
+        // thought, so the next pair is still judged and the stale rows still settle. Thrown out of the loop it failed
+        // the claim with none of its later pairs judged, and --retry-failed met the same pair first again (review pass 2).
+        if (e instanceof DecisionRefused) {
+          problems.push(`pair with ${c.older_id}: ${e.message}`);
+          continue;
+        }
         throw e;
       }
       llmMs += Date.now() - t0;
@@ -2242,8 +2256,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 } else if (act === "thought") {
                   outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
                 } else if (act === "fatal") {
-                  if (e instanceof ProbeRefused && e.tier) refusedByTier = true;
                   configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
+                  // The decision tier's refusal (jev.ts names its requests so: a tier serving another model, 409; a
+                  // URL that is not a tier, 404), not the writer's: the closing remedy names the tier's knob, not the
+                  // chat endpoint's (SMD-3326 review pass 4: a one-shot run against a tier serving another model said
+                  // "Check the chat endpoint"; only the follower's start refusal set this). So does a pair timeout
+                  // whose tier probe was refused (SMD-2636 PR 3a).
+                  if ((e instanceof ProbeRefused && e.tier) || (jev && e instanceof ProviderError && /^(Decision|Info) request to /.test(e.message))) refusedByTier = true;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
@@ -2691,7 +2710,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
         (refusedByTier
-          ? `  Check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md). Nothing was marked failed.`
+          ? `  Check ${tierBaseKnob}: it must be an ob1-jev/1 tier${jev?.model ? ` serving ${jev.model} (${jev.modelKnob ?? "OB1_JEV_MODEL"})` : ""} (jev/README.md). Nothing was marked failed.`
           : `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
             `  is usually reasoning_effort or response_format not being supported by this model; a 402 is the account's credit or spend limit. Nothing was marked failed.`)
     );
@@ -2705,8 +2724,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 if (import.meta.main) {
   const cli = commandLine("consolidate.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.

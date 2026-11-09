@@ -38,7 +38,7 @@ const KEYED_ANSWERS = {
   "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)} — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for \`registry_away\` alone; their other causes wait on an operator and carry none.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)} — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for \`registry_away\` alone; their other causes, and CLAIMS_UNREADABLE (the database role lacks the claims group), wait on an operator and carry none.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
 };
 /** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
 const answersFor = (name: ToolName) => {
@@ -53,7 +53,7 @@ function jsonSchemaOf(schema: z.ZodType, io: "input" | "output"): Json {
   return js;
 }
 
-/** The answers a plugin operation may give besides its success: as a core operation's, but a plugin's own refusal codes at 400–422 and no 501. */
+/** The answers a plugin operation may give besides its success: as a core operation's, but a plugin's own refusal codes at 400–422 and 503 (its one retryable refusal), and no 501. */
 const PLUGIN_ANSWERS = {
   "400": refusal("The input does not fit the schema (REFUSED_INPUT), or the plugin's own refusal."),
   "401": KEYED_ANSWERS["401"],
@@ -63,7 +63,7 @@ const PLUGIN_ANSWERS = {
   "409": refusal("The plugin's own refusal: the state conflicts."),
   "422": refusal("The plugin's own refusal."),
   "500": KEYED_ANSWERS["500"],
-  "503": KEYED_ANSWERS["503"],
+  "503": { ...KEYED_ANSWERS["503"], description: `${KEYED_ANSWERS["503"].description} For a plugin's operation, also its own retryable refusal: a service it needs, such as the core's embedding provider, did not answer, and its code names it.` },
 };
 
 /**

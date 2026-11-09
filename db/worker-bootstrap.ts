@@ -21,7 +21,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { isRedirect, ProviderError, providerDown, refuseRedirect, refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
-import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
+import { DecisionRefused, jevInfo, type JevConfig } from "../server-portable/jev.ts";
 import { modelCall } from "../server-portable/model-call.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -233,6 +233,9 @@ export function classifyError(e: unknown, opts: { maxTokensFatal?: boolean } = {
   if (status !== undefined && isRedirect(status)) return "fatal";
   if (opts.maxTokensFatal && status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
   if (status === 400 && refusesLength(status, msg)) return "thought";
+  // The decision tier's 422: one decision it cannot read faithfully (jev.ts, SMD-3326) — this thought's, so it is
+  // recorded failed with the tier's words, not a stop of every worker that the next run meets again.
+  if (e instanceof DecisionRefused) return "thought";
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
   return "thought";
@@ -413,6 +416,8 @@ export function followClassify(e: unknown): FollowVerdict {
   }
   const http = answerStatus(e);
   if (e instanceof ProviderError && e.kind === "egress") return "thought";
+  // The decision tier's 422 (classifyError's rule): this decision's, not the provider's state, so no probe decides it.
+  if (e instanceof DecisionRefused) return "thought";
   if ((e instanceof ProviderError && e.kind === "timeout") || (http === null && e instanceof Error && timedOut(e))) return "maybe-poison";
   if (http !== null) {
     if (http === 429 || http === 503 || modelMissing(e)) return "backpressure";
@@ -586,11 +591,11 @@ export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; wh
  * endpoint answers 503 (busy) or the model is still being pulled, so only the
  * call the pass makes says the pass can go on.
  */
-export function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers">, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
+export function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "headers"> & { local?: boolean }, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
   // Through the model-call seam (SMD-3379 PR 2a): a probe is one of the model server's calls too. A hook that ends
   // its wait on `wake` reads as the stop does (review pass 1); any other failure of the seam's — a hook's refusal, its
   // bug — is thrown, not read as the provider out, which would park a worker waiting on an outage (review pass 2).
-  return modelCall({ type: "chat", model, base: endpoint.base, purpose: "probe", ...(wake ? { signal: wake } : {}) }, () => probeExchange(endpoint, model, timeoutMs, wake))
+  return modelCall({ type: "chat", model, base: endpoint.base, local: endpoint.local, purpose: "probe", ...(wake ? { signal: wake } : {}) }, () => probeExchange(endpoint, model, timeoutMs, wake))
     .catch((e: unknown): Probe => {
       if (wake?.aborted) return { state: "out", why: "the probe was stopped" };
       throw e;

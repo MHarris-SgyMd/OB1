@@ -589,6 +589,17 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(new Set(VERDICTS.map((v) => v[0])).size === VERDICTS.length && VERDICTS.every((v) => who.includes(`"${v}"`)),
     "the five verdicts start with five different letters, and the prompt names each");
   assert(wrapSide("thought_a", "x".repeat(7000)).length < 6100, "a thought is cut to the content limit before wrapping");
+  // …never between a surrogate pair (SMD-3326 review pass 5): an emoji across the cut left a lone high surrogate the
+  // decision tier's tokenizer cannot encode. Code units are checked by number, so no escape sits in this source.
+  {
+    const grin = String.fromCodePoint(0x1f600);
+    const grinCut = wrapSide("thought_a", "x".repeat(5999) + grin + "y".repeat(100));
+    const inner = grinCut.slice("<thought_a>\n".length, grinCut.length - "\n</thought_a>".length);
+    const tail = inner.charCodeAt(inner.length - 1);
+    const grinKept = wrapSide("thought_a", "x".repeat(5998) + grin + "y".repeat(100));
+    assert(inner === "x".repeat(5999) && !(tail >= 0xd800 && tail <= 0xdbff) && grinKept.includes(grin),
+      `a cut through an emoji drops the emoji's first half rather than leave it alone, and an emoji before the cut stays whole (${inner.length} units, last 0x${tail.toString(16)})`);
+  }
 
   // SMD-1803: a proposal thought's created_at is nullable and can be a sentinel.
   // dateOf (the prompt's only date path) must not fabricate the epoch on a NULL

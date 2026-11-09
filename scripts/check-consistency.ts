@@ -10446,25 +10446,25 @@ const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg
  * allowlist denies fails too.
  */
 const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
-  "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs, and in a recipe's example payload" },
+  "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/probes-check.ts", "scripts/agent-runner/probes.ts"], why: "named by the session-capture hook's test, which repo-consistency runs, in a recipe's example payload, and in the agent-runner probes' fixtures (planted in a clone or named in a refused-path case, none read)" },
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release-steps.yml alone runs, called by release.yml; the rest are repo-consistency's or the cut's" },
-  "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
+  "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts", "scripts/agent-runner/probes-check.ts", "scripts/agent-runner/probes.ts"], why: "named in messages, and in the agent-runner probes' fixtures (planted in a clone or named in a refused-path case, not read)" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
   "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "integrations/package.json"], why: "named in messages and integrations/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
-  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, in a plugin's npm files list, and by the agent-runner probe and gate harnesses' \"README.md\" token (which resolves to the repo root's as well), not read" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
-  "docs/01-getting-started.md": { by: ["db/test-schema.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
+  "docs/01-getting-started.md": { by: ["db/test-schema.ts", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
+  "docs/agent-runner.md": { by: ["scripts/agent-runner/probes-check.ts"], why: "named in the self-check's assertion text (the probe list matches the design) and a refused-path case; it opens no file" },
   "docs/connector-taxonomy.md": { by: ["docs/connector-registry.json", "scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs; the registry names it as its spec" },
   "docs/vendored-disposition.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
   "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts", "evals/consolidate-labels.json"], why: "named in messages, assertion text and a label file's note" },
   "integrations/openclaw-agent-memory/plugin/README.md": { by: ["integrations/openclaw-agent-memory/plugin/package.json"], why: "in the plugin's npm files list, which no job packs" },
-  "integrations/agent-memory-api/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
   "jev/README.md": { by: ["db/consolidate.ts", "jev/test-jev.ts"], why: "named in messages" },
-  "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
+  "jev/h2o/README.md": { by: ["db/consolidate.ts", "server-portable/preflight.ts"], why: "named in preflight's and decide mode's messages" },
   "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
-  "recipes/openclaw-agent-memory/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
   "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },
+  "scripts/agent-runner/README.md": { by: ["scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts"], why: "the probe and gate harnesses' \"README.md\" token resolves from their own directory to this file; they plant a README in the clone, not this one" },
 };
 /** The tracked files a token in a code file can name: the token from the root, its leading ./, ../ and / taken off, and the token from the file's own directory. */
 function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<string> {
@@ -11289,6 +11289,7 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
   "scripts/check-consistency.ts": {
     "db/ci-parity.sh": reads("the local mirror of CI runs the checker; no CI job runs it"),
     "integrations/test-writes.ts": reads("asserts over the checker's text (thoughtWritesAroundIn), in data-layer"),
+    "scripts/agent-runner/probes-check.ts": names("a refusedPart test case lists it among the paths the guard allows; it opens no file"),
     "scripts/gen-tools.ts": names("a sentence in the note it writes into tools.json"),
     "scripts/gen-version.ts": names("a sentence in the comment it writes into db/version.mjs"),
     "scripts/mechanism-yield.ts": names("a sample commit body in its own cases"),
@@ -11742,8 +11743,6 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["evals/store-composed.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
   ["evals/store-readmodel.ts", { fork: { why: KEPT.HISTORY, lines: 2 } }],
   ["integrations/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
-  ["integrations/agent-memory-api/README.md", { name: { why: KEPT.NBJ, lines: 2 } }],
-  ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", { name: { why: KEPT.NBJ, lines: 2 } }],
   ["integrations/chrome-capture-extension/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/chrome-capture-extension/icons/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/hermes-agent-memory/README.md", { fork: { why: KEPT.NBJ, lines: 1 }, name: { why: KEPT.NBJ, lines: 1 } }],
@@ -11803,7 +11802,6 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["recipes/wiki-synthesis/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["resources/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["schemas/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
-  ["schemas/agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 4 } }],
   ["schemas/brain-stats-daily/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["schemas/crm-person-tiers/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["schemas/enhanced-thoughts/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
@@ -11973,9 +11971,14 @@ function parityLinesIn(text: string): { runs: ParityRun[]; typechecks: { dir: st
  * The environment the comparison holds: the database URLs are the harness's,
  * so not compared; the verb says whether DATABASE_URL is set. OB1_TEST_COUNTS
  * is where a run's totals are written for the wiki (SMD-3614), not what it
- * tests, so it is not compared either.
+ * tests, so it is not compared either. OB1_BACKGROUND_SLOTS is the
+ * workflow's for every step and ci-parity.sh's for every row, held once
+ * below rather than on each line (SMD-3379 PR 2b-2b).
  */
-const UNHELD_ENV = ["OB1_TEST_COUNTS"];
+const UNHELD_ENV = ["OB1_TEST_COUNTS", "OB1_BACKGROUND_SLOTS"];
+/** The background slots the suites run with (SMD-3379 PR 2b-2b): the workflow's own env, and ci-parity.sh's export of it. */
+const SUITE_SLOTS = "off";
+const PARITY_SLOTS_LINE = `export OB1_BACKGROUND_SLOTS=${SUITE_SLOTS}`;
 const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL") && !UNHELD_ENV.includes(k));
 const heldEnv = (env: Record<string, string>): string => JSON.stringify(heldEntries(env).sort(([a], [b]) => a.localeCompare(b)));
 const parityLine = (verb: string, dir: string, script: string, args: string, env: Record<string, string>): string =>
@@ -12090,6 +12093,27 @@ function checkCiParity() {
   // Were these missed, the reading is broken, not the two files in step.
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+  // The background slots off in both, once each, as the comparison above leaves them out (SMD-3379 PR 2b-2b): the
+  // workflow's env for every job, ci-parity.sh's export before its first row.
+  const topSlots = isMapping(doc) && isMapping(doc.env) ? doc.env.OB1_BACKGROUND_SLOTS : undefined;
+  if (topSlots !== SUITE_SLOTS) fail(SUITE_WORKFLOW, `sets OB1_BACKGROUND_SLOTS ${JSON.stringify(topSlots ?? null)} in its env, not "${SUITE_SLOTS}": the suites run with the background slots off, a compose stack's job setting it empty (check 35, SMD-3379)`);
+  // A job that brings the compose stack up runs it as shipped: OB1_BACKGROUND_SLOTS empty in its env, so compose hands
+  // the stack the defaults rather than the suites' off (review pass 1).
+  const jobsOf = isMapping(doc) && isMapping(doc.jobs) ? Object.entries(doc.jobs) : [];
+  // A step's commands as the shell reads them: continued lines joined, comments dropped, so a comment or a message that
+  // names compose's `up` is no stack, and an `up` on a continuation line is one (review pass 2); canary.sh's up too.
+  const commands = (run: string) => run.replace(/\\\n/g, " ").split("\n").map((l) => l.replace(/(^|\s)#.*$/, "")).filter((l) => !/^\s*(?:echo|printf|said|refused)\b/.test(l));
+  const bringsUp = (run: string) => commands(run).some((l) => /\bcompose\b.*\sup(?:\s|$)/.test(l) || /\bcanary\.sh\s+up\b/.test(l) || /\bfull-stack-up\.sh\b/.test(l));
+  const stackJobs = jobsOf.filter(([, j]) => isMapping(j) && Array.isArray(j.steps) && j.steps.some((st) => isMapping(st) && typeof st.run === "string" && bringsUp(st.run)));
+  // Each reading held: a comment and a message are no stack, a continued line is (probes).
+  if (bringsUp("# docker compose up -d") || bringsUp("  docker compose ps # then compose up -d") || bringsUp("refused 'x' compose up") || !bringsUp("docker compose -f a.yaml \\\n  up -d") || !bringsUp("./canary.sh up --no-refresh") || !bringsUp(".github/ci/full-stack-up.sh"))
+    fail(SELF, "check 35's stack-job reading no longer drops comments and messages and joins continued lines (SMD-3379)");
+  if (!stackJobs.length) fail(SELF, `check 35 reads no job of ${SUITE_WORKFLOW} that brings a compose stack up — the reading is broken`);
+  for (const [name, j] of stackJobs) {
+    const own = isMapping(j) && isMapping(j.env) ? j.env.OB1_BACKGROUND_SLOTS : undefined;
+    if (own !== "") fail(SUITE_WORKFLOW, `job ${name} brings a compose stack up with OB1_BACKGROUND_SLOTS ${JSON.stringify(own ?? null)} in its env, not "": the workflow's "${SUITE_SLOTS}" would reach the stack, which runs as shipped (check 35, SMD-3379)`);
+  }
+  if (readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n").filter((l) => l === PARITY_SLOTS_LINE).length !== 1) fail(PARITY_SCRIPT, `does not \`${PARITY_SLOTS_LINE}\` once, as ${SUITE_WORKFLOW}'s env does, so its suites would run with the background slots' defaults (check 35, SMD-3379)`);
   // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
   if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
     fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");

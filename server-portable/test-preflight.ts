@@ -3323,8 +3323,20 @@ else {
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON work_claims TO ob1_pf_capture");
-      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\)/.test(noSelect.out),
+      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\); agenda answers unfiltered by claims and refuses holder mine \(SMD-3669\)/.test(noSelect.out),
              `…and without SELECT on it, the claim calls and every read's claimed label are named (${noSelect.out.split("\n").find((l) => /ticket claims/.test(l))?.trim().slice(0, 200)})`);
+      // The agenda (SMD-3669 review pass 6): without SELECT on priority_assertions the priority row names it; without
+      // SELECT on open_items both the priority row and the items row do.
+      await claims.unsafe("REVOKE SELECT ON priority_assertions FROM ob1_pf_capture");
+      const noAssertions = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_assertions TO ob1_pf_capture");
+      await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
+      const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
+      assert(/, and so does agenda \(SMD-3669\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\)/.test(rowOf(noItems.out, "priority"))
+             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table/.test(rowOf(noItems.out, "open items")),
+        `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.
@@ -5424,15 +5436,45 @@ if (want("9")) {
   assert(/!\s+provider re-probe\s+OB1_PROVIDER_REPROBE_INTERVAL="5m" is not a whole number of seconds from 1 to 3600, or "off"; a provider that does not answer is re-probed every 15 s/.test(reprobeBad.out) && /→ Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15\./.test(fix(reprobeBad.out, "provider re-probe")),
          "…a value that does not read warns, with the default it falls back to");
   assert(row(refused.out, "provider re-probe") === "", "…and unset, the knob has no row");
-  // The background slots in force (SMD-3379 PR 2b-2a): their shares, off, and a value that does not read; unset, no row.
-  const slotsSet = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=1,embed=2,decide=1" });
+  // The background slots in force (SMD-3379 PR 2b-2a), on by default since PR 2b-2b: the defaults on the local
+  // endpoints, a value's own shares over them, off, a value that does not read (the defaults standing), OB1_MODEL_SLOTS'
+  // own, and the host rule — a chat or embedding share as large as the server's slots, or a server of one, warns. A run
+  // reading the defaults sets it empty, as unset — the suites run with it off.
+  const slotsDefault = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsSet = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=1,embed=2,decide=1" });
   const slotsOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "off" });
   const slotsBad = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=0" });
-  assert(/✓\s+background slots\s+chat=1, embed=2, decide=1 \(OB1_BACKGROUND_SLOTS\) — background model calls held to these shares/.test(slotsSet.out)
+  const slotsTwo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "2", OB1_BACKGROUND_SLOTS: "" });
+  const slotsFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_BACKGROUND_SLOTS: "chat=4,decide=4" });
+  const slotsOne = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsTypo = await run({ ...DB_DOWN, ...NO_KEYS, OB1_MODEL_SLOTS: "four", OB1_BACKGROUND_SLOTS: "" });
+  // No endpoint local: OB1_MODEL_SLOTS speaks of none, so neither a chat share of 4 nor a server of one warns (review pass 1).
+  const slotsRemote = await run({ ...DB_DOWN, ...NO_KEYS, OB1_BACKGROUND_SLOTS: "chat=4", OB1_MODEL_SLOTS: "1" });
+  // The defaults said only where their endpoint is local; one slot warned only where chat or embeddings is; a decide
+  // share warned only with a tier (review pass 2).
+  const slotsSplit = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k-split", OB1_EGRESS_POLICY: "off", OB1_BACKGROUND_SLOTS: "" });
+  const slotsJevOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_JEV_BASE_URL: "http://127.0.0.1:9", OB1_JEV_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "" });
+  const slotsNoTier = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_BACKGROUND_SLOTS: "decide=2" });
+  const slotsOneFull = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_LOCAL: "1", OB1_MODEL_SLOTS: "1", OB1_BACKGROUND_SLOTS: "embed=1" });
+  const held = "background model calls held to these shares";
+  // The shares as they stand: the decide tier's default left out with no tier configured, a type the value gives its
+  // own (review pass 1).
+  assert(new RegExp(String.raw`✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\) — ${held}`).test(slotsDefault.out)
+      && new RegExp(String.raw`✓\s+background slots\s+none by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\); chat=1, embed=2, decide=1 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — ${held}`).test(slotsSet.out)
       && /✓\s+background slots\s+off \(OB1_BACKGROUND_SLOTS\) — background model calls are not held/.test(slotsOff.out)
-      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
-      && row(refused.out, "background slots") === "",
-         `OB1_BACKGROUND_SLOTS has a row of its shares in force, off, or why it does not read; unset, none (${row(slotsSet.out, "background slots").slice(0, 160)})`);
+      && /!\s+background slots\s+OB1_BACKGROUND_SLOTS: "chat=0" is no whole number of slots from 1 to 16 .*; the defaults stay — in force: none by default: no endpoint is declared local/.test(slotsBad.out) && /→ Correct the value as the line says/.test(fix(slotsBad.out, "background slots"))
+      && /✓\s+background slots\s+chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 2,/.test(slotsTwo.out),
+         `the background slots' row: the defaults on the local endpoints, a value's own over them, off, a value that does not read, OB1_MODEL_SLOTS' own (${row(slotsDefault.out, "background slots").slice(0, 200)})`);
+  assert(/!\s+background slots\s+chat takes every one of the local server's OB1_MODEL_SLOTS 4, leaving live calls none; decide=4 queues that many background calls ahead of a capture's live genre call at a tier that answers one request at a time — in force:/.test(slotsFull.out) && !/decide takes/.test(row(slotsFull.out, "background slots"))
+      && /!\s+background slots\s+OB1_MODEL_SLOTS 1 leaves live calls no slot: background calls take the one — in force: chat=1, embed=1 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 1, none left for live calls\)/.test(slotsOne.out)
+      && /✓\s+background slots\s+none by default: no endpoint is declared local \(OB1_LLM_LOCAL, OB1_CHAT_LOCAL, OB1_JEV_LOCAL\); chat=4 set \(OB1_BACKGROUND_SLOTS\), every endpoint's — /.test(slotsRemote.out)
+      && /!\s+background slots\s+OB1_MODEL_SLOTS: "four" is no whole number of slots from 1 to 16 .*; 4 stays — in force: none by default: no endpoint is declared local/.test(slotsTypo.out),
+         `the host rule: a chat share of every one of the local server's slots warns, a decide share above one does, a server of one slot does; neither where no endpoint is local; a slot count that does not read is said (${row(slotsFull.out, "background slots").slice(0, 160)} | ${row(slotsOne.out, "background slots").slice(0, 120)})`);
+  assert(/✓\s+background slots\s+embed=3 by default on the local embeddings endpoint\(s\) \(OB1_MODEL_SLOTS 4,/.test(slotsSplit.out)
+      && /✓\s+background slots\s+decide=1 by default on the local decide endpoint\(s\) — /.test(slotsJevOnly.out)
+      && /✓\s+background slots\s+chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) .*; decide=2 set/.test(slotsNoTier.out)
+      && /!\s+background slots\s+embed takes every one of the local server's OB1_MODEL_SLOTS 1, leaving live calls none — in force:/.test(slotsOneFull.out) && !/OB1_MODEL_SLOTS 1 leaves live calls no slot/.test(row(slotsOneFull.out, "background slots")),
+         `the defaults said only for a local endpoint, a remote chat's not; one slot no warning where only the decide tier is local; a decide share no warning with no tier; one fault one warning (${row(slotsSplit.out, "background slots").slice(0, 120)} | ${row(slotsJevOnly.out, "background slots").slice(0, 120)} | ${row(slotsNoTier.out, "background slots").slice(0, 120)})`);
   // With the database up, the warning alone is no failure: exit 0, the server
   // starts — the restart loop SMD-2887 measured is gone.
   if (LIVE) {
@@ -5782,7 +5824,7 @@ if (want("10")) {
       : Response.json({ error: "the model failed" }, { status: 500 })),
   });
   const TIER = `http://127.0.0.1:${stub.port}`;
-  const JEV = { OB1_JEV_BASE_URL: undefined, OB1_JEV_MODEL: undefined, OB1_JEV_LOCAL: undefined, OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined };
+  const JEV = { OB1_JEV_BASE_URL: undefined, OB1_JEV_MODEL: undefined, OB1_JEV_LOCAL: undefined, OB1_CONSOLIDATE_DECIDER_URL: undefined, OB1_CONSOLIDATE_DECIDER_LOCAL: undefined, OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined };
 
   const off = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV });
   assert(/^\s*·\s+jev tier\s+OB1_JEV_BASE_URL is unset — the typed-decision tier is off/.test(row(off.out, "jev tier")) && row(off.out, "jev egress") === "",
@@ -5880,6 +5922,19 @@ if (want("10")) {
            "an https tier with an untrusted certificate answers, and the fix is http://");
   }
   rmSync(jevCerts, { recursive: true, force: true });
+  // Every failure branch of decide mode's own tier warns (review pass 4's mutants: only nothing listening and an
+  // unresolved name were held, so a 401, an answer not as the tier, or --deep's decision failing could go back to
+  // failing the start over a tier only the consolidation pass asks).
+  const DECIDE_OWN = { OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" };
+  const ownNotTier = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${other.port}` });
+  const ownGuard = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("unauthorized", { status: 401 }) });
+  const ownRefused = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${ownGuard.port}` });
+  ownGuard.stop(true);
+  const ownHalf = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${halfTier.port}` }, "--deep");
+  assert(/!\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but not as the tier/.test(ownNotTier.out) && !/✗\s+decide tier/.test(ownNotTier.out)
+      && /!\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but refuses the request/.test(ownRefused.out) && !/✗\s+decide tier/.test(ownRefused.out)
+      && /!\s+decide decision\s+/.test(ownHalf.out) && !/✗\s+decide decision/.test(ownHalf.out),
+         `its own tier answering not as the tier, refusing the request, or failing --deep's decision each warns (${row(ownNotTier.out, "decide tier").trim().slice(0, 90)} | ${row(ownRefused.out, "decide tier").trim().slice(0, 90)} | ${row(ownHalf.out, "decide decision").trim().slice(0, 90)})`);
   redirector.stop();
   halfTier.stop();
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
@@ -5888,21 +5943,78 @@ if (want("10")) {
   // Consolidation's decide mode (SMD-3115): its own row says what the pass needs, and the decider is the model the
   // tier is held to when OB1_JEV_MODEL names none. Warnings: the server never judges, and only the pass refuses.
   const decideNoTier = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
-  assert(/!\s+consolidate decide mode\s+OB1_CONSOLIDATE_DECIDER is verdict-v1\.4 and OB1_JEV_BASE_URL is unset — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideNoTier.out)
-      && /→ Point OB1_JEV_BASE_URL at the typed-decision tier serving verdict-v1\.4 \(jev\/h2o\/README\.md\), or unset OB1_CONSOLIDATE_DECIDER for the judge\./.test(fix(decideNoTier.out, "consolidate decide mode")),
+  assert(/!\s+consolidate decide mode\s+OB1_CONSOLIDATE_DECIDER is verdict-v1\.4 and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideNoTier.out)
+      && /→ Point OB1_CONSOLIDATE_DECIDER_URL at the typed-decision tier serving verdict-v1\.4 \(jev\/h2o\/README\.md\), or unset OB1_CONSOLIDATE_DECIDER for the judge\./.test(fix(decideNoTier.out, "consolidate decide mode")),
          `decide mode with no tier warns, naming both knobs (${row(decideNoTier.out, "consolidate decide mode").trim().slice(0, 160)})`);
   const decideUp = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
-  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through the tier; \S+ only writes the proposals it calls \(OB1_CONSOLIDATE_DECIDER, pass key consolidate:verdict-v1\.4\+\S+@p\d+d\d+\)/.test(decideUp.out)
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through the shared tier \(OB1_JEV_BASE_URL\); \S+ only writes the proposals it calls \(OB1_CONSOLIDATE_DECIDER, pass key consolidate:verdict-v1\.4\+\S+@p\d+d\d+\)/.test(decideUp.out)
       && /✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(decideUp.out, "jev tier")),
          `a tier serving the decider: decide mode's row names the pass key, and the tier row the knob that held it (${row(decideUp.out, "consolidate decide mode").trim().slice(0, 200)})`);
-  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
-  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(row(decideElse.out, "jev tier"))
-      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(decideElse.out, "jev tier")),
-         `a tier serving another model than the decider warns, naming the decider's knob (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
+  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
+  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — the consolidation pass decides nothing \(jev\/h2o\/README\.md, "When the tier is down"\); capture is unaffected/.test(row(decideElse.out, "jev tier"))
+      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\), or give decide mode a tier of its own at OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(decideElse.out, "jev tier"))
+      // The skip names the row as it ended (review pass 2: it said "failed" after this warn).
+      && /·\s+jev decision\s+not checked — the jev tier row warned/.test(decideElse.out),
+         `a tier serving another model than the decider warns, naming the decider's knob and decide mode's own tier, and --deep's skip says it warned (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
   const decideHeld = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "verdict-v1.4", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
   assert(/!\s+consolidate decide mode\s+OB1_JEV_MODEL is verdict-v1\.4 and OB1_CONSOLIDATE_DECIDER is h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideHeld.out)
       && /✓\s+jev tier\s+.* serves verdict-v1\.4 .* \(OB1_JEV_MODEL\)\s*$/.test(row(decideHeld.out, "jev tier")),
          "OB1_JEV_MODEL and the decider naming two models warns on decide mode's row, the tier held to OB1_JEV_MODEL");
+  // Decide mode's own tier (SMD-3326, a tier per caller): OB1_CONSOLIDATE_DECIDER_URL, declared local by
+  // OB1_CONSOLIDATE_DECIDER_LOCAL and held to the decider, gets rows of its own, and the shared tier is no longer the
+  // decider's.
+  const OWN = { OB1_CONSOLIDATE_DECIDER_URL: TIER, OB1_CONSOLIDATE_DECIDER_LOCAL: "1" };
+  const ownUp = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through its own tier \(OB1_CONSOLIDATE_DECIDER_URL\)/.test(ownUp.out)
+      && /✓\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(ownUp.out, "decide tier"))
+      && /^\s*·\s+jev tier\s+OB1_JEV_BASE_URL is unset/.test(row(ownUp.out, "jev tier")) && /✓\s+decide egress/.test(ownUp.out),
+         `its own tier: decide mode's row says so, the decide tier row is held to the decider, the shared tier stays off (${row(ownUp.out, "decide tier").trim().slice(0, 160)})`);
+  const ownElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — the consolidation pass decides nothing/.test(row(ownElse.out, "decide tier"))
+      && /→ Point OB1_CONSOLIDATE_DECIDER_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(ownElse.out, "decide tier")),
+         `its own tier serving another model than the decider warns, pointing at OB1_CONSOLIDATE_DECIDER_URL (${row(ownElse.out, "decide tier").trim().slice(0, 160)})`);
+  const ownDead = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" }, "--deep");
+  // A warning, not a failure (review pass 1): only the consolidation pass asks this tier, and it decides nothing
+  // until it answers; capture and search must still start.
+  assert(/!\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(ownDead.out) && /→ Start it on the host — jev\/h2o\/serve\.py in decider-4b's venv, kept running by its LaunchAgent/.test(fix(ownDead.out, "decide tier"))
+      && /Capture and search are unaffected/.test(fix(ownDead.out, "decide tier")) && /·\s+decide decision\s+not checked — the decide tier row warned/.test(ownDead.out),
+         `its own tier down warns with the host process's remedy — the server still starts — and --deep dials no decision (${fix(ownDead.out, "decide tier").trim().slice(0, 120)})`);
+  const both = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER_URL: "http://127.0.0.1:1", OB1_CONSOLIDATE_DECIDER_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* tokens\s*$/.test(row(both.out, "jev tier")) && /!\s+decide tier\s+nothing answers at http:\/\/127\.0\.0\.1:1/.test(both.out)
+      && /✓\s+consolidate decide mode/.test(both.out),
+         `with a tier of its own, the shared tier is no longer held to the decider: no warning on it, and decide mode's row is ok (${row(both.out, "jev tier").trim().slice(0, 160)})`);
+  const ownUndeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER_URL: TIER, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/!\s+decide egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(ownUndeclared.out) && /→ Set OB1_CONSOLIDATE_DECIDER_LOCAL=1 if this endpoint is on this machine/.test(ownUndeclared.out),
+         "its own tier undeclared: the decide egress row warns with OB1_CONSOLIDATE_DECIDER_LOCAL as the fix");
+  // Its own URL the shared tier's still gets its own rows (review pass 1): decide mode holds the tier to the decider and
+  // reads its own local declaration, which the jev rows check neither of.
+  const ownSame = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+decide tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(ownSame.out, "decide tier")) && /✓\s+decide egress/.test(ownSame.out)
+      && /✓\s+jev tier/.test(ownSame.out),
+         "its own URL the shared tier's: both tiers' rows, the decide tier's held to the decider");
+  const ownSameElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER_URL: TIER, OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/✓\s+jev tier/.test(ownSameElse.out) && /!\s+decide tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b/.test(row(ownSameElse.out, "decide tier"))
+      && /!\s+decide egress\s+http:\/\/127\.0\.0\.1:\d+ looks local but is not declared so/.test(ownSameElse.out),
+         `…so at the shared tier's URL, a model other than the decider and a missing OB1_CONSOLIDATE_DECIDER_LOCAL each warn, though the jev rows pass (${row(ownSameElse.out, "decide tier").trim().slice(0, 140)})`);
+  // Its URL with no decider is read by nothing (review pass 2): a warning, not silence and judge mode.
+  const urlAlone = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: undefined });
+  assert(/!\s+decide tier\s+OB1_CONSOLIDATE_DECIDER_URL is set, but OB1_CONSOLIDATE_DECIDER is not — decide mode is off/.test(urlAlone.out)
+      && /→ Set OB1_CONSOLIDATE_DECIDER to the model that tier serves to turn decide mode on, or unset OB1_CONSOLIDATE_DECIDER_URL\./.test(fix(urlAlone.out, "decide tier"))
+      && !/decide egress/.test(urlAlone.out),
+         `OB1_CONSOLIDATE_DECIDER_URL with no decider warns that nothing reads it, and dials nothing (${row(urlAlone.out, "decide tier").trim().slice(0, 160)})`);
+  // Its own tier's name unresolved warns too, the likeliest failure, under the wrong runtime's host alias (review pass 2:
+  // only nothing listening was held; not the tier, a 401 and --deep's decision are held above, review pass 4; the
+  // untrusted-certificate branch has no case of its own).
+  const ownUnresolved = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...DECIDE_OWN, OB1_CONSOLIDATE_DECIDER_URL: "http://ob1-no-such-host.invalid:8022" });
+  assert(/!\s+decide tier\s+nothing answers at http:\/\/ob1-no-such-host\.invalid:8022/.test(ownUnresolved.out) && !/✗\s+decide tier/.test(ownUnresolved.out),
+         `its own tier's name unresolved warns, as nothing listening does (${row(ownUnresolved.out, "decide tier").trim().slice(0, 160)})`);
+  // OB1_JEV_MODEL names the shared tier's model, not decide mode's, once decide mode has its own (review pass 2: that
+  // check went unheld here, though it is the setup a tier per caller exists for).
+  const ownJevModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_JEV_MODEL: "semif", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through its own tier/.test(ownJevModel.out) && !/OB1_JEV_MODEL is semif and OB1_CONSOLIDATE_DECIDER/.test(ownJevModel.out),
+         `with its own tier, an OB1_JEV_MODEL naming another model leaves decide mode's row ok (${row(ownJevModel.out, "consolidate decide mode").trim().slice(0, 160)})`);
+  const ownDeep = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, ...OWN, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" }, "--deep");
+  assert(/✓\s+decide decision\s+one binary decision in \d+ ms/.test(ownDeep.out), `--deep makes one decision through decide mode's own tier (${row(ownDeep.out, "decide decision").trim().slice(0, 120)})`);
 
   const notJev = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${other.port}`, OB1_JEV_LOCAL: "1" });
   assert(/✗\s+jev tier\s+.*speaks undefined, not ob1-jev\/1/.test(notJev.out), "a URL that answers but is not the tier (an Ollama, say) fails as not the contract");

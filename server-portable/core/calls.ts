@@ -49,6 +49,7 @@ export const CALLS = {
   release_claim: (c, p, i) => c.releaseClaim(p, i),
   list_claims: (c, p, i) => c.listClaims(p, i),
   thread: (c, p, i) => c.thread(p, i),
+  relations: (c, p, i) => c.relations(p, i),
   // The plugin rides here too: 117 lets a plugin's call state a priority on an item its row stands for (SMD-3665 PR 2).
   set_priority: (c, p, i, o) => c.setPriority(p, i, { plugin: o.plugin }),
   clear_priority: (c, p, i) => c.clearPriority(p, i),
@@ -61,6 +62,7 @@ export const CALLS = {
   decide_item_close: (c, p, i, o) => c.decideItemClose(p, i, { plugin: o.plugin }),
   item_history: (c, p, i) => c.itemHistory(p, i),
   list_items: (c, p, i) => c.listItems(p, i),
+  agenda: (c, p, i) => c.agenda(p, i),
 } satisfies { [K in ToolName]: Call<K> };
 
 /** The `{field}` names a route's path fills, in order: a core route's (rest/routes.ts) or a plugin operation's. */

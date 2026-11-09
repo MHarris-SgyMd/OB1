@@ -8,7 +8,7 @@ import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { providerDown, shownBase } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
-import { ListCursorRefused, storeKind, UUID_RE, type AuditChange, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { ListCursorRefused, RELATIONS_FETCHED, storeKind, UUID_RE, type AuditChange, type EffectivePriority, type PriorityTerm, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
@@ -21,6 +21,7 @@ import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
 import { parseSince } from "./since.ts";
 import { fetchedThreads, type FetchedThread } from "./threads.ts";
+import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
@@ -64,20 +65,22 @@ interface RunSearch {
   // provider call.
   // An embedding of null is a query the provider did not answer for, and
   // vectorFailed says why (SMD-2891).
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean }):
     Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }>;
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
 const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust;
+  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }> => {
   // min_trust (SMD-1724) is no column of query_log, so a search with it is not
   // logged: a replay (db/tier.ts) would run it without the floor and report
   // the rows it kept out as a difference (the maintainer's call; the column is
-  // SMD-2479). Every logged row replays as it ran.
-  const logged = opts.minTrust === undefined;
+  // SMD-2479). Every logged row replays as it ran. A priority-ranked search
+  // (SMD-3668: priority_weight, min_priority) is not logged for the same
+  // reason, and the window it reads is no row's limit either (`unlogged`).
+  const logged = opts.minTrust === undefined && opts.unlogged !== true;
   if (opts.arm === "keyword") {
     const rows = await (await ctx.store()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter, minTrust: opts.minTrust });
     // A keyword search takes no threshold or recency weight; log them as the
@@ -232,7 +235,7 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * an unknown field through, and then only the results it is about carry it.
  */
 export type SearchResult = {
-  results: ({ id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number } & ReturnType<typeof claimedResult>)[];
+  results: ({ id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number } & ReturnType<typeof claimedResult> & ReturnType<typeof priorityResult>)[];
   /** Present only when the provider did not answer for the query, and the results are its exact matches alone (SMD-2891); with none, the search is refused EMBEDDING_PROVIDER_UNAVAILABLE. */
   vectorFailed?: QueryVectorFailed;
 };
@@ -255,7 +258,9 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       needles: f.needles.filter((_, i) => f.needleCounts[i] === 0), commonNeedles: f.commonNeedles });
   }
   const store = await ctx.store();
-  const [moved, claimed] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows)]);
+  // No relations here (review pass 1, the maintainer's call): ChatGPT's search shape is a list to fetch from, and fetch
+  // carries them.
+  const [moved, claimed, priority] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows), priorityOf(store, r.rows)]);
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
@@ -264,6 +269,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       trust: t.metadata?.trust,
       ...resultLabel(moved[t.id]),
       ...claimedResult(claimed, t.id),
+      ...priorityResult(priority, t.id),
     })),
     ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}),
   });
@@ -274,7 +280,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
  * in a work thread (SMD-3306 PR 7a-2a) — the thought it continues and the one continuing it in each, null when they
  * could not be read.
  */
-export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult>;
+export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult> & ReturnType<typeof relationsResult> & ReturnType<typeof priorityResult>;
 
 export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input<"fetch">): Promise<Outcome<FetchedThought>> {
   const store = await ctx.store();
@@ -282,7 +288,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const [, claimed, threads] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id)]);
+  const [, claimed, threads, related, priority] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true), priorityOf(store, [thought])]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),
@@ -294,6 +300,9 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
       updated_at: thought.updated_at,
     },
     ...claimedResult(claimed, thought.id),
+    // SMD-2726: its judged relations, only where it has some, as `claimed` rides.
+    ...relationsResult(related, thought.id),
+    ...priorityResult(priority, thought.id),
     // Only where it stands in a thread, or the read failed: a thought in none adds nothing to ChatGPT's shape.
     ...(threads === null || threads.length > 0 ? { threads } : {}),
   });
@@ -314,7 +323,7 @@ export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "
  * under one, no written time, a brain before 095), empty when checked and none
  * moved or it names none; `movedNotRead` the keys past the first 50, not checked.
  */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number } & ReturnType<typeof claimedLabel>;
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -328,6 +337,8 @@ export type SearchThoughtsResult = {
   facts: QueryFacts | null;
   /** prefer_current's window (059): what it held, for the header note. Null without the flag. */
   window: NonNullable<ThoughtHybridMatch["window"]> | null;
+  /** The priority ranking (SMD-3668): its weight and floor, the window it read and what it kept. Null with neither set. */
+  priority: PriorityRanking | null;
   /** Present only when the provider did not answer for the query, and the hits are its exact matches alone (SMD-2891). */
   vectorFailed?: QueryVectorFailed;
 };
@@ -474,16 +485,232 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
   return c?.claimed.length ? { claimed: c.claimed, ...(c.claimedMore > 0 ? { claimedMore: c.claimedMore } : {}), ...(c.claimedNotRead > 0 ? { claimedNotRead: c.claimedNotRead } : {}) } : {};
 };
 
+// ── priority_weight and min_priority (SMD-3668) ─────────────────────────────
+
+/**
+ * The largest effective priority under the default weights (docs/priority.md, migration 122): a critical level (5),
+ * overdue (3) and unblocking many (1). A priority-ranked search reads a match's priority as its effective over this,
+ * capped at 1, so the blend's two halves share a 0–1 scale.
+ */
+export const PRIORITY_SPAN = 9;
+/** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
+export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
+
+/** What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known priority on. */
+export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number };
+/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a stated or inherited level). */
+export type MatchPriority = { effective: number; known: boolean };
+
+/**
+ * Each row's priority as the ranking reads it (SMD-3668): its own thought's effective priority, from the window's one
+ * read of its rows' own thoughts (readPriorities with `tickets: false`). 122 decides it as
+ * docs/priority.md decision 5 says (review pass 1: an earlier reading took the highest of a thought's and its filed
+ * tickets', against three of the ADR's rules):
+ * - a ticket's own row reads as its ticket;
+ * - any other thought takes its own stated level, else one inherited from the ticket it is about (metadata ticket or
+ *   issue, else its standing subject) at one level less a hop, counted only above unknown's 2, and nothing from a
+ *   settled ticket;
+ * - a ticket its text only mentions does not rank it: inheritance through mentions waits for SMD-3662's numbers ("Not
+ *   decided here"); the label shows that ticket's priority beside the row's own.
+ * Known is a stated or a counted inherited level; otherwise the row's unknown, ordered as 122's `unknown` weight.
+ */
+export function prioritiesOf(read: PriorityRead, rows: readonly { id: string }[]): Record<string, MatchPriority> {
+  const out: Record<string, MatchPriority> = {};
+  for (const { id } of rows) {
+    const p = read.by.get(`thought:${id}`);
+    out[id] = p ? { effective: p.effective, known: knownPriority(p) } : { effective: 0, known: false };
+  }
+  return out;
+}
+
+/** A priority is known when a counted statement states its level or it inherits a counted one (decision 5): unknown's 2 is no label. */
+const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom">) => p.level !== null || p.inheritedFrom !== null;
+
+/**
+ * A prioritised item a result names (SMD-3668 PR 2), as 122 read it: the result itself (`self`) — a ticket's own row
+ * as its ticket, kind `ticket` — or a ticket it is filed under or names. Its effective priority and the level behind
+ * it, stated (`level`) or inherited (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
+ * items it unblocks; whether it is settled (a finished ticket's own level stands, its urgency and unblocks dropped)
+ * or waiting on a not_before; and every term, named, as the agenda shows them.
+ */
+export type PriorityOn = {
+  kind: "thought" | "ticket"; key: string; self: boolean; effective: number; level: number | null;
+  inheritedFrom: { kind: string; key: string; level: number; hops: number } | null;
+  dueAt: string | null; urgency: number; overdue: boolean; unblocks: number; settled: boolean; notBefore: string | null; waiting: boolean;
+  terms: PriorityTerm[];
+};
+/** A result's priorities: the first PRIORITY_SHOWN, how many more, and how many tickets it names that were not read. */
+export type PriorityHit = { priority: PriorityOn[]; priorityMore: number; priorityNotRead: number };
+/** How many of a result's prioritised items it names in full (itself first, then the most pressing). */
+const PRIORITY_SHOWN = 10;
+/** One read's reach: 122 reads at most 1000 items at once. The rows' own thoughts first, then the tickets they name. */
+const PRIORITY_READ = 1000;
+/** A ticket key as 115 and 122 take it: a key the text names that is no ticket (SMD-0, a 17-letter team) would fail the whole read. */
+const PRIORITY_TICKET = /^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$/;
+/** One effective_priority read for a page (SMD-3668): every answer by `kind:key`, and per row the tickets asked for it and those it names that were not. */
+export type PriorityRead = { by: Map<string, EffectivePriority>; keyed: Map<string, { keys: string[]; notRead: number }> };
+
+type PriorityRow = { id: string; content: string; metadata?: Record<string, unknown> | null };
+
+/**
+ * The page's one priority read (SMD-3668): each row as its own thought — a ticket's own row reads as its ticket, and a
+ * note inherits from the ticket it is about, as 122 decides — then the tickets each row is filed under and the first
+ * MOVED_READ others its text names (claimKeysOf, as the claimed label reads them), each once, to 122's reach of 1000.
+ * A key that is no ticket key by 115's rule is not sent. Throws as the store does: a ranked search refuses on it,
+ * priorityOf reads it as not read.
+ *
+ * `tickets: false` asks the rows' own thoughts alone: a ranked search's window read, which ranks by them and refuses
+ * on a failure, so a ticket only a row it drops names can neither cost it nor fail it (review pass 1). `have` holds
+ * answers already read, not asked again: the label of a ranked page reuses the window's. Nothing to ask, no call.
+ */
+export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): Promise<PriorityRead> {
+  const have = opts.have ?? new Map<string, EffectivePriority>();
+  const ids = [...new Set(rows.map((r) => r.id))].filter((id) => !have.has(`thought:${id}`));
+  const tickets: string[] = [];
+  const seen = new Set<string>();
+  const keyed = new Map<string, { keys: string[]; notRead: number }>();
+  for (const r of rows) {
+    if (keyed.has(r.id) || opts.tickets === false) continue;
+    const { keys, notRead } = claimKeysOf(r);
+    // A ticket's own row is asked by its key too, though 122 may read its thought as that ticket: whether it does rests
+    // on the raw metadata and the row's linear source identity, which this side cannot see (review pass 3: a lower-case
+    // `issue`, which 122 does not map, lost its ticket when the key was skipped). priorityLabels shows it once.
+    const asked: string[] = [];
+    let cut = notRead;
+    for (const k of keys.filter((k) => PRIORITY_TICKET.test(k))) {
+      if (!seen.has(k)) {
+        if (ids.length + tickets.length >= PRIORITY_READ) { cut++; continue; }
+        seen.add(k);
+        tickets.push(k);
+      }
+      asked.push(k);
+    }
+    keyed.set(r.id, { keys: asked, notRead: cut });
+  }
+  const by = new Map(have);
+  if (ids.length + tickets.length === 0) return { by, keyed };
+  // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are; a ticket upper-case.
+  const read = await store.effectivePriority([...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))]);
+  for (const p of read) by.set(`${p.item.kind}:${p.item.key}`, p);
+  return { by, keyed };
+}
+
+/** The ticket a thought's answer reads as (122 names it in its first term's `as`), else null. */
+const readAs = (p: EffectivePriority): string | null => {
+  const as = p.terms[0]?.detail.as as { kind?: unknown; key?: unknown } | undefined;
+  return as?.kind === "ticket" && typeof as.key === "string" ? as.key : null;
+};
+const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
+  const as = self ? readAs(p) : null;
+  return {
+    kind: as !== null || p.item.kind === "ticket" ? "ticket" : "thought", key: as ?? p.item.key, self, effective: p.effective, level: p.level,
+    inheritedFrom: p.inheritedFrom, dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
+    notBefore: p.notBefore, waiting: p.waiting, terms: p.terms,
+  };
+};
+
+/**
+ * Each row's label from the read (SMD-3668 PR 2): the known priorities of the row itself and of the tickets it names —
+ * itself first, then by effective priority, a tie in the order named; a settled item by the level it keeps, said
+ * settled, as finished-ness is its own fact (the maintainer, SMD-3668 PR 1's review pass 2) — the first PRIORITY_SHOWN and the rest counted, and
+ * the tickets it names past the read's reach counted. A ticket's own row is shown once, as its ticket. An unknown
+ * priority is no label: 122 reads it as 2, which says nothing of the item. It labels and never ranks.
+ */
+export function priorityLabels(read: PriorityRead, rows: readonly { id: string }[]): Record<string, PriorityHit> {
+  const out: Record<string, PriorityHit> = {};
+  for (const { id } of rows) {
+    const own = read.by.get(`thought:${id}`);
+    const self = own && knownPriority(own) ? priorityOn(own, true) : null;
+    const as = own ? readAs(own) : null;
+    const k = read.keyed.get(id) ?? { keys: [], notRead: 0 };
+    const named = k.keys
+      .filter((key) => key !== as)
+      .map((key) => read.by.get(`ticket:${key}`))
+      .filter((p): p is EffectivePriority => p !== undefined && knownPriority(p))
+      .map((p) => priorityOn(p, false))
+      .sort((a, b) => b.effective - a.effective);
+    const all = self ? [self, ...named] : named;
+    out[id] = { priority: all.slice(0, PRIORITY_SHOWN), priorityMore: Math.max(0, all.length - PRIORITY_SHOWN), priorityNotRead: k.notRead };
+  }
+  return out;
+}
+
+/**
+ * The priority label (SMD-3668 PR 2) for a page: one read, best-effort, as claimedOf — a brain before 122, a server
+ * role without its grants, or a read that fails gives null, which the replies say. A ranked page passes its window's
+ * answers (`have`), so only its tickets are asked; an empty page asks nothing (review pass 1).
+ */
+export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>): Promise<Record<string, PriorityHit> | null> {
+  try {
+    return priorityLabels(await readPriorities(store, rows, { have }), rows);
+  } catch (e) {
+    const err = e as { errno?: unknown; code?: unknown; message?: unknown };
+    console.error(`priority: the effective priority read failed (${String(err.errno ?? err.code ?? "no code")}): ${String(err.message ?? e).slice(0, 200)}; results carry priority: null`);
+    return null;
+  }
+}
+
+/** A result's priority fields where every read carries them: null when the read failed, else the items and counts. */
+export const priorityLabel = (all: Record<string, PriorityHit> | null, id: string): { priority: PriorityOn[] | null; priorityMore: number; priorityNotRead: number } =>
+  all === null ? { priority: null, priorityMore: 0, priorityNotRead: 0 } : (all[id] ?? { priority: [], priorityMore: 0, priorityNotRead: 0 });
+/** The compat shapes' priority fields (search, fetch), as claimedResult: only where an item is prioritised, or `priority: null` when the read failed. */
+export const priorityResult = (all: Record<string, PriorityHit> | null, id: string): { priority?: PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number } => {
+  if (all === null) return { priority: null };
+  const p = all[id];
+  return p?.priority.length ? { priority: p.priority, ...(p.priorityMore > 0 ? { priorityMore: p.priorityMore } : {}), ...(p.priorityNotRead > 0 ? { priorityNotRead: p.priorityNotRead } : {}) } : {};
+};
+
+/**
+ * The window re-ranked and filtered (SMD-3668): each match scored (1 − weight) × relevance + weight × priority —
+ * relevance its place in the window, (n − i) / n, so the first is 1 and the last 1/n; priority its effective over
+ * PRIORITY_SPAN, capped at 1 — in that order, a tie in the window's own; then, with a floor, only matches whose
+ * priority is known and at least it; then the first `limit`. Pure, for the unit test.
+ *
+ * By place, not score (review pass 2): the hybrid's score is its fusion score, 0 for a text match, for every row of
+ * a literal-only query without the literal, and for every row when no thought holds it — rows the search ordered by
+ * similarity or newness, which a score over the top's left to priority alone at any weight. The window's order is the
+ * search's own, ties and all; and the fusion scores bunch (the 40th about 0.6 of the first), which place does not.
+ */
+export function rankByPriority<T extends { id: string }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number): T[] {
+  const n = rows.length;
+  const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / PRIORITY_SPAN);
+  const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * ((n - i) / n) + weight * priority(r) }));
+  // The window's own order breaks a tie, so a weight of 0 with a floor keeps it.
+  scored.sort((a, b) => b.s - a.s || a.i - b.i);
+  const kept = min === null ? scored : scored.filter(({ r }) => prio[r.id]?.known === true && prio[r.id].effective >= min);
+  return kept.slice(0, limit).map(({ r }) => r);
+}
+
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
-  const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
+  const { query, limit, threshold, recency_weight, prefer_current, min_trust, priority_weight, min_priority } = input;
+  // SMD-3668: a weight above 0 or a floor reads a window and its priorities; neither is today's search, untouched.
+  const ranked = priority_weight > 0 || min_priority !== undefined;
+  const window = ranked ? priorityWindow(limit) : limit;
   // parseFilter refuses a shape jsonb should not run.
   const f = searchFilter(input);
   if ("refusal" in f) return refuse(f.refusal);
   // The one search op, hybrid arm (SMD-1490): it gates the query
   // (SMD-1903), embeds it, runs the filter and logs.
-  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust });
+  const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit: window, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust, unlogged: ranked });
   if (r.refusal) return refuse(r.refusal);
-  const data = r.rows;
+  let data = r.rows;
+  let priority: PriorityRanking | null = null;
+  // A ranked search reads its window's own thoughts, which rank it, and refuses on a failed read, as PR 1's did. Its
+  // label then reads the tickets of the page it keeps, best-effort, reusing the window's answers (SMD-3668 PR 2, review
+  // pass 1: a window read of every ticket its rows name read up to 900 the page never shows, and could fail the search
+  // on one). An unranked search reads its page's, best-effort, beside the claims.
+  let labels: Promise<Record<string, PriorityHit> | null> | null = null;
+  if (ranked && data.length) {
+    const store = await ctx.store();
+    const all = await readPriorities(store, data, { tickets: false });
+    const prio = prioritiesOf(all, data);
+    const read = data.length;
+    data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit);
+    labels = priorityOf(store, data, all.by);
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length };
+  } else if (ranked) {
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read: 0, kept: 0, known: 0 };
+  }
   const failed = r.vectorFailed ? { vectorFailed: r.vectorFailed } : {};
 
   if (data.length === 0) {
@@ -497,7 +724,8 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // the facts are the query's, not the filtered scope's.
     // Without a vector the facts are answerWithoutVector's (SMD-2891).
     const facts = r.vectorFailed ? (r.facts ?? null) : factsOf((await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} }))[0]);
-    return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, ...failed });
+    // A floor that kept none of the window's matches says so (SMD-3668): the facts are still the query's.
+    return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, priority, ...failed });
   }
 
   // 025 (SMD-1253): which of these hits a newer thought has superseded,
@@ -507,25 +735,27 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
   const store = await ctx.store();
-  const claims = claimedOf(store, principal, data);
+  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
+  const prios = labels ?? priorityOf(store, data);
   const superseded = await store.supersededAmong(data.map((t) => t.id));
-  const [moved, claimed] = await Promise.all([movedOf(store, data, superseded), claims]);
+  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
   return ok({
     query,
     preferCurrent: prefer_current,
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id),
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
     })),
     // A text match has no literal-only reading: unknown, not false (review pass 6).
     facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
     window: data[0].window ?? null,
+    priority,
     ...failed,
   });
 }
 
-export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences"> & ReturnType<typeof claimedLabel>;
+export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences"> & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
 export type KeywordResult = { query: string; offset: number; total: number | null; hits: KeywordHit[] };
 
 export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, input: Input<"search_thoughts_keyword">): Promise<Outcome<KeywordResult>> {
@@ -537,19 +767,20 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
   // the scan, and — new since SMD-1490 — a query_log row written with
   // arm='keyword' (034 logged only the semantic path).
   const { rows } = await runSearch(ctx, principal, { tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: f.filter, minTrust: min_trust });
-  const claimed = rows.length ? await claimedOf(await ctx.store(), principal, rows) : {};
+  const store = rows.length ? await ctx.store() : null;
+  const [claimed, related, prioritised] = store ? await Promise.all([claimedOf(store, principal, rows), relationsOf(store, rows), priorityOf(store, rows)]) : [{}, {}, {}];
   return ok({
     query,
     offset,
     // The whole match set, not the page: every row carries it. An empty first page is none; an empty later page (an offset past the end) says nothing of the set, so null (review pass 6).
     total: rows.length ? rows[0].totalCount : offset === 0 ? 0 : null,
-    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences, ...claimedLabel(claimed, t.id) })),
+    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id) })),
   });
 }
 
 // ── list_thoughts and list_supersession_proposals ────────────────────────────
 
-export type ListedThought = ThoughtListItem & { supersededBy: string | null } & ReturnType<typeof claimedLabel>;
+export type ListedThought = ThoughtListItem & { supersededBy: string | null } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
 /** A page (SMD-2995): the thoughts, the sort they are in, and the cursor for the next page — null when no more follow. */
 export type ListThoughtsResult = { thoughts: ListedThought[]; sort: ListSort; cursor: string | null };
 
@@ -581,8 +812,8 @@ export async function listThoughts(ctx: Ctx, principal: Principal, { limit, type
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
   // and name the replacement — the same label search_thoughts prints.
   const store = await ctx.store();
-  const [superseded, claimed] = await Promise.all([store.supersededAmong(page.thoughts.map((t) => t.id)), claimedOf(store, principal, page.thoughts)]);
-  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null, ...claimedLabel(claimed, t.id) })), sort, cursor });
+  const [superseded, claimed, related, prioritised] = await Promise.all([store.supersededAmong(page.thoughts.map((t) => t.id)), claimedOf(store, principal, page.thoughts), relationsOf(store, page.thoughts), priorityOf(store, page.thoughts)]);
+  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id) })), sort, cursor });
 }
 
 /**

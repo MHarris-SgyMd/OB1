@@ -14,6 +14,7 @@
  */
 
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
+import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
@@ -113,6 +114,16 @@ const deny = resolveEgressPolicy({});
   ok(classifyError({ status: 400, message: "bad request shape" }) === "fatal", "a 400 that is not about length is fatal");
   ok(classifyError({ status: 307 }) === "fatal" && classifyError({ status: 301 }) === "fatal", "a redirect, which no call follows, is fatal: the base redirects every call (SMD-2908)");
   ok(classifyError({}) === "thought", "an error the rules do not recognise is the thought's");
+  // The decision tier's 422 (SMD-3326): one decision it cannot read faithfully, so this thought's — recorded failed —
+  // where any other 422 (a chat endpoint's) still stops the pass as a request every thought would send.
+  const refused = new DecisionRefused("Decision request to http://127.0.0.1:8022/decide failed: 422 {\"error\":\"decision 0: its context is 40000 tokens\"}", "decision 0");
+  ok(refused instanceof ProviderError && refused.status === 422 && refused.kind === "http" && refused.name === "ProviderError",
+    "a DecisionRefused is still a ProviderError of kind http and status 422");
+  ok(classifyError(refused) === "thought" && followClassify(refused) === "thought",
+    "the decision tier's 422 is the thought's, to classifyError and to a follower alike");
+  const chat422 = new ProviderError("Chat request failed: 422 unprocessable", "http", 422);
+  ok(classifyError(chat422) === "fatal" && followClassify(chat422) === "probe-decides",
+    "…and any other 422 is as before: fatal, and a probe decides it under --follow");
   // The one rule extract adds: a 400 about the answer budget. Without the option
   // it reads as this thought's length (refusesLength matches "tokens") and is the
   // thought's; with it, it names the request and is fatal — stop the whole pass.

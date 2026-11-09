@@ -30,6 +30,16 @@ defaults:
   run:
     shell: bash
 
+# The suites run with the background slots off (SMD-3379 PR 2b-2b, the
+# maintainer, 2026-11-08): the defaults would hold every local stub's background
+# calls in each process a suite spawns, a connection per slot, and the rows that
+# test them set their own. A job that runs the compose stack sets it empty, so
+# compose hands the stack its defaults: deploy-stack checks preflight says them,
+# and the stack starts, stops and runs its flows with the hook installed — its
+# calls are live, so none takes a slot (review pass 3).
+env:
+  OB1_BACKGROUND_SLOTS: "off"
+
 # Every job names its runner image (ubuntu-24.04, not ubuntu-latest, which
 # GitHub moves to a new release on its own date), and every `uses:` names a
 # full commit SHA with the tag it was in a trailing comment; Dependabot
@@ -214,6 +224,19 @@ jobs:
       # and a whole dry run on stubs that sends nothing but reads.
       - name: The agent runner's selection and dry run
         run: bun scripts/agent-runner/dry-run.ts --self-check
+      # SMD-4088 (SMD-4087 cut 2a): the runner sessions' profile on fixtures —
+      # the guard's decisions, the settings, environment and command line, the
+      # launcher's checks on a stand-in for Claude Code, and the probes' mock.
+      # The probes themselves need the pinned Claude Code and macOS's sandbox.
+      - name: The agent runner sessions' profile
+        run: bun scripts/agent-runner/probes.ts --self-check
+      # SMD-4087 cut 2b-1: the run record and the gate on fixtures — the record's
+      # round-trip and its no-follow I/O, the gate's pure parsers, and the whole
+      # gate on a real bare repo and branch (a clean branch, and each kind of bad
+      # branch, diff, secret and work), with stubbed commitlint and secret
+      # scanners. The run orchestration that makes a real branch is cut 2b-2.
+      - name: The agent runner's record and gate
+        run: bun scripts/agent-runner/gate-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -410,6 +433,14 @@ jobs:
       - name: Decision tier — contract, service and client
         working-directory: jev
         run: bun test-jev.ts
+
+      # H2O's adapter (SMD-3326): serve.handle, the whole of its POST /decide —
+      # one read at a time, SMD-2082's bounded queue, the 422 for a context it
+      # would read in part — with a fake reader and the standard library alone,
+      # so no model, no web framework and no install. ci-parity.sh runs bun
+      # scripts only (check 35), so a local run is `python3 jev/h2o/test_serve.py`.
+      - name: H2O adapter — one read at a time, the bounded queue, the 422
+        run: python3 jev/h2o/test_serve.py
 
       # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
       # with mutants, and the committed fixture held to them. Ids and closed
@@ -615,7 +646,8 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # extensions until SMD-2311 made the six plugins (change 64), and the
       # recipes' and integrations' HTTP APIs and workers (change 67; the
-      # webhook receiver until SMD-2690 made it a plugin) — through a
+      # webhook receiver and the agent-memory API until SMD-2690 made them
+      # plugins, and smart-ingest imports only listenOn and routable) — through a
       # _shared/auth.ts beside it, a byte copy. Their suites and install live
       # in integrations/ since SMD-3747. One MCP stack
       # across the tree's installs — the test fails if server-portable's or
@@ -1686,6 +1718,9 @@ jobs:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack '))) }}
     steps:
@@ -1724,6 +1759,8 @@ jobs:
           grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
+          # The stack got the background slots' defaults, not the suites' off (SMD-3379 PR 2b-2b review pass 3).
+          grep -E 'background slots +chat=3, embed=3 by default on the local embeddings and chat endpoint\(s\) \(OB1_MODEL_SLOTS 4, one left for live calls\)' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
 
       # SMD-1875, the ticket's first Verify item on every PR: the compose
@@ -3003,6 +3040,9 @@ jobs:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-brains '))) }}
     steps:
@@ -3854,6 +3894,9 @@ jobs:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-auth '))) }}
     steps:
@@ -4617,6 +4660,9 @@ jobs:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The stack as shipped: compose hands it the background slots' defaults (SMD-3379 PR 2b-2b).
+    env:
+      OB1_BACKGROUND_SLOTS: ""
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' deploy-stack-observability '))) }}
     steps:

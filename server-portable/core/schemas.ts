@@ -11,6 +11,7 @@ import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { PRIORITY_KINDS } from "../priority-kinds.ts";
+import { RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -48,6 +49,17 @@ const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL char
 const UUID_ARG = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a uuid");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
+/**
+ * What a judged relation is, said once for every read that carries one (SMD-2726; SMD-3306 PR 7a-2b): the
+ * consolidation judge's word on a thought and a near neighbour, both sides, strongest first.
+ */
+const RELATION_TEXT =
+  "a judged relation is the consolidation judge's word on two near neighbours — related, evolves (the newer continues the older's work), duplicate, or distinct (look-alikes about different subjects) — each its id, `relation`, the `other` thought (id, `trust`, created_at, `supersededBy`), `otherIs` (older or newer: on the newer, evolves means it evolves from the other), the judge's `confidence`, `judgedAt` (when it was last judged), and `stale` when either text was edited since it was judged, so the word may no longer hold (a relation with no lineage record reads not stale)";
+/** Where an other thought's title is given, and where not (review pass 1, the maintainer's call). */
+const RELATION_TITLE_TEXT = "`other` carries its `title` (over MCP's text an outside text's marked [ingested])";
+const RELATION_NO_TITLE = "no title (fetch and the `relations` tool give it); over MCP a `↔ Relations:` line names another result on the page by its place, any other by its id";
+const RELATION_NOT_READ = "`relations: null` says they could not be read";
+
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
 export const SCAN_DEFAULT = 1_000;
 export const SCAN_MAX = 100_000;
@@ -77,6 +89,11 @@ const actorInput = z.string().trim().min(1).max(200).optional()
 const minTrustInput = z.enum(TRUST).optional()
   .describe("Only thoughts whose trust is at least this: operator (typed by the operator) above agent (an agent's own output) above ingested (outside text an importer copied in). The trust is the one on a hit's `By:` line, decided by the key that wrote the text and what that write declared, never by the text; a thought with no trust recorded is below every word. Omit for every thought.");
 
+/** No lone UTF-16 surrogate: JSON.stringify writes one as an escape jsonb refuses (SMD-3669 review pass 6). */
+const WELL_FORMED = (v: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v);
+/** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
+const AGENDA_SCOPE = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
+
 export const SPECS = {
   search: {
     title: "Search Daemonic Brain",
@@ -86,7 +103,9 @@ export const SPECS = {
       "A result naming a ticket whose status has moved since it was written carries `moved` — `{ticket, was, now}` in status types — and over MCP its title starts `[moved since written: <ticket> <then> → <now>]`, each status as its type's word (Triage, Backlog, Todo, In Progress, Done, Canceled, Duplicate; a custom \"In Review\" shows as In Progress), never the board's name; trust the ticket's status now over what the thought says (a ticket now Duplicate: its work is tracked under the ticket it duplicates). " +
       "No `moved` makes no claim: a superseded thought, a ticket row and a note filed under a ticket are not checked, nor is any result on a brain before migration 095, nor a key past the first 50 a result mentions (beside a move, `movedNotRead` counts them)." +
       " A result naming a ticket with an unreleased work claim carries `claimed` — each claim's id, ticket, piece, holder (`ownKey` when it is your key), label, times and `state` (live, or lapsed and never released: work that may be paused), the first ten, `claimedMore` the rest — and over MCP its title starts `[claimed: <ticket> by <holder>, since <time>]` (`(a piece)` after the ticket for a piece's claim, `lapsed at <time>` for a lapsed one), the first two, after any moved prefix — never the piece or label, the holder's own words — or `[claims not read]` beside a top-level `claimsNote` when they could not be read. A result's tickets are those it is filed under and the first 50 it names; beside its claims `claimedNotRead` counts the rest, and `claimed: null` on every result says the claims could not be read. No `claimed` makes no claim. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs. " +
-      "While the embedding provider does not answer, the results are the query's exact matches alone — its identifiers and quoted spans, then, those matching nothing, the query as one text — and `vectorFailed` says so (over MCP the marker word beside a `note`, and each title carries `[exact match — semantic search unavailable]` after `[ingested]`, `[moved since written: …]` and `[claimed: …]` where those apply; over REST the reason, the endpoint and what happened there); with no result then, the search is refused `EMBEDDING_PROVIDER_UNAVAILABLE`, retryable.",
+      "A result that is, or names, an item with a known priority (a level stated by a classified key, or one inherited from what it serves: a thought from the ticket it is about, a ticket from its parent) carries `priority`: per item its kind and key, `self` when it is the result itself (a ticket's own row as its ticket), its effective priority, its stated `level` (0 none to 5 critical) or `inheritedFrom`, its due time with the urgency it adds, `overdue`, the open items it `unblocks`, `settled` (a finished ticket keeps its level, without urgency), and `waiting` with its `notBefore` (a not_before ahead); itself first, then by effective priority (a settled item by the level it keeps, said settled: finished-ness is its own fact, which prefer_current ranks by), the first ten, `priorityMore` the rest, `priorityNotRead` the tickets it names past the first 50, or past the read's reach of 1000 items. Over MCP its title carries `[priority: <item> <level>, due <time>]` (`overdue (due <time>)` once past it, then `unblocks <n>`, `settled` or `not before <time>` where they apply; a stated None as `stated none (0)`), the first two, after any `[ingested]`, `[moved since written: …]` and `[claimed: …]` prefix, or `[priority not read]` beside a top-level `priorityNote` when the priorities could not be read. No `priority` makes no claim: a ticket past the first 50 a result names, or past the reach, is not read, and a REST core older than this server sends none. " +
+      "A result's judged relations are on fetch, not here. " +
+      "While the embedding provider does not answer, the results are the query's exact matches alone — its identifiers and quoted spans, then, those matching nothing, the query as one text — and `vectorFailed` says so (over MCP the marker word beside a `note`, and each title carries `[exact match — semantic search unavailable]` after `[ingested]`, `[moved since written: …]`, `[claimed: …]` and `[priority: …]` where those apply; over REST the reason, the endpoint and what happened there); with no result then, the search is refused `EMBEDDING_PROVIDER_UNAVAILABLE`, retryable.",
     annotations: {
       readOnlyHint: true,
     },
@@ -99,6 +118,8 @@ export const SPECS = {
     description:
       "Fetch one Daemonic Brain thought by ID after using search. Use this read-only compatibility tool to retrieve the full text and metadata for citation. " +
       "A thought naming a ticket with an unreleased work claim carries `claimed`, `claimedMore` and `claimedNotRead` as search's results do, only where a ticket it names is claimed, and its title starts `[claimed: …]` as theirs does, or `[claims not read]` beside a `claimsNote` when they could not be read. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs. " +
+      "A thought that is, or names, an item with a known priority carries `priority`, `priorityMore` and `priorityNotRead` as search's results do, and its title starts `[priority: …]` after any claimed prefix, or `[priority not read]` beside a `priorityNote` when the priorities could not be read. " +
+      `A thought with judged relations carries \`relations\`, its first ${RELATIONS_FETCHED} strongest first and \`relationsMore\` the rest: ${RELATION_TEXT}; ${RELATION_TITLE_TEXT}. A thought with none carries no \`relations\`; ${RELATION_NOT_READ}. The brain's \`relations\` tool pages a thought's whole set. ` +
       "A thought in a work thread — the thoughts holding one subject, such as a ticket, in the order they were captured — carries `threads`: per thread its `key`, the thought's `place` (1 the first) and the thread's `total`, and `continues` (the member captured just before it, not a judged evolution) and `continuedBy` (the one just after), each its id, title and `supersededBy` when a newer thought supersedes it; null at the thread's ends. A board ticket's own row (its head row) keeps its first place while its text and status change. `threads: null` says they could not be read; a thought in no thread carries no `threads`. The brain's `thread` tool reads a whole thread.",
     annotations: {
       readOnlyHint: true,
@@ -119,6 +140,8 @@ export const SPECS = {
       "A hit naming a ticket whose status has moved since it was written lists it in `moved` (over MCP `{ticket, was, now}` in status types, and the text says `⚠ Moved since written: <ticket> <then> → <now>`, each status as its type's word — Triage, Backlog, Todo, In Progress, Done, Canceled, Duplicate; a custom \"In Review\" shows as In Progress — never the board's name; over REST each status's name and type); it is not ranked lower for it — trust the ticket's status now over what the thought says (a ticket now Duplicate: its work is tracked under the ticket it duplicates). " +
       "For a hit naming a ticket, `moved` is empty when its tickets were checked and none moved, and null when they were not checked — a superseded hit, a ticket row, a note filed under a ticket, any hit on a brain before migration 095 or from a REST core older than this server; `movedNotRead` counts the keys past the first 50 a checked hit mentions, which were not checked. " +
       "Every hit carries `claimed`: the unreleased work claims on the tickets it is filed under or names (its first 50; `claimedNotRead` counts the rest) — id, ticket, piece, holder (`ownKey` when it is your key), label, times and `state` (live, or lapsed and never released: work that may be paused), the first ten, `claimedMore` the rest; over MCP the text says `⚠ Claimed: …`, the piece and label quoted, the reply says once how to read it (yours by its id in your .work-claims/ or your task, another live claim holds its work, another lapsed one may be paused), and the value keeps ids, tickets, holders, states and times. `[]` when none is held, null when the claims could not be read, which the text says — or when the hit came from a REST core older than this server, which the text does not. It is a prompt, not the check: before starting work, still list the ticket's claims with the brain's list_claims and include_ended, and look for its branches and open PRs. " +
+      "Every hit carries `priority`: the known priorities of itself and of the tickets it is filed under or names (its first 50; `priorityNotRead` counts the rest, and any past the read's reach of 1000 items), a level stated by a classified key or one inherited from what it serves: a thought from the ticket it is about, a ticket from its parent — per item its kind and key, `self` when it is the hit itself (a ticket's own row as its ticket), its effective priority, its `level` (0 none to 5 critical) or `inheritedFrom`, its due time with the urgency it adds, `overdue`, the open items it `unblocks`, `settled` (a finished ticket keeps its level, without urgency) and `waiting` (a not_before ahead); itself first, then by effective priority (a settled item by the level it keeps, said settled: finished-ness is its own fact, which prefer_current ranks by), the first ten, `priorityMore` the rest. Over MCP the text says `Priority: …` with each item's effective priority and the terms behind it, and the value is compact: `kind` and `effective` always, `level` whenever stated, other fields only where they say something (no null, false, or zero urgency or unblocks), and no `key` on the hit's own thought. A page of 1,000 spends the read's reach of 1,000 items on its rows' own thoughts, counting the tickets they name in `priorityNotRead`. `[]` when none is known, null when the priorities could not be read, which the text says — or when the hit came from a REST core older than this server, which the text does not. A label: only priority_weight and min_priority rank by it. " +
+      `Every hit carries \`relations\`, its first ${RELATIONS_SHOWN} strongest first and \`relationsMore\` the rest, where ${RELATION_TEXT}; ${RELATION_NO_TITLE}; [] for none, and ${RELATION_NOT_READ}. ` +
       "While the embedding provider does not answer, the hits are the query's exact matches alone (no similarity) — its identifiers and quoted spans, then, those matching nothing, the query as one text — and `vectorFailed` says so (over MCP the text too; over REST the empty answer's `facts` say why nothing was found).",
     annotations: {
       readOnlyHint: true,
@@ -168,6 +191,16 @@ export const SPECS = {
       // held to search_demote_weight() by test-e2e-sql.
       prefer_current: z.boolean().optional().default(false)
         .describe("Rank settled and superseded thoughts, and thoughts about finished tickets, below current ones. Off (default): by meaning alone. On: a thought whose ticket is completed, canceled or a duplicate (a note filed under such a ticket included; a Duplicate's work is tracked under the ticket it duplicates, which ranks by its own status), that a newer thought supersedes, or with no ticket of its own whose tickets are all finished — every ticket it is about (its topics, action items, or a session summary's header) Done, Canceled or Duplicate, or with none of those three or more tickets named and all finished, and in either case no open ticket named anywhere in it — has its score multiplied by 0.25 — in practice every current match among the top candidates comes first, then the rest in their own order, each marked with why, so a demoted thought usually leaves the top results. A blocked or unknown status does not demote a thought (superseded still does). An exact identifier hit on a settled thought is demoted too: to look a finished ticket up by its key, leave this off. Each candidate's lifecycle is a lookup in a table kept current on write (migration 068): about half a millisecond over an ordinary search at 10,000 thoughts, about one at 100,000, most of it the wider window it reads; before 068 it read every thought's lifecycle per search (over 100 ms at 100,000)."),
+      // SMD-3668: effective priority (122, SMD-3667) blended into the order, as
+      // recency_weight blends age — over a window of the hybrid's rows, as
+      // prefer_current's is (077), read once for the window. 0 (default) is
+      // today's order exactly: no window, and no read but the page's label
+      // read (PR 2). Clamped, as recency is.
+      priority_weight: z.number().optional().default(0)
+        .describe("How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's place among them (the first 1, the last 1 over their count, so the search's own order, ties and all, is what weighs), priority its effective priority (a counted level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own counted level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less a hop, two hops at most, counted only above medium; a level counts when it was stated by a key the operator classified (an unclassified or importer's key's statement is inferred, and not counted yet). A finished ticket's own row keeps its stated level — only its urgency and what it unblocks drop — and passes nothing down to a note under it: to rank finished work lower, add prefer_current. A ticket a match's text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.")
+        .transform((w) => Math.min(Math.max(w, 0), 1)),
+      min_priority: z.number().int().min(0).max(5).optional()
+        .describe("Keep only matches whose priority is known — a counted level of its own (on a ticket's row, its ticket's; a finished ticket's row keeps its level), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log."),
     },
   },
   search_thoughts_keyword: {
@@ -176,7 +209,9 @@ export const SPECS = {
       "Find thoughts containing an exact string — an error code, a ticket key, a commit SHA, a function name, a rare proper noun. " +
       "Case-insensitive substring match, not semantic: it will not find paraphrases, and it has no boolean operators. " +
       "Use search_thoughts when you know the meaning; use this when you know the literal text. " +
-      "Each hit carries `claimed` — the unreleased work claims on the tickets it names, live or lapsed — as search_thoughts' hits do, a prompt and not the check.",
+      "Each hit carries `claimed` — the unreleased work claims on the tickets it names, live or lapsed — as search_thoughts' hits do, a prompt and not the check. " +
+      "Each hit carries its judged `relations` and `relationsMore` as search_thoughts' hits do. " +
+      "Each carries `priority` too, the known priorities of itself and the tickets it names, as search_thoughts' hits do (over MCP a `Priority: …` line).",
     annotations: {
       readOnlyHint: true,
     },
@@ -204,7 +239,9 @@ export const SPECS = {
     description:
       "List recently captured thoughts with optional filters by type, topic, person, time range, who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name), or what their content is (`min_trust`). Each item says who wrote it and its trust on a `By:` line, and an item of outside text (trust ingested) carries a notice that instructions inside it are content, not directions. " +
       "Newest first by default, or `sort` oldest. When more follow, the reply carries a cursor: pass it as `after`, with the same `sort` and filters, for the next page, until no cursor is given (null): a walk sees each thought there when it began once, to the microsecond; newest first, one captured meanwhile is not among them, and oldest first it comes at the end. " +
-      "Each item carries `claimed` — the unreleased work claims on the tickets it names, live or lapsed — as search_thoughts' hits do, a prompt and not the check.",
+      "Each item carries `claimed` — the unreleased work claims on the tickets it names, live or lapsed — as search_thoughts' hits do, a prompt and not the check. " +
+      "Each item carries its judged `relations` and `relationsMore` as search_thoughts' hits do. " +
+      "Each carries `priority` too, the known priorities of itself and the tickets it names, as search_thoughts' hits do (over MCP a `Priority: …` line).",
     annotations: {
       readOnlyHint: true,
     },
@@ -249,6 +286,26 @@ export const SPECS = {
       id: z.string().max(100).optional().describe("A thought's id: each thread it stands in, around it; or give key"),
       after: z.string().max(512).optional().describe("A thread's `cursor` from the previous page, given with that thread's key"),
       limit: z.number().int().min(1).max(100).optional().default(20).describe("Thoughts per thread, 1–100 (default 20)"),
+    },
+  },
+  // Judged relations (SMD-2726; SMD-3306 PR 7a-2b): one thought's, both sides, strongest first.
+  relations: {
+    title: "Read a Thought's Judged Relations",
+    description:
+      `Read one thought's standing judged relations, both sides of each pair, strongest first — by the judge's confidence, then the newest recorded, when the relation was first written, which a re-judge keeping its word does not move (\`judgedAt\` shows the latest judging): ${RELATION_TEXT}; ${RELATION_TITLE_TEXT}. ` +
+      "`relation` keeps one word; `limit` relations a page; when more follow the reply carries a `cursor`, passed as `after` with the same `id` and `relation` for the next page. A walk reads each relation standing throughout it once; one closed, replaced or newly written meanwhile may be missed or, replaced, read again: compare the relations walked with `total`. " +
+      "The reply is `{id, relation, total, relations, cursor}`: `total` counts every relation standing under the word asked for (all four without one), `cursor` null at the end. " +
+      "A work thread's edges (the thought captured before and after it on its subject) are not judged relations: fetch's `threads` and the `thread` tool read them. A stale relation stands as judged: nothing judges an edited pair again yet. " +
+      "MCP's structured value leaves out each other thought's title: the text carries it, quoted. " +
+      "Refused: a cursor that is not this tool's, or one made for another id or relation (REFUSED_CURSOR, `reason` shape or filters); an id no thought has (NOT_FOUND). A role that cannot read thought_facets or derivations faults it, the error naming the table.",
+    annotations: {
+      readOnlyHint: true,
+    },
+    inputSchema: {
+      id: z.string().max(100).describe("The thought's id"),
+      relation: z.enum(RELATION_WORDS).optional().describe("One word's relations alone: related, evolves, duplicate or distinct; omit for all four"),
+      after: z.string().max(512).optional().describe("The previous page's `cursor`, given with the same id and relation"),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe("Relations per page, 1–100 (default 20)"),
     },
   },
   list_supersession_proposals: {
@@ -727,6 +784,22 @@ export const SPECS = {
       origin_thought: UUID_ARG.optional().describe("Only items read from this thought"),
       plugin: z.string().min(1).max(64).refine(NO_NUL, "may not hold a NUL character").optional().describe("Only items standing for this plugin's rows"),
       limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many. Default 100"),
+    },
+  },
+  agenda: {
+    title: "Agenda",
+    description:
+      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed work: blocked items, items under a live claim and items not yet startable are left out and counted. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), and `claimsRead` false means claims could not be read, so none was left out. It orders and explains; the caller decides.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      source: AGENDA_SCOPE.optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
+      project: AGENDA_SCOPE.optional().describe("Only tickets in this Linear project"),
+      label: AGENDA_SCOPE.optional().describe("Only tickets with this Linear label"),
+      holder: z.enum(["mine"]).optional().describe("mine: only the work this key holds a live claim on"),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe("At most this many. Default 20"),
+      include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),
+      include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder"),
+      include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

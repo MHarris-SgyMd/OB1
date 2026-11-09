@@ -64,10 +64,21 @@ export type Env = {
    * slots.ts): types with per-model overrides, `chat=1,embed=2,decide=1`, held
    * across the brain's processes by advisory locks: each slot held, and one
    * waiting call per share and process, costs a connection of its own; a live
-   * call takes none. Unset or off, none held; a value that does not parse is
-   * said, and none held.
+   * call takes none. Merged over the defaults a local model server's calls are
+   * held to (PR 2b-2b: chat and embed OB1_MODEL_SLOTS less one, decide one),
+   * its own shares holding every endpoint; `off`, none held; a value that does
+   * not parse is said, and the defaults stay.
    */
   OB1_BACKGROUND_SLOTS?: string;
+  /**
+   * A local model server's parallel calls per model (SMD-3379 PR 2b-2b), 1 to
+   * 16: compose hands the bundled Ollama the same as OLLAMA_NUM_PARALLEL, and
+   * the background slots' defaults leave one of them for live calls (a server
+   * of one leaves none, which preflight warns of). Unset, 4: a host Ollama's
+   * own OLLAMA_NUM_PARALLEL (1 unset in current releases) is raised to match,
+   * and two brains on one server each take their share of it.
+   */
+  OB1_MODEL_SLOTS?: string;
   /**
    * Seconds between re-probes of a local embedding provider that does not
    * answer (provider-health.ts, SMD-2890): whole seconds from 1 to 3600, `0`
@@ -175,10 +186,17 @@ export type Env = {
    */
   OB1_CONSOLIDATE_DECIDER?: string;
   /**
+   * Decide mode's own tier (a tier per caller, SMD-3326): where it is served, and 1/on when that endpoint is on this
+   * box. Unset, decide mode asks the shared tier at OB1_JEV_BASE_URL. Preflight reads them to check that tier.
+   */
+  OB1_CONSOLIDATE_DECIDER_URL?: string;
+  OB1_CONSOLIDATE_DECIDER_LOCAL?: string;
+  /**
    * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
    * the caller expects, and 1/on when that endpoint is on this box (declared,
-   * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in
-   * this container, checks the tier when OB1_JEV_BASE_URL is set.
+   * as OB1_LLM_LOCAL is). The REST core's capture asks it for a thought's genre
+   * (SMD-2323); preflight, which runs in this container, checks the tier when
+   * OB1_JEV_BASE_URL is set.
    */
   OB1_JEV_BASE_URL?: string;
   OB1_JEV_MODEL?: string;

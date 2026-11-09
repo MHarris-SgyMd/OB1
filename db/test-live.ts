@@ -17991,6 +17991,8 @@ if (want("16")) {
         tierCalls++;
         const d = body.decisions[0];
         const both = thoughtsIn(d.context);
+        // A pair the tier cannot read faithfully (SMD-3326): the contract's 422, as jev/h2o answers a context past its tokens.
+        if (/unreadable/.test(both)) return Response.json({ error: "decision 0: its context is 40000 tokens, over the 32000 this model reads whole; a cut to its head and tail is not a faithful read, so it is refused" }, { status: 422 });
         const p: Record<string, number> = /tenancy/.test(both) ? { unrelated: 0.03, related: 0.1, evolves: 0.05, duplicate: 0.02, outdates: 0.8 }
           : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
           : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
@@ -18050,16 +18052,28 @@ if (want("16")) {
       const denv: Record<string, string | undefined> = {
         ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
         OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
+        OB1_CONSOLIDATE_DECIDER_URL: "", OB1_CONSOLIDATE_DECIDER_LOCAL: "",
       };
       const decide = (e: Record<string, string | undefined>, ...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: e as Record<string, string>, cwd: HERE });
       const last = (out: string) => out.trim().split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300);
 
       const noTier = await decide({ ...denv, OB1_JEV_BASE_URL: "" });
-      assert(noTier.code === 2 && /OB1_CONSOLIDATE_DECIDER is h2o-stub and OB1_JEV_BASE_URL is unset/.test(noTier.out) && tierCalls === 0 && writerCalls === 0,
+      assert(noTier.code === 2 && /OB1_CONSOLIDATE_DECIDER is h2o-stub and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set/.test(noTier.out) && tierCalls === 0 && writerCalls === 0,
         `decide mode with no tier is refused at start, naming both knobs (exit ${noTier.code}: ${last(noTier.out)})`);
       const heldElsewhere = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other" });
       assert(heldElsewhere.code === 2 && /OB1_JEV_MODEL is h2o-other and OB1_CONSOLIDATE_DECIDER is h2o-stub/.test(heldElsewhere.out),
         `…and so is a tier held to a model the key would not name (exit ${heldElsewhere.code}: ${last(heldElsewhere.out)})`);
+      // Decide mode's own tier (SMD-3326, a tier per caller): resolved with the shared tier unset, and held to the decider
+      // whatever OB1_JEV_MODEL says, since the shared tier is no longer the decider's.
+      const OWN_TIER = { OB1_CONSOLIDATE_DECIDER_URL: `http://127.0.0.1:${tier.port}`, OB1_CONSOLIDATE_DECIDER_LOCAL: "1" };
+      const ownDry = await decide({ ...denv, OB1_JEV_BASE_URL: "", OB1_JEV_MODEL: "", OB1_JEV_LOCAL: "", ...OWN_TIER }, "--dry-run");
+      const ownBanner = ownDry.out.split("\n").filter((l) => /^\s*(decide|tier):/.test(l));
+      assert(ownDry.code === 0 && ownBanner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
+          && ownBanner.some((l) => /^\s*tier:\s+/.test(l) && /OB1_CONSOLIDATE_DECIDER_LOCAL/.test(l)) && tierCalls === 0,
+        `decide mode's own tier at OB1_CONSOLIDATE_DECIDER_URL is resolved with the shared tier unset, its banner naming its own local knob, and a dry run asks it nothing (exit ${ownDry.code}: ${ownBanner.join(" | ").trim().slice(0, 300)})`);
+      const ownHeld = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other", ...OWN_TIER }, "--dry-run");
+      assert(ownHeld.code === 0 && !/OB1_JEV_MODEL is h2o-other/.test(ownHeld.out),
+        `…and the shared tier's OB1_JEV_MODEL no longer refuses it, the shared tier no longer the decider's (exit ${ownHeld.code}: ${last(ownHeld.out)})`);
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
@@ -18146,6 +18160,36 @@ if (want("16")) {
           && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
+      // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that pair's, recorded on the claim with the
+      // tier's words and the older thought's id, and the thought's next pair is still judged. Review pass 1: it was read
+      // as a provider refusing every request, which stopped every worker, marked nothing failed, and met the same pair
+      // again on the next run. Review pass 2: thrown out of the pair loop, it failed the claim with the thought's later
+      // pairs never judged. So the ledger thought has two older neighbours: the refused one at its own axis, first in
+      // consolidation_candidates' distance order, and a readable one tilted just off it, second, which the stub tier
+      // calls related (its runbook rule), so the pair judged leaves a relation.
+      const unreadOld = await seed("[16d] The unreadable ledger lists every vendor.", 56, 3, ["ledger"]);
+      const readOld = await seed("[16d] The ledger runbook lists vendors by region.", 56, 2, ["ledger"]);
+      const tilted = new Array(EMBEDDING_DIM).fill(0);
+      [tilted[56], tilted[58]] = [Math.sqrt(1 - 0.1 ** 2), 0.1];
+      await sql`UPDATE thoughts SET embedding = ${`[${tilted.join(",")}]`}::vector WHERE id = ${readOld}::uuid`;
+      const ledgerNew = await seed("[16d] The ledger now lists only active vendors.", 56, 0, ["ledger"]);
+      // …and, in the same run, another thought's pair the tier reads: settled, so the pass went on past the refusal.
+      await seed("[16d] The volunteer roster lists every member.", 57, 3, ["roster"]);
+      const rosterNew = await seed("[16d] The volunteer roster now lists only active members.", 57, 0, ["roster"]);
+      const unreadRun = await decide(denv);
+      const claimOf = async (t: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${t}::uuid`) as { status: string; last_error: string | null }[])[0];
+      const [ledgerClaim, rosterClaim] = [await claimOf(ledgerNew), await claimOf(rosterNew)];
+      const [readJudged] = (await sql`SELECT count(*)::int AS n FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${DKEY}
+                                       WHERE f.kind = 'relation' AND f.thought_id = ${ledgerNew}::uuid AND f.payload->>'target' = ${readOld}`) as { n: number }[];
+      const ledgerError = ledgerClaim?.last_error ?? "";
+      // Exit 1 is a pass that left a failed row (consolidate.ts's `incomplete`); a refusal read as the provider's stops
+      // every worker and exits 2, "The provider refused the request itself", marking nothing failed.
+      assert(unreadRun.code === 1 && !/stopping every worker|refused the request itself/.test(unreadRun.out) && ledgerClaim?.status === "failed"
+          && ledgerError.startsWith(`1 of 2 pair(s) not judged: pair with ${unreadOld}: `) && /422/.test(ledgerError) && /its context is 40000 tokens/.test(ledgerError)
+          && readJudged?.n === 1 && rosterClaim?.status === "succeeded",
+        `a pair the tier refuses with 422 is recorded on the claim, naming the older thought and the tier's words, and the thought's next pair and the next thought are still judged (exit ${unreadRun.code}: ${JSON.stringify(ledgerClaim ?? null)}, the readable pair's relations ${readJudged?.n}, roster ${rosterClaim?.status}; ${last(unreadRun.out)})`);
+      const tierBeforeFollower = tierCalls;
+
       // A follower checks the tier at start as it checks the chat endpoint: a
       // tier serving another model is refused before anything is claimed.
       tierServes = "h2o-other";
@@ -18154,12 +18198,23 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 7,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === tierBeforeFollower,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
       // …its row, under the decide key, ended with the kind (SMD-3214).
       const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
       const fv = fbeat ? JSON.parse(fbeat.value as string) : null;
       assert(fv?.ended === true && fv.outcome === "failed" && fv.refused === "model", `…and its row ends on the refusal, the kind on it, model (${JSON.stringify(fv)})`);
+      // A one-shot run makes no start check: the tier's 409 stops every worker at its first call, nothing marked
+      // failed, and the remedy names the tier's knob and model, not the chat endpoint (review pass 4: it said "Check
+      // the chat endpoint", and the README said each thought fails).
+      await seed("[16d] The intake form asks for a phone number.", 59, 3, ["intake"]);
+      const intakeNew = await seed("[16d] The intake form no longer asks for a phone number.", 59, 0, ["intake"]);
+      const oneShotElse = await decide({ ...denv, ...OWN_TIER });
+      const [intakeClaim] = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${intakeNew}::uuid`) as { status: string }[];
+      assert(oneShotElse.code === 2 && /stopping every worker; nothing is marked failed/.test(oneShotElse.out)
+          && /Check OB1_CONSOLIDATE_DECIDER_URL: it must be an ob1-jev\/1 tier serving h2o-stub \(OB1_CONSOLIDATE_DECIDER\)/.test(oneShotElse.out)
+          && !/Check the chat endpoint/.test(oneShotElse.out) && intakeClaim?.status !== "failed",
+        `a one-shot run against a tier serving another model stops at the first call, marks nothing failed, and names the tier's knob and model (exit ${oneShotElse.code}, the claim ${intakeClaim?.status}: ${last(oneShotElse.out)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
@@ -18390,18 +18445,18 @@ if (want("18")) {
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
-      assert(!/ON SEQUENCE|agent_memories/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+      assert(!/ON SEQUENCE|openbrain_agents/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
 
       const failed: string[] = [];
-      // A file that opens a transaction (BEGIN … COMMIT — agent-memory, per-agent-identity, typed-reasoning-edges,
+      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges,
       // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
       // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 13 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 12 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }

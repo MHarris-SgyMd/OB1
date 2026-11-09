@@ -69,6 +69,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   PROPOSAL_DECIDED: 409,
   PROPOSAL_YOURS: 403,
   CONFIRM_NOT_YOURS: 403,
+  CLAIMS_UNREADABLE: 503,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -110,6 +111,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   list_thoughts: { method: "GET", path: "/v1/thoughts", ok: 200, call: CALLS.list_thoughts },
   // Work threads (SMD-3306 PR 7a-2a): a key or a thought id in the query, as a key holds a colon and a phrase spaces.
   thread: { method: "GET", path: "/v1/thread", ok: 200, call: CALLS.thread },
+  // Judged relations (SMD-2726; SMD-3306 PR 7a-2b): the thought's id, a word and a cursor in the query.
+  relations: { method: "GET", path: "/v1/relations", ok: 200, call: CALLS.relations },
   list_thought_ids: { method: "GET", path: "/v1/thought-ids", ok: 200, call: CALLS.list_thought_ids },
   list_logged_searches: { method: "GET", path: "/v1/logged-searches", ok: 200, call: CALLS.list_logged_searches },
   list_supersession_proposals: { method: "GET", path: "/v1/proposals", ok: 200, call: CALLS.list_supersession_proposals },
@@ -139,6 +142,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },
+  // The agenda (SMD-3669, migration 123): the scope and flags in the query string.
+  agenda: { method: "GET", path: "/v1/agenda", ok: 200, call: CALLS.agenda },
   open_item: { method: "POST", path: "/v1/items", ok: 200, call: CALLS.open_item },
   item_history: { method: "GET", path: "/v1/items/{id}", ok: 200, call: CALLS.item_history },
   update_item: { method: "PATCH", path: "/v1/items/{id}", ok: 200, call: CALLS.update_item },
