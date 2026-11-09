@@ -315,6 +315,7 @@ free_rows() {
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
   nodb evals              eval-priority.ts --self-check
+  nodb evals              board-replay.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check

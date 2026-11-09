@@ -547,6 +547,15 @@ jobs:
         working-directory: evals
         run: bun eval-priority.ts --self-check
 
+      # The board replay's rollback rules (SMD-3669 PR 3): a day's issue
+      # rebuilt from Linear's history — state, priority, due date, parent,
+      # project, labels, title and relations undone after the moment, every
+      # relation-change code read or refused. No database, no Linear; a
+      # replay reads Linear, so it runs by hand.
+      - name: Board replay rules
+        working-directory: evals
+        run: bun board-replay.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key
