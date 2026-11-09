@@ -65,7 +65,8 @@
  *
  * In a process a share's calls are ordered (PR 2c-2): consolidation's go
  * first, then the rest in the order they asked, and a call that has waited
- * --max-wait (OB1_SLEEP_MAX_WAIT, 60 s) goes first whatever its pass; across
+ * --max-wait (OB1_SLEEP_MAX_WAIT, 60 s) goes first whatever its pass, at the
+ * next turn — the waiter takes a slot — after older consolidation calls; across
  * processes the queue is in the order each process's next call asked. Which
  * model the server has loaded is not read: one brain's order cannot see the
  * other brains' or clients' loads on a server they share, so it is PR 3's
@@ -350,7 +351,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (!l) locals.set(key, (l = { key, limit, waiter: false, queue: [], pid: 0, freed: 0, busy: false }));
     return l;
   };
-  const maxWaitMs = (opts.maxWaitS ?? DEFAULT_MAX_WAIT_S) * 1000;
+  // A bound that is no finite number of seconds stands as the default: NaN or Infinity would age no call (review pass 1).
+  const maxWaitMs = (typeof opts.maxWaitS === "number" && Number.isFinite(opts.maxWaitS) ? opts.maxWaitS : DEFAULT_MAX_WAIT_S) * 1000;
   /**
    * The share's turn to wait for a slot in this process: at once when no call of it has it, else queued, `first` where
    * its pass goes first (passTurn's order); a stop takes a call out of the queue.
