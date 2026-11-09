@@ -15877,7 +15877,9 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     await door([null, "ticket:SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", "", "f"]), await door([b, "ticket:SMD-1", "metadata", "k".repeat(201), "f"]),
     await door([b, "SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "guess", KEY, "f"]), await door([b, "ticket:SMD-1", null, KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", KEY, null]),
   ];
-  assert(refusals.every((r) => r.code === "22023") && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
+  // 113's refusals word for word, the wrapper's own before the set door's (review pass 1: unanchored, the set door's
+  // passed in their place).
+  assert(refusals.every((r) => r.code === "22023" && r.message.startsWith("record_thought_subject: ")) && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
          && /the key is ticket:<ID>/.test(refusals[3].message) && /by is metadata, first_line or model, got 'guess'/.test(refusals[4].message) && /fingerprint of the text/.test(refusals[6].message),
     `the door refuses a missing thought, an empty or overlong judge key, a malformed key, a way outside the three or none, a missing fingerprint — each invalid_parameter_value (${refusals.map((r) => r.code).join()})`);
 
@@ -16076,7 +16078,10 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
   const refused: string[] = [];
   for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {
-    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) { refused.push((e as { code?: string }).code ?? (e as Error).message); }
+    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) {
+      // 113's words, the wrapper's own: the set close's would name close_thought_subjects (review pass 1).
+      refused.push(`${(e as { code?: string }).code}${(e as Error).message.startsWith("close_thought_subject: ") ? "" : ` (${(e as Error).message.split("\n")[0]})`}`);
+    }
   }
   assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
   const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
@@ -18410,7 +18415,7 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
     assert(/127/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 127 and the ticket`);
   }
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
-  assert(/since 127 a set: one standing per thought and key, at most three/.test(tableComment) && /four kinds registered/.test(tableComment),
+  assert(/since 127 a set: one standing per thought and key \(the index's rule\), at most three and one rule's \(record_thought_subjects's\)/.test(tableComment) && /four kinds registered/.test(tableComment),
     "thought_facets' comment says a thought's subjects are a set since 127");
 
   // Thoughts at known times, so each thread's order is the test's.
@@ -18445,7 +18450,7 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
   const l1 = await Promise.all(s1.map((s) => lineage(s.id)));
   assert(added.ok && added.action === "added" && added.added === 2 && added.kept === 0 && added.closed === 0 && JSON.stringify(added.ids) === JSON.stringify(s1.map((s) => s.id))
          && (await keysOf(t1)) === ks(A, B) && s1.every((s) => s.by === "model" && s.judge === MODEL)
-         && l1.every((l, i) => l.length === 1 && l[0].inputs.join() === t1 && l[0].by === MODEL && l[0].recipe.prompt_hash === "sha256:x" && s1[i].id !== ""),
+         && l1.every((l) => l.length === 1 && l[0].inputs.join() === t1 && l[0].by === MODEL && l[0].recipe.prompt_hash === "sha256:x"),
     `added: a key repeated counts once, each key a standing subject with its lineage row, ids by key (${JSON.stringify(added)})`);
   await sets(t2, [A]); await sets(t3, [B]);
   assert((await edges(A)) === "t2→t1" && (await edges(B)) === "t3→t1", `a thought with a set stands in each key's thread (${await edges(A)} | ${await edges(B)})`);
@@ -18456,6 +18461,10 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
   assert(kept.action === "kept" && kept.kept === 2 && kept.added === 0 && kept.closed === 0 && JSON.stringify(kept.ids) === JSON.stringify(s1.map((s) => s.id))
          && (await Promise.all(s1.map((s) => lineage(s.id)))).every((l) => l[0]?.recipe.prompt_hash === "sha256:y") && `${await edges(A)}|${await edges(B)}` === edgesBefore,
     `kept: the same keys, way and pass leave both facets standing, each lineage row moved (${JSON.stringify(kept)})`);
+  const keptBare = await sets(t1, [A, B]);
+  const bareLineage = await Promise.all(s1.map((s) => lineage(s.id)));
+  assert(keptBare.action === "kept" && bareLineage.every((l) => l.length === 1 && l[0].recipe.deterministic === false && l[0].recipe.declared === false && l[0].recipe.prompt_hash === undefined),
+    `kept without a recipe: each lineage row moved to the default's, the model's not deterministic (${JSON.stringify(bareLineage.map((l) => l[0]?.recipe))})`);
 
   // Replaced: one key kept, one closed, one written; the closed key's thread loses the thought, the new one gains it.
   const t4 = await thought("a later pr"); names.set(t4, "t4");
@@ -18496,12 +18505,18 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
     await door([null, [A], "model", MODEL, f5]), await door([t5, [A], "model", "", f5]), await door([t5, [A, null], "model", MODEL, f5]),
     await door([t5, [A, "SMD-1"], "model", MODEL, f5]), await door([t5, [A, B, C, D], "model", MODEL, f5]), await door([t5, [A], "guess", MODEL, f5]),
     await door([t5, [A], null, MODEL, f5]), await door([t5, [A, B], "metadata", MODEL, f5]), await door([t5, [A], "model", MODEL, " "]),
+    await door([t5, [A], "model", "k".repeat(201), f5]),
   ];
   assert(refusals.every((r) => r.code === "22023") && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
          && /a key in the set is NULL/.test(refusals[2].message) && /each key is ticket:<ID>.*got 'SMD-1'/.test(refusals[3].message)
          && /at most 3 subjects, got 4 keys/.test(refusals[4].message) && /by is metadata, first_line or model, got 'guess'/.test(refusals[5].message)
-         && /by metadata is one key/.test(refusals[7].message) && /fingerprint of the text/.test(refusals[8].message) && (await standing(t5)).length === 0,
-    `the set door refuses a missing thought or judge key, a NULL or malformed key, four keys, a way outside the three or none, metadata with two keys, a missing fingerprint — each invalid_parameter_value, nothing written (${refusals.map((r) => r.code).join()})`);
+         && /by metadata is one key/.test(refusals[7].message) && /fingerprint of the text/.test(refusals[8].message) && /judge_key must name the pass/.test(refusals[9].message)
+         && (await standing(t5)).length === 0,
+    `the set door refuses a missing, empty or overlong judge key, a missing thought, a NULL or malformed key, four keys, a way outside the three or none, metadata with two keys, a missing fingerprint — each invalid_parameter_value, nothing written (${refusals.map((r) => r.code).join()})`);
+  const twoDims = [await failure(`SELECT record_thought_subjects($1::uuid, '{{ticket:SMD-1},{ticket:SMD-2}}'::text[], 'model', $2, NULL, $3, NULL)`, [t5, MODEL, f5]),
+    await failure(`SELECT close_thought_subjects($1::uuid, ARRAY[ARRAY[$2::uuid], ARRAY[$2::uuid]], $3)`, [t5, t5, f5])];
+  assert(twoDims.every((r) => r.code === "22023") && /one-dimensional array of keys/.test(twoDims[0].message),
+    `a two-dimensional set is refused as a parameter error, by either door (${twoDims.map((r) => `${r.code}: ${r.message.slice(0, 50)}`).join(" | ")})`);
   const fourOnce = await sets(t5, [A, A, B, B, C, C]).catch((e: Error) => ({ refused: e.message.split("\n")[0] }));
   assert("added" in fourOnce && fourOnce.added === 3, `a set of three keys each named twice is three keys, not six (${JSON.stringify(fourOnce)})`);
 
@@ -18541,9 +18556,10 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
   const closes = async (id: string, facets: string[], f?: string) => (await one<{ c: C }>(`SELECT close_thought_subjects($1::uuid, $2::uuid[], $3) AS c`, [id, facets, f ?? await fp(id)])).c;
   const closeOne = async (id: string, facet: string, f?: string) => (await one<{ c: C }>(`SELECT close_thought_subject($1::uuid, $2::uuid, $3) AS c`, [id, facet, f ?? await fp(id)])).c;
   const part = await closes(t7, [s7[0]]), wider = await closes(t7, [...s7, closedA]), wrapPart = await closeOne(t7, s7[1]), staleClose = await closes(t7, s7, "0".repeat(64));
+  const wrapFirst = await closeOne(t7, s7[0]);
   assert(part.action === "none" && part.moved === true && JSON.stringify(part.ids) === JSON.stringify(s7) && wider.action === "none" && wider.moved === true
-         && wrapPart.action === "none" && wrapPart.moved === true && wrapPart.id === s7[0] && staleClose.stale === true && (await standing(t7)).length === 2,
-    `not closed: one facet of the two read, a facet beside them that no longer stands, close_thought_subject's one facet (moved, the first standing named), a text moved (${[part, wider, wrapPart, staleClose].map((c) => c.action + (c.moved ? "/moved" : c.stale ? "/stale" : "")).join(", ")})`);
+         && wrapPart.action === "none" && wrapPart.moved === true && wrapPart.id === s7[0] && wrapFirst.moved === true && wrapFirst.id === s7[1] && staleClose.stale === true && (await standing(t7)).length === 2,
+    `not closed: one facet of the two read, a facet beside them that no longer stands, close_thought_subject's one facet (moved, naming a facet standing beside it, never the one passed), a text moved (${[part, wider, wrapPart, staleClose].map((c) => c.action + (c.moved ? "/moved" : c.stale ? "/stale" : "")).join(", ")})`);
   const closedSet = await closes(t7, [s7[1], s7[0], s7[1]]);
   const noneLeft = await closes(t7, s7);
   assert(closedSet.action === "closed" && JSON.stringify(closedSet.ids) === JSON.stringify(s7) && (await standing(t7)).length === 0 && noneLeft.action === "none" && noneLeft.moved === undefined,
@@ -18554,11 +18570,37 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
     closeRefusals.push(r.code ?? "accepted");
   }
   assert(closeRefusals.every((c) => c === "22023"), `a missing thought, an empty or NULL-holding set, a missing fingerprint: parameter errors (${closeRefusals.join()})`);
+  // A set whose facet ids sort against its keys is still the set read (review pass 1: random ids held it half the time).
+  const t10 = await thought("ids against key order"); names.set(t10, "t10");
+  const hiA = "ffffffff-ffff-4fff-bfff-ffffffff1120", loB = "00000000-0000-4000-8000-000000001120";
+  for (const [fid, key] of [[hiA, A], [loB, B]]) {
+    await db.query(`INSERT INTO thought_facets (id, thought_id, kind, payload) VALUES ($1::uuid, $2::uuid, 'subject', $3::jsonb)`, [fid, t10, JSON.stringify({ key, by: "model", judge_key: MODEL })]);
+  }
+  const reversed = await closes(t10, [hiA, loB]);
+  assert(reversed.action === "closed" && JSON.stringify(reversed.ids) === JSON.stringify([hiA, loB]) && (await standing(t10)).length === 0,
+    `a set whose ids sort against its keys is still the set read: closed, its ids by key (${JSON.stringify(reversed)})`);
+  // Answers by key whatever the plan: the index on (thought, key) returns rows in key order, so a sequential scan is
+  // forced here, the order the ORDER BYs keep (review pass 1).
+  const t9 = await thought("written out of key order"); names.set(t9, "t9");
+  await sets(t9, [B]);
+  await db.exec(`SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off; DISCARD PLANS`);
+  let grownOut: S, movedOut: C, nulledOut: R, s9: string[];
+  try {
+    grownOut = await sets(t9, [A, B]);
+    s9 = (await standing(t9)).map((s) => s.id);
+    movedOut = await closes(t9, [s9[1]]);
+    nulledOut = await single(t9, null, null);
+  } finally {
+    await db.exec(`RESET enable_indexscan; RESET enable_bitmapscan; RESET enable_indexonlyscan; DISCARD PLANS`);
+  }
+  assert(JSON.stringify(grownOut.ids) === JSON.stringify(s9) && JSON.stringify(movedOut.ids) === JSON.stringify(s9) && nulledOut.id === s9[0],
+    `by key whatever the write order and the plan: the set door's ids, the close's, the wrapper's closed id (${JSON.stringify([grownOut.ids, movedOut.ids, nulledOut.id, s9])})`);
 
   // The locks. A door takes no thread lock as it writes; at its commit the first re-link takes the lock of every key the
   // transaction moved on the thought, closed or written, a kept key's not — a raw replace's too. Fired early (SET
   // CONSTRAINTS ALL IMMEDIATE) and read from pg_locks in the writer's own transaction (PGlite names no pid: its one
-  // session holds every lock). The order they are taken in is test-live [48]'s.
+  // session holds every lock). Each re-link takes its own key's lock too, so this read tells which keys were re-linked,
+  // not what the trigger's helper took or in what order: test-live [48] holds those.
   const held = async (tx: { query: <T>(s: string, p?: unknown[]) => Promise<{ rows: T[] }> }, keys: string[]) => (await tx.query<{ k: string }>(
     `SELECT k FROM unnest($1::text[]) AS k WHERE EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND COALESCE(l.pid, pg_backend_pid()) = pg_backend_pid() AND l.objsubid = 1
        AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:thread:' || k, 0)) ORDER BY k`, [keys])).rows.map((r) => r.k).join(",");

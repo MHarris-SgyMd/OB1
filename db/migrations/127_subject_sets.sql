@@ -59,13 +59,22 @@
 --     standing key, of which a set has several: a replace of two keys locking
 --     the second's as its re-link came, after a later key, could deadlock with
 --     a writer taking both in order, and a subject kept standing beside the
---     replace is no part of it. The first re-link at the commit takes every
---     lock the transaction's subjects need, the rest finding them held, so a
---     door's set, written or closed in any order, a raw writer's included,
---     queues behind another on the same keys. Its timing is 120's: from the
---     commit's first re-link to the commit.
---   * Comments restated: thought_facets' (one standing per key, a set of at
---     most three) and the trigger function's.
+--     replace is no part of it. With them it locks (KEY SHARE, in id order)
+--     the thought and its neighbours in every key moved, the thoughts the
+--     re-links' edges join: one neighbour may stand in two of the keys, and
+--     a delete of it, waiting on an edge the first key's re-link closed,
+--     deadlocked with the second's waiting on it to write the edge again
+--     (review pass 1); locked first, the delete waits for the commit, 120's
+--     write-before-close carried across the keys. All this once a
+--     transaction and thought (a local setting under its name marks it),
+--     the rest finding the locks held, so a door's set, written or closed in
+--     any order, a raw writer's included, queues behind another on the same
+--     keys. Its timing is 120's: from the commit's first re-link to the
+--     commit. Above READ COMMITTED the re-link's refusal comes first, before
+--     any lock.
+--   * Comments restated: thought_facets' (one standing per key; a set of at
+--     most three, one rule's, through record_thought_subjects), the trigger
+--     function's and the two doors'.
 --   * Grants: none issued. The doors are 111's and 113's, SECURITY INVOKER,
 --     needing what they needed: INSERT on thought_facets (the structure
 --     group), UPDATE on it and on thoughts (the row locks) and the writes on
@@ -74,10 +83,11 @@
 --   ob1:subject-set — a CONTRACT SENTINEL, not prose (the 014 convention).
 --
 -- WHO READS
---   Every reader of a thought's subjects reads them by key already: a thread
---   (120's thread_relink, db/threads.ts, the census of brain_info and
---   preflight) is one key's thoughts, and the thread read and fetch's
---   continues read each standing key of a thought (PR 7a-2a). brain_info's
+--   Every reader of a thread reads subjects by key already: a thread (120's
+--   thread_relink, db/threads.ts, the census of brain_info and preflight) is
+--   one key's thoughts, and the thread read and fetch's continues read each
+--   standing key of a thought (PR 7a-2a). Two readers of a thought's own
+--   subject read one row, below (NOT HERE). brain_info's
 --   and --status's thought count is a count of thread places: a thought in
 --   two threads counts in each, as each thread wants an edge to it.
 --
@@ -87,8 +97,13 @@
 --     for up to three subjects, the new pool key, and the subject sweep and
 --     the extraction pass writing sets through this door. Until then every
 --     writer of the stack writes one key, so no thought holds a set.
---   * The sweep's reads of a thought's standing subject read one row a
---     subject (db/subject-sweep.ts): PR 7a-3b reads a set.
+--   * The sweep reads a thought's standing subject as one row
+--     (db/subject-sweep.ts), which PR 7a-3b changes before anything writes a
+--     set. On a set its candidate read returns a row a subject (a dry run
+--     counting the thought once for each), its rules write one key, and a
+--     non-current set the model names nothing for is closed one facet at a
+--     time: close_thought_subject answers moved, the claim goes back to
+--     pending, and the thought is asked again every round.
 --   * ob1_item_serves (122) reads one ticket subject of a thought (LIMIT 1);
 --     with a set it serves one of them. SMD-4149's 125 redefines it: the set
 --     reading follows that.
@@ -98,25 +113,35 @@
 --     so two such can deadlock, Postgres ending one (120's NOT HERE). No
 --     writer of the stack does either: each writes one thought's subjects a
 --     transaction, outside any savepoint.
+--   * An edge a moved key's thread lacks away from the moved thought (a
+--     thread the upgrade to 120 left unlinked, or a gap a delete left) joins
+--     thoughts the neighbour locks do not cover: a delete of one of them,
+--     waiting on an edge an earlier key's re-link closed, can still deadlock
+--     with the commit, Postgres ending one. db/threads.ts links such gaps.
 --
 -- SAFETY
 --   One index made and 111's dropped (by name: the new one stands first, so
 --   at no point does the table hold no rule); three functions added, three
 --   redefined (113's two doors, now wrappers keeping their signatures,
 --   refusals and answers' shape; 120's trigger function, its locks taken for
---   a set); two comments restated. No row changes: a brain holds at most
+--   a set); four comments restated. No row changes: a brain holds at most
 --   one standing subject per thought, which the new index admits. Making the
---   index reads every standing subject under the migrator's lock on
---   thought_facets (SHARE: facet writes wait it out) — a moment on a brain
---   of thousands, longer on one of millions.
+--   index scans all of thought_facets (every kind, closed rows too) under
+--   the migrator's lock on it (SHARE: facet writes wait it out) — a moment
+--   on a brain of thousands of facets, longer on one of millions. Dropping
+--   111's index then holds thought_facets ACCESS EXCLUSIVE until the
+--   migrator commits, reads waiting too, for the functions after it.
 --
 -- Prerequisites
 --   111 (record_thought_subject), 113 (close_thought_subject,
 --   ob1_filed_ticket), 120 (thread_relink). Applied by `bun db/migrate.ts`.
 --   Idempotent: CREATE OR REPLACE, the index IF NOT EXISTS, 111's dropped IF
---   EXISTS. A re-apply of 111 alone makes its index again, refusing a second
---   subject on a thought until this file runs again; --reapply runs both,
---   in order.
+--   EXISTS. A re-apply of 111 makes its index again: on a brain where no
+--   thought holds a set it is built, refusing a second subject on a thought
+--   until this file runs again (--reapply runs both, in order); where one
+--   does, its build fails and so does a --reapply, rolled back whole. (A
+--   --reapply already fails at 064 on any brain holding a subject: 064's
+--   derivations CHECK lacks the kind, SMD-3149.)
 -- =============================================================================
 
 DO $qc$
@@ -211,6 +236,9 @@ BEGIN
     -- 111's bounds, refused as parameter errors: a check violation would read
     -- to the pass as the thought deleted mid-write (084's way).
     RAISE EXCEPTION USING MESSAGE = 'record_thought_subjects: judge_key must name the pass, in at most 200 characters', ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF array_ndims(p_keys) > 1 THEN
+    RAISE EXCEPTION USING MESSAGE = 'record_thought_subjects: the set is a one-dimensional array of keys', ERRCODE = 'invalid_parameter_value';
   END IF;
   IF array_position(p_keys, NULL) IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = 'record_thought_subjects: a key in the set is NULL (an empty set, or NULL, closes every standing subject)', ERRCODE = 'invalid_parameter_value';
@@ -322,7 +350,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) IS
-  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds, stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Migration 127 / SMD-3306.';
+  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Migration 127 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 4. record_thought_subject — 113's door, now a set of one
@@ -395,7 +423,7 @@ DECLARE
   v_ids   uuid[];
   v_read  uuid[];
 BEGIN
-  IF p_thought IS NULL OR p_facets IS NULL OR cardinality(p_facets) = 0 OR array_position(p_facets, NULL) IS NOT NULL THEN
+  IF p_thought IS NULL OR p_facets IS NULL OR cardinality(p_facets) = 0 OR array_ndims(p_facets) > 1 OR array_position(p_facets, NULL) IS NOT NULL THEN
     RAISE EXCEPTION USING MESSAGE = 'close_thought_subjects: a thought and the subject facets read are required', ERRCODE = 'invalid_parameter_value';
   END IF;
   IF p_fp IS NULL OR btrim(p_fp) = '' THEN
@@ -457,16 +485,20 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = 'close_thought_subject: the fingerprint of the text read is required', ERRCODE = 'invalid_parameter_value';
   END IF;
   v_r := close_thought_subjects(p_thought, ARRAY[p_facet], p_fp);
-  -- 113's answer: `id` the one closed, or the one standing (the first by key)
-  -- when another stands.
+  -- 113's answer: `id` the one closed, or when another stands the one standing
+  -- in its place (the first by key other than the facet passed: on a set the
+  -- facet passed may stand beside others).
   RETURN jsonb_strip_nulls(jsonb_build_object(
-    'ok', true, 'action', v_r->>'action', 'id', v_r->'ids'->0,
+    'ok', true, 'action', v_r->>'action',
+    'id', CASE WHEN v_r ? 'moved'
+               THEN (SELECT to_jsonb(x) FROM jsonb_array_elements_text(v_r->'ids') WITH ORDINALITY AS e(x, n) WHERE x::uuid <> p_facet ORDER BY n LIMIT 1)
+               ELSE v_r->'ids'->0 END,
     'gone', v_r->'gone', 'stale', v_r->'stale', 'moved', v_r->'moved'));
 END;
 $$;
 
 COMMENT ON FUNCTION close_thought_subject(uuid, uuid, text) IS
-  'Closes a thought''s standing subject only when it is still the facet the caller read, standing alone, and the thought''s text still has the fingerprint read (113, SMD-3306): since 127, close_thought_subjects with one facet. Returns {ok, action: closed | none, id?, gone?, stale?, moved?}: none with gone for a thought deleted, with stale for a text that moved, with moved (and the standing id, the first by key) when another subject stands, beside it or in its place, and alone when none does. SECURITY INVOKER: the caller needs UPDATE on thought_facets and on thoughts (the row locks), as the door''s close does; since 120 a close re-links the subject''s thread (thought_facets_thread_closed), which needs INSERT on thought_facets (the structure group) and INSERT, UPDATE and SELECT on derivations (the capture group) too, as the door''s writes do. Migrations 113, 120, 127 / SMD-3306.';
+  'Closes a thought''s standing subject only when it is still the facet the caller read, standing alone, and the thought''s text still has the fingerprint read (113, SMD-3306): since 127, close_thought_subjects with one facet. Returns {ok, action: closed | none, id?, gone?, stale?, moved?}: none with gone for a thought deleted, with stale for a text that moved, with moved (and the id of a subject standing in its place or beside it, the first by key other than the one passed) when another subject stands, and alone when none does. SECURITY INVOKER: the caller needs UPDATE on thought_facets and on thoughts (the row locks), as the door''s close does; since 120 a close re-links the subject''s thread (thought_facets_thread_closed), which needs INSERT on thought_facets (the structure group) and INSERT, UPDATE and SELECT on derivations (the capture group) too, as the door''s writes do. Migrations 113, 120, 127 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 6. The trigger that keeps the threads: the first re-link locks every key moved
@@ -480,6 +512,7 @@ DECLARE
   v_thought uuid;
   v_key     text;
   v_moved   text[];
+  v_mark    text;
 BEGIN
   IF TG_OP IN ('INSERT', 'UPDATE') THEN
     IF TG_OP = 'INSERT' THEN
@@ -489,21 +522,63 @@ BEGIN
       v_thought := OLD.thought_id;
       v_key := OLD.payload->>'key';
     END IF;
-    -- A replace closes subjects and writes others in one transaction, each
-    -- re-linking its key at the commit in turn. Two writers moving thoughts
-    -- across the same keys in opposite directions would each hold a key while
-    -- they waited on the other's, so every subject key the transaction wrote
-    -- or closed on the thought — its rows there of this transaction's making,
-    -- closed or standing — is locked first, in key order, as db/threads.ts's
-    -- batches lock theirs: they queue. The first re-link takes them all, the
-    -- rest finding them held. A subject that stood before the transaction,
-    -- kept beside the replace, is no part of it (127, a thought's subjects a
-    -- set): taken after a later key, its lock could deadlock with a writer
-    -- that takes both in order.
-    SELECT array_agg(s.payload->>'key') INTO v_moved
-      FROM thought_facets s
-     WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.xmin = pg_current_xact_id()::xid;
-    PERFORM ob1_thread_lock_keys(v_moved || v_key);
+    -- thread_relink's refusal, said before any lock: a transaction above READ
+    -- COMMITTED is refused at its commit whatever it waits on, so it waits on
+    -- none (review pass 1: it waited out another writer's key first).
+    IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
+      PERFORM thread_relink(v_key);
+    END IF;
+    -- Before the first re-link, once a transaction and thought, the locks every
+    -- re-link of its subjects may wait on. A replace closes subjects and writes
+    -- others in one transaction, each re-linking its key at the commit in turn.
+    --  * Its keys. Two writers moving thoughts across the same keys in
+    --    opposite directions would each hold a key while they waited on the
+    --    other's, so every subject key the transaction wrote or closed on the
+    --    thought — its rows there of this transaction's making, closed or
+    --    standing — is locked, in key order, as db/threads.ts's batches lock
+    --    theirs: they queue. A subject that stood before the transaction, kept
+    --    beside the replace, is no part of it: taken after a later key, its
+    --    lock could deadlock with a writer that takes both in order.
+    --  * Its neighbours. Each edge those re-links write joins the thought to
+    --    its neighbour in a key it joined, or bridges its two neighbours in a
+    --    key it left, and its two thoughts are locked (KEY SHARE) before the
+    --    write (120). With a set, one neighbour can stand in two of the keys:
+    --    the first key's re-link closing the thought's edge to it, a delete of
+    --    it then waiting on that closed edge's row (084's close), and the
+    --    second's waiting on the deleted row to write the edge again — a
+    --    deadlock (review pass 1). So the thought and its neighbours in every
+    --    key moved are locked first, in id order, before any re-link closes an
+    --    edge: a delete of one waits for the commit, as 120's write-before-close
+    --    makes it wait within one key.
+    -- The keys moved, as an array's text, mark the transaction (a local
+    -- setting under the thought's name): the next re-link of its subjects
+    -- finds them taken, unless a write since moved another key.
+    SELECT array_agg(DISTINCT k ORDER BY k) INTO v_moved
+      FROM (SELECT s.payload->>'key' AS k
+              FROM thought_facets s
+             WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.xmin = pg_current_xact_id()::xid
+            UNION
+            SELECT v_key) m;
+    v_mark := 'ob1.thread_' || replace(v_thought::text, '-', '');
+    IF current_setting(v_mark, true) IS DISTINCT FROM v_moved::text THEN
+      PERFORM ob1_thread_lock_keys(v_moved);
+      PERFORM 1 FROM thoughts t
+       WHERE t.id = v_thought
+          OR t.id IN (SELECT x
+                        FROM (SELECT o.id, lag(o.id) OVER w AS prev, lead(o.id) OVER w AS next
+                                FROM (SELECT s.payload->>'key' AS k, h.id, h.created_at
+                                        FROM thought_facets s JOIN thoughts h ON h.id = s.thought_id
+                                       WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = ANY (v_moved)
+                                         AND s.thought_id <> v_thought
+                                      UNION ALL
+                                      SELECT k, h.id, h.created_at FROM unnest(v_moved) AS k, thoughts h WHERE h.id = v_thought) o
+                              WINDOW w AS (PARTITION BY o.k ORDER BY o.created_at, o.id)) around,
+                             LATERAL (VALUES (around.prev), (around.next)) AS v(x)
+                       WHERE around.id = v_thought AND x IS NOT NULL)
+       ORDER BY t.id
+         FOR KEY SHARE OF t;
+      PERFORM set_config(v_mark, v_moved::text, true);
+    END IF;
     PERFORM thread_relink(v_key);
   -- A standing subject deleted with its thought: its edges are closed by 084's
   -- trigger and the cascade, and its neighbours linked here when the deleting
@@ -525,10 +600,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_thread_relink_subject() IS
-  'Constraint triggers AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120), deferred to the writer''s commit: re-links the subject''s key''s thread (thread_relink) once the transaction''s subjects are final, so a replace (a close and an insert on one key) moves no edge. A subject written or closed locks, before its re-link, every subject key the same transaction wrote or closed on the thought, in key order (ob1_thread_lock_keys over the thought''s subject rows of the transaction''s making; since 127 a thought''s subjects are a set, and a subject kept standing beside a replace is not locked), as db/threads.ts locks its batches'' keys, so two writers moving thoughts across the same keys queue rather than deadlock. A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets, UPDATE on thoughts for the row locks, and INSERT, UPDATE and SELECT on derivations), the transaction is READ COMMITTED and no other transaction holds the key''s lock (pg_try_advisory_xact_lock): a delete never waits on the key''s lock; otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migrations 120, 127 / SMD-3306.';
+  'Constraint triggers AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120), deferred to the writer''s commit: re-links the subject''s key''s thread (thread_relink) once the transaction''s subjects are final, so a replace (a close and an insert on one key) moves no edge. A subject written or closed locks, before its re-link, every subject key the same transaction wrote or closed on the thought, in key order (ob1_thread_lock_keys over the thought''s subject rows of the transaction''s making; since 127 a thought''s subjects are a set, and a subject kept standing beside a replace is not locked), as db/threads.ts locks its batches'' keys, so two writers moving thoughts across the same keys queue rather than deadlock; with them the thought and its neighbours in those keys'' threads (KEY SHARE, in id order), so a delete of a neighbour standing in two of them waits for the commit rather than deadlocking with its re-links; once a transaction and thought (a local setting marks it), and above READ COMMITTED not at all (the re-link''s refusal first). A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets, UPDATE on thoughts for the row locks, and INSERT, UPDATE and SELECT on derivations), the transaction is READ COMMITTED and no other transaction holds the key''s lock (pg_try_advisory_xact_lock): a delete never waits on the key''s lock; otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migrations 120, 127 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 7. The catalog's copy of the vocabulary
 -- ---------------------------------------------------------------------------
 COMMENT ON TABLE thought_facets IS
-  'Typed rows on a thought, four kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (111), payload {key, by, judge_key, origin} — the thought''s own subject, since 127 a set: one standing per thought and key, at most three, one rule''s, written by record_thought_subjects (record_thought_subject a set of one) and only ever closed. Since 120 a relation is also a work thread''s edge — origin thread, the key of the thread it links — kept by thread_relink as the subjects land and leave (SMD-3306), so a thought with a set stands in each key''s thread. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 111, 120, 127 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306.';
+  'Typed rows on a thought, four kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (111), payload {key, by, judge_key, origin} — the thought''s own subject, since 127 a set: one standing per thought and key (the index''s rule), at most three and one rule''s (record_thought_subjects''s), written by record_thought_subjects (record_thought_subject a set of one) and only ever closed. Since 120 a relation is also a work thread''s edge — origin thread, the key of the thread it links — kept by thread_relink as the subjects land and leave (SMD-3306), so a thought with a set stands in each key''s thread. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 111, 120, 127 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306.';
