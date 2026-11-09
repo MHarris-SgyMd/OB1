@@ -2437,9 +2437,10 @@ extraction's stall floor, so each abort counts as a long stop),
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and
-the share is the same; the order matters only once the scheduler's calls
-queue, its workers more than the share, and while consolidation's fill it a
-lower value gives the other passes more turns — SMD-3379 PR 2c-2),
+the share is the same; the order matters once the scheduler's calls queue —
+consolidation's workers two or more past the share hold the other passes to
+about a call a worker a max-wait — and a lower value gives them more turns —
+SMD-3379 PR 2c-2),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep

@@ -3424,12 +3424,14 @@ if (import.meta.main) {
   const dumpDir = cli.value("dump-dir");
   // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`;
   // consolidation's first in a share, and a call that has waited --max-wait first whatever its pass (PR 2c-2).
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS, maxWaitS: maxWait });
+  const slots = installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS, maxWaitS: maxWait });
   const sql = openSql(url, { max: 2, session: schedulerSession({ workMem, maintenanceWorkMem }) });
   let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
-      sql, url, capture, abortAfter, maxWait, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
+      sql, url, capture, abortAfter, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
+      // The order said only where the hook is in: under `off` there is none (review pass 3).
+      ...(slots.installed ? { maxWait } : {}),
       ...(dumpDir === undefined ? {} : { dumpDir }),
       follow: cli.has("follow"),
       dryRun: cli.has("dry-run"),
