@@ -163,7 +163,7 @@ export async function run(opts: ThreadsOptions): Promise<number> {
         ? "  linked:    every thread — nothing to do"
         : `  linked:    ${c.unlinked} key(s) whose edges differ from their thread's${c.orphaned ? `, ${c.orphaned} key(s) no thought holds still carrying edges` : ""} — threads.ts without --status links them`);
       const named = c.first;
-      if (named.length) out(`  keys:      ${named.join(", ")}${c.unlinked + c.orphaned > named.length ? `, and ${c.unlinked + c.orphaned - named.length} more` : ""} — --key <key> re-links one`);
+      if (named.length) out(`  keys:      ${named.join(", ")}${c.unlinked + c.orphaned > named.length ? `, and ${c.unlinked + c.orphaned - named.length} more` : ""} — --key '<key>' re-links one`);
       return 0;
     }
     if (!DRY) {

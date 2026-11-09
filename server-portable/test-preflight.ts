@@ -1571,7 +1571,7 @@ else {
   assert(/^\s*✓\s+threads\s+\d+ thread\(s\), \d+ thought\(s\) in them, \d+ edge\(s\) standing — every thread linked\s*$/m.test(thrOk.out)
       && /^\s*!\s+threads\s+\d+ thread\(s\); \d+ edge\(s\) standing, \d+ once every thread read is linked; 1 key\(s\) whose edges differ from their thread's\s*$/m.test(thrWarn.out)
       && edgeGap(thrWarn.out) === 1
-      && /^\s*→ Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names each key, --key <key> re-links one\)\. /.test(fix(thrWarn.out, "threads"))
+      && /^\s*→ Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names the first 10 keys, --key '<key>' re-links one\)\. /.test(fix(thrWarn.out, "threads"))
       && !row(thrWarn.out, "threads").includes("SMD-9120") && relinkedAgain.added === 1
       && /^\s*!\s+threads\s+\d+ thread\(s\); \d+ edge\(s\) standing, \d+ once every thread read is linked; 1 key\(s\) no thought holds still carrying edges\s*$/m.test(thrOrphan.out)
       && edgeGap(thrOrphan.out) === -1,
