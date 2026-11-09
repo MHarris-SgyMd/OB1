@@ -136,7 +136,7 @@ A live claim whose PR merged or closed is stale. The runner skips its ticket and
 
 The label proves less than it seems. Linear records an add made through the maintainer's personal API key just as it records the maintainer's own click, so any agent session with that key's write access can add the label. For the label to be the maintainer's own word, agent sessions hold only read access to Linear, or a key of their own (`scripts/agent-runner/README.md`, "What the label proves").
 
-The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda item carries no ticket state, assignee, delegate, title or label history, so the rule's Backlog, unassigned, title and label checks stay Linear's.
+The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda ticket carries its Linear status since migration 124 (SMD-4162), as board-sync last copied it, but no assignee, delegate, or history of its title or labels, so the rule's Backlog, unassigned, title and label checks stay Linear's.
 
 ## A run, step by step
 
