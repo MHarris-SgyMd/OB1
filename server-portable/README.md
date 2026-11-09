@@ -717,6 +717,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
+Threads:         41 (127 thoughts in them), every one linked
 Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
@@ -745,6 +746,18 @@ worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
 three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
+`Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
+thoughts in them, and whether every thread's standing edges (migration 120) are the ones its thoughts want, compared
+edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw
+write's; a key no thought holds that still carries edges is counted beside it. The row names the run that links either,
+`cd db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000
+standing subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`,
+`ticket:` and `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the
+keys before the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key,
+counts those that differ and names the first ten. It names no key here, since a phrase key is the judge model's words.
+`not counted` before migration 120, and past the bound when no key was read (the first key in key order alone passes
+it) or no thread was (each key read held by one thought); preflight warns then. Preflight's `threads` row reads the
+same census and warns, never fails, on a key that differs.
 `Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
 pass's findings show without a query. `Proposals` is the queue a reviewer works:
 how many are pending, how long ago the oldest was judged (a pass that re-judges
@@ -810,7 +823,9 @@ heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
-SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
+SMD-2682; the work threads' census as `threads`, `{ threads, thoughts, standing, whole, unlinked,
+orphaned, keys, complete }` — counts of the keys before the census's first cut, `keys` of them subject keys,
+`complete` false when it stopped at its bound, null before 120 — SMD-3306 PR 7a-2c; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
 did not answer, null with no entry before 079 (or when its field was not read),
 and 0, not read, when there is nothing to count, SMD-2680) or

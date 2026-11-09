@@ -2608,22 +2608,26 @@ a `thread:` judge key with no confidence; any other is the judge's, `judged`,
 under 084's index, which now keeps to the judge's edges, so a judged `related`
 and a thread's `evolves` stand side by side on one pair.
 `record_thought_relation` reads, keeps, replaces and closes the judge's edge
-alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
-count the judge's alone. The upgrade writes no edge: run `threads.ts` once after
-it, which links every thread, a batch of at most 200 keys a transaction, a key
-that writes ending its batch and the next batch taking the page's rest (on the
-compose stack, from a checkout, reaching its Postgres through deploy/README's
-host-ports file):
+alone, and `brain_info`'s Relations row, board-sync's findings and
+`consolidate.ts --status` count the judge's alone (its Threads row counts the
+threads' edges apart, PR 7a-2c). The upgrade writes no edge: run `threads.ts`
+once after it, which links every thread, a batch of at most 200 keys a
+transaction, a key that writes ending its batch and the next batch taking the
+page's rest (on the compose stack, from a checkout, reaching its Postgres
+through deploy/README's host-ports file):
 
 ```bash
-bun threads.ts --url … --status                # the threads, and the keys whose edges differ
+bun threads.ts --url … --status                # the threads, and the keys whose edges differ (the first ten, one a line, quoted as --key takes them)
 bun threads.ts --url … --dry-run               # counts what it would close and write; writes nothing
 bun threads.ts --url …                         # links them (--batch N keys a transaction at most, 200 the default and the most)
 bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after a server's delete
 ```
 
-A thought stands in one thread until its subjects are a set (PR 7a-3); the
-thread's read and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
+`--status`'s census is the one `brain_info`'s `Threads` row and preflight's
+`threads` row read, which stop at the first 10,000 subjects and thread edges in
+key order; `--status` reads it with no bound (SMD-3306 PR 7a-2c). A thought
+stands in one thread until its subjects are a set (PR 7a-3); the thread's read
+and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the re-link,
 the validator, the judge's door beside a thread, the deletes with and without
 the writes, a replace that keeps its key, a write and a delete under REPEATABLE
