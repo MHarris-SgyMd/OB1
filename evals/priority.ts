@@ -843,8 +843,8 @@ export async function withAnswerMoved<T>(run: () => Promise<T>, prompts: readonl
  * What effective_priority should answer for each personal note asked as a thought, once migration 125 reads a
  * thought's open items (SMD-4149, the rule the maintainer decided on 2026-11-09): the level counted on its open item
  * (`from_items`), else unknown's 2 (a note states nothing on itself, and is about no ticket); its open item's due time,
- * in calendar days from the run's day, +2 by the end of tomorrow, +1 by the end of the seventh day, +3 once past; none
- * at level 0; a done item gives nothing. One line a note, `key effective: terms`, each term naming the note whose item
+ * in calendar days from the run's day, +0.4 by the end of tomorrow, +0.2 by the end of the seventh day, +0.6 once past
+ * (migration 127's level-first weights, SMD-4177; 125's were +2, +1 and +3); none at level 0; a done item gives nothing. One line a note, `key effective: terms`, each term naming the note whose item
  * it came from. Pure, so --self-check reads it; outside the registered section, as it plants nothing.
  */
 export function plannedNoteReads(items: readonly Item[], today: string): string[] {
@@ -854,12 +854,13 @@ export function plannedNoteReads(items: readonly Item[], today: string): string[
     const open = !p.done;
     const level = open ? p.level : null;
     const terms = [level !== null ? `from_items ${level} item:${key}` : "unknown 2"];
-    let urgency = 0;
+    // Tenths, as 127's weights are: 2 + 0.4 is 2.4 here, as the database's numeric reads it.
+    let tenths = 0;
     if (open && days !== undefined && level !== 0) {
-      urgency = days < 0 ? 3 : days <= 1 ? 2 : days <= 7 ? 1 : 0;
-      if (urgency > 0) terms.push(`${days < 0 ? "overdue" : urgency === 2 ? "urgency soon" : "urgency week"} ${urgency} item:${key}`);
+      tenths = days < 0 ? 6 : days <= 1 ? 4 : days <= 7 ? 2 : 0;
+      if (tenths > 0) terms.push(`${days < 0 ? "overdue" : tenths === 4 ? "urgency soon" : "urgency week"} ${tenths / 10} item:${key}`);
     }
-    return `${key} ${(level ?? 2) + urgency}: ${terms.join("; ")}`;
+    return `${key} ${((level ?? 2) * 10 + tenths) / 10}: ${terms.join("; ")}`;
   }).sort();
 }
 
