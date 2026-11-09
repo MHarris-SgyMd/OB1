@@ -1633,8 +1633,16 @@ export type AgendaResult = {
    * leave anything out, as on a brain whose board is claimed through another brain.
    */
   claimsLive: number | null;
+  /**
+   * With a `keys` scope (126, SMD-2684), the keys named that are no candidate: `others`, a ticket whose head is
+   * settled or carries a status type the brain does not know, with its status; `missing`, a key no thought records.
+   * Null without keys, and from a brain before 126.
+   */
+  keyed: { others: AgendaOther[]; missing: string[] } | null;
   now: string;
 };
+/** A named ticket the agenda does not rank (126): settled, or a status type the brain does not know. */
+export type AgendaOther = { key: string; title: string; status: string | null; statusType: string | null; settled: boolean };
 
 const claimsOf = (v: unknown, what: string): AgendaClaim[] => {
   if (v === null || v === undefined) return [];
@@ -1658,6 +1666,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
+  const keyed = keyedOf(o.keyed, what);
   const items = (o.items as unknown[]).map((it) => {
     const i = it !== null && typeof it === "object" ? (it as Record<string, unknown>) : undefined;
     if (!i || (i.kind !== "ticket" && i.kind !== "item") || typeof i.key !== "string" || typeof i.source !== "string" || !Number.isInteger(num(i.rank))
@@ -1685,8 +1694,25 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     boardSync: bs && (typeof bs.at === "string" || bs.at instanceof Date) ? { at: isoTimestamp(bs.at as string | Date), outcome: bs.outcome ?? null } : null,
     claimsRead: o.claims_read as boolean,
     claimsLive: o.claims_live === null ? null : num(o.claims_live),
+    keyed,
     now: isoTimestamp(o.now as string | Date),
   };
+}
+
+/** 126's `keyed`: null or absent is null (no keys, or a brain before 126); any other shape throws. */
+function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
+  if (v === null || v === undefined) return null;
+  const o = typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+  if (!o || !Array.isArray(o.others) || !Array.isArray(o.missing) || !(o.missing as unknown[]).every((k) => typeof k === "string")) {
+    throw new Error(`${what} answered named tickets this server cannot read`);
+  }
+  const others = (o.others as unknown[]).map((x) => {
+    const t = x !== null && typeof x === "object" ? (x as Record<string, unknown>) : undefined;
+    if (!t || typeof t.key !== "string" || typeof t.settled !== "boolean") throw new Error(`${what} answered named tickets this server cannot read`);
+    return { key: t.key, title: typeof t.title === "string" ? t.title : "", status: typeof t.status === "string" ? t.status : null,
+             statusType: typeof t.status_type === "string" ? t.status_type : null, settled: t.settled };
+  });
+  return { others, missing: o.missing as string[] };
 }
 
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
@@ -2009,6 +2035,18 @@ export type QueryActionLog = {
  * An 'agenda' row for the query log (migration 123, SMD-3669): the call's scope, holder and flags in `filter`, its
  * limit as `matchCount`, and the items returned, in order, each with its effective priority.
  */
+/** A plan_context call's row (migration 126, SMD-2684): the request, its limit, the knowledge hits' ids and scores and their arm, and the board's tickets in the order shown. */
+export type QueryPlanContextLog = {
+  agentId?: string;
+  query: string;
+  matchCount: number;
+  arm: string;
+  resultIds: string[];
+  resultScores: (number | null)[];
+  items: { kind: string; key: string; effective: number }[];
+  tier?: string;
+};
+
 export type QueryAgendaLog = {
   agentId?: string;
   filter: Record<string, unknown>;
@@ -2432,13 +2470,18 @@ export interface ThoughtStore {
    * first, and the core answers holder mine's 42501 as CLAIMS_UNREADABLE.
    */
   agenda(opts: {
-    scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
+    /** `keys` (126): those tickets alone, 1 to 100 upper-case keys; the named ones it does not rank come back in `keyed`. */
+    scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean;
     /** Also list started tickets (124); absent is false: started work is left out, and counted. */
     includeStarted?: boolean; now?: string;
+    /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */
+    timeoutMs?: number;
   }): Promise<AgendaResult>;
   /** One agenda row in query_log (migration 123): the scope and the items returned, in order. */
   logAgenda(row: QueryAgendaLog): Promise<void>;
+  /** One plan_context row in query_log (migration 126, SMD-2684): the request, the knowledge hits and the board's tickets, in order. */
+  logPlanContext(row: QueryPlanContextLog): Promise<void>;
   /**
    * Open items (migration 117, SMD-3665 PR 2): 117's writers, each one statement in its own transaction, the actor
    * as the maker's envelope with `scope` stated (as 116's) and `plugin` the plugin a call came through (a plugin's
@@ -2765,7 +2808,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

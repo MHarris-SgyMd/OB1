@@ -3334,8 +3334,8 @@ else {
       const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      assert(/, and so does agenda \(SMD-3669\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\)/.test(rowOf(noItems.out, "priority"))
-             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table/.test(rowOf(noItems.out, "open items")),
+      assert(/, and so does agenda \(SMD-3669\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\); plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms

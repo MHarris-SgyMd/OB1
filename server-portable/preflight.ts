@@ -3163,7 +3163,8 @@ if (configFailed) {
               : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
             // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
             // alone was left out, and the items row said otherwise).
-            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669)" : ", and nothing else does";
+            // plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure.
+            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669); plan_context answers with no board (SMD-2684)" : ", and nothing else does";
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
@@ -3206,7 +3207,9 @@ if (configFailed) {
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
-            add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+            // plan_context's board is the agenda's (SMD-2684): without open_items it answers with no board, a gap.
+            const besides = reads.some((g) => g.startsWith("open_items ")) ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does";
+            add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table${besides}`,
                 "Grant the items group (SMD-3665): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups items (db/README.md, Grants for a capturing role).");
           } else {
             add("open items", "ok", "open_item, update_item, set_item_status, propose_item_close, decide_item_close, open_item_history and their helpers present; the server's role holds the items group");

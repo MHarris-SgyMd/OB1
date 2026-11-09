@@ -70,7 +70,7 @@ interface RunSearch {
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
-const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
+export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
   threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }> => {
@@ -417,7 +417,7 @@ const TICKET_KEY = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 /** A key a row's metadata files it under (a ticket row's `issue`, a note's `ticket`), as 115 keys it, when it is one. */
 const filedUnder = (v: unknown) => (typeof v === "string" && TICKET_KEY.test(v.trim().toUpperCase()) ? v.trim().toUpperCase() : null);
 /** The tickets a result names: those its metadata files it under, then the first MOVED_READ others its text mentions; the rest counted. */
-function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
+export function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
   const filed = [...new Set([filedUnder(h.metadata?.issue), filedUnder(h.metadata?.ticket)].filter((k): k is string => k !== null))];
   // A filed key the text also names is read as filed: not one of the text's 50, nor counted past them (review pass 1).
   const named = keysInOrder(h.content).filter((k) => !filed.includes(k));
@@ -681,6 +681,24 @@ export function rankByPriority<T extends { id: string }>(rows: readonly T[], pri
   return kept.slice(0, limit).map(({ r }) => r);
 }
 
+/**
+ * A page of hybrid rows as search_thoughts' hits: which a newer thought superseded, the tickets they name that moved,
+ * their claims, judged relations and priorities, each read once for the page. `labels` is a priority read already
+ * made (a ranked search's). Shared with plan_context's knowledge section (SMD-2684), so its hits read as these do.
+ */
+export async function labelHits(ctx: Ctx, principal: Principal, data: readonly ThoughtHybridMatch[], labels?: Promise<Record<string, PriorityHit> | null> | null): Promise<SearchHit[]> {
+  const store = await ctx.store();
+  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
+  const prios = labels ?? priorityOf(store, data);
+  const superseded = await store.supersededAmong(data.map((t) => t.id));
+  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
+  return data.map((t) => ({
+    id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
+    matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
+    supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
+  }));
+}
+
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust, priority_weight, min_priority } = input;
   // SMD-3668: a weight above 0 or a floor reads a window and its priorities; neither is today's search, untouched.
@@ -734,19 +752,10 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
-  const store = await ctx.store();
-  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
-  const prios = labels ?? priorityOf(store, data);
-  const superseded = await store.supersededAmong(data.map((t) => t.id));
-  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
   return ok({
     query,
     preferCurrent: prefer_current,
-    hits: data.map((t) => ({
-      id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
-      matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
-    })),
+    hits: await labelHits(ctx, principal, data, labels),
     // A text match has no literal-only reading: unknown, not false (review pass 6).
     facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
     window: data[0].window ?? null,

@@ -18368,6 +18368,90 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
     `a NULL include_started is refused (22023), and a re-apply is a no-op: the same read (${nullFlag})`);
 }
 
+console.log("\n[112] Migration 126: the agenda's keys scope — the tickets named alone, no open item, under every other rule; a named ticket that is settled, or whose status type is unknown, and a key no thought records, said beside the list; query_log's plan_context kind and its shape; a re-apply a no-op (SMD-2684)");
+{
+  const file = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  // [111] re-applied 124's agenda over this one (one signature): put 126's back first.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [112]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag112-op', 'operator')`);
+  const OP = { name: "ag112-op", scope: "write" };
+  type It = { kind: string; key: string; status: string | null; blockers: string[] };
+  type Other = { key: string; title: string; status: string | null; status_type: string | null; settled: boolean };
+  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; keyed: { others: Other[]; missing: string[] } | null };
+  const ticket = async (issue: string, status: string, statusType: string, o: { project?: string; blockedBy?: string } = {}) => {
+    const content = `${issue} — [112] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag112-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (o.blockedBy) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify([{ relation: "blocked_by", target: o.blockedBy }])]);
+  };
+  // SMD-9941 Backlog at High; SMD-9942 started, unclaimed; SMD-9943 Done; SMD-9944 blocked by SMD-9941; SMD-9945 a
+  // status type this brain doesn't know; SMD-9946 open but never named; SMD-9949 named and nowhere.
+  await ticket("SMD-9941", "Backlog", "backlog"); await ticket("SMD-9942", "In Progress", "started"); await ticket("SMD-9943", "Done", "completed");
+  await ticket("SMD-9944", "Todo", "unstarted", { blockedBy: "SMD-9941" }); await ticket("SMD-9945", "Parked", "parked"); await ticket("SMD-9946", "Backlog", "backlog");
+  await db.query(`SELECT assert_priority('ticket', 'SMD-9941', 3, NULL, NULL, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
+  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941"];
+  const ag = async (scope: object | null, all = true) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, $2, $2, false, NULL, $3::timestamptz, $2) AS a`, [scope === null ? null : JSON.stringify(scope), all, NOW])).rows[0].a;
+  const row = (a: Ag) => a.items.map((i) => `${i.kind}:${i.key} ${i.status}`).join(", ");
+  const others = (a: Ag) => (a.keyed?.others ?? []).map((o) => `${o.key} ${o.status}/${o.status_type}${o.settled ? " settled" : ""}`).join(", ");
+
+  // The shape: still one agenda of nine arguments, its comment naming 126.
+  const fns = (await db.query<{ n: number; c: string | null }>(
+    `SELECT p.pronargs::int AS n, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'agenda'`)).rows;
+  assert(fns.length === 1 && fns[0].n === 9 && /Migrations 123 \(SMD-3669\), 124 \(SMD-4162\) and 126 \(SMD-2684\)/.test(fns[0].c ?? ""),
+    `one agenda, of nine arguments, its comment naming 123, 124 and 126 (${fns.map((f) => f.n).join(", ")})`);
+
+  // Every flag on: the named open tickets alone, in agenda order (the High one first), no open item though earlier
+  // sections left some, the never-named one out; the Done and the unknown-type ones beside, with their status; the
+  // key no thought records missing; a duplicate counted once. Flags off: the blocked and the started ones left out
+  // and counted, keyed the same. A keys scope with a project narrows by both. Without keys, keyed is null.
+  const named = await ag({ keys: NAMED }), off = await ag({ keys: NAMED }, false);
+  const both = await ag({ keys: NAMED, project: "nothing in scope [112]" }), plain = await ag({ project: P });
+  assert(row(named) === "ticket:SMD-9941 Backlog, ticket:SMD-9942 In Progress, ticket:SMD-9944 Todo" && named.total === 3
+      && JSON.stringify(named.items.find((i) => i.key === "SMD-9944")?.blockers) === '["SMD-9941"]'
+      && others(named) === "SMD-9943 Done/completed settled, SMD-9945 Parked/parked" && JSON.stringify(named.keyed?.missing) === '["SMD-9949"]'
+      && named.keyed?.others[0]?.title === "SMD-9943 — [112] SMD-9943"
+      && row(off) === "ticket:SMD-9941 Backlog" && JSON.stringify(off.left_out) === '{"blocked":1,"claimed":0,"started":1,"waiting":0}' && others(off) === others(named)
+      && both.items.length === 0 && others(both) === others(named)
+      && plain.keyed === null && row(plain).includes("SMD-9946"),
+    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown and missing ones beside (${row(named)}; ${others(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${both.items.length} | ${plain.keyed === null})`);
+
+  // Refused, 22023: keys not an array, none, more than 100, a lower-case key, a number.
+  const raisedCode = async (scope: unknown) => { try { await db.query(`SELECT agenda($1::jsonb, NULL, 20, false, false, false, NULL, now(), false)`, [JSON.stringify(scope)]); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const hundredOne = Array.from({ length: 101 }, (_, i) => `SMD-${i + 1}`);
+  const refused = [await raisedCode({ keys: "SMD-9941" }), await raisedCode({ keys: [] }), await raisedCode({ keys: hundredOne }),
+                   await raisedCode({ keys: ["smd-9941"] }), await raisedCode({ keys: [9941] }), await raisedCode({ keys: Array.from({ length: 100 }, (_, i) => `SMD-${i + 1}`) })];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023,", `a keys scope that is not 1 to 100 ticket keys is refused 22023, 100 taken (${refused.join(",")})`);
+
+  // query_log: the plan_context kind, its row needing a query and an items array (23514 otherwise).
+  const logRow = async (query: string | null, items: string | null) => {
+    try { await db.query(`INSERT INTO query_log (kind, tool, query, match_count, result_ids, result_items) VALUES ('plan_context', 'plan_context', $1, 10, '{}', $2::jsonb)`, [query, items]); return "ok"; }
+    catch (e) { return String((e as { code?: string }).code ?? "?"); }
+  };
+  const logged = [await logRow("[112] plan a thing", '[{"kind":"ticket","key":"SMD-9941","effective":3}]'), await logRow(null, "[]"), await logRow("[112] no items", null), await logRow("[112] an object", "{}")];
+  const comments = (await db.query<{ t: string | null; i: string | null; f: string | null }>(
+    `SELECT obj_description('query_log'::regclass, 'pg_class') AS t,
+            col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'result_items')::int) AS i,
+            col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0];
+  assert(logged.join(",") === "ok,23514,23514,23514" && /one per plan_context call \(kind plan_context/.test(comments.t ?? "") && /a plan_context row's board tickets/.test(comments.i ?? "")
+      && /On a plan_context row, \{\} \(migration 126\)/.test(comments.f ?? ""),
+    `query_log takes a plan_context row with its query and items array and refuses one without (${logged.join(",")}); its comments name the kind`);
+
+  // A re-apply is a no-op: the same read, the same constraints.
+  const defs = async () => (await db.query<{ d: string }>(`SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '; ' ORDER BY conname) AS d FROM pg_constraint WHERE conrelid = 'query_log'::regclass`)).rows[0].d;
+  const defsBefore = await defs();
+  await reapply(file.slice(0, 4));
+  const again = await ag({ keys: NAMED });
+  assert(JSON.stringify(again) === JSON.stringify(named) && await defs() === defsBefore, `a re-apply is a no-op: the same read and query_log's same constraints`);
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

@@ -4290,6 +4290,31 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
   }
 }
 
+console.log("\n[26] plan_context's query_log row (migration 126, SMD-2684): one call writes one row of its own kind — the request, the knowledge hits' ids in the order shown, the arm current, the board's tickets — and no search row beside it");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+    // A ticket's own row, as board-sync writes it, and a note naming it.
+    const row26 = "KES-1 — [26] KES-1";
+    const [{ id: ticketId }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${row26}, (${JSON.stringify({ source: "linear", issue: "KES-1", status: "Backlog", status_type: "backlog" })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${ticketId}::uuid, 'linear', 'KES-1', ${row26}, 'text/markdown')`;
+    const note = idIn(await call("capture_thought", { content: '[26] "kestrel plan" leans on KES-1' }))!;
+    const count = async (kind: string) => Number((await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = ${kind}`)[0].n);
+    const [searchBefore, planBefore] = [await count("search"), await count("plan_context")];
+    const text = await call("plan_context", { request: 'what is "kestrel plan"', limit: 5 });
+    const [searchAfter, planAfter] = [await count("search"), await count("plan_context")];
+    const [row] = await sql`SELECT tool, query, match_count, arm, result_ids::text[] AS ids, result_items FROM query_log WHERE kind = 'plan_context' ORDER BY logged_at DESC LIMIT 1`;
+    const shown = [...text.matchAll(/^ID: ([0-9a-f-]{36})$/gm)].map((m) => m[1]);
+    assert(planAfter === planBefore + 1 && searchAfter === searchBefore && row?.tool === "plan_context" && row.query === 'what is "kestrel plan"' && row.match_count === 5 && row.arm === "current"
+        && JSON.stringify(row.ids) === JSON.stringify(shown) && row.ids.includes(note) && Array.isArray(row.result_items)
+        && row.result_items.some((i: { key: string }) => i.key === "KES-1"),
+      `one plan_context row and no search row: the request, the limit, arm current, the hits' ids in the order shown, the board's tickets (${planBefore} → ${planAfter}, search ${searchBefore} → ${searchAfter} | ${JSON.stringify(row?.result_items)})`);
+  } finally {
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 
