@@ -4263,7 +4263,8 @@ if (want("9f")) {
       if (probe && probeRefused401) return Response.json({ error: { message: `stub: invalid api key — ${"the key was revoked by its owner; ".repeat(5)}` } }, { status: 401 });
       if (probe && probeDownNext) {
         probeDownNext = false;
-        return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
+        // Past the 160 characters the "is not answering" line cuts at, so its mark is read (review pass 5).
+        return Response.json({ error: { message: `stub: overloaded — ${"every replica is busy, retry after the queue drains; ".repeat(3)}` } }, { status: 503 });
       }
       // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
       if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
@@ -4526,7 +4527,8 @@ if (want("9f")) {
     let downClaim: Awaited<ReturnType<typeof claimOf>>;
     try {
       downHangs = await newThought("a zz-deadline thought whose probe meets an outage");
-      downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503.*\\) — ${downHangs} goes back to the pool unrecorded`));
+      // In the probe's words, cut at 160 and marked (review pass 5: the mark was held by no row).
+      downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503 .*…\\) — ${downHangs} goes back to the pool unrecorded`));
       downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 20_000);
       downClaim = await claimOf(downHangs);
     } finally {

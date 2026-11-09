@@ -2293,9 +2293,14 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           if (!row) {
             outcome = { outcome: "vanished" };
           } else {
-            inCall.begin(workerId);
-            /** The call's slot waits, one count for its calls and the probe after them, so a window call still waiting and the probe do not keep two (SMD-2636 PR 3b, review pass 4). */
-            const callWaits = callWaitsFor(() => inCall.get(workerId));
+            /**
+             * The call's slot waits, one count for its calls and the probe after them, so a window call still waiting
+             * and the probe do not keep two (SMD-2636 PR 3b, review pass 4), on this thought's own entry: looked up
+             * by the worker's id, a window call left waiting when a sibling failed told the next thought's entry it
+             * ran (review pass 5).
+             */
+            const entry = inCall.begin(workerId);
+            const callWaits = callWaitsFor(() => entry);
             try {
               // A wait for a slot on the model-call seam is not the call's time (review pass 3).
               outcome = await withCallWaits(callWaits, () => processRow(row, workerId));
