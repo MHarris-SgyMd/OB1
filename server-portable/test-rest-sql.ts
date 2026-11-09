@@ -2269,7 +2269,7 @@ const relationsDeniedCore = () => coreWhoseReadThrows("relationsAmong", "permiss
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
 const STALE_KEY_HEAD = "A relation marked edited since judged was judged on a text that has changed since";
 
-console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; holder mine lists the tickets the key holds a claim on");
+console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3669, SMD-4162): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; a started ticket left out and counted unless include_started, listed with its status; holder mine lists the tickets the key holds a claim on");
 {
   await sql`SELECT set_agent_kind('writer', 'operator')`;
   const P = "Agenda rest [17]";
@@ -2287,11 +2287,11 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
   const m = await mcp("agenda", { project: P });
   type It = { key: string; rank: number; effective: number; terms: { term: string }[] };
   const items = (r.body.items ?? []) as It[];
-  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9912 SMD-9911 SMD-9914"
-      && items[0].effective === 4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
-    `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
+  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9911 SMD-9912 SMD-9914"
+      && items[1].effective === 2.4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
+    `REST and MCP give one agenda, each stamped with its own clock, level first (127): the High (3), the Medium due tomorrow (2.4), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
   const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
-  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
+  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9911 \("backlog"\) "SMD-9911 — \[17\] SMD-9911" — 3: high \(3\)\n2\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 2\.4: medium \(2\); \+0\.4 due by the end of /.test(m.text)
       && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
@@ -2304,13 +2304,27 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
   const its = await rest("GET", "/v1/agenda?source=items&limit=100");
   const itsMcp = await mcp("agenda", { source: "items", limit: 100 });
   const mine17 = ((its.body.items ?? []) as (It & { kind: string })[]).find((i) => i.key === String((opened.body.item as { id?: string } | undefined)?.id));
-  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 4 && !itsMcp.isError
-      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 4: no priority stated \\(read as 2\\); \\+2 due by the end of `).test(itsMcp.text),
+  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 2.4 && !itsMcp.isError
+      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 2\\.4: no priority stated \\(read as 2\\); \\+0\\.4 due by the end of `).test(itsMcp.text),
     `an open item due tomorrow is listed over REST and said over MCP, unknown 2 plus its urgency (${its.status} ${mine17?.effective} | ${itsMcp.text.split("\n").find((l) => l.includes("water the ferns"))})`);
   const reader = await rest("GET", q, undefined, KEYS.reader);
   const hook = await rest("GET", q, undefined, KEYS.hook);
   assert(reader.status === 200 && same(reader.body.items, r.body.items) && hook.status === 403,
     `a read key reads the agenda; a capture-only key does not (${reader.status} ${hook.status})`);
+  // A started ticket (124, SMD-4162): left out by default and counted, said in the text; include_started lists it with
+  // its status, over both doors; claimsLive is a count.
+  await ticket("SMD-9915", "started");
+  await rest("POST", "/v1/priorities/ticket/SMD-9915", { level: 3 });
+  const [noStarted, withStarted, withStartedMcp] = [await rest("GET", q), await rest("GET", `${q}&include_started=true`), await mcp("agenda", { project: P, include_started: true })];
+  type Sit = It & { status: string | null; statusType: string | null };
+  const startedRow = ((withStarted.body.items ?? []) as Sit[]).find((i) => i.key === "SMD-9915");
+  const noStartedMcp = await mcp("agenda", { project: P });
+  assert(noStarted.status === 200 && ((noStarted.body.items ?? []) as It[]).every((i) => i.key !== "SMD-9915") && (noStarted.body.leftOut as { started?: number }).started === 1
+      && typeof noStarted.body.claimsLive === "number"
+      && withStarted.status === 200 && startedRow?.status === "started" && startedRow.statusType === "started" && (withStarted.body.leftOut as { started?: number }).started === 0
+      && !withStartedMcp.isError && /ticket SMD-9915 \("started"\)/.test(withStartedMcp.text)
+      && /\nLeft out: 1 started \(include_started lists them\)\./.test(noStartedMcp.text),
+    `a started ticket is left out and counted, said in the text; include_started lists it with its status over REST and MCP; claimsLive a count (${noStarted.status} ${JSON.stringify(noStarted.body.leftOut)} ${noStarted.body.claimsLive} | ${startedRow?.status}/${startedRow?.statusType})`);
   // holder mine: the tickets this key holds a live claim on, claimed as they are.
   const claim = await rest("POST", "/v1/claims", { ticket: "SMD-9914", label: "test-rest-sql [17]", lease_seconds: 3600 });
   const mine = await rest("GET", "/v1/agenda?holder=mine");
@@ -2320,6 +2334,65 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
       && rivalMine.status === 200 && Array.isArray(rivalMine.body.items) && (rivalMine.body.items as It[]).every((i) => i.key !== "SMD-9914"),
     `holder mine lists the ticket the key claimed, its claim named; another key's mine leaves it out (${mine.status} ${mineItems.map((i) => i.key)} | ${rivalMine.status})`);
   if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [17] done" });
+}
+
+console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): REST's POST /v1/plan-context and MCP's plan_context give one record; the knowledge is the request's search with current work first, a superseded hit labelled with its replacement; the board is the tickets the hits name in agenda order, a started one listed with its status, a Done one beside, a key the brain does not hold a gap; specs and procedures not available, naming what they wait on; the tools a key's scope may call; a read key reads it, a capture-only key and an unknown key do not; a blank request refused by the schema");
+{
+  const P = "Plan rest [17b]";
+  const ticket = async (issue: string, st: string) => {
+    const content = `${issue} — [17b] ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: st, status_type: st, project: P })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9951", "backlog"); await ticket("SMD-9952", "started"); await ticket("SMD-9953", "completed");
+  await rest("POST", "/v1/priorities/ticket/SMD-9951", { level: 3 });
+  // Three notes holding the request's quoted span (axis beta, so the search's pool is small): a draft and the newer
+  // draft superseding it, and a note naming an open, a started, a Done and an unknown ticket.
+  const draft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" first draft, about SMD-9952' });
+  const redraft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" second draft, about SMD-9952', supersedes: String(draft.body.id) });
+  const note = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" needs SMD-9951, follows SMD-9953, and SMD-9959' });
+  const request = 'how do I build "zephyr plan beta"';
+  const r = await rest("POST", "/v1/plan-context", { request, limit: 20 });
+  const m = await mcp("plan_context", { request, limit: 20 });
+  type Hit = { id: string; supersededBy: string | null };
+  type Tk = { key: string; status: string | null; statusType: string | null; effective: number };
+  const k = r.body.knowledge as { hits: Hit[]; preferCurrent: boolean } | undefined;
+  const b = r.body.board as { available: boolean; tickets: Tk[]; others: { key: string; settled: boolean }[] } | undefined;
+  const gaps = (r.body.gaps ?? []) as { gap: string; keys?: string[] }[];
+  const hitIds = (k?.hits ?? []).map((h) => h.id);
+  const oldHit = k?.hits.find((h) => h.id === draft.body.id);
+  const keysShown = (b?.tickets ?? []).map((t) => t.key);
+  assert(draft.status === 201 && redraft.status === 201 && note.status === 201 && r.status === 200 && k?.preferCurrent === true
+      && [draft.body.id, redraft.body.id, note.body.id].every((id) => hitIds.includes(String(id))) && oldHit?.supersededBy === redraft.body.id
+      && hitIds.indexOf(String(redraft.body.id)) < hitIds.indexOf(String(draft.body.id)),
+    `the knowledge: the request's search, current work first, the superseded draft labelled with the draft that replaced it (${r.status} ${hitIds.length} hits; ${oldHit?.supersededBy})`);
+  assert(b?.available === true && keysShown.includes("SMD-9951") && keysShown.includes("SMD-9952") && keysShown.indexOf("SMD-9951") < keysShown.indexOf("SMD-9952")
+      && b.tickets.find((t) => t.key === "SMD-9952")?.statusType === "started" && b.others.some((o) => o.key === "SMD-9953" && o.settled)
+      && gaps.some((g) => g.gap === "tickets_missing" && g.keys?.includes("SMD-9959")),
+    `the board: the named tickets in agenda order, the High before the started one, which is listed with its status; the Done one beside, settled; the unknown key a gap (${keysShown.join(" ")} | ${JSON.stringify(b?.others)} | ${JSON.stringify(gaps)})`);
+  const specs = r.body.specs as { available: boolean; waitsOn: string[] }, procs = r.body.procedures as { available: boolean; waitsOn: string[] };
+  const tools = r.body.tools as { scope: string; core: string[] };
+  assert(specs?.available === false && same(specs.waitsOn, ["SMD-2683", "SMD-1715"]) && procs?.available === false && same(procs.waitsOn, ["SMD-1721"])
+      && tools?.scope === "write" && tools.core.includes("plan_context") && tools.core.includes("capture_thought"),
+    `specs and procedures not available, naming the tickets they wait on; the tools a write key may call (${JSON.stringify(specs)} | ${tools?.core.length})`);
+  // One record through both doors: MCP's reply is the REST answer rendered.
+  const out = rendered((v) => say.renderPlanContext(ok(v)), r.body);
+  assert(!m.isError && out.content[0].text === m.text && same(out.structuredContent, m.sc) && /^Plan context for "how do I build \\"zephyr plan beta\\""/.test(m.text)
+      && /\n## Board: the tickets the hits name\n/.test(m.text) && /ticket SMD-9952 \("started"\)/.test(m.text) && /- ticket SMD-9953 \("completed"\) .* — settled/.test(m.text),
+    `MCP's reply is the REST answer rendered, text and value (${m.text.split("\n")[0]})`);
+  const reader = await rest("POST", "/v1/plan-context", { request, limit: 20 }, KEYS.reader);
+  const hook = await rest("POST", "/v1/plan-context", { request }, KEYS.hook);
+  const gone = await rest("POST", "/v1/plan-context", { request }, "no-such-key-raw");
+  const blank = await rest("POST", "/v1/plan-context", { request: "   " });
+  // The limit (review pass 1): 2 keeps two of the three notes' hits; 21 is past the schema's 20, refused; the log is
+  // off in this suite, so no call here wrote a row.
+  const two = await rest("POST", "/v1/plan-context", { request, limit: 2 });
+  const tooMany = await rest("POST", "/v1/plan-context", { request, limit: 21 });
+  const [{ n: planRows }] = await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`;
+  assert(reader.status === 200 && same((reader.body.board as { tickets: Tk[] }).tickets.map((t) => t.key), keysShown) && (reader.body.tools as { scope: string; core: string[] }).scope === "read"
+      && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400
+      && two.status === 200 && (two.body.knowledge as { hits: Hit[] }).hits.length === 2 && tooMany.status === 400 && planRows === 0,
+    `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400; limit 2 keeps two hits, 21 is refused; with the log off no row is written (${reader.status} ${hook.status} ${gone.status} ${blank.status} ${(two.body.knowledge as { hits?: Hit[] } | undefined)?.hits?.length} ${tooMany.status} ${planRows})`);
 }
 
 console.log("\n[18] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
@@ -2746,11 +2819,11 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   const restRows = [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row];
   const due = `by the end of ${tomorrow} (UTC)`;
   assert(set.status === 200 && restRows.every((r) => r?.priority?.length === 1 && r.priority[0].kind === "ticket" && r.priority[0].key === "SMD-9921" && r.priority[0].self === false
-        && r.priority[0].effective === 5 && r.priority[0].level === 3 && r.priority[0].urgency === 2 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
+        && r.priority[0].effective === 3.4 && r.priority[0].level === 3 && r.priority[0].urgency === 0.4 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
     `over REST each of the five carries the High due tomorrow, its terms named; the unknown SMD-9922 no label (${JSON.stringify(restRows.map((r) => r?.priority?.map((p) => `${p.key} ${p.effective}`)))})`);
-  const line = `Priority: ticket SMD-9921 at 5 (high (3); +2 due ${due}).`;
+  const line = `Priority: ticket SMD-9921 at 3.4 (high (3); +0.4 due ${due}).`;
   const scs = [pick(stMcp.sc.hits, tid), pick(kwMcp.sc.hits, tid), pick(listMcp.sc.thoughts, tid)];
-  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 5 && !("terms" in h.priority[0])),
+  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 3.4 && !("terms" in h.priority[0])),
     `over MCP the three text tools print the line, and their values carry the item without its terms (${stMcp.text.match(/Priority: .*/)?.[0]})`);
   const title = `[priority: ticket SMD-9921 high (3), due ${due}] `;
   const compatHit = pick(JSON.parse(compatMcp.text).results, tid);

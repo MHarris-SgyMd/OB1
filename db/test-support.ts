@@ -464,6 +464,9 @@ const FUNCTIONS = [
   "ob1_ticket_rows(text)",
   "ob1_priority_subject(text, text)",
   "ob1_priority_open(text, text)",
+  // 125 (SMD-4149): an item's due time, and a thought's open items, for effective_priority's from_items terms.
+  "ob1_priority_due(priority_assertions, text, text, boolean)",
+  "ob1_thought_items(uuid, boolean)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",
@@ -477,6 +480,9 @@ const FUNCTIONS = [
   // 123 (SMD-3669): the agenda and the blockers it names.
   "ob1_item_blockers(text, text)",
   "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone)",
+  // 124 (SMD-4162): the agenda again, under a ninth argument (123's eight-argument one above, dropped by 124, kept for a
+  // schema reset at 123).
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean)",
 ];
 
 /**

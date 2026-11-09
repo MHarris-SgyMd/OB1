@@ -17995,6 +17995,9 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
 {
   const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
   await reapply(file.slice(0, 4));
+  // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
+  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's).
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
   // or compares this section's own items among themselves.
   const P = "Agenda [110]";
@@ -18247,6 +18250,449 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
+  // The shipped agenda back: 124's, which drops 123's eight-argument one.
+  await restoreShipped("agenda");
+}
+
+console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves a started ticket out and counted unless asked (holder mine shows its own), counts a claimed started ticket once, as claimed, and says how many live claims the brain holds; one agenda, of nine arguments, 123's eight positional ones read as the default; a re-apply a no-op (SMD-4162)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [111]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag111-op', 'operator')`);
+  const BOT_ID = "4b5c6d7e-8f9a-4b2c-8d3e-4f5a6b7c8d9e";
+  await db.query(`INSERT INTO ob1_agents (canonical_agent_id, label, kind) VALUES ($1::uuid, 'ag111-bot', 'agent')`, [BOT_ID]);
+  const OP = { name: "ag111-op", scope: "write" };
+  type It = { key: string; status: string | null; status_type: string | null; claimed: { holder: string }[] | null; blockers: string[] };
+  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; claims_read: boolean; claims_live: number | null };
+  const ticket = async (issue: string, status: string, statusType: string, o: { project?: string; blockedBy?: string; notBefore?: string } = {}) => {
+    const content = `${issue} — [111] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag111-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (o.blockedBy) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify([{ relation: "blocked_by", target: o.blockedBy }])]);
+    await db.query(`SELECT assert_priority('ticket', $1, 2, NULL, $2::timestamptz, NULL, NULL, NULL, false, $3::jsonb)`, [issue, o.notBefore ?? null, JSON.stringify(OP)]);
+  };
+  // SMD-9904 is started and blocked by SMD-9901 (open); SMD-9905 is started and not yet startable; SMD-9906 is started,
+  // in another project: the claim on it is outside the scope, and claims_live counts it all the same.
+  await ticket("SMD-9901", "Backlog", "backlog"); await ticket("SMD-9902", "Todo", "unstarted"); await ticket("SMD-9903", "In Progress", "started");
+  await ticket("SMD-9904", "In Progress", "started", { blockedBy: "SMD-9901" });
+  await ticket("SMD-9905", "In Review", "started", { notBefore: "2027-04-01T00:00:00Z" });
+  await ticket("SMD-9906", "In Progress", "started", { project: "Agenda [111] elsewhere" });
+  const ag = async (o: { started?: boolean; claimed?: boolean; blocked?: boolean; holder?: object; now?: string } = {}) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, $2::jsonb, 100, $3, $4, false, NULL, $5::timestamptz, $6) AS a`,
+      [o.holder ? null : JSON.stringify({ project: P }), o.holder ? JSON.stringify(o.holder) : null, o.blocked ?? false, o.claimed ?? false, o.now ?? NOW, o.started ?? false])).rows[0].a;
+  const row = (a: Ag) => a.items.map((i) => `${i.key} ${i.status}/${i.status_type}`).join(", ");
+  const lo = (a: Ag) => JSON.stringify(a.left_out);
+
+  // The shape: one agenda, nine arguments, STABLE, commented for both migrations.
+  const fns = (await db.query<{ n: number; v: string; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname = 'agenda'`)).rows;
+  assert(fns.length === 1 && fns[0].n === 9 && fns[0].v === "s" && /Migrations 123 \(SMD-3669\) and 124 \(SMD-4162\)/.test(fns[0].c ?? ""),
+    `one agenda, of nine arguments, STABLE, its comment naming 123 and 124 (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // Default: the Backlog and Todo tickets with their status; the unblocked, startable In Progress one left out and
+  // counted as started, the blocked one as blocked and the one not yet startable as waiting: one bucket each, the
+  // earlier filter's. Asked: the started one listed, the other two still the earlier filters'. include_blocked alone
+  // moves the blocked started ticket to the started count; with include_started it is listed with its blocker.
+  const plain = await ag(), all = await ag({ started: true }), blk = await ag({ blocked: true }), blkAll = await ag({ blocked: true, started: true });
+  const eight = (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz) AS a`, [JSON.stringify({ project: P }), NOW])).rows[0].a;
+  assert(row(plain) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted" && plain.total === 2 && lo(plain) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}'
+      && row(all) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && lo(all) === '{"blocked":1,"claimed":0,"started":0,"waiting":1}'
+      && row(blk) === row(plain) && lo(blk) === '{"blocked":0,"claimed":0,"started":2,"waiting":1}'
+      && JSON.stringify(blkAll.items.find((i) => i.key === "SMD-9904")?.blockers) === '["SMD-9901"]' && lo(blkAll) === '{"blocked":0,"claimed":0,"started":0,"waiting":1}'
+      && JSON.stringify(eight) === JSON.stringify(plain),
+    `a ticket row says its status; a started ticket left out and counted unless asked, in the first bucket whose filter takes it; 123's eight positional arguments read as the default (${row(plain)}; ${lo(plain)} | ${row(all)}; ${lo(all)} | ${lo(blk)} | ${lo(blkAll)})`);
+
+  // Claims, on the real clock. claims_live is every live claim the brain records, in the scope or not: the count
+  // work_claims gives, and two more for the bot's two, one of them on a ticket outside the scope. A claimed started
+  // ticket is the claim rule's alone: counted once, as claimed; include_claimed alone lists it with its holder (claimed
+  // work is started work, review pass 1); holder mine shows it, nothing counted started.
+  const t = new Date().toISOString();
+  const liveCount = async (at: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL AND expires_at > $1::timestamptz`, [at])).rows[0].n;
+  const before = (await ag({ now: t })).claims_live ?? -1, direct = await liveCount(t);
+  const BOT = JSON.stringify({ name: "ag111-bot", agent_id: BOT_ID });
+  type Claimed = { outcome: string; claim: { id: string } | null; token: string | null };
+  const claimed = (await db.query<{ r: Claimed }>(`SELECT claim_work('SMD-9903', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
+  const elsewhere = (await db.query<{ r: Claimed }>(`SELECT claim_work('SMD-9906', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
+  const now = new Date().toISOString();
+  const after = await ag({ now }), mine = await ag({ now, holder: { name: "ag111-bot", agent_id: BOT_ID } }), withClaimed = await ag({ now, claimed: true });
+  const nobody = await ag({ now: "2099-01-01T00:00:00Z" });
+  const directAfter = await liveCount(now);
+  assert(claimed.outcome === "claimed" && elsewhere.outcome === "claimed" && before === direct && after.claims_read && after.claims_live === directAfter && directAfter >= 2
+      && lo(after) === '{"blocked":1,"claimed":1,"started":0,"waiting":1}'
+      && row(withClaimed) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && withClaimed.items.find((i) => i.key === "SMD-9903")?.claimed?.[0]?.holder === "ag111-bot"
+      && lo(withClaimed) === '{"blocked":1,"claimed":0,"started":0,"waiting":1}'
+      && row(mine) === "SMD-9903 In Progress/started, SMD-9906 In Progress/started" && mine.left_out.started === 0
+      && nobody.claims_live === 0,
+    `claims_live is the brain's live claims, in scope or not (work_claims says ${direct}, then ${directAfter} with the bot's two); a claimed started ticket counted once, as claimed, and listed with its holder by include_claimed alone; holder mine shows both, started; every lease run out, 0 (${before} → ${after.claims_live}; ${lo(after)} | ${row(withClaimed)}; ${lo(withClaimed)} | ${row(mine)} | ${nobody.claims_live})`);
+
+  // A role without the claims group: claims_live null, and with no claim to read a claimed started ticket is a started one.
+  await db.exec(`CREATE ROLE ag111_noclaims NOLOGIN; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ag111_noclaims; REVOKE SELECT ON work_claims FROM ag111_noclaims`);
+  let soft: Ag | null = null;
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL ROLE ag111_noclaims`);
+    try { soft = (await tx.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, now(), false) AS a`, [JSON.stringify({ project: P })])).rows[0].a; } catch { soft = null; }
+  });
+  await db.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ag111_noclaims; DROP ROLE ag111_noclaims`);
+  const softA = soft as Ag | null;
+  assert(softA !== null && softA.claims_read === false && softA.claims_live === null && lo(softA) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
+    `without the claims group claims_live is null, and the claimed started ticket is counted started, no claim read (${softA === null ? "raised" : `${softA.claims_live}; ${lo(softA)}`})`);
+
+  // Released, a claim is no longer live: claims_live one down, the started ticket counted as started again.
+  const release = async (c: Claimed) => (await db.query<{ r: { outcome: string } }>(`SELECT release_work_claim($1::uuid, $2, 'test-schema [111]', false, $3::jsonb) AS r`, [c.claim?.id ?? null, c.token, BOT])).rows[0].r.outcome;
+  const released = await release(claimed);
+  const freedAt = new Date().toISOString();
+  const freed = await ag({ now: freedAt }), directFreed = await liveCount(freedAt);
+  const releasedElsewhere = await release(elsewhere);
+  assert(released === "released" && releasedElsewhere === "released" && freed.claims_live === directFreed && lo(freed) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
+    `a released claim is not live: claims_live as work_claims counts it (${directAfter} → ${freed.claims_live}, work_claims ${directFreed}), the started ticket counted as started (${released}; ${lo(freed)})`);
+
+  // query_log.filter's comment says an agenda row holds four flags.
+  const filterComment = (await db.query<{ c: string | null }>(`SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS c`)).rows[0].c ?? "";
+  assert(/its four include flags \(blocked, claimed, proposed, started; migrations 123 and 124\)/.test(filterComment),
+    `query_log.filter's comment names the agenda row's four include flags (${filterComment.slice(-120)})`);
+
+  // A NULL flag is refused as 123 refuses one; a re-apply is a no-op.
+  let nullFlag = "";
+  try { await db.query(`SELECT agenda(NULL, NULL, 20, false, false, false, NULL, now(), NULL)`); } catch (e) { nullFlag = String((e as { code?: string }).code ?? "?"); }
+  await reapply(file.slice(0, 4));
+  const again = await ag();
+  assert(nullFlag === "22023" && JSON.stringify(again) === JSON.stringify(plain),
+    `a NULL include_started is refused (22023), and a re-apply is a no-op: the same read (${nullFlag})`);
+}
+
+console.log("\n[112] Migration 125: a note's open items reach its priority — a thought that is no ticket's row reads the highest level counted on its open items (from_items, no hop discount) where it states none, before what it inherits; its own due time, else its open items' soonest, an item at level 0 passing none and a level 0 so read taking no urgency; only an open item counts, and only its own counted level and due time, so an item still inherits only its note's stated level; a ticket's row reads as its ticket; each term names the item; the shape; a re-apply a no-op (SMD-4149)");
+{
+  const file = files.find((f) => /^\d{3}_effective_priority_from_items\.sql$/.test(f)) ?? "no NNN_effective_priority_from_items.sql";
+  // [109] re-applies 122's effective_priority, which 125 replaces: this section holds 125's.
+  await reapply(file.slice(0, 4));
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fi-op', 'operator')`);
+  const OP = { name: "fi-op", scope: "write" };
+  type Term = { term: string; value: number; window?: string; item?: string; level?: number; due_from?: string; from?: { kind: string; key: string } };
+  type Row = { item_key: string; effective: string; level: number | null; inherited_from: object | null; due_at: string | null; due_from: string | null; urgency: string; overdue: boolean; terms: Term[] };
+  const note = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "fi-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  const item = async (origin: string, text: string, o: { due?: string; level?: number; status?: string; proposed?: boolean; inferred?: boolean; ref?: [string, string]; stateDue?: string } = {}) => {
+    const r = (await db.query<{ r: { outcome: string; item?: { id: string } } }>(`SELECT open_item($1, NULL, $2, $3::uuid, NULL, $4, $5::jsonb) AS r`,
+      [text, o.due ?? null, origin, o.proposed ?? false, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "opened" || !r.item) throw new Error(`[112] fixture: open_item answered ${JSON.stringify(r)}`);
+    const id = r.item.id;
+    if (o.level !== undefined) await put("item", id, o.level, { inferred: o.inferred, ref: o.ref, due: o.stateDue });
+    if (o.status) {
+      const s = (await db.query<{ r: { outcome: string } }>(`SELECT set_item_status($1, $2, NULL, $3::jsonb) AS r`, [id, o.status, JSON.stringify(OP)])).rows[0].r;
+      if (s.outcome === "refused") throw new Error(`[112] fixture: set_item_status answered ${JSON.stringify(s)}`);
+    }
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, o: { due?: string; ref?: [string, string]; inferred?: boolean } = {}) => {
+    const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, $5, $6, NULL, $7, $8::jsonb) AS r`,
+      [kind, key, level, o.due ?? null, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.inferred ?? false, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[112] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+  };
+  const eff = async (items: [string, string][], weights: object | null = null) =>
+    (await db.query<Row>(`SELECT * FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), weights === null ? null : JSON.stringify(weights), NOW])).rows;
+  const one = async (kind: string, key: string, weights: object | null = null) => (await eff([[kind, key]], weights))[0];
+  // Each term, its value, and the item it names as the fixture's own name for it.
+  const names = new Map<string, string>();
+  const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}${t.window ? `:${t.window}` : ""}=${t.value}${t.item ? `@${names.get(t.item) ?? "?"}` : ""}`).join(" ");
+  const nameItem = (id: string, name: string) => { names.set(id, name); return id; };
+
+  // The shape: two new functions, STABLE and commented; effective_priority's comment names 125.
+  const fns = (await db.query<{ n: string; v: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_due', 'ob1_thought_items', 'effective_priority') ORDER BY 1`)).rows;
+  assert(fns.length === 3 && fns.every((f) => f.v === "s" && /migration 125 \/ SMD-4149/i.test(f.c ?? "")),
+    `two new functions and the replaced read, each STABLE and commented with 125 (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // SMD-4149's first Verify, in small: the bill due tomorrow +2, the gutters overdue +3, the passport its item's level 4.
+  const bill = await note("[112] the electric bill is due tomorrow");
+  nameItem(await item(bill, "pay the bill", { due: "2027-03-11" }), "bill");
+  const gutters = await note("[112] clean the gutters, two weeks overdue");
+  nameItem(await item(gutters, "clean the gutters", { due: "2027-02-24" }), "gutters");
+  const passport = await note("[112] this matters: the passport renewal");
+  nameItem(await item(passport, "renew the passport", { level: 4 }), "passport");
+  const [rb, rg, rp] = await eff([["thought", bill], ["thought", gutters], ["thought", passport]]);
+  assert(named(rb) === "unknown=2 urgency:soon=2@bill" && Number(rb.effective) === 4 && rb.due_from === "from_items"
+         && named(rg) === "unknown=2 overdue=3@gutters" && Number(rg.effective) === 5 && rg.overdue === true
+         && named(rp) === "from_items=4@passport" && Number(rp.effective) === 4 && rp.level === null && rp.inherited_from === null,
+    `a note reads its open item: the bill +2 by the end of tomorrow, the gutters overdue +3, the passport its item's 4, each term naming the item, the level column the note's own (null) (${named(rb)}; ${named(rg)}; ${named(rp)})`);
+
+  // Precedence: a level stated on the note wins; an item's level beats the inherited one, even when lower; of the
+  // items, the highest, at one level the one due soonest.
+  const stated = await note("[112] stated Low, its item High");
+  nameItem(await item(stated, "a High to-do", { level: 3 }), "high");
+  await put("thought", stated, 1);
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9981', '[112] SMD-9981', 'text/markdown')`, [await note("[112] SMD-9981", { source: "linear", issue: "SMD-9981", status: "Todo", status_type: "unstarted" })]);
+  await put("ticket", "SMD-9981", 5);
+  const under = await note("[112] filed under a Critical ticket, its item Medium", { ticket: "SMD-9981" });
+  nameItem(await item(under, "a Medium to-do", { level: 2 }), "medium");
+  const inheritsAlone = await note("[112] filed under a Critical ticket, no item", { ticket: "SMD-9981" });
+  const many = await note("[112] three items");
+  nameItem(await item(many, "a Low due today", { level: 1, due: "2027-03-10" }), "low");
+  nameItem(await item(many, "a High due in a week", { level: 3, due: "2027-03-16" }), "high-week");
+  nameItem(await item(many, "a High due tomorrow", { level: 3, due: "2027-03-11" }), "high-soon");
+  const [rs, ru, ri, rm] = await eff([["thought", stated], ["thought", under], ["thought", inheritsAlone], ["thought", many]]);
+  assert(named(rs) === "level=1" && Number(rs.effective) === 1
+         && named(ru) === "from_items=2@medium" && Number(ru.effective) === 2 && ru.inherited_from === null && named(ri) === "inherited=4"
+         && named(rm) === "from_items=3@high-soon urgency:soon=2@low" && Number(rm.effective) === 5,
+    `a stated Low beats its item's High; an item's Medium beats a Critical ticket's inherited 4, which a note without items takes; the highest of three items, at one level the sooner, and the soonest due time of them all (${named(rs)}; ${named(ru)}; ${named(ri)}; ${named(rm)})`);
+
+  // The due time: the note's own (stated) wins over its items'; an item at level 0 passes none; a note reading level 0
+  // from its items takes no urgency from another item's due time; an item with a due time and no level passes it.
+  const ownDue = await note("[112] its own due time in a week, its item's tomorrow");
+  nameItem(await item(ownDue, "due tomorrow", { due: "2027-03-11" }), "tomorrow");
+  await put("thought", ownDue, 2, { due: "2027-03-16T00:00:00Z" });
+  const zeroDue = await note("[112] its only due item at level 0");
+  nameItem(await item(zeroDue, "an overdue none", { level: 0, due: "2027-03-01" }), "zero-overdue");
+  nameItem(await item(zeroDue, "a Low with no date", { level: 1 }), "low-undated");
+  const zeroLevel = await note("[112] level 0 from one item, a due time from another");
+  nameItem(await item(zeroLevel, "a none", { level: 0 }), "none");
+  nameItem(await item(zeroLevel, "due tomorrow, no level", { due: "2027-03-11" }), "undated-level");
+  const [ro, rz, rl] = await eff([["thought", ownDue], ["thought", zeroDue], ["thought", zeroLevel]]);
+  assert(named(ro) === "level=2 urgency:week=1" && ro.due_from === "stated"
+         && named(rz) === "from_items=1@low-undated" && rz.due_at === null && Number(rz.effective) === 1
+         && named(rl) === "from_items=0@none" && Number(rl.effective) === 0 && rl.due_from === "from_items" && Number(rl.urgency) === 0,
+    `the note's own due time wins over its item's; a level-0 item's overdue passes nothing; a note at level 0 from its items keeps the other item's due time and takes no urgency (${named(ro)}; ${named(rz)}, due ${rz.due_at}; ${named(rl)}, due_from ${rl.due_from})`);
+
+  // What counts: an open item alone (done, dropped and proposed give nothing); its own counted level (an inferred one
+  // only when counted) and its own due time (its statement's, else by due_ref, else its own); never what it inherits.
+  const settled = await note("[112] items done, dropped and proposed");
+  await item(settled, "done", { level: 5, due: "2027-03-01", status: "done" });
+  await item(settled, "dropped", { level: 5, due: "2027-03-01", status: "dropped" });
+  await item(settled, "proposed", { level: 5, due: "2027-03-01", proposed: true });
+  const inferred = await note("[112] its item's level inferred");
+  nameItem(await item(inferred, "an inferred High", { level: 3, inferred: true }), "inferred");
+  const refd = await note("[112] its item's due time by reference");
+  const target = nameItem(await item(refd, "the referenced one, at level 0", { level: 0, due: "2027-03-11" }), "target");
+  nameItem(await item(refd, "a Low due as the target is", { level: 1, ref: ["item", target] }), "by-ref");
+  const stateDue = await note("[112] its item's due time stated");
+  nameItem(await item(stateDue, "stated due in a week, own due tomorrow", { level: 2, due: "2027-03-11", stateDue: "2027-03-16T00:00:00Z" }), "stated-due");
+  const [rd, rinf, rinf2, rr, rsd] = [await one("thought", settled), await one("thought", inferred), await one("thought", inferred, { count_inferred: true }), await one("thought", refd), await one("thought", stateDue)];
+  assert(named(rd) === "unknown=2" && rd.due_at === null && named(rinf) === "unknown=2" && named(rinf2) === "from_items=3@inferred"
+         && named(rr) === "from_items=1@by-ref urgency:soon=2@by-ref" && named(rsd) === "from_items=2@stated-due urgency:week=1@stated-due",
+    `done, dropped and proposed items give nothing; an inferred level only when counted; an item's due time by its due_ref, and its statement's over its own (${named(rd)}; ${named(rinf)} / ${named(rinf2)}; ${named(rr)}; ${named(rsd)})`);
+  // No cycle, nothing counted twice: an item with no level of its own, beside one at 4 on the same note, inherits
+  // nothing from the note's 4 (read from the other item, not stated on the note), and the stated item reads its own.
+  const pair = await note("[112] two items, one stated Urgent");
+  const urgent = nameItem(await item(pair, "an Urgent to-do", { level: 4 }), "urgent");
+  const bare = nameItem(await item(pair, "a to-do with no level"), "bare");
+  const [rpair, rurgent, rbare] = await eff([["thought", pair], ["item", urgent], ["item", bare]]);
+  assert(named(rpair) === "from_items=4@urgent" && named(rurgent) === "level=4" && named(rbare) === "unknown=2" && Number(rbare.effective) === 2,
+    `the note reads 4 from its Urgent item; the item reads its own 4; its sibling with no level inherits nothing from the note (${named(rpair)}; ${named(rurgent)}; ${named(rbare)})`);
+
+  // A ticket's own row reads as its ticket, never its items (the maintainer, SMD-4149: plain thoughts only).
+  const row = await note("[112] SMD-9982", { source: "linear", issue: "SMD-9982", status: "Todo", status_type: "unstarted" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9982', '[112] SMD-9982', 'text/markdown')`, [row]);
+  await item(row, "an Urgent to-do opened from the row", { level: 4, due: "2027-03-11" });
+  const [rrow, rticket] = await eff([["thought", row], ["ticket", "SMD-9982"]]);
+  assert(named(rrow) === "unknown=2" && (rrow.terms[0] as { as?: { key: string } }).as?.key === "SMD-9982" && named(rticket) === "unknown=2" && rrow.due_at === null,
+    `a ticket's row and its ticket read nothing from an item opened from the row (${named(rrow)}; ${named(rticket)})`);
+
+  // The helpers, as the read uses them: an open item's due time is its own (due_from item), the done ones are not listed.
+  const own = (await db.query<{ due_at: string | null; due_from: string | null }>(`SELECT d.due_at::text, d.due_from FROM ob1_priority_due(NULL::priority_assertions, 'item', $1, false) d`, [target])).rows[0];
+  const listed = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_thought_items($1::uuid, false)`, [settled])).rows[0].n;
+  assert(own?.due_from === "item" && own?.due_at !== null && listed === 0, `ob1_priority_due reads an open item's own due time; ob1_thought_items lists no settled or proposed item (${own?.due_from}; ${listed})`);
+
+  // A re-apply is a no-op.
+  const before = JSON.stringify(await eff([["thought", bill], ["thought", many], ["thought", zeroLevel], ["thought", pair]]));
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await eff([["thought", bill], ["thought", many], ["thought", zeroLevel], ["thought", pair]])) === before, "a re-apply is a no-op: the same reads");
+}
+
+console.log("\n[113] Migration 126: the agenda's keys scope — the tickets named alone, no open item, under every other rule; a named ticket that is settled, or whose status type is unknown, and a key no thought records, said beside the list; query_log's plan_context kind and its shape; a re-apply a no-op (SMD-2684)");
+{
+  const file = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  // [111] re-applied 124's agenda over this one (one signature): put 126's back first.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [113]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag112-op', 'operator')`);
+  const OP = { name: "ag112-op", scope: "write" };
+  type It = { kind: string; key: string; status: string | null; blockers: string[] };
+  type Other = { key: string; title: string; status: string | null; status_type: string | null; settled: boolean };
+  type Wait = { key: string; status: string | null; not_before: string | null };
+  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; keyed: { others: Other[]; waiting: Wait[]; missing: string[] } | null };
+  const ticket = async (issue: string, status: string | null, statusType: string | null, o: { project?: string; blockedBy?: string } = {}) => {
+    const content = `${issue} — [113] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag112-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, ...(status === null ? {} : { status }), ...(statusType === null ? {} : { status_type: statusType }), project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (o.blockedBy) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify([{ relation: "blocked_by", target: o.blockedBy }])]);
+  };
+  // Review pass 1: SMD-9947 is not yet startable (a not_before ahead), and SMD-9948's row carries no status at all —
+  // each was in neither the list, others nor missing before.
+  await ticket("SMD-9947", "Todo", "unstarted"); await ticket("SMD-9948", null, null);
+  await db.query(`SELECT assert_priority('ticket', 'SMD-9947', 2, NULL, '2027-04-01T00:00:00Z'::timestamptz, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
+  // SMD-9941 Backlog at High; SMD-9942 started, unclaimed; SMD-9943 Done; SMD-9944 blocked by SMD-9941; SMD-9945 a
+  // status type this brain doesn't know; SMD-9946 open but never named; SMD-9949 named and nowhere.
+  await ticket("SMD-9941", "Backlog", "backlog"); await ticket("SMD-9942", "In Progress", "started"); await ticket("SMD-9943", "Done", "completed");
+  await ticket("SMD-9944", "Todo", "unstarted", { blockedBy: "SMD-9941" }); await ticket("SMD-9945", "Parked", "parked"); await ticket("SMD-9946", "Backlog", "backlog");
+  await db.query(`SELECT assert_priority('ticket', 'SMD-9941', 3, NULL, NULL, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
+  // UTF-8 is key-shaped, and no ticket here carries its prefix: no ticket, so not missing (review pass 2).
+  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941", "SMD-9947", "SMD-9948", "SMD-9949", "UTF-8"];
+  const ag = async (scope: object | null, all = true) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, $2, $2, false, NULL, $3::timestamptz, $2) AS a`, [scope === null ? null : JSON.stringify(scope), all, NOW])).rows[0].a;
+  const row = (a: Ag) => a.items.map((i) => `${i.kind}:${i.key} ${i.status}`).join(", ");
+  const others = (a: Ag) => (a.keyed?.others ?? []).map((o) => `${o.key} ${o.status}/${o.status_type}${o.settled ? " settled" : ""}`).join(", ");
+  const waits = (a: Ag) => (a.keyed?.waiting ?? []).map((w) => `${w.key} ${w.status} ${String(w.not_before).slice(0, 10)}`).join(", ");
+
+  // The shape: still one agenda of nine arguments, its comment naming 126.
+  const fns = (await db.query<{ n: number; c: string | null }>(
+    `SELECT p.pronargs::int AS n, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'agenda'`)).rows;
+  assert(fns.length === 1 && fns[0].n === 9 && /Migrations 123 \(SMD-3669\), 124 \(SMD-4162\) and 126 \(SMD-2684\)/.test(fns[0].c ?? ""),
+    `one agenda, of nine arguments, its comment naming 123, 124 and 126 (${fns.map((f) => f.n).join(", ")})`);
+
+  // Every flag on: the named open tickets alone, in agenda order (the High one first), no open item though earlier
+  // sections left some, the never-named one out; the Done and the unknown-type ones beside, with their status; the
+  // key no thought records missing; a duplicate counted once. Flags off: the blocked and the started ones left out
+  // and counted, keyed the same. Without keys, keyed is null.
+  const named = await ag({ keys: NAMED }), off = await ag({ keys: NAMED }, false);
+  const plain = await ag({ project: P });
+  assert(row(named) === "ticket:SMD-9941 Backlog, ticket:SMD-9942 In Progress, ticket:SMD-9944 Todo" && named.total === 3
+      && JSON.stringify(named.items.find((i) => i.key === "SMD-9944")?.blockers) === '["SMD-9941"]'
+      && others(named) === "SMD-9943 Done/completed settled, SMD-9945 Parked/parked, SMD-9948 null/null" && JSON.stringify(named.keyed?.missing) === '["SMD-9949"]'
+      && waits(named) === "SMD-9947 Todo 2027-04-01" && waits(off) === waits(named)
+      && named.keyed?.others[0]?.title === "SMD-9943 — [113] SMD-9943"
+      && row(off) === "ticket:SMD-9941 Backlog" && JSON.stringify(off.left_out) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}' && others(off) === others(named)
+      && plain.keyed === null && row(plain).includes("SMD-9946"),
+    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown-type, status-less, not yet startable and missing ones beside, a key named twice once (${row(named)}; ${others(named)}; ${waits(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${plain.keyed === null})`);
+
+  // Refused, 22023: keys not an array, none, more than 500, a lower-case key, a number; and keys beside a project, a
+  // label, a source or a holder (review pass 2: a named open ticket outside that scope was in no list). 500 taken.
+  const raisedCode = async (scope: unknown, holder: unknown = null) => { try { await db.query(`SELECT agenda($1::jsonb, $2::jsonb, 20, false, false, false, NULL, now(), false)`, [JSON.stringify(scope), holder === null ? null : JSON.stringify(holder)]); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const keysOf = (n: number) => Array.from({ length: n }, (_, i) => `SMD-${i + 1}`);
+  const refused = [await raisedCode({ keys: "SMD-9941" }), await raisedCode({ keys: [] }), await raisedCode({ keys: keysOf(501) }),
+                   await raisedCode({ keys: ["smd-9941"] }), await raisedCode({ keys: [9941] }),
+                   await raisedCode({ keys: ["SMD-9941"], project: P }), await raisedCode({ keys: ["SMD-9941"], label: "x" }), await raisedCode({ keys: ["SMD-9941"], source: "linear" }),
+                   await raisedCode({ keys: ["SMD-9941"] }, { name: "ag112-op" }), await raisedCode({ keys: keysOf(500) })];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023,22023,22023,22023,22023,",
+    `a keys scope that is not 1 to 500 ticket keys, or stands beside a project, label, source or holder, is refused 22023; 500 taken (${refused.join(",")})`);
+
+  // query_log: the plan_context kind, its row needing a query and an items array (23514 otherwise).
+  const logRow = async (query: string | null, items: string | null) => {
+    try { await db.query(`INSERT INTO query_log (kind, tool, query, match_count, result_ids, result_items) VALUES ('plan_context', 'plan_context', $1, 10, '{}', $2::jsonb)`, [query, items]); return "ok"; }
+    catch (e) { return String((e as { code?: string }).code ?? "?"); }
+  };
+  const logged = [await logRow("[113] plan a thing", '[{"kind":"ticket","key":"SMD-9941","effective":3}]'), await logRow(null, "[]"), await logRow("[113] no items", null), await logRow("[113] an object", "{}")];
+  const comments = (await db.query<{ t: string | null; i: string | null; f: string | null }>(
+    `SELECT obj_description('query_log'::regclass, 'pg_class') AS t,
+            col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'result_items')::int) AS i,
+            col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0];
+  assert(logged.join(",") === "ok,23514,23514,23514" && /one per plan_context call \(kind plan_context/.test(comments.t ?? "") && /a plan_context row's board tickets/.test(comments.i ?? "")
+      && /On a plan_context row, \{\} when its board was read, else \{board: deadline, failed or no_keys_scope\} \(migration 126\)/.test(comments.f ?? ""),
+    `query_log takes a plan_context row with its query and items array and refuses one without (${logged.join(",")}); its comments name the kind`);
+
+  // A re-apply is a no-op: the same read, the same constraints.
+  const defs = async () => (await db.query<{ d: string }>(`SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '; ' ORDER BY conname) AS d FROM pg_constraint WHERE conrelid = 'query_log'::regclass`)).rows[0].d;
+  const defsBefore = await defs();
+  await reapply(file.slice(0, 4));
+  const again = await ag({ keys: NAMED });
+  assert(JSON.stringify(again) === JSON.stringify(named) && await defs() === defsBefore, `a re-apply is a no-op: the same read and query_log's same constraints`);
+}
+
+console.log("\n[114] Migration 127: level first — the default weights after the level scaled by 0.2 (soon 0.4, week 0.2, overdue 0.6, unblocks 0.1 or 0.2), so an overdue note with no stated level stays below an Urgent ticket, a High due tomorrow below an Urgent, a Medium due tomorrow below a High, and a Low overdue and blocking three below a Medium; within a level, 122's order; 122's weights by name give 122's numbers; a level 0 still takes no urgency; the shape; a re-apply a no-op (SMD-4177)");
+{
+  const file = files.find((f) => /^\d{3}_effective_priority_level_first\.sql$/.test(f)) ?? "no NNN_effective_priority_level_first.sql";
+  // [109] and [112] re-apply 122's and 125's effective_priority, which 127 replaces: this section holds 127's.
+  await reapply(file.slice(0, 4));
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('lf-op', 'operator')`);
+  const OP = { name: "lf-op", scope: "write" };
+  const OLD = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  type Row = { item_key: string; effective: string; urgency: string; terms: { term: string; value: number }[] };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "lf-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  const ticket = async (issue: string, links: [string, string][] = [], statusType = "unstarted") => {
+    const content = `[114] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: statusType, status_type: statusType, linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (links.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
+  };
+  const put = async (kind: string, key: string, level: number, due: string | null = null) => {
+    const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, NULL, NULL, NULL, false, $5::jsonb) AS r`,
+      [kind, key, level, due, JSON.stringify(OP)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[114] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+  };
+  const eff = async (items: [string, string][], weights: object | null = null) =>
+    (await db.query<Row>(`SELECT item_key, effective::text AS effective, urgency::text AS urgency, terms FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), weights === null ? null : JSON.stringify(weights), NOW])).rows;
+  const nums = (rows: Row[]) => rows.map((r) => Number(r.effective));
+  const named = (r: Row | undefined) => (r?.terms ?? []).map((t) => `${t.term}=${t.value}`).join(" ");
+
+  // The shape: effective_priority's comment names 127; its defaults are the scaled ones.
+  const c = (await db.query<{ c: string; d: string }>(`SELECT obj_description('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure, 'pg_proc') AS c,
+      pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0];
+  assert(/level first, migration 127 \/ SMD-4177/.test(c.c) && /"soon": 0\.4, .*"week": 0\.2, .*"overdue": 0\.6,/s.test(c.d) && /"unblocks_one": 0\.1, "unblocks_many": 0\.2,/.test(c.d),
+    "effective_priority is 127's: its comment names the migration, its defaults the scaled weights");
+
+  // The ticket's case: an overdue note with no stated level stays below an Urgent ticket that blocks one.
+  const gutters = await thoughtAs("[114] clean the gutters, two weeks overdue");
+  const opened = (await db.query<{ r: { outcome: string } }>(`SELECT open_item('clean the gutters', NULL, '2027-02-24', $1::uuid, NULL, false, $2::jsonb) AS r`, [gutters, JSON.stringify(OP)])).rows[0].r;
+  if (opened.outcome !== "opened") throw new Error(`[114] fixture: open_item answered ${JSON.stringify(opened)}`);
+  await ticket("SMD-9961", [["blocks", "SMD-9962"]]); await ticket("SMD-9962");
+  await put("ticket", "SMD-9961", 4);
+  const [g, u] = await eff([["thought", gutters], ["ticket", "SMD-9961"]]);
+  const [gOld, uOld] = await eff([["thought", gutters], ["ticket", "SMD-9961"]], OLD);
+  assert(Number(g.effective) === 2.6 && named(g) === "unknown=2 overdue=0.6" && Number(u.effective) === 4.1 && named(u) === "level=4 unblocks=0.1"
+         && Number(gOld.effective) === 5 && Number(uOld.effective) === 4.5,
+    `the overdue gutters read 2.6 below the Urgent ticket's 4.1, the terms the same names; with 122's weights by name, 5 above 4.5 as before (${named(g)}; ${named(u)}; old ${gOld.effective}, ${uOld.effective})`);
+
+  // No term crosses a level: a High due tomorrow under an Urgent; a Medium due tomorrow under a High; a Low overdue and
+  // blocking three under a Medium; and within one level 122's order (overdue, then soon, then the week, then none).
+  for (const t of ["SMD-9963", "SMD-9964", "SMD-9965", "SMD-9966", "SMD-9967", "SMD-9968", "SMD-9969", "SMD-9971", "SMD-9972", "SMD-9973"]) await ticket(t);
+  await ticket("SMD-9970", [["blocks", "SMD-9971"], ["blocks", "SMD-9972"], ["blocks", "SMD-9973"]]);
+  await put("ticket", "SMD-9963", 4);                              // Urgent, no date
+  await put("ticket", "SMD-9964", 3, "2027-03-12T00:00:00Z");     // High, due tomorrow
+  await put("ticket", "SMD-9965", 3);                              // High, no date
+  await put("ticket", "SMD-9966", 2, "2027-03-12T00:00:00Z");     // Medium, due tomorrow
+  await put("ticket", "SMD-9967", 2, "2027-03-01T00:00:00Z");     // Medium, overdue
+  await put("ticket", "SMD-9968", 2, "2027-03-15T00:00:00Z");     // Medium, within the week
+  await put("ticket", "SMD-9969", 2);                              // Medium, no date
+  await put("ticket", "SMD-9970", 1, "2027-03-01T00:00:00Z");     // Low, overdue, blocks three
+  const ladder = await eff([["ticket", "SMD-9963"], ["ticket", "SMD-9964"], ["ticket", "SMD-9965"], ["ticket", "SMD-9967"], ["ticket", "SMD-9966"], ["ticket", "SMD-9968"], ["ticket", "SMD-9969"], ["ticket", "SMD-9970"]]);
+  const old = await eff([["ticket", "SMD-9964"], ["ticket", "SMD-9963"], ["ticket", "SMD-9966"], ["ticket", "SMD-9965"]], OLD);
+  assert(JSON.stringify(nums(ladder)) === JSON.stringify([4, 3.4, 3, 2.6, 2.4, 2.2, 2, 1.8]) && JSON.stringify(nums(old)) === JSON.stringify([5, 4, 4, 3]),
+    `level first: Urgent 4, High due tomorrow 3.4, High 3, then the Mediums overdue 2.6, due tomorrow 2.4, within the week 2.2, undated 2, and a Low overdue that blocks three 1.8, under every Medium; under 122's weights the High due tomorrow (5) passed the Urgent and the Medium due tomorrow (4) the High (${nums(ladder).join(", ")}; old ${nums(old).join(", ")})`);
+
+  // A level 0 still takes no urgency, and a settled item neither urgency nor unblocks, as 122.
+  await ticket("SMD-9974");
+  await put("ticket", "SMD-9974", 0, "2027-03-01T00:00:00Z");
+  await ticket("SMD-9975", [["blocks", "SMD-9976"]], "completed"); await ticket("SMD-9976");
+  await put("ticket", "SMD-9975", 3, "2027-03-01T00:00:00Z");
+  const [zero, done] = await eff([["ticket", "SMD-9974"], ["ticket", "SMD-9975"]]);
+  assert(Number(zero.effective) === 0 && Number(zero.urgency) === 0 && named(zero) === "level=0" && Number(done.effective) === 3 && Number(done.urgency) === 0 && named(done) === "level=3",
+    `a level 0 overdue still reads 0 with no urgency term; a completed High, overdue and blocking an open ticket, keeps its 3 with neither term (${named(zero)}; ${named(done)})`);
+
+  // A re-apply is a no-op.
+  const before = JSON.stringify(ladder);
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await eff([["ticket", "SMD-9963"], ["ticket", "SMD-9964"], ["ticket", "SMD-9965"], ["ticket", "SMD-9967"], ["ticket", "SMD-9966"], ["ticket", "SMD-9968"], ["ticket", "SMD-9969"], ["ticket", "SMD-9970"]])) === before,
+    "a re-apply is a no-op: the same reads");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

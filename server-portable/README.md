@@ -450,10 +450,13 @@ window's own thoughts' effective priority once (`effective_priority`, migration
 - **A match's priority** is its own effective priority, as `docs/priority.md`
   decision 5 composes it:
   - A ticket's row reads as its ticket.
-  - Any other thought takes its own counted level, else one inherited from the
-    ticket it is about (its metadata `ticket` or `issue`, else its standing
-    subject). An inherited level is one less a hop, two hops at most, and
-    counts only above unknown's 2.
+  - Any other thought takes its own counted level, else the highest counted on
+    the open items opened from it (migration 125, SMD-4149), else one inherited
+    from the ticket it is about (its metadata `ticket` or `issue`, else its
+    standing subject). An inherited level is one less a hop, two hops at most,
+    and counts only above unknown's 2. With no due time of its own, such a
+    thought takes its open items' soonest, so a note whose open item is due
+    tomorrow reads +2.
   - A level counts when a key the operator classified stated it. An
     unclassified or importer's key's statement is inferred, and not counted
     until SMD-3670.
@@ -469,13 +472,16 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   1 and the last 1/n. So the search's own order, ties and all, is what weighs,
   and a text match or a literal-only query's similarity order is kept too. Their
   fusion scores are 0, and a score over the top's would have left those rows to
-  priority alone. Priority is the effective priority (a level, unknown counted as
-  2, plus urgency and what it unblocks) over 9, the default weights' largest.
-  Ties keep the window's order.
-- **`min_priority`** keeps the matches whose priority is known (counted, or
-  inherited from what they serve) and whose effective priority is at least the
-  level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
-  unknown priority never passes.
+  priority alone. Priority is the effective priority over 5.8, the default
+  weights' largest. That is a level (unknown counted as 2), plus up to 0.8 from
+  urgency and what it unblocks, which order items of one level and never lift
+  one past the next (migration 127, SMD-4177; 9 under 122's weights). Ties keep
+  the window's order.
+- **`min_priority`** keeps the matches whose priority is known (counted, read
+  from their open items, or inherited from what they serve) and whose effective
+  priority is at least the level. Since migration 127 the level decides it: a
+  High due tomorrow (3.4) passes at high, not at urgent. An unknown priority
+  never passes.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
@@ -490,7 +496,11 @@ hint naming the fix.
 
 The ChatGPT `search` tool takes only its query, so it never ranks by priority.
 `evals/eval-priority.ts` (SMD-3662) measures the weight before any default
-changes.
+changes. At its pre-registered 0.5 it doesn't clear the bar (2026-11-09,
+`evals/README.md`). Its due time and level then sat on its open item, which
+`effective_priority` didn't read. Measured again once it does (SMD-4149, the
+same day), it still doesn't: top-1 on 2 of 7 and mean tau 0.327, where the bar
+asks 5 and 0.502. The default stays 0.
 
 **Each result's priority, a label (SMD-3668 PR 2).** `search`, `search_thoughts`,
 `search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its
@@ -507,7 +517,7 @@ priority; ten are named and `priorityMore` counts the rest. A settled item is
 ordered by the level it keeps and said settled: whether work is finished is its
 own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
 can come before an open High. Over MCP the three text tools print
-`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+`Priority: ticket SMD-2908 at 3.4 (high (3); +0.4 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
 `[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed
@@ -714,6 +724,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
+Threads:         41 (127 thoughts in them), every one linked
 Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
@@ -742,6 +753,18 @@ worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
 three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
+`Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
+thoughts in them, and whether every thread's standing edges (migration 120) are the ones its thoughts want, compared
+edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw
+write's; a key no thought holds that still carries edges is counted beside it. The row names the run that links either,
+`cd db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000
+standing subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`,
+`ticket:` and `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the
+keys before the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key,
+counts those that differ and names the first ten. It names no key here, since a phrase key is the judge model's words.
+`not counted` before migration 120, and past the bound when no key was read (the first key in key order alone passes
+it) or no thread was (each key read held by one thought); preflight warns then. Preflight's `threads` row reads the
+same census and warns, never fails, on a key that differs.
 `Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
 pass's findings show without a query. `Proposals` is the queue a reviewer works:
 how many are pending, how long ago the oldest was judged (a pass that re-judges
@@ -807,7 +830,9 @@ heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
-SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
+SMD-2682; the work threads' census as `threads`, `{ threads, thoughts, standing, whole, unlinked,
+orphaned, keys, complete }` — counts of the keys before the census's first cut, `keys` of them subject keys,
+`complete` false when it stopped at its bound, null before 120 — SMD-3306 PR 7a-2c; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
 did not answer, null with no entry before 079 (or when its field was not read),
 and 0, not read, when there is nothing to count, SMD-2680) or
@@ -1287,7 +1312,8 @@ it, each over REST and MCP alike:
 | `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
-| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, now}`: open tickets and open items ranked by effective priority (migration 123), each with its terms, claims and blockers; `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE` |
+| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE` |
+| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values. One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at

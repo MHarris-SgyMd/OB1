@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -412,7 +412,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -3163,7 +3163,8 @@ if (configFailed) {
               : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
             // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
             // alone was left out, and the items row said otherwise).
-            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669)" : ", and nothing else does";
+            // plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure.
+            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669); plan_context answers with no board (SMD-2684)" : ", and nothing else does";
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
@@ -3206,7 +3207,9 @@ if (configFailed) {
               : reads.some((g) => g.startsWith("open_item_close_proposals ")) ? "list_items, item_history and the open-item writers"
               : reads.length ? "item_history and the open-item writers"
               : "the open-item writers (open_item, update_item, set_item_status, propose_item_close and decide_item_close)";
-            add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
+            // plan_context's board is the agenda's (SMD-2684): without open_items it answers with no board, a gap.
+            const besides = reads.some((g) => g.startsWith("open_items ")) ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does";
+            add("open items", "warn", `the server's role holds no ${it.ungranted.join(", ")}: ${failing} fail naming the table${besides}`,
                 "Grant the items group (SMD-3665): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups items (db/README.md, Grants for a capturing role).");
           } else {
             add("open items", "ok", "open_item, update_item, set_item_status, propose_item_close, decide_item_close, open_item_history and their helpers present; the server's role holds the items group");
@@ -4933,6 +4936,19 @@ if (configFailed) {
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
+        }
+
+        // The work threads (SMD-3306 PR 7a-2c): whether each thread's edges (120)
+        // are the ones its thoughts want, from the record's own read (brain-info.ts
+        // threadCensus), so this row and brain_info say one thing. Bounded and
+        // exact: the first keys in key order, a key the bound cuts left out; the
+        // row says when it stopped there. An unlinked key warns — a thread the
+        // upgrade has not linked, or a gap a delete left — and never fails: every
+        // read works without its edges, the thread's own reading the subjects. It
+        // names no key: db/threads.ts --status does.
+        {
+          const r = threadsRow(facts.threads, facts.unread.threads);
+          add("threads", r.status, r.detail, r.fix);
         }
 
         // The ledger's highest migration against the tree this server was built

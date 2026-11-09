@@ -1,9 +1,6 @@
 {
-  "used_memory_ids": ["memory_123", "memory_456"],
-  "ignored_memory_ids": ["memory_789"],
-  "usage_notes": {
-    "memory_123": "Used as confirmed project instruction.",
-    "memory_456": "Used as supporting evidence.",
-    "memory_789": "Ignored because it was stale and evidence-only."
-  }
+  "used_memory_ids": ["5f0c2a1e-8d4b-4c7a-9e21-3b6f0d7a1c01", "5f0c2a1e-8d4b-4c7a-9e21-3b6f0d7a1c02"],
+  "ignored": [
+    { "memory_id": "5f0c2a1e-8d4b-4c7a-9e21-3b6f0d7a1c03", "reason": "Ignored because it was stale and evidence-only." }
+  ]
 }

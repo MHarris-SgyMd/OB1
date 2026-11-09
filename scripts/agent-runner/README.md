@@ -196,9 +196,8 @@ One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1
 
 ## Cuts still to come
 
-2. One run, local, in three PRs:
-   * **2a (here):** the sessions' profile and its probes, SMD-4088.
-   * **2b:** the run's local steps on the profile: the record, the clone, the brief, the worker and review sessions, the bundle and its import, and the gate. It is tested against the stand-in Messages API, and needs no key.
-   * **2c:** the outward steps, over the runner's own keys (SMD-4089). These are the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
-3. Publishing and reconciliation, and the launchd schedule.
-4. The pilot and its report (SMD-4091).
+Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
+
+* **2c:** the outward steps, over the runner's own keys (SMD-4089): the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
+* **3:** publishing and reconciliation, and the launchd schedule.
+* **4:** the pilot and its report (SMD-4091).

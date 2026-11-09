@@ -65,9 +65,9 @@ export type BoardMeta = { issue: string; status: string; status_type: "backlog" 
  * claim in work_claims, board-sync's links), with the baseline re-run on each
  * and BAR held by its own pin, so the bar a read is judged by never moves with
  * it. A personal note's facts sit on its open item, not on the note: a read
- * that scores thoughts (SMD-3668's priority_weight) sees the tickets' levels
- * and none of the notes', until effective_priority reads a thought's open
- * items (SMD-4149, the maintainer's call, 2026-11-08).
+ * that scores thoughts (SMD-3668's priority_weight) reads them through
+ * effective_priority's from_items terms (migration 125, SMD-4149, the
+ * maintainer's call, 2026-11-08), as plannedNoteReads says.
  * A read never reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
@@ -758,11 +758,12 @@ export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureI
  * SMD-3669's agenda, as a client would put it to a question (the maintainer, 2026-11-08): the agenda takes no query,
  * so the read searches the query as the plain baseline does (`search`, its defaults) and orders those hits by the
  * agenda — the hits the agenda lists first, in the agenda's order, then the rest in search's order. The agenda takes
- * its default flags (every source, startable and unclaimed work only) at its cap of 100, read through the store, as
- * are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer is not
- * exercised here). A hit is placed by its ticket when its metadata names one (board-sync's row, or an older row of
- * the same ticket), else by the best of the open items read from it (list_items). Priority orders what is relevant;
- * it adds nothing search did not find.
+ * its default flags (every source, startable, unclaimed and unstarted work only; 124's started default changes no
+ * seeded score, since the corpus's one started ticket, ZQ-103, is also claimed) at its cap of 100, read through the
+ * store, as are the hits' tickets and items (callTool admits the search tools alone, so the agenda tool's own layer
+ * is not exercised here). A hit is placed by its ticket when its metadata names one (board-sync's row, or an older
+ * row of the same ticket), else by the best of the open items read from it (list_items). Priority orders what is
+ * relevant; it adds nothing search did not find.
  */
 export const AGENDA_READ: MeasuredRead = {
   name: "agenda", ticket: "SMD-3669",
@@ -787,8 +788,29 @@ export const AGENDA_READ: MeasuredRead = {
   },
 };
 
+/**
+ * The weight SMD-3668's read is measured at: pre-registered on SMD-3668 on 2026-11-08, before any run, as the value it
+ * would ship with (the bar's rule for a read with a knob: measured once, no sweep reported as the verdict). The
+ * maintainer's choice: meaning and priority counted alike.
+ */
+export const PRIORITY_WEIGHT = 0.5;
+
+/**
+ * SMD-3668's priority_weight at `weight`, as a client would send it: `search_thoughts` with `priority_weight` at that
+ * weight and every other argument at its default, called over MCP as the baseline reads are. The tool re-ranks its
+ * top min(100, 4 × limit) matches by its place among them and 122's effective priority, each match read as a
+ * thought: a ticket's row reads its ticket's level, and a note what is stated on it, else its open items' level and
+ * soonest due time (migration 125, SMD-4149; plannedNoteReads), else what it inherits from a ticket it is about.
+ */
+export function priorityWeightRead(weight: number, name = "priority_weight"): MeasuredRead {
+  return { name, ticket: "SMD-3668", run: ({ query, callTool }) => callTool("search_thoughts", { query, priority_weight: weight }) };
+}
+
+/** The read at the pre-registered weight: the one whose verdict counts. eval-priority.ts's --priority-weight adds others, each exploratory. */
+export const PRIORITY_WEIGHT_READ: MeasuredRead = priorityWeightRead(PRIORITY_WEIGHT);
+
 /** The reads under measurement, each with its ticket. */
-export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ];
+export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ, PRIORITY_WEIGHT_READ];
 
 /** A measured read's ids as scored: each once, first occurrence kept, the top READ_K. */
 export function measuredIds(ids: readonly string[]): string[] {
@@ -815,6 +837,52 @@ export async function withAnswerMoved<T>(run: () => Promise<T>, prompts: readonl
   }
 }
 
+// ── What a note reads from its open items (SMD-4149) ────────────────────────
+
+/**
+ * What effective_priority should answer for each personal note asked as a thought, once migration 125 reads a
+ * thought's open items (SMD-4149, the rule the maintainer decided on 2026-11-09): the level counted on its open item
+ * (`from_items`), else unknown's 2 (a note states nothing on itself, and is about no ticket); its open item's due time,
+ * in calendar days from the run's day, +0.4 by the end of tomorrow, +0.2 by the end of the seventh day, +0.6 once past
+ * (migration 127's level-first weights, SMD-4177; 125's were +2, +1 and +3); none at level 0; a done item gives nothing. One line a note, `key effective: terms`, each term naming the note whose item
+ * it came from. Pure, so --self-check reads it; outside the registered section, as it plants nothing.
+ */
+export function plannedNoteReads(items: readonly Item[], today: string): string[] {
+  return factPlan(items, today).items.map((p) => {
+    const key = items[p.index].key;
+    const days = items[p.index].facts.dueInDays;
+    const open = !p.done;
+    const level = open ? p.level : null;
+    const terms = [level !== null ? `from_items ${level} item:${key}` : "unknown 2"];
+    // Tenths, as 127's weights are: 2 + 0.4 is 2.4 here, as the database's numeric reads it.
+    let tenths = 0;
+    if (open && days !== undefined && level !== 0) {
+      tenths = days < 0 ? 6 : days <= 1 ? 4 : days <= 7 ? 2 : 0;
+      if (tenths > 0) terms.push(`${days < 0 ? "overdue" : tenths === 4 ? "urgency soon" : "urgency week"} ${tenths / 10} item:${key}`);
+    }
+    return `${key} ${((level ?? 2) * 10 + tenths) / 10}: ${terms.join("; ")}`;
+  }).sort();
+}
+
+/**
+ * What effective_priority answers for each personal note asked as a thought, at the database's own clock, as
+ * plannedNoteReads' lines: an open item a term names written as the note it was opened from.
+ */
+export async function readNoteReads(sql: SQL, items: readonly Item[], rows: readonly SeedRow[]): Promise<string[]> {
+  const keyOf = new Map(rows.map((r, i) => [r.id, items[i].key] as const));
+  const itemOf = new Map(((await sql`SELECT item_id::text AS id, origin_thought_id::text AS origin FROM open_items`) as { id: string; origin: string | null }[])
+    .map((r) => [r.id, `item:${r.origin === null ? "none" : keyOf.get(r.origin) ?? `?${r.origin}`}`] as const));
+  const notes = items.flatMap((it, i) => (it.issue ? [] : [{ kind: "thought", key: rows[i].id }]));
+  const read = (await sql`SELECT item_key, effective::text AS effective, terms FROM effective_priority(${JSON.stringify(notes)}::text::jsonb, NULL, now())`) as
+    { item_key: string; effective: string; terms: { term: string; value: number; window?: string; item?: string }[] }[];
+  return read.map((r) => {
+    const terms = r.terms.map((t) => {
+      const name = t.term === "urgency" ? `urgency ${t.window}` : t.term;
+      return `${name} ${t.value}${t.item ? ` ${itemOf.get(t.item) ?? `item:?${t.item}`}` : ""}`;
+    });
+    return `${keyOf.get(r.item_key) ?? `?${r.item_key}`} ${Number(r.effective)}: ${terms.join("; ")}`;
+  }).sort();
+}
 
 // ── The dogfood rows ────────────────────────────────────────────────────────
 
@@ -853,12 +921,13 @@ export function isDay(n: unknown): boolean {
  * read leaves READS or MEASURED (review pass 4: a row is never rewritten):
  * the seeded set's reads, each by its procedure there — `agenda` is
  * AGENDA_READ's (search's hits ordered by the agenda), not the agenda tool's
- * own list, which would need a name of its own — and `ticket_rows`, search
+ * own list, which would need a name of its own; `priority_weight` is
+ * PRIORITY_WEIGHT_READ's (search_thoughts at the pre-registered weight) — and `ticket_rows`, search
  * filtered to board-sync's ticket rows alone, the 2026-10-14 session's second
  * read. A new name is added here with what it is, so rows stay comparable read
  * by read; the self-check holds every seeded read's name among them.
  */
-export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "ticket_rows"];
+export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "priority_weight", "ticket_rows"];
 
 /** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
 export function dogfoodProblems(raw: unknown): string[] {
