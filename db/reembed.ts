@@ -2222,6 +2222,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   };
 
+  /** `s` cut to `n` characters, a cut marked "…", so a number cut short does not read whole (SMD-2636 PR 3b, review passes 1 and 2). */
+  const cutMarked = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+
   async function worker(n: number): Promise<void> {
     // Globally unique: release_claims_for_worker matches on this alone, and a
     // bare pid collides across containers.
@@ -2324,11 +2327,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                  * that name in this file as one of run()'s refusals, which it returns.
                  */
                 const stopRefused = (probeWhy?: string): void => {
-                  configError = probeWhy === undefined ? msg : `a probe's embedding call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
+                  configError = probeWhy === undefined ? msg : `a probe's embedding call was refused (${cutMarked(probeWhy, 160)}), right after ${msg}`;
                   drainEnds.abort();
-                  // Cut words are marked, so a number cut short does not read whole (review pass 1: "…up to 81").
-                  const words = configError.length > 200 ? `${configError.slice(0, 200)}…` : configError;
-                  err(`  ${workerId}: the embedding provider refuses the request itself (${words}) — stopping every worker; nothing is marked failed`);
+                  // Cut words marked (review pass 1: a 402's "…up to 81" read as a number).
+                  err(`  ${workerId}: the embedding provider refuses the request itself (${cutMarked(configError, 200)}) — stopping every worker; nothing is marked failed`);
                 };
                 if (verdict === "db-end") throw e;
                 // Re-embed has no pauses: a fault to pause for is an outage at once, as before.
@@ -2702,7 +2704,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   if (configError !== null) {
     if (opts.stamper === undefined) stamper?.refused?.("provider");
     await stamper?.end("failed");
-    err(`\n  The embedding provider refused the request itself: ${configError.slice(0, 300)}`);
+    err(`\n  The embedding provider refused the request itself: ${cutMarked(configError, 300)}`);
     return 2;
   }
   await stamper?.end(haltedByProvider ? "failed" : "stopped");

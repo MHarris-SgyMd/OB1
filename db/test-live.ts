@@ -4993,13 +4993,13 @@ if (want("9f")) {
       embedProbeHangs = true;
       probedThought = await newThought("a zz-deadline thought whose probe is aborted in hand");
       await pollUntil(async () => embedProbesHung > probeHungFrom, 15_000);
-      // The thought's next call answers: set back, it is claimed again at once, in the same drain, and the
-      // "set back" line comes when the drain ends (a second deadline with the probe still hung was an outage).
+      // The thought's next call answers: set back, it is claimed again at once, in the same drain (a second
+      // deadline with the probe still hung was an outage). The "set back" count is the run's closing summary's,
+      // read after the stop (review pass 2: waited for here, it never came before the stop).
       deadlinesHang = false;
       embedProbeHangs = false;
       probeAborted = abortProbe?.() ?? -1;
       probeEmbedded = await pollUntil(() => atModel(probedThought), 15_000);
-      await probing.saw(/set back in the queue/);
       probeClaim = await claimOutOfHand(probedThought);
     } finally {
       deadlinesHang = true;
